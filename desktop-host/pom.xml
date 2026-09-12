@@ -1,0 +1,379 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>dev.t1m3.qplayer</groupId>
+        <artifactId>musicplayer-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>desktop-host</artifactId>
+    <name>Desktop Host</name>
+    <description>LWJGL/GLFW host + desktop audio backend (javax.sound + SPI decoders + jaudiotagger). Dev/run target.</description>
+
+    <properties>
+        <!-- Desktop-only module, always built/run on JDK 21. Override the parent's
+             release 8 (kept for the Android-shared player-core) so we can use
+             modern APIs here. -->
+        <maven.compiler.release>17</maven.compiler.release>
+        <lwjgl.version>3.3.3</lwjgl.version>
+        <!-- The native classifiers for THIS build host. Defaults target Linux x64;
+             the os-activated profiles below flip them for Windows / macOS (intel &
+             apple-silicon). jpackage can't cross-build either, so each platform's
+             release is produced on its own runner with the matching natives. -->
+        <lwjgl.natives>natives-linux</lwjgl.natives>
+        <qplayer.skija.platform>linux-x64</qplayer.skija.platform>
+        <log4j.version>2.25.5</log4j.version>
+        <jna.version>5.14.0</jna.version>
+        <flatlaf.version>3.7.2</flatlaf.version>
+        <!-- App version baked into version.properties (read by Main → the update
+             check). Local dev default; the release workflow overrides it with the
+             git tag (-Dqplayer.app.version=…) so release binaries match the tag
+             without a committed bump, like the macOS/Windows packagers. -->
+        <qplayer.app.version>1.3.0</qplayer.app.version>
+        <!-- exec:exec run knobs. Empty gfx means use the persisted in-app setting;
+             pass -Dgfx=gl|vulkan only when an explicit development override is
+             wanted. -->
+        <gfx></gfx>
+        <win.w>1100</win.w>
+        <win.h>720</win.h>
+        <!-- Optional isolated profile root, useful for parallel/demo instances. -->
+        <data.dir></data.dir>
+    </properties>
+
+    <build>
+        <resources>
+            <!-- Keep the default resource dir (log4j2.xml) — declaring <resources>
+                 at all otherwise replaces it. -->
+            <resource>
+                <directory>${project.basedir}/src/main/resources</directory>
+            </resource>
+            <!-- Maven-filtered: substitutes ${qplayer.app.version} into
+                 version.properties. Kept in its own dir so filtering never touches
+                 the QML / fonts below. -->
+            <resource>
+                <directory>${project.basedir}/src/main/resources-filtered</directory>
+                <filtering>true</filtering>
+            </resource>
+            <!-- Mount the shared QML tree (Main.qml + app pages + md3/Core + fonts)
+                 onto the classpath so ClasspathResourceLoader serves it exactly like
+                 the Android shell's merged assets. -->
+            <resource>
+                <directory>${project.basedir}/../shared-qml</directory>
+            </resource>
+        </resources>
+
+        <plugins>
+            <!-- Run the desktop app in a fresh JVM (real main thread, which GLFW needs)
+                 with the full runtime classpath incl. Skija + LWJGL natives:
+                   mvn -pl desktop-host -am install        # build once
+                   mvn -pl desktop-host exec:exec          # run (OpenGL, default)
+                   mvn -pl desktop-host exec:exec -Dgfx=vulkan
+                 -Dgfx / -Dwin.w / -Dwin.h forward to the app. On macOS add
+                 -XstartOnFirstThread to <argument>s. -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.1.0</version>
+                <configuration>
+                    <executable>java</executable>
+                    <arguments>
+                        <argument>-Dqplayer.gfx=${gfx}</argument>
+                        <argument>-Dqplayer.width=${win.w}</argument>
+                        <argument>-Dqplayer.height=${win.h}</argument>
+                        <argument>-Dqplayer.data.dir=${data.dir}</argument>
+                        <argument>-classpath</argument>
+                        <classpath/>
+                        <argument>dev.t1m3.qplayer.desktop.app.Main</argument>
+                    </arguments>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.lwjgl</groupId>
+                <artifactId>lwjgl-bom</artifactId>
+                <version>${lwjgl.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <!-- Player core: netease + audio abstraction + QML bridge + the host-drawn
+             lyric page (fluid backdrop + per-syllable renderer + compositor). -->
+        <dependency>
+            <groupId>dev.t1m3.qplayer</groupId>
+            <artifactId>player-core</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <!-- QML engine + desktop-native Skija (provided by engine as `provided`) -->
+        <dependency>
+            <groupId>io.github.timer-err</groupId>
+            <artifactId>qml4j-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <version>4.13.2</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.github.humbleui</groupId>
+            <artifactId>skija-${qplayer.skija.platform}</artifactId>
+            <version>${skija.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- LWJGL3: GLFW window/input + OpenGL + Vulkan loaders. The switchable
+             graphics backend uses GL by default and Vulkan behind -Dqplayer.gfx=vulkan. -->
+        <dependency>
+            <groupId>org.lwjgl</groupId>
+            <artifactId>lwjgl</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.lwjgl</groupId>
+            <artifactId>lwjgl-glfw</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.lwjgl</groupId>
+            <artifactId>lwjgl-opengl</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.lwjgl</groupId>
+            <artifactId>lwjgl-vulkan</artifactId>
+        </dependency>
+        <!-- Audio: OpenAL Soft drives the output device (replaces javax.sound, which
+             has no Mixer in the native image on macOS); stb_vorbis decodes ogg with
+             real sample-accurate seek. Both load through the same LWJGL native path
+             the graphics modules already use, so the image needs no extra config. -->
+        <dependency>
+            <groupId>org.lwjgl</groupId>
+            <artifactId>lwjgl-openal</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.lwjgl</groupId>
+            <artifactId>lwjgl-stb</artifactId>
+        </dependency>
+        <!-- LWJGL native libraries for this host. lwjgl-vulkan ships no natives jar
+             (it binds the system Vulkan loader / MoltenVK). -->
+        <dependency>
+            <groupId>org.lwjgl</groupId>
+            <artifactId>lwjgl</artifactId>
+            <classifier>${lwjgl.natives}</classifier>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.lwjgl</groupId>
+            <artifactId>lwjgl-glfw</artifactId>
+            <classifier>${lwjgl.natives}</classifier>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.lwjgl</groupId>
+            <artifactId>lwjgl-opengl</artifactId>
+            <classifier>${lwjgl.natives}</classifier>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.lwjgl</groupId>
+            <artifactId>lwjgl-openal</artifactId>
+            <classifier>${lwjgl.natives}</classifier>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.lwjgl</groupId>
+            <artifactId>lwjgl-stb</artifactId>
+            <classifier>${lwjgl.natives}</classifier>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- @NotNull annotations on Main/DesktopAudioBackend. Used to come in
+             transitively via dorkbox SystemTray; pin it directly now. -->
+        <dependency>
+            <groupId>org.jetbrains</groupId>
+            <artifactId>annotations</artifactId>
+            <version>24.1.0</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- Logging backend for the desktop host: the shared player-core Logger
+             routes through a log4j2 Sink installed in Main. Kept out of player-core
+             so Android keeps its java.util.logging → logcat path. -->
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-api</artifactId>
+            <version>${log4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-core</artifactId>
+            <version>${log4j.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- System tray. On Windows we drive Shell_NotifyIcon + a native Win32
+             popup menu directly via JNA (TrayController → WinTray): the menu is
+             rendered by the OS, so CJK renders correctly regardless of the AWT
+             font configuration. Other platforms still use the AWT tray. -->
+        <dependency>
+            <groupId>net.java.dev.jna</groupId>
+            <artifactId>jna</artifactId>
+            <version>${jna.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>net.java.dev.jna</groupId>
+            <artifactId>jna-platform</artifactId>
+            <version>${jna.version}</version>
+        </dependency>
+
+        <!-- Cross-platform Swing file/directory dialogs with FlatMac themes.
+             Deliberately use no-natives: FlatLaf's Linux SystemFileChooser loads
+             GTK alongside GLFW and can crash the process inside libgtk-3. -->
+        <dependency>
+            <groupId>com.formdev</groupId>
+            <artifactId>flatlaf</artifactId>
+            <version>${flatlaf.version}</version>
+            <classifier>no-natives</classifier>
+        </dependency>
+
+        <!-- MIT-licensed fork of swingwebview. It embeds the installed system
+             browser engine in the existing JVM and exposes native CookieManager
+             access so HttpOnly MUSIC_U can be handed to player-core securely. -->
+        <dependency>
+            <groupId>io.github.timer-err</groupId>
+            <artifactId>swingwebview</artifactId>
+            <version>${swingwebview.version}</version>
+        </dependency>
+
+        <!-- Desktop audio decoders. We drive these libraries directly (no
+             javax.sound SPI / AudioSystem) so each can seek for real instead of
+             decode-and-discard from zero: jlayer (mp3) frame-walks headers,
+             jflac (flac) uses FLACDecoder.seek, ogg goes through stb_vorbis above.
+             jaudiotagger stays for reading tags. -->
+        <dependency>
+            <groupId>net.jthink</groupId>
+            <artifactId>jaudiotagger</artifactId>
+            <version>${jaudiotagger.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.googlecode.soundlibs</groupId>
+            <artifactId>jlayer</artifactId>
+            <version>1.0.1.4</version>
+        </dependency>
+        <dependency>
+            <groupId>org.jflac</groupId>
+            <artifactId>jflac-codec</artifactId>
+            <version>1.5.2</version>
+        </dependency>
+    </dependencies>
+
+    <profiles>
+        <!-- Per-OS native classifiers (auto-activated by the build host). -->
+        <profile>
+            <id>os-windows</id>
+            <activation><os><family>windows</family></os></activation>
+            <properties>
+                <lwjgl.natives>natives-windows</lwjgl.natives>
+                <qplayer.skija.platform>windows-x64</qplayer.skija.platform>
+            </properties>
+        </profile>
+        <profile>
+            <id>os-macos-x64</id>
+            <activation><os><family>mac</family><arch>x86_64</arch></os></activation>
+            <properties>
+                <lwjgl.natives>natives-macos</lwjgl.natives>
+                <qplayer.skija.platform>macos-x64</qplayer.skija.platform>
+            </properties>
+        </profile>
+        <profile>
+            <id>os-macos-arm64</id>
+            <activation><os><family>mac</family><arch>aarch64</arch></os></activation>
+            <properties>
+                <lwjgl.natives>natives-macos-arm64</lwjgl.natives>
+                <qplayer.skija.platform>macos-arm64</qplayer.skija.platform>
+            </properties>
+        </profile>
+
+        <!-- `mvn -Pdist package`: lay out everything jpackage needs under
+             target/app — the app jar (with a lib/-relative Class-Path manifest) plus
+             every runtime dependency in target/app/lib. The dist/ scripts then run
+             jpackage over that directory to produce the per-OS bundle. -->
+        <profile>
+            <id>dist</id>
+            <build>
+                <plugins>
+                    <!-- The app jar jpackage launches. Class-Path lists the sibling
+                         lib/*.jar so the generated launcher needs no -cp of its own. -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-jar-plugin</artifactId>
+                        <version>3.4.1</version>
+                        <configuration>
+                            <archive>
+                                <manifest>
+                                    <addClasspath>true</addClasspath>
+                                    <classpathPrefix>lib/</classpathPrefix>
+                                    <mainClass>dev.t1m3.qplayer.desktop.app.Main</mainClass>
+                                </manifest>
+                            </archive>
+                        </configuration>
+                    </plugin>
+
+                    <!-- Runtime classpath (player-core, qml4j, Skija, LWJGL + its
+                         natives jars, log4j, JNA, the decoders) into target/app/lib.
+                         Skija/LWJGL extract their own natives from these jars at
+                         runtime, exactly as they do on a dev `exec:exec` run. -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-dependency-plugin</artifactId>
+                        <version>3.6.1</version>
+                        <executions>
+                            <execution>
+                                <id>stage-libs</id>
+                                <phase>prepare-package</phase>
+                                <goals><goal>copy-dependencies</goal></goals>
+                                <configuration>
+                                    <outputDirectory>${project.build.directory}/app/lib</outputDirectory>
+                                    <includeScope>runtime</includeScope>
+                                    <!-- jlayer declares junit at compile scope; it has
+                                         no business in a shipped bundle. -->
+                                    <excludeArtifactIds>junit</excludeArtifactIds>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+
+                    <!-- Drop the app jar next to lib/ under a stable name, so the
+                         packaging scripts always pass the same main jar to jpackage. -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-antrun-plugin</artifactId>
+                        <version>3.1.0</version>
+                        <executions>
+                            <execution>
+                                <id>stage-app-jar</id>
+                                <phase>package</phase>
+                                <goals><goal>run</goal></goals>
+                                <configuration>
+                                    <target>
+                                        <copy file="${project.build.directory}/${project.build.finalName}.jar"
+                                              tofile="${project.build.directory}/app/qplayer.jar"/>
+                                    </target>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+</project>

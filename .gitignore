@@ -1,0 +1,11 @@
+.gradle/
+.gradle-user-home/
+.gradle-user-home-anim/
+**/.gradle/
+**/build/
+build/
+out/
+target/
+local.properties
+*.apk
+*.aab

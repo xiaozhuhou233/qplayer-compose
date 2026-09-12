@@ -1,0 +1,6068 @@
+package dev.t1m3.qplayer.android.ui
+
+import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.BitmapFactory
+import android.graphics.Color
+import android.os.Bundle
+import android.util.Log
+import android.os.Handler
+import android.os.Looper
+import android.util.LruCache
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.LocalIndication
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.basicMarquee
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListItemInfo
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Album
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowForward
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DragHandle
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.LibraryMusic
+import androidx.compose.material.icons.filled.Login
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.QueueMusic
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material.icons.filled.RepeatOne
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.Divider
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SmallFloatingActionButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.foundation.border
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color as ComposeColor
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToDownIgnoreConsumed
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.BaselineShift
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Dp
+import androidx.core.view.WindowCompat
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.roundToInt
+import kotlin.math.sin
+import kotlin.math.PI
+import kotlin.math.sqrt
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.tooling.preview.Preview
+import dev.t1m3.qplayer.android.library.AndroidLibraryScanner
+import dev.t1m3.qplayer.android.playback.AndroidAudioBackend
+import dev.t1m3.qplayer.android.playback.PlaybackService
+import dev.t1m3.qplayer.android.settings.PrefsSettingsStore
+import dev.t1m3.qplayer.audio.AudioBackend
+import dev.t1m3.qplayer.audio.MetadataReader
+import dev.t1m3.qplayer.bridge.PlayerController
+import dev.t1m3.qplayer.bridge.SearchRow
+import dev.t1m3.qplayer.model.Track
+import dev.t1m3.qplayer.netease.dto.NeteaseAlbum
+import dev.t1m3.qplayer.netease.dto.NeteasePlaylist
+import dev.t1m3.qplayer.netease.dto.NeteaseSong
+import dev.t1m3.qplayer.settings.SettingsCatalog
+import dev.t1m3.qplayer.settings.SettingsCore
+import dev.t1m3.qplayer.settings.SettingSpec
+import io.github.timer_err.qml4j.android.R
+import dev.t1m3.qplayer.lyric.LyricLine
+import dev.t1m3.qplayer.lyric.LyricTimeline
+import kotlinx.coroutines.delay
+import sh.calvin.reorderable.ReorderableItem
+import sh.calvin.reorderable.rememberReorderableLazyListState
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.Stroke
+
+//all by chatgpt
+
+private const val REQ_AUDIO = 1
+private const val REQ_NOTIFICATIONS = 2
+private const val REQ_NETEASE_WEB_LOGIN = 4
+
+// MD3 shape scale tokens applied across the app (small 8 / medium 12 / large 20 /
+// extra-large 32 / sheet-top 48 / full pill).
+private val ShapeSmall = RoundedCornerShape(8.dp)
+private val ShapeMedium = RoundedCornerShape(12.dp)
+private val ShapeLarge = RoundedCornerShape(20.dp)
+private val ShapeExtraLarge = RoundedCornerShape(32.dp)
+private val ShapeSheetTop = RoundedCornerShape(topStart = 48.dp, topEnd = 48.dp)
+private val GoogleSansFlexBold = FontFamily(
+    Font(R.font.google_sans_flex_bold, FontWeight.Bold)
+)
+
+/** Android entry point for the Compose UI. QML is no longer mounted here. */
+class ComposeQPlayerActivity : ComponentActivity() {
+    private lateinit var controller: PlayerController
+    private lateinit var settings: SettingsCore
+    private lateinit var reader: MetadataReader
+    private var mainHandler: Handler? = null
+
+    companion object {
+        private var sharedController: PlayerController? = null
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // Let Compose own the complete window, including the status-bar region.
+        // The status bar itself is recolored from the active Monet scheme below.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            window.isStatusBarContrastEnforced = false
+            window.isNavigationBarContrastEnforced = false
+        }
+
+        val backend: AudioBackend = AndroidAudioBackend(this)
+        reader = dev.t1m3.qplayer.android.library.AndroidMetadataReader(this)
+        controller = sharedController ?: PlayerController(backend, reader).also {
+            sharedController = it
+        }
+        controller.setColorExtractor(dev.t1m3.qplayer.android.graphics.AndroidColorExtractor())
+        controller.setClipboard { value ->
+            runOnUiThread {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                clipboard?.setPrimaryClip(ClipData.newPlainText("link", value))
+            }
+        }
+        controller.setWebLoginLauncher {
+            runOnUiThread {
+                try {
+                    startActivityForResult(
+                        Intent(this, NeteaseWebLoginActivity::class.java), REQ_NETEASE_WEB_LOGIN
+                    )
+                } catch (_: Throwable) {
+                    controller.cancelWebLogin()
+                }
+            }
+        }
+
+        mainHandler = Handler(Looper.getMainLooper())
+        controller.setMainExecutor(mainHandler!!::post)
+        PlaybackService.attachController(controller) {
+            try {
+                val intent = Intent(this, PlaybackService::class.java)
+                    .setAction(PlaybackService.ACTION_REFRESH)
+                androidx.core.content.ContextCompat.startForegroundService(this, intent)
+            } catch (_: Throwable) {
+            }
+        }
+        controller.setExitListener { runOnUiThread { moveTaskToBack(true) } }
+
+        settings = SettingsCore()
+        settings.attach(controller)
+        settings.setSystemDark(isSystemDark())
+        settings.registerAction("clearCache", controller::clearDiskCache)
+        settings.registerAction("checkUpdate", controller::checkForUpdateManual)
+        settings.registerAction("openRepo") {
+            controller.openExternalUrl("https://github.com/TIMER-err/qplayer")
+        }
+        settings.registerInfo("version") { "v${controller.appVersion.peek()}" }
+        settings.registerInfo("cacheUsage") { "${controller.cacheSizeMB.peek()} MB" }
+        settings.load(PrefsSettingsStore(this), SettingsCatalog.ANDROID)
+
+        setContent { QPlayerComposeApp(controller, settings) }
+        controller.loadHome()
+        requestAudioPermission()
+        requestNotificationPermission()
+    }
+
+    private fun isSystemDark(): Boolean =
+        (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+
+    private fun requestAudioPermission() {
+        val permission = if (android.os.Build.VERSION.SDK_INT >= 33) {
+            Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        if (checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED) {
+            scanMusic()
+        } else {
+            requestPermissions(arrayOf(permission), REQ_AUDIO)
+        }
+    }
+
+    private fun requestNotificationPermission() {
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFICATIONS)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, results: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, results)
+        if (requestCode == REQ_AUDIO && results.firstOrNull() == PackageManager.PERMISSION_GRANTED) scanMusic()
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_NETEASE_WEB_LOGIN) return
+        val cookie = data?.getStringExtra(NeteaseWebLoginActivity.EXTRA_COOKIE_HEADER)
+        if (resultCode == RESULT_OK && !cookie.isNullOrBlank()) {
+            controller.completeWebLogin(cookie)
+        } else {
+            controller.cancelWebLogin()
+        }
+    }
+
+    private fun scanMusic() {
+        val scanner = AndroidLibraryScanner(contentResolver, reader)
+        Thread {
+            val tracks = scanner.scan()
+            runOnUiThread { controller.scanTracks(tracks) }
+        }.start()
+    }
+
+    override fun onDestroy() {
+        if (::controller.isInitialized && !controller.isPlaying() && !PlaybackService.isRunning()) {
+            controller.shutdown()
+            sharedController = null
+        }
+        mainHandler = null
+        super.onDestroy()
+    }
+}
+
+private enum class ComposeScreen { HOME, SEARCH, LIBRARY, LOCAL, PRIVATE_FM, QUEUE, SETTINGS, ACCOUNT, PLAYLIST, ALBUM, ARTIST, LYRICS }
+
+/** A screen plus the id needed to restore the exact drill-down destination. */
+private data class ComposeRoute(
+    val screen: ComposeScreen,
+    val id: Long = 0L
+)
+
+// Tab order used to give page transitions a direction (shared-axis X):
+// moving "forward" slides content left, going back slides it right.
+private val screenOrder = listOf(
+    ComposeScreen.HOME, ComposeScreen.SEARCH, ComposeScreen.LIBRARY, ComposeScreen.LOCAL,
+    ComposeScreen.QUEUE, ComposeScreen.SETTINGS, ComposeScreen.ACCOUNT, ComposeScreen.PLAYLIST,
+    ComposeScreen.ALBUM, ComposeScreen.ARTIST
+)
+
+private data class PlayerUiState(
+    val playing: Boolean = false,
+    val title: String = "",
+    val artist: String = "",
+    val artistId: Long = 0L,
+    val artistIdsCsv: String = "",
+    val artistNamesCsv: String = "",
+    val album: String = "",
+    val albumId: Long = 0L,
+    val positionMs: Long = 0,
+    /** Playback time adjusted by the lyric offset; used only by lyric rendering. */
+    val lyricPositionMs: Long = 0,
+    val durationMs: Long = 0,
+    val liked: Boolean = false,
+    val likeable: Boolean = false,
+    val playMode: Int = 0,
+    val privateFmMode: Boolean = false,
+    val loading: Boolean = false,
+    val loggedIn: Boolean = false,
+    val userName: String = "",
+    val qrImage: List<List<Boolean>> = emptyList(),
+    val qrStatus: Int = 0,
+    val webLoginAvailable: Boolean = false,
+    val webLoginBusy: Boolean = false,
+    val webLoginError: String = "",
+    val webLoginSuccessRevision: Long = 0L,
+    val recommendations: List<NeteaseSong> = emptyList(),
+    val recommendPlaylists: List<NeteasePlaylist> = emptyList(),
+    val myPlaylists: List<NeteasePlaylist> = emptyList(),
+    val tracks: List<Track> = emptyList(),
+    val searchRows: List<SearchRow> = emptyList(),
+    val playlistTracks: List<NeteaseSong> = emptyList(),
+    val queueTracks: List<Track> = emptyList(),
+    val lyrics: List<LyricLine> = emptyList(),
+    val lyricsRevision: Long = 0L,
+    val lyricIndex: Int = -1,
+    val lyricOffsetMs: Int = 0,
+    val lyricsCoverOnly: Boolean = true,
+    val coverModeManual: Boolean = false,
+    val lyricFontSize: Int = 28,
+    val lyricFontWeight: Int = 2,
+    val lyricLineSpacing: Int = 200,
+    val lyricSpring: Boolean = true,
+    val lyricScale: Boolean = true,
+    val lyricGlow: Boolean = true,
+    val lyricShadow: Boolean = true,
+    val lyricLinearAnim: Boolean = false,
+    val lyricEdgeBlur: Boolean = false,
+    val lyricMd3Color: Boolean = false,
+    val lyricParticles: Boolean = false,
+    val lyricProgressStyle: Int = 1,
+    val lyricBgMode: Int = 0,
+    val lyricBgStyle: Int = 0,
+    val lyricCoverBackground: Boolean = true,
+    val playlistTitle: String = "",
+    val playlistCoverPath: String = "",
+    val artistName: String = "",
+    val artistCoverPath: String = "",
+    val artistBriefDesc: String = "",
+    val artistLoading: Boolean = false,
+    val artistSongs: List<NeteaseSong> = emptyList(),
+    val artistAlbums: List<NeteaseAlbum> = emptyList(),
+    val openArtistId: Long = 0L,
+    val albumTitle: String = "",
+    val openAlbumId: Long = 0L,
+    val albumCoverPath: String = "",
+    val albumArtist: String = "",
+    val albumYear: String = "",
+    val albumTracks: List<NeteaseSong> = emptyList(),
+    val albumLoading: Boolean = false,
+    val coverBytes: ByteArray? = null,
+    val coverPath: String? = null,
+    val coverSeed: String = "",
+    val trackKey: String = "",
+    val queueIndex: Int = -1,
+    val dark: Boolean = false
+)
+
+/** One frame of the original QPlayer lyric scroll offset. The Compose port uses
+ * delayed samples of this value to reproduce LyricRenderer's short cascade rather
+ * than translating the entire column in lockstep. */
+private data class LyricScrollSample(val timeNs: Long, val offsetPx: Float)
+
+private val snapshotCache = HashMap<String, List<*>>()
+
+/** Same main-line selection rule as PlayerController, but evaluated from the
+ * live backend clock so Compose does not wait for the controller's 5 Hz UI pump. */
+private fun lyricIndexForPosition(lines: List<LyricLine>, positionMs: Long): Int {
+    var index = -1
+    for (i in lines.indices) {
+        val line = lines[i]
+        if (line.startMs() > positionMs) break
+        if (
+            index < 0 ||
+                line.startMs() > lines[index].startMs() ||
+                (
+                    line.startMs() == lines[index].startMs() &&
+                        lines[index].vocalChannel != LyricLine.VocalChannel.MAIN &&
+                        line.vocalChannel == LyricLine.VocalChannel.MAIN
+                    )
+        ) {
+            index = i
+        }
+    }
+    return index
+}
+
+/** QPlayer changes its scroll anchor when a line enters the visual fade-in
+ * window, rather than waiting for the exact lyric timestamp. */
+private fun lyricVisualGroupIndex(
+    groups: List<LyricTimeline.Group>,
+    positionMs: Long
+): Int {
+    var result = -1
+    for (index in groups.indices) {
+        if (groups[index].startMs - 450L > positionMs) break
+        result = index
+    }
+    return result
+}
+
+// Direct Kotlin counterparts of LyricMotion.java. Keeping these values and
+// curves here makes the Compose renderer follow the original QML/Skia timing
+// instead of inventing a second set of lyric transitions.
+private fun lyricSmoothstep(value: Float): Float {
+    val x = value.coerceIn(0f, 1f)
+    return x * x * (3f - 2f * x)
+}
+
+private fun lyricFadeInStart(startMs: Long): Long = startMs - 450L
+
+private fun lyricActiveK(positionMs: Long, startMs: Long, endMs: Long): Float {
+    val fadeInStart = lyricFadeInStart(startMs)
+    val fadeInEnd = fadeInStart + 600L
+    if (positionMs < fadeInStart) return 0f
+    if (positionMs < fadeInEnd) {
+        return lyricSmoothstep((positionMs - fadeInStart) / 600f)
+    }
+    val fadeOutStart = endMs + 100L
+    val fadeOutEnd = fadeOutStart + 350L
+    if (positionMs < fadeOutStart) return 1f
+    if (positionMs >= fadeOutEnd) return 0f
+    return 1f - lyricSmoothstep((positionMs - fadeOutStart) / 350f)
+}
+
+private fun lyricEaseOutBack(value: Float): Float {
+    val c1 = 1.7f
+    val c3 = c1 + 1f
+    val shifted = value.coerceIn(0f, 1f) - 1f
+    return 1f + c3 * shifted * shifted * shifted + c1 * shifted * shifted
+}
+
+private fun lyricBackgroundScale(positionMs: Long, startMs: Long, endMs: Long): Float {
+    val popStart = startMs + 150L
+    if (positionMs < popStart) return 0f
+    if (positionMs < popStart + 460L) {
+        return lyricEaseOutBack((positionMs - popStart) / 460f)
+    }
+    if (positionMs < endMs) return 1f
+    val out = (positionMs - endMs) / 280f
+    return if (out >= 1f) 0f else 1f - lyricSmoothstep(out)
+}
+
+private fun controllerState(controller: PlayerController, settings: SettingsCore): PlayerUiState {
+    // Snapshot cache: the 200ms poll used to copy every list on every tick
+    // (thousands of allocations/s with a large library → GC hitches, visibly
+    // dropped frames during drags). The controller's Property values are
+    // already fresh immutable lists; reuse the previous snapshot whenever the
+    // underlying list instance hasn't changed.
+    fun <T> cached(cacheKey: String, value: List<T>?): List<T> {
+        val list = value ?: return emptyList()
+        @Suppress("UNCHECKED_CAST")
+        val prev = snapshotCache[cacheKey] as? List<T>
+        if (prev !== list) snapshotCache[cacheKey] = list
+        @Suppress("UNCHECKED_CAST")
+        return (snapshotCache[cacheKey] as List<T>)
+    }
+    val currentTrack = controller.currentTrack()
+    fun settingInt(key: String, fallback: Int): Int =
+        if (settings.has(key)) settings.intOf(key) else fallback
+    fun settingBool(key: String, fallback: Boolean): Boolean =
+        if (settings.has(key)) settings.bool(key) else fallback
+    val livePositionMs = controller.lyricClockPosition().coerceAtLeast(0L)
+    val lyricOffsetMs = controller.lyricOffsetMs.peek() ?: 0
+    val liveLyricPositionMs = livePositionMs - lyricOffsetMs
+    val liveLyrics = cached("lyrics", controller.lyrics.peek())
+    return PlayerUiState(
+        playing = controller.playing.peek() == true,
+        title = controller.title.peek() ?: "",
+        artist = controller.artist.peek() ?: "",
+        artistId = controller.playingArtistId.peek() ?: 0L,
+        // Read the complete credits from the live Track. The Android shell can
+        // therefore use the existing core binary without requiring a rebuilt JAR.
+        artistIdsCsv = currentTrack?.artistIdsCsv ?: "",
+        artistNamesCsv = currentTrack?.artistNamesCsv ?: "",
+        album = controller.album.peek() ?: "",
+        albumId = controller.playingAlbumId.peek() ?: 0L,
+        positionMs = livePositionMs,
+        lyricPositionMs = liveLyricPositionMs,
+        durationMs = controller.durationMs.peek() ?: 0L,
+        liked = controller.currentLiked.peek() == true,
+        likeable = controller.currentLikeable.peek() == true,
+        playMode = controller.playMode.peek() ?: 0,
+        privateFmMode = controller.privateFmActive.peek() == true,
+        loading = controller.loading.peek() == true,
+        coverBytes = controller.coverBytes.peek(),
+        coverPath = controller.coverPath.peek(),
+        coverSeed = controller.coverSeed.peek() ?: "",
+        // Identity of the playing track only — deliberately WITHOUT the queue
+        // index, so dragging the current song to a new slot doesn't replay the
+        // cover transition. Netease tracks carry no filePath; title+artist
+        // identifies them well enough for the crossfade trigger.
+        trackKey = listOf(
+            controller.currentFilePath.peek() ?: "",
+            controller.title.peek() ?: "",
+            controller.artist.peek() ?: ""
+        ).joinToString("|"),
+        queueIndex = controller.index.peek() ?: -1,
+        loggedIn = controller.loggedIn.peek() == true,
+        userName = controller.userName.peek() ?: "",
+        qrImage = controller.qrImage.peek() ?: emptyList(),
+        qrStatus = controller.qrStatus.peek() ?: 0,
+        webLoginAvailable = controller.webLoginAvailable.peek() == true,
+        webLoginBusy = controller.webLoginBusy.peek() == true,
+        webLoginError = controller.webLoginError.peek() ?: "",
+        webLoginSuccessRevision = controller.webLoginSuccessRevision.peek() ?: 0L,
+        recommendations = cached("recommendations", controller.recommendations.peek()),
+        recommendPlaylists = cached("recommendPlaylists", controller.recommendPlaylists.peek()),
+        myPlaylists = cached("myPlaylists", controller.myPlaylists.peek()),
+        tracks = cached("tracks", controller.tracks.peek()),
+        searchRows = cached("searchRows", controller.searchRows.peek()),
+        playlistTracks = cached("playlistTracks", controller.playlistTracks.peek()),
+        queueTracks = cached("queueTracks", controller.queueTracks.peek()),
+        lyrics = liveLyrics,
+        // Lyrics are loaded asynchronously after playback starts. Use the core's
+        // lyric revision (rather than the track/playback revision) so the lyric
+        // column is re-anchored when an initially empty list is replaced by the
+        // fetched list.
+        lyricsRevision = controller.lyricsRevision.peek() ?: 0L,
+        lyricIndex = lyricIndexForPosition(liveLyrics, liveLyricPositionMs),
+        lyricOffsetMs = lyricOffsetMs,
+        lyricsCoverOnly = controller.lyricsCoverOnly.peek() == true,
+        coverModeManual = controller.coverModeManual.peek() == true,
+        lyricFontSize = settingInt("lyricFontSize", 28),
+        lyricFontWeight = settingInt("lyricFontWeight", 2),
+        lyricLineSpacing = settingInt("lyricLineSpacing", 200),
+        lyricSpring = settingBool("lyricSpring", true),
+        lyricScale = settingBool("lyricScale", true),
+        lyricGlow = settingBool("lyricGlow", true),
+        lyricShadow = settingBool("lyricShadow", true),
+        lyricLinearAnim = settingBool("lyricLinearAnim", false),
+        lyricEdgeBlur = settingBool("lyricEdgeBlur", false),
+        lyricMd3Color = settingBool("lyricMd3Color", false),
+        lyricParticles = settingBool("lyricParticles", false),
+        lyricProgressStyle = settingInt("lyricProgressStyle", 1),
+        lyricBgMode = settingInt("lyricBgMode", 0),
+        lyricBgStyle = settingInt("lyricBgStyle", 0),
+        lyricCoverBackground = settingBool("lyricCoverBackground", true),
+        playlistTitle = controller.playlistTitle.peek() ?: "",
+        playlistCoverPath = controller.playlistCoverPath.peek() ?: "",
+        artistName = controller.artistName.peek() ?: "",
+        artistCoverPath = controller.artistCoverPath.peek() ?: "",
+        artistBriefDesc = controller.artistBriefDesc.peek() ?: "",
+        artistLoading = controller.artistLoading.peek() == true,
+        artistSongs = cached("artistSongs", controller.artistSongs.peek()),
+        artistAlbums = cached("artistAlbums", controller.artistAlbums.peek()),
+        openArtistId = controller.openArtistId.peek() ?: 0L,
+        albumTitle = controller.albumName.peek() ?: "",
+        openAlbumId = controller.openAlbumId.peek() ?: 0L,
+        albumCoverPath = controller.albumCoverPath.peek() ?: "",
+        albumArtist = controller.albumArtistName.peek() ?: "",
+        albumYear = controller.albumPublishYear.peek() ?: "",
+        albumTracks = cached("albumTracks", controller.albumTracks.peek()),
+        albumLoading = controller.albumLoading.peek() == true,
+        dark = settings.resolvedDarkValue()
+    )
+}
+
+@Composable
+private fun rememberQPlayerColorScheme(seed: String, dark: Boolean, enabled: Boolean): ColorScheme {
+    val fallback = ComposeColor(0xFF6750A4)
+    val target = remember(seed, enabled) {
+        if (enabled) parseSeedColor(seed) ?: fallback else fallback
+    }
+    val primary by animateColorAsState(
+        targetValue = target,
+        animationSpec = tween(durationMillis = 700),
+        label = "dynamic_seed_color"
+    )
+    return remember(primary, dark) { qPlayerColorScheme(primary, dark) }
+}
+
+private fun parseSeedColor(seed: String): ComposeColor? {
+    if (seed.isBlank()) return null
+    return try {
+        ComposeColor(Color.parseColor(seed))
+    } catch (_: RuntimeException) {
+        null
+    }
+}
+
+private data class PlayingArtist(
+    val name: String,
+    val id: Long
+)
+
+/**
+ * Rebuild the current track's credits without losing the id/name pairing.
+ * Netease uses comma-separated ids and U+0001-separated names. When older
+ * cached tracks lack the CSV fields, the legacy first-artist fields remain a
+ * usable fallback.
+ */
+private fun playingArtists(state: PlayerUiState): List<PlayingArtist> {
+    val names = if (state.artistNamesCsv.isNotBlank()) {
+        state.artistNamesCsv.split('\u0001')
+    } else if (state.artist.isNotBlank()) {
+        state.artist.split(" / ")
+    } else {
+        emptyList()
+    }
+    val ids = if (state.artistIdsCsv.isNotBlank()) {
+        state.artistIdsCsv.split(',').map { it.trim().toLongOrNull() ?: 0L }
+    } else {
+        listOf(state.artistId)
+    }
+    val count = maxOf(names.size, ids.size)
+    return (0 until count).mapNotNull { index ->
+        val name = names.getOrNull(index).orEmpty().trim()
+        if (name.isBlank()) return@mapNotNull null
+        PlayingArtist(name, ids.getOrNull(index) ?: 0L)
+    }.ifEmpty {
+        if (state.artist.isNotBlank()) listOf(PlayingArtist(state.artist, state.artistId)) else emptyList()
+    }
+}
+
+@Composable
+private fun PlayingArtistLinks(
+    state: PlayerUiState,
+    openArtist: (Long) -> Unit,
+    fontSize: androidx.compose.ui.unit.TextUnit,
+    centered: Boolean = true
+) {
+    val artists = remember(state.artist, state.artistId, state.artistIdsCsv, state.artistNamesCsv) {
+        playingArtists(state)
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = if (centered) Arrangement.Center else Arrangement.Start,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        artists.forEachIndexed { index, artist ->
+            if (index > 0) {
+                Text(
+                    text = " / ",
+                    fontSize = fontSize,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Text(
+                text = artist.name,
+                fontSize = fontSize,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                modifier = if (artist.id != 0L) {
+                    Modifier.clickable { openArtist(artist.id) }
+                } else Modifier
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Material You dynamic color: CIELAB / LCh tone system.
+//
+// The cover seed's hue drives five M3-style tonal palettes (primary,
+// secondary at hue+24°, tertiary at hue+60°, neutral, neutral-variant) with
+// expressive chroma, so surfaces visibly inherit the album art's hue. Colors
+// are built at the spec's tone values (primary T40 light / T80 dark,
+// containers T90/T30, five-level neutral surface containers) and chroma is
+// gamut-mapped by binary search when a request falls outside sRGB.
+// ---------------------------------------------------------------------------
+
+private const val WP_X = 0.95047f // D65 white point
+private const val WP_Z = 1.08883f
+
+private fun linearizeSrgb(c: Float): Float =
+    if (c <= 0.04045f) c / 12.92f else Math.pow(((c + 0.055f) / 1.055f).toDouble(), 2.4).toFloat()
+
+private fun delinearizeSrgb(c: Float): Float =
+    if (c <= 0.0031308f) c * 12.92f
+    else (1.055 * Math.pow(c.toDouble(), 1.0 / 2.4) - 0.055).toFloat().coerceIn(0f, 1f)
+
+private fun rgbToXyz(r: Float, g: Float, b: Float): FloatArray {
+    val rl = linearizeSrgb(r)
+    val gl = linearizeSrgb(g)
+    val bl = linearizeSrgb(b)
+    return floatArrayOf(
+        0.4124564f * rl + 0.3575761f * gl + 0.1804375f * bl,
+        0.2126729f * rl + 0.7151522f * gl + 0.0721750f * bl,
+        0.0193339f * rl + 0.1191920f * gl + 0.9503041f * bl
+    )
+}
+
+/** sRGB from XYZ, or null when the color falls outside the gamut (pre-clamp). */
+private fun xyzToRgb(x: Float, y: Float, z: Float): FloatArray? {
+    val r = 3.2404542f * x - 1.5371385f * y - 0.4985314f * z
+    val g = -0.9692660f * x + 1.8760108f * y + 0.0415560f * z
+    val b = 0.0556434f * x - 0.2040259f * y + 1.0572252f * z
+    if (r < -0.001f || r > 1.001f || g < -0.001f || g > 1.001f || b < -0.001f || b > 1.001f) return null
+    return floatArrayOf(
+        delinearizeSrgb(r.coerceIn(0f, 1f)),
+        delinearizeSrgb(g.coerceIn(0f, 1f)),
+        delinearizeSrgb(b.coerceIn(0f, 1f))
+    )
+}
+
+private fun labF(t: Float): Float =
+    if (t > 216f / 24389f) Math.cbrt(t.toDouble()).toFloat() else (24389f / 27f * t + 16f) / 116f
+
+private fun labFInv(t: Float): Float {
+    val t3 = t * t * t
+    return if (t3 > 216f / 24389f) t3 else (116f * t - 16f) * 27f / 24389f
+}
+
+private fun xyzToLab(x: Float, y: Float, z: Float): FloatArray {
+    val fx = labF(x / WP_X)
+    val fy = labF(y)
+    val fz = labF(z / WP_Z)
+    return floatArrayOf(116f * fy - 16f, 500f * (fx - fy), 200f * (fy - fz))
+}
+
+private fun labToXyz(l: Float, a: Float, b: Float): FloatArray {
+    val fy = (l + 16f) / 116f
+    val fx = fy + a / 500f
+    val fz = fy - b / 200f
+    return floatArrayOf(labFInv(fx) * WP_X, labFInv(fy), labFInv(fz) * WP_Z)
+}
+
+/** L* / chroma / hue of a color; hue normalized to [0, 360). */
+private fun seedLch(seed: ComposeColor): FloatArray {
+    val xyz = rgbToXyz(seed.red, seed.green, seed.blue)
+    val lab = xyzToLab(xyz[0], xyz[1], xyz[2])
+    var h = Math.toDegrees(atan2(lab[2], lab[1]).toDouble()).toFloat()
+    if (h < 0f) h += 360f
+    return floatArrayOf(lab[0], sqrt(lab[1] * lab[1] + lab[2] * lab[2]), h)
+}
+
+/** Tone (L*) + chroma + hue → sRGB, shrinking chroma until the color is in gamut. */
+private fun lchColor(tone: Float, chroma: Float, hue: Float): ComposeColor {
+    val hRad = Math.toRadians(hue.toDouble())
+    fun at(c: Float): ComposeColor? {
+        val xyz = labToXyz(tone, (c * cos(hRad)).toFloat(), (c * sin(hRad)).toFloat())
+        val rgb = xyzToRgb(xyz[0], xyz[1], xyz[2]) ?: return null
+        return ComposeColor(red = rgb[0], green = rgb[1], blue = rgb[2])
+    }
+    at(chroma)?.let { return it }
+    var lo = 0f
+    var hi = chroma
+    repeat(16) {
+        val mid = (lo + hi) / 2f
+        if (at(mid) != null) lo = mid else hi = mid
+    }
+    return at(lo) ?: ComposeColor(0xFF808080)
+}
+
+private fun qPlayerColorScheme(seed: ComposeColor, dark: Boolean): ColorScheme {
+    val hue = seedLch(seed)[2]
+    // Secondary keeps the SOURCE hue (as real M3 does). Rotating it +24° in
+    // Lab space jumps hue families — a violet cover seed (H≈305°) lands its
+    // containers in hot pink (H≈329°), which is exactly the pink nav pill seen
+    // on device. Tertiary keeps the +60° expressive offset (lyric accent only).
+    val hue2 = hue
+    val hue3 = (hue + 60f) % 360f
+    // Expressive chroma: punchy accents, neutral surfaces that still carry the hue.
+    fun p(tone: Float) = lchColor(tone, 48f, hue)
+    fun s(tone: Float) = lchColor(tone, 24f, hue2)
+    fun tr(tone: Float) = lchColor(tone, 32f, hue3)
+    fun n(tone: Float) = lchColor(tone, 8f, hue)
+    fun nv(tone: Float) = lchColor(tone, 12f, hue)
+    return if (dark) {
+        darkColorScheme(
+            primary = p(80f), onPrimary = p(20f),
+            primaryContainer = p(30f), onPrimaryContainer = p(90f),
+            secondary = s(80f), onSecondary = s(20f),
+            secondaryContainer = s(30f), onSecondaryContainer = s(90f),
+            tertiary = tr(80f), onTertiary = tr(20f),
+            tertiaryContainer = tr(30f), onTertiaryContainer = tr(90f),
+            background = n(6f), onBackground = nv(90f),
+            surface = n(6f), onSurface = nv(90f),
+            surfaceVariant = nv(30f), onSurfaceVariant = nv(80f),
+            surfaceContainerLowest = n(4f),
+            surfaceContainerLow = n(10f),
+            surfaceContainer = n(12f),
+            surfaceContainerHigh = n(17f),
+            surfaceContainerHighest = n(22f),
+            outline = nv(60f), outlineVariant = nv(30f)
+        )
+    } else {
+        lightColorScheme(
+            primary = p(40f), onPrimary = p(100f),
+            primaryContainer = p(90f), onPrimaryContainer = p(10f),
+            secondary = s(40f), onSecondary = s(100f),
+            secondaryContainer = s(90f), onSecondaryContainer = s(10f),
+            tertiary = tr(40f), onTertiary = tr(100f),
+            tertiaryContainer = tr(90f), onTertiaryContainer = tr(10f),
+            background = n(98f), onBackground = nv(10f),
+            surface = n(98f), onSurface = nv(10f),
+            surfaceVariant = nv(90f), onSurfaceVariant = nv(30f),
+            surfaceContainerLowest = n(100f),
+            surfaceContainerLow = n(96f),
+            surfaceContainer = n(94f),
+            surfaceContainerHigh = n(92f),
+            surfaceContainerHighest = n(90f),
+            outline = nv(50f), outlineVariant = nv(80f)
+        )
+    }
+}
+
+@Composable
+private fun rememberPlayerState(controller: PlayerController, settings: SettingsCore): PlayerUiState {
+    var state by remember { mutableStateOf(controllerState(controller, settings)) }
+    LaunchedEffect(controller) {
+        while (true) {
+            controller.pump()
+            state = controllerState(controller, settings)
+            // Compose reads the live lyric clock in controllerState, so word fill
+            // and auto-follow remain smooth without changing the shared core's
+            // observable 5 Hz position cadence.
+            // Position-only updates used to rebuild the complete application
+            // state 20 times a second. 10 Hz is enough for the progress/lyric
+            // interpolators while leaving the render thread time to animate
+            // and scroll large lists smoothly.
+            delay(100)
+        }
+    }
+    return state
+}
+
+private fun pageTransitionTransform(preset: Int, forward: Boolean): ContentTransform {
+    val easing = androidx.compose.animation.core.FastOutSlowInEasing
+    return when (preset) {
+        SettingsCatalog.PAGE_TRANSITION_FADE -> {
+            fadeIn(tween(260, easing = easing)) togetherWith
+                fadeOut(tween(180, easing = easing))
+        }
+        SettingsCatalog.PAGE_TRANSITION_SLIDE_HORIZONTAL -> {
+            val inFrom = if (forward) 1 else -1
+            val outTo = -inFrom
+            (slideInHorizontally(
+                initialOffsetX = { inFrom * it / 4 },
+                animationSpec = tween(280, easing = easing)
+            ) + fadeIn(tween(280, easing = easing))).togetherWith(
+                slideOutHorizontally(
+                    targetOffsetX = { outTo * it / 4 },
+                    animationSpec = tween(180, easing = easing)
+                ) + fadeOut(tween(180, easing = easing))
+            )
+        }
+        SettingsCatalog.PAGE_TRANSITION_SLIDE_VERTICAL -> {
+            val inFrom = if (forward) 1 else -1
+            val outTo = -inFrom
+            (slideInVertically(
+                initialOffsetY = { inFrom * it / 4 },
+                animationSpec = tween(300, easing = easing)
+            ) + fadeIn(tween(280, easing = easing))).togetherWith(
+                slideOutVertically(
+                    targetOffsetY = { outTo * it / 4 },
+                    animationSpec = tween(190, easing = easing)
+                ) + fadeOut(tween(180, easing = easing))
+            )
+        }
+        SettingsCatalog.PAGE_TRANSITION_NONE ->
+            EnterTransition.None togetherWith ExitTransition.None
+        else -> {
+            // Zoom In / Out, matching the original default preset.
+            (fadeIn(tween(300, easing = easing)) + scaleIn(
+                initialScale = if (forward) 0.92f else 1.08f,
+                animationSpec = tween(320, easing = easing)
+            )).togetherWith(
+                fadeOut(tween(220, easing = easing)) + scaleOut(
+                    targetScale = if (forward) 1.08f else 0.92f,
+                    animationSpec = tween(220, easing = easing)
+                )
+            )
+        }
+    }
+}
+
+private const val DETAIL_MOTION_MS = 300
+private const val DETAIL_META_DELAY_MS = 60L
+private const val DETAIL_CONTROLS_DELAY_MS = 110L
+private const val DETAIL_EXIT_TOTAL_MS = DETAIL_MOTION_MS.toLong()
+
+@OptIn(androidx.compose.animation.ExperimentalAnimationApi::class)
+@Composable
+private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCore) {
+    val state = rememberPlayerState(controller, settings)
+    var navigationStack by remember {
+        mutableStateOf(listOf(ComposeRoute(ComposeScreen.HOME)))
+    }
+    var loginOpen by remember { mutableStateOf(false) }
+    // True while the player detail page is on its way out. The page reads it to
+    // play its own entrance animation backwards, so leaving looks like the
+    // entrance running in reverse instead of the page sliding away intact.
+    var detailClosing by remember { mutableStateOf(false) }
+    val route = navigationStack.last()
+    val screen = route.screen
+    val pageTransitionPreset = settings.intOf(SettingsCatalog.PAGE_TRANSITION_KEY).coerceIn(
+        SettingsCatalog.PAGE_TRANSITION_ZOOM,
+        SettingsCatalog.PAGE_TRANSITION_NONE
+    )
+
+    fun navigateTo(target: ComposeRoute, asRoot: Boolean = false) {
+        if (target == navigationStack.last()) return
+        if (target.screen == ComposeScreen.LYRICS) detailClosing = false
+        navigationStack = if (asRoot) listOf(target) else navigationStack + target
+    }
+
+    fun goBack() {
+        navigationStack = when {
+            navigationStack.size > 1 -> navigationStack.dropLast(1)
+            screen != ComposeScreen.HOME -> listOf(ComposeRoute(ComposeScreen.HOME))
+            else -> {
+                controller.requestExit()
+                navigationStack
+            }
+        }
+    }
+
+    // Leaves the detail page. The reversal of the entrance starts in the same
+    // frame as the slide-down, so nothing pauses before the page starts moving.
+    // Pop the route in the same state transaction as the closing flag. The
+    // AnimatedContent target then changes immediately, while its outgoing
+    // PlayerDetailScreen still receives closing=true and reverses its child
+    // timeline during the very same 220 ms window.
+    fun closeDetail() {
+        if (detailClosing) return
+        detailClosing = true
+        goBack()
+    }
+
+    // Keep the outgoing detail content in closing mode until the outer page
+    // transition has finished. This reset does not start another transition:
+    // the route has already been popped, so the target remains the base page.
+    LaunchedEffect(detailClosing) {
+        if (!detailClosing) return@LaunchedEffect
+        delay(DETAIL_EXIT_TOTAL_MS)
+        detailClosing = false
+    }
+
+    BackHandler {
+        when {
+            loginOpen -> loginOpen = false
+            else -> goBack()
+        }
+    }
+
+    val scheme = rememberQPlayerColorScheme(
+        seed = state.coverSeed,
+        dark = state.dark,
+        enabled = settings.bool("monet")
+    )
+    MaterialTheme(colorScheme = scheme) {
+        Surface(modifier = Modifier.fillMaxSize(), color = scheme.background) {
+            AnimatedContent(
+                modifier = Modifier.fillMaxSize(),
+                targetState = route.screen == ComposeScreen.LYRICS && !detailClosing,
+                transitionSpec = {
+                    if (targetState && !initialState) {
+                        (slideInVertically(
+                            initialOffsetY = { it },
+                            animationSpec = tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+                        ) + fadeIn(tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing)))
+                            .togetherWith(fadeOut(tween(220)))
+                    } else {
+                        // Exact reverse of the detail entrance: the detail
+                        // page travels back down while the underlying route
+                        // fades back in. Avoid a second, unrelated scale step.
+                        fadeIn(tween(220)).togetherWith(
+                            slideOutVertically(
+                                targetOffsetY = { it },
+                                animationSpec = tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+                            ) + fadeOut(tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+                        )
+                    }
+                },
+                label = "player_detail_screen_transition"
+            ) { isDetail ->
+                if (isDetail) {
+                    Surface(
+                        modifier = Modifier.fillMaxSize(),
+                        color = scheme.background
+                    ) {
+                        PlayerDetailScreen(
+                            state = state,
+                            controller = controller,
+                            openAlbum = { id ->
+                                if (id != 0L) {
+                                    controller.openAlbum(id)
+                                    navigateTo(ComposeRoute(ComposeScreen.ALBUM, id))
+                                }
+                            },
+                            openArtist = { id ->
+                                if (id != 0L) {
+                                    controller.openArtist(id)
+                                    navigateTo(ComposeRoute(ComposeScreen.ARTIST, id))
+                                }
+                            },
+                            close = ::closeDetail,
+                            closing = detailClosing
+                        )
+                    }
+                } else {
+                    val isMainTab = screen in listOf(
+                        ComposeScreen.HOME,
+                        ComposeScreen.SEARCH,
+                        ComposeScreen.LIBRARY,
+                        ComposeScreen.LOCAL
+                    )
+                    Scaffold(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .statusBarsPadding(),
+                        containerColor = scheme.background,
+                        topBar = {
+                            ComposeTopBar(route, state,
+                                canGoBack = navigationStack.size > 1,
+                                onBack = ::goBack,
+                                onQueue = { navigateTo(ComposeRoute(ComposeScreen.QUEUE)) },
+                                onSettings = { navigateTo(ComposeRoute(ComposeScreen.SETTINGS)) },
+                                onAccount = {
+                                    if (state.loggedIn) navigateTo(ComposeRoute(ComposeScreen.ACCOUNT)) else loginOpen = true
+                                })
+                        },
+                        // This is the actual MD3 bottom-bar slot. It is no
+                        // longer drawn as an overlay or a rounded floating
+                        // Surface; NavigationBar owns its height, insets, and
+                        // selection indicator.
+                        bottomBar = {
+                            if (isMainTab) {
+                                StandardBottomNav(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    screen = screen,
+                                    showLocalTab = settings.bool("showLocalTab"),
+                                    onScreen = { navigateTo(ComposeRoute(it), asRoot = true) },
+                                    onSearch = {
+                                        navigateTo(ComposeRoute(ComposeScreen.SEARCH), asRoot = true)
+                                    }
+                                )
+                            }
+                        }
+                    ) { padding ->
+                    Box(Modifier.fillMaxSize().padding(padding)) {
+                        AnimatedContent(
+                            modifier = Modifier.fillMaxSize(),
+                            targetState = route,
+                            transitionSpec = {
+                                // Restore the shared page-transition setting used by
+                                // the original QML shell. Lyrics keeps its own
+                                // player-sheet animation above.
+                                val forward = screenOrder.indexOf(targetState.screen) >= screenOrder.indexOf(initialState.screen)
+                                pageTransitionTransform(pageTransitionPreset, forward)
+                            },
+                            label = "page_transition"
+                        ) { visibleRoute ->
+                            when (visibleRoute.screen) {
+                                ComposeScreen.HOME -> HomeScreen(
+                                    state = state,
+                                    openPlaylist = { id ->
+                                        controller.openPlaylist(id)
+                                        navigateTo(ComposeRoute(ComposeScreen.PLAYLIST, id))
+                                    },
+                                    playRecommendation = { index -> controller.playRecommendation(index) },
+                                    refresh = { controller.loadHome() },
+                                    controller = controller,
+                                    settings = settings
+                                )
+                                ComposeScreen.SEARCH -> SearchScreen(state, controller)
+                                ComposeScreen.LIBRARY -> LibraryScreen(
+                                    state = state,
+                                    openLogin = { loginOpen = true }
+                                ) { id ->
+                                    controller.openPlaylist(id)
+                                    navigateTo(ComposeRoute(ComposeScreen.PLAYLIST, id))
+                                }
+                                ComposeScreen.LOCAL -> LocalScreen(state, controller)
+                                ComposeScreen.QUEUE -> QueueScreen(state, controller)
+                                ComposeScreen.SETTINGS -> SettingsScreen(settings, controller)
+                                ComposeScreen.ACCOUNT -> AccountScreen(state)
+                                ComposeScreen.PLAYLIST -> PlaylistScreen(state, controller)
+                                ComposeScreen.ALBUM -> AlbumScreen(state, controller)
+                                ComposeScreen.ARTIST -> ArtistScreen(
+                                    state = state,
+                                    controller = controller,
+                                    openAlbum = { id ->
+                                        controller.openAlbum(id)
+                                        navigateTo(ComposeRoute(ComposeScreen.ALBUM, id))
+                                    }
+                                )
+                                else -> Unit
+                            }
+                        }
+                        Column(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                // Scaffold already reserves the NavigationBar
+                                // area. Keep an explicit visual gap so the
+                                // MiniPlayer does not touch the MD3 bar.
+                                .padding(top = 8.dp, bottom = 12.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            AnimatedVisibility(
+                                // The player strip belongs to the content
+                                // screens; the settings page is a pure form and
+                                // must not carry it.
+                                visible = state.title.isNotBlank() &&
+                                    screen != ComposeScreen.SETTINGS,
+                                enter = slideInVertically { it } + fadeIn(tween(300)),
+                                exit = slideOutVertically { it } + fadeOut(tween(220))
+                            ) {
+                                Column(Modifier.fillMaxWidth()) {
+                                    // Private FM is a separate action row at the
+                                    // screen edge, above MiniPlayer—not a button
+                                    // attached to or covering the player.
+                                        Box(
+                                            modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(40.dp)
+                                            .padding(end = 8.dp)
+                                    ) {
+                                        PrivateFmFab(
+                                            modifier = Modifier.align(Alignment.TopEnd),
+                                            onClick = {
+                                                if (state.loggedIn) {
+                                                    controller.startPrivateFm()
+                                                    navigateTo(ComposeRoute(ComposeScreen.LYRICS))
+                                                } else {
+                                                    loginOpen = true
+                                                }
+                                            }
+                                        )
+                                    }
+                                    Spacer(Modifier.height(8.dp))
+                                    MiniPlayer(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 16.dp),
+                                        state = state,
+                                        onOpen = { navigateTo(ComposeRoute(ComposeScreen.LYRICS)) },
+                                        onSeek = { controller.seek(it) },
+                                        onToggle = { controller.toggle() },
+                                        onPrevious = { controller.prev() },
+                                        onNext = { controller.next() }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (loginOpen) LoginDialog(controller, state) { loginOpen = false }
+    }
+}
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ComposeTopBar(
+    route: ComposeRoute,
+    state: PlayerUiState,
+    canGoBack: Boolean,
+    onBack: () -> Unit,
+    onQueue: () -> Unit,
+    onSettings: () -> Unit,
+    onAccount: () -> Unit
+) {
+    val title = when (route.screen) {
+        ComposeScreen.HOME -> "推荐"
+        ComposeScreen.SEARCH -> "搜索"
+        ComposeScreen.LIBRARY -> "我的"
+        ComposeScreen.LOCAL -> "本地"
+        ComposeScreen.QUEUE -> "播放队列"
+        ComposeScreen.SETTINGS -> "设置"
+        ComposeScreen.ACCOUNT -> "账户"
+        ComposeScreen.PLAYLIST -> state.playlistTitle.ifBlank { "歌单" }
+        ComposeScreen.ALBUM -> state.albumTitle.ifBlank { "专辑" }
+        ComposeScreen.ARTIST -> state.artistName.ifBlank { "歌手" }
+        else -> "QPlayer"
+    }
+    TopAppBar(
+        colors = TopAppBarDefaults.topAppBarColors(
+            containerColor = MaterialTheme.colorScheme.background,
+            scrolledContainerColor = MaterialTheme.colorScheme.background
+        ),
+        title = { Text(title) },
+        navigationIcon = {
+            if (canGoBack) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Default.ArrowBack, contentDescription = "返回")
+            }
+            }
+        },
+        actions = {
+            IconButton(onClick = onQueue) {
+                Icon(Icons.Default.QueueMusic, contentDescription = "播放队列")
+            }
+            IconButton(onClick = onSettings) {
+                Icon(Icons.Default.Settings, contentDescription = "设置")
+            }
+            IconButton(onClick = onAccount) {
+                Icon(if (state.loggedIn) Icons.Default.AccountCircle else Icons.Default.Login, contentDescription = "账户")
+            }
+        }
+    )
+}
+
+@Composable
+private fun StandardBottomNav(
+    modifier: Modifier = Modifier,
+    screen: ComposeScreen,
+    showLocalTab: Boolean,
+    onScreen: (ComposeScreen) -> Unit,
+    onSearch: () -> Unit
+) {
+    val items = listOf(
+        Triple(ComposeScreen.HOME, Icons.Default.Home, "主页"),
+        Triple(ComposeScreen.LIBRARY, Icons.Default.LibraryMusic, "歌单"),
+        Triple(ComposeScreen.LOCAL, Icons.Default.Folder, "本地"),
+        Triple(ComposeScreen.SEARCH, Icons.Default.Search, "搜索")
+    )
+    NavigationBar(
+        modifier = modifier.height(80.dp),
+        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        tonalElevation = 3.dp
+    ) {
+        items.forEach { (target, icon, label) ->
+            val enabled = target != ComposeScreen.LOCAL || showLocalTab
+            NavigationBarItem(
+                selected = screen == target,
+                onClick = {
+                    if (target == ComposeScreen.SEARCH) onSearch()
+                    else if (screen != target) onScreen(target)
+                },
+                enabled = enabled,
+                icon = {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = label
+                    )
+                },
+                label = { Text(label, maxLines = 1) },
+                colors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                    selectedTextColor = MaterialTheme.colorScheme.onSurface,
+                    indicatorColor = MaterialTheme.colorScheme.secondaryContainer,
+                    unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    disabledIconColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+                    disabledTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                )
+            )
+        }
+    }
+}
+
+@Composable
+private fun PrivateFmFab(
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    SmallFloatingActionButton(
+        onClick = onClick,
+        modifier = modifier,
+        containerColor = MaterialTheme.colorScheme.primaryContainer,
+        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        shape = CircleShape
+    ) {
+        Icon(Icons.Default.AutoAwesome, contentDescription = "私人漫游")
+    }
+}
+
+@Composable
+private fun WindowGlassBackdrop(
+    modifier: Modifier = Modifier,
+    radius: Float = 34f,
+    overlay: ComposeColor? = null
+) {
+    val glassOverlay = overlay ?: MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.64f)
+    // Keep this layer Compose-only. A BlurView/AndroidView backdrop can attach
+    // to the Compose root recursively during route transitions and crash on
+    // some Android 16 renderers. The caller adds the blurred colour source
+    // underneath; this Monet glass layer remains stable on every API level.
+    @Suppress("UNUSED_VARIABLE")
+    val unusedRadius = radius
+    Box(modifier.background(glassOverlay))
+}
+
+@Composable
+@OptIn(androidx.compose.animation.ExperimentalAnimationApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
+private fun MiniPlayer(
+    modifier: Modifier = Modifier,
+    state: PlayerUiState,
+    onOpen: () -> Unit,
+    onSeek: (Long) -> Unit,
+    onToggle: () -> Unit,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit
+) {
+    val coverBitmap = rememberCoverBitmap(state.coverBytes, state.coverPath)
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(64.dp)
+            .clickable { onOpen() },
+        shape = RoundedCornerShape(32.dp),
+        tonalElevation = 1.dp,
+        shadowElevation = 7.dp,
+        // The root stays transparent so only the backdrop is blurred; the
+        // controls and album art remain crisp.
+        color = ComposeColor.Transparent
+    ) {
+        Box(Modifier.fillMaxSize()) {
+            // Safe Compose-only backdrop. The cover is intentionally subdued
+            // and blurred as the colour source; the foreground controls stay
+            // crisp and this path is safe during Activity route transitions.
+            if (coverBitmap != null) {
+                Image(
+                    bitmap = coverBitmap,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .blur(34.dp)
+                        .graphicsLayer { alpha = 0.78f }
+                )
+            }
+            WindowGlassBackdrop(
+                modifier = Modifier.fillMaxSize(),
+                radius = 42f,
+                overlay = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.76f)
+            )
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.22f))
+            )
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f))
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+            Box(
+                modifier = Modifier
+                    .size(52.dp)
+                    .pointerInput(state.durationMs) {
+                        detectTapGestures { offset ->
+                            val center = Offset(size.width / 2f, size.height / 2f)
+                            val angle = Math.toDegrees(
+                                atan2(
+                                    (offset.y - center.y).toDouble(),
+                                    (offset.x - center.x).toDouble()
+                                )
+                            ).toFloat()
+                            val fraction = ((angle + 90f + 360f) % 360f) / 360f
+                            val duration = state.durationMs.coerceAtLeast(1L)
+                            onSeek((duration * fraction).roundToInt().toLong())
+                        }
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                CircularCoverProgress(
+                    state = state,
+                    modifier = Modifier.fillMaxSize()
+                )
+                AnimatedContent(
+                    targetState = state.trackKey to coverBitmap,
+                    transitionSpec = {
+                        (fadeIn(tween(240)) + scaleIn(initialScale = 0.9f, animationSpec = tween(240))) togetherWith
+                            (fadeOut(tween(160)) + scaleOut(targetScale = 1.05f, animationSpec = tween(160)))
+                    },
+                    label = "mini_cover_transition"
+                ) { (_, bitmap) ->
+                    Surface(
+                        modifier = Modifier.size(42.dp),
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surfaceContainerHighest
+                    ) {
+                        if (bitmap != null) {
+                            Image(
+                                bitmap = bitmap,
+                                contentDescription = "专辑封面",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            Icon(
+                                Icons.Default.Album,
+                                contentDescription = null,
+                                modifier = Modifier.padding(11.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.width(7.dp))
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text(
+                    state.title.ifBlank { "未播放" },
+                    maxLines = 1,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.basicMarquee(
+                        iterations = Int.MAX_VALUE,
+                        initialDelayMillis = 600
+                    )
+                )
+                Text(
+                    state.artist,
+                    maxLines = 1,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(Modifier.width(5.dp))
+            val playCorner by animateDpAsState(
+                targetValue = if (state.playing) 12.dp else 16.dp,
+                animationSpec = tween(255),
+                label = "mini_play_corner"
+            )
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(RoundedCornerShape(playCorner))
+                    .background(MaterialTheme.colorScheme.primaryContainer)
+                    .clickable(onClick = onToggle),
+                contentAlignment = Alignment.Center
+            ) {
+                AnimatedContent(
+                    targetState = state.playing,
+                    transitionSpec = { fadeIn(tween(140)) togetherWith fadeOut(tween(100)) },
+                    label = "mini_play_icon"
+                ) { playing ->
+                    Icon(
+                        if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = "播放",
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+            }
+            Spacer(Modifier.width(5.dp))
+            if (!state.privateFmMode) {
+                PixelMiniControl(
+                    icon = Icons.Default.SkipPrevious,
+                    contentDescription = "上一首",
+                    enabled = true,
+                    onClick = onPrevious
+                )
+                Spacer(Modifier.width(5.dp))
+            }
+            PixelMiniControl(
+                icon = Icons.Default.SkipNext,
+                contentDescription = "下一首",
+                enabled = true,
+                onClick = onNext
+            )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CircularCoverProgress(
+    state: PlayerUiState,
+    modifier: Modifier = Modifier
+) {
+    val duration = state.durationMs.coerceAtLeast(1L)
+    val progress = (state.positionMs.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+    val density = LocalDensity.current
+    val trackColor = MaterialTheme.colorScheme.secondaryContainer
+    val progressColor = MaterialTheme.colorScheme.primary
+    val animatedProgress by animateFloatAsState(
+        targetValue = progress,
+        animationSpec = tween(260, easing = LinearEasing),
+        label = "cover_ring_progress"
+    )
+    val infinite = rememberInfiniteTransition(label = "cover_ring_loading")
+    val wavePhase by infinite.animateFloat(
+        initialValue = 0f,
+        targetValue = (2f * PI).toFloat(),
+        animationSpec = infiniteRepeatable(tween(1300, easing = LinearEasing)),
+        label = "cover_ring_wave_phase"
+    )
+    val loadingRotation by infinite.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing)),
+        label = "cover_ring_loading_rotation"
+    )
+    Canvas(modifier = modifier) {
+        val strokeWidth = with(density) { 3.dp.toPx() }
+        val stroke = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+        // Keep a visible M3 Expressive separation at the active/inactive seam.
+        val gap = 14f
+        val start = -90f + gap / 2f
+        val sweep = 360f - gap
+        val progressSweep = (sweep * animatedProgress - gap / 2f).coerceAtLeast(0f)
+        // Keep a short active wave visible from the first rendered frame of a
+        // new playback. Its length is independent from total track duration.
+        val playedSweep = if (state.playing) maxOf(progressSweep, 24f) else progressSweep
+        val unplayedStart = start + playedSweep + gap
+        val unplayedSweep = (start + sweep - unplayedStart).coerceAtLeast(0f)
+        drawArc(
+            color = trackColor,
+            startAngle = unplayedStart,
+            sweepAngle = unplayedSweep,
+            useCenter = false,
+            style = stroke
+        )
+        if (state.loading) {
+            drawArc(
+                color = progressColor,
+                startAngle = loadingRotation - 90f,
+                sweepAngle = 86f,
+                useCenter = false,
+                style = stroke
+            )
+        } else if (playedSweep > 0f) {
+            val center = Offset(size.width / 2f, size.height / 2f)
+            val radius = minOf(size.width, size.height) / 2f - strokeWidth / 2f
+            val wavePath = Path()
+            val steps = maxOf(12, (playedSweep * 2f).roundToInt())
+            repeat(steps + 1) { index ->
+                val fraction = index.toFloat() / steps.toFloat()
+                val angle = Math.toRadians((start + playedSweep * fraction).toDouble())
+                // Fixed wavelength: increasing progress adds waves instead of
+                // stretching the existing wave, so the amplitude stays stable.
+                val wave = sin(
+                    wavePhase + (playedSweep * fraction / 30f) * 2f * PI.toFloat()
+                ) * if (state.playing) 1.72f else 0.52f
+                val pointRadius = radius + wave
+                val point = Offset(
+                    center.x + cos(angle).toFloat() * pointRadius,
+                    center.y + sin(angle).toFloat() * pointRadius
+                )
+                if (index == 0) wavePath.moveTo(point.x, point.y)
+                else wavePath.lineTo(point.x, point.y)
+            }
+            drawPath(
+                path = wavePath,
+                color = progressColor,
+                style = stroke
+            )
+        }
+    }
+}
+
+@Composable
+private fun PixelMiniControl(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .size(32.dp)
+            .clip(CircleShape)
+            .background(
+                if (enabled) MaterialTheme.colorScheme.onPrimary
+                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+            )
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            icon,
+            contentDescription = contentDescription,
+            tint = if (enabled) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+            modifier = Modifier.size(20.dp)
+        )
+    }
+}
+
+private val coverBitmapCache = object : LruCache<String, androidx.compose.ui.graphics.ImageBitmap>(48 * 1024) {
+    override fun sizeOf(
+        key: String,
+        value: androidx.compose.ui.graphics.ImageBitmap
+    ): Int = ((value.width.toLong() * value.height.toLong() * 4L) / 1024L)
+        .coerceAtLeast(1L)
+        .coerceAtMost(Int.MAX_VALUE.toLong())
+        .toInt()
+}
+
+private fun httpsCoverSource(source: String): String =
+    if (source.startsWith("http://", ignoreCase = true)) "https://${source.substring(7)}" else source
+
+private fun decodeRemoteCover(source: String): androidx.compose.ui.graphics.ImageBitmap? {
+    val connection = try {
+        URL(source).openConnection() as? HttpURLConnection
+    } catch (_: Exception) {
+        null
+    } ?: return null
+    return try {
+        connection.connectTimeout = 10_000
+        connection.readTimeout = 10_000
+        connection.instanceFollowRedirects = true
+        connection.setRequestProperty("User-Agent", "QPlayer/1.3 Android")
+        if (connection.responseCode !in 200..299) return null
+        connection.inputStream.use { BitmapFactory.decodeStream(it)?.asImageBitmap() }
+    } catch (_: Exception) {
+        null
+    } finally {
+        connection.disconnect()
+    }
+}
+
+@Composable
+private fun rememberCoverBitmap(bytes: ByteArray?, path: String?): androidx.compose.ui.graphics.ImageBitmap? {
+    val remoteSource = path?.takeIf {
+        it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true)
+    }?.let(::httpsCoverSource)
+    val key = remember(bytes, path) {
+        bytes?.let { "bytes_${it.contentHashCode()}_${it.size}" }
+            ?: remoteSource?.let { "url_$it" }
+            ?: path?.takeIf { it.isNotBlank() }?.let { "path_$it" }
+    } ?: return null
+
+    var bitmap by remember(key) {
+        mutableStateOf(synchronized(coverBitmapCache) { coverBitmapCache.get(key) })
+    }
+
+    LaunchedEffect(key) {
+        if (bitmap == null) {
+            val decoded = withContext(Dispatchers.IO) {
+                val decoded = bytes?.let { b ->
+                    try {
+                        BitmapFactory.decodeByteArray(b, 0, b.size)?.asImageBitmap()
+                    } catch (_: Exception) { null }
+                } ?: remoteSource?.let(::decodeRemoteCover) ?: path?.let { p ->
+                    try {
+                        if (File(p).exists()) BitmapFactory.decodeFile(p)?.asImageBitmap() else null
+                    } catch (_: Exception) { null }
+                }
+                decoded
+            }
+            if (decoded != null) {
+                synchronized(coverBitmapCache) { coverBitmapCache.put(key, decoded) }
+                bitmap = decoded
+            }
+        }
+    }
+    return bitmap
+}
+
+@Composable
+private fun HomeScreen(
+    state: PlayerUiState,
+    openPlaylist: (Long) -> Unit,
+    playRecommendation: (Int) -> Unit,
+    refresh: () -> Unit,
+    controller: PlayerController? = null,
+    settings: SettingsCore? = null
+) {
+    var aiText by remember { mutableStateOf("") }
+    var aiOpen by remember { mutableStateOf(false) }
+    var aiMode by remember { mutableStateOf<Boolean?>(null) }
+    var aiLoading by remember { mutableStateOf(false) }
+    var aiError by remember { mutableStateOf("") }
+    var aiSongs by remember { mutableStateOf(emptyList<dev.t1m3.qplayer.netease.dto.NeteaseSong>()) }
+    var aiProgress by remember { mutableStateOf("") }
+    var aiSummary by remember { mutableStateOf("") }
+    var aiDetails by remember { mutableStateOf("") }
+    LaunchedEffect(aiOpen, controller) {
+        while (aiOpen && controller != null) {
+            controller.pump()
+            aiLoading = controller.aiLoading.peek() == true
+            aiError = controller.aiError.peek() ?: ""
+            aiSongs = controller.aiSongs.peek() ?: emptyList()
+            aiProgress = controller.aiProgress.peek() ?: ""
+            aiSummary = controller.aiSummary.peek() ?: ""
+            aiDetails = controller.aiDetails.peek() ?: ""
+            delay(150)
+        }
+    }
+    LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        item { Text(if (state.userName.isBlank()) "你好" else "你好，${state.userName}", fontSize = 27.sp, fontWeight = FontWeight.SemiBold) }
+        item {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.QueueMusic, contentDescription = null, modifier = Modifier.size(28.dp))
+                Spacer(Modifier.width(8.dp))
+                OutlinedTextField(aiText, { aiText = it }, Modifier.weight(1f), placeholder = { Text("输入内容与你的AI DJ会面") }, singleLine = true, shape = RoundedCornerShape(18.dp))
+                IconButton(onClick = { if (aiText.isNotBlank()) { aiMode = null; aiError = ""; aiSongs = emptyList(); aiOpen = true } }) {
+                    Icon(Icons.Default.AutoAwesome, contentDescription = "打开 AI DJ")
+                }
+            }
+        }
+        item {
+            SectionTitle("推荐歌单")
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
+                items(state.recommendPlaylists) { playlist -> PlaylistCard(playlist) { openPlaylist(playlist.id) } }
+            }
+        }
+        item { SectionTitle("每日推荐") }
+        itemsIndexed(
+            state.recommendations,
+            key = { index, song -> "recommend_${song.id}_$index" },
+            contentType = { _, _ -> "song" }
+        ) { index, song ->
+            SongRow(
+                title = song.name ?: "未知歌曲",
+                artist = song.artist ?: "未知歌手",
+                coverPath = song.coverThumbPath ?: song.coverUrl,
+                onClick = { playRecommendation(index) }
+            )
+        }
+        if (state.recommendPlaylists.isEmpty() && state.recommendations.isEmpty()) {
+            item { EmptyState("暂无推荐内容", "点击刷新后重新加载", refresh) }
+        }
+    }
+    if (aiOpen) AlertDialog(
+        onDismissRequest = { aiOpen = false },
+        title = { Text("AI DJ") },
+        text = { Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("请选择生成方式")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Button(onClick = { aiMode = false }) { Text("创建歌单") }
+                Button(onClick = { aiMode = true }) { Text("生成播放列表") }
+            }
+            if (aiMode != null) Button(onClick = {
+                controller?.generateAiPlaylist(
+                    settings?.str("aiBaseUrl") ?: "", settings?.str("aiApiKey") ?: "",
+                    settings?.str("aiModel") ?: "", aiText, extractAiCount(aiText),
+                    aiMode == true, settings?.bool("aiExcludeLiked") == true,
+                    settings?.bool("aiWebSearchEnabled") != false,
+                    settings?.str("aiWebSearchUrl") ?: "https://api.tavily.com/search",
+                    settings?.str("aiWebSearchKey") ?: "",
+                    settings?.bool("aiForceKnowledge") == true
+                )
+            }, enabled = !aiLoading) { Text("开始生成") }
+            if (aiLoading) { CircularProgressIndicator(); Text("AI 正在分析歌曲并搜索网易云匹配结果…") }
+            if (aiProgress.isNotBlank()) Text(aiProgress, color = MaterialTheme.colorScheme.primary)
+            if (aiError.isNotBlank()) Text(aiError, color = MaterialTheme.colorScheme.error)
+            if (aiSummary.isNotBlank()) Text("AI 推荐说明：\n$aiSummary")
+            if (aiDetails.isNotBlank()) Text("AI 返回的推荐理由：\n$aiDetails")
+            if (aiSongs.isNotEmpty()) { Text("已找到 ${aiSongs.size} 首歌曲："); aiSongs.take(8).forEach { Text("• ${it.name} — ${it.artist}") } }
+        } }, confirmButton = {}
+    )
+}
+
+private fun extractAiCount(request: String): Int {
+    val match = Regex("(\\d{1,3})\\s*(首|首歌|songs?)?", RegexOption.IGNORE_CASE).find(request)
+    return (match?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 10).coerceIn(1, 100)
+}
+
+@Composable
+private fun SearchScreen(state: PlayerUiState, controller: PlayerController) {
+    var query by remember { mutableStateOf("") }
+    Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+        Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(query, { query = it }, Modifier.weight(1f), label = { Text("搜索歌曲、专辑或歌手") }, singleLine = true)
+            IconButton(onClick = {
+                if (query.isNotBlank()) {
+                    controller.search(query)
+                    controller.searchLocal(query)
+                    controller.searchCustom(query)
+                }
+            }) { Icon(Icons.Default.Search, contentDescription = "搜索") }
+        }
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            itemsIndexed(
+                state.searchRows,
+                key = { index, row -> "search_${row.kind}_${row.id}_$index" },
+                contentType = { _, _ -> "song" }
+            ) { index, row ->
+                SongRow(
+                    title = row.name ?: "未知歌曲",
+                    artist = row.artist ?: row.kindLabel ?: "",
+                    coverPath = row.coverThumbPath,
+                    onClick = { controller.playSearchRow(index) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LibraryScreen(
+    state: PlayerUiState,
+    openLogin: () -> Unit,
+    openPlaylist: (Long) -> Unit
+) {
+    if (!state.loggedIn) {
+        EmptyState("登录后查看你的歌单", "使用网易云账号登录", openLogin)
+        return
+    }
+    LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item { SectionTitle("我的歌单") }
+        items(
+            state.myPlaylists,
+            key = { playlist -> "playlist_${playlist.id}" },
+            contentType = { "playlist" }
+        ) { playlist -> PlaylistListRow(playlist) { openPlaylist(playlist.id) } }
+    }
+}
+
+@Composable
+private fun LocalScreen(state: PlayerUiState, controller: PlayerController) {
+    if (state.tracks.isEmpty()) {
+        EmptyState("还没有本地音乐", "授权音乐权限后会自动扫描") { }
+        return
+    }
+    LazyColumn(contentPadding = PaddingValues(16.dp)) {
+        item { Text("本地音乐 · ${state.tracks.size}", fontSize = 18.sp, fontWeight = FontWeight.Medium) }
+        itemsIndexed(
+            state.tracks,
+            key = { index, track -> "local_${track.contentUri ?: track.filePath ?: index}" },
+            contentType = { _, _ -> "song" }
+        ) { index, track ->
+            SongRow(
+                title = track.title ?: "未知歌曲",
+                artist = track.artist ?: "未知歌手",
+                coverBytes = track.coverBytes,
+                coverPath = track.coverThumbPath ?: track.coverLocalPath,
+                onClick = { controller.play(index) }
+            )
+        }
+    }
+}
+
+@Composable
+@OptIn(androidx.compose.animation.ExperimentalAnimationApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
+private fun DraggableQueueList(
+    state: PlayerUiState,
+    controller: PlayerController,
+    modifier: Modifier = Modifier,
+    contentPadding: PaddingValues = PaddingValues(vertical = 8.dp),
+    staggeredEntry: Boolean = false,
+    header: @Composable () -> Unit = {},
+    emptyContent: @Composable () -> Unit = {
+        Text("播放队列为空", color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+) {
+    // One draggable queue list shared by the player sheet and the queue page.
+    // Works identically for netease / local / custom-API tracks — the queue is a
+    // flat List<Track>, and moveInQueue is source-agnostic.
+    //
+    // Reordering uses sh.calvin.reorderable (the same library PixelPlayer uses):
+    // it owns gesture tracking, swap-while-scrolling and edge auto-scroll — all
+    // the hand-rolled versions of those fought each other. The polled controller
+    // state only refreshes every ~200ms, so swaps are mirrored into a local list
+    // that renders immediately and is dropped once the poll catches up.
+    val controllerQueue = state.queueTracks
+    var localQueue by remember { mutableStateOf<List<Track>?>(null) }
+    val queueList = localQueue ?: controllerQueue
+    LaunchedEffect(controllerQueue, localQueue) {
+        val mirror = localQueue ?: return@LaunchedEffect
+        if (mirror.size == controllerQueue.size && mirror.indices.all { mirror[it] === controllerQueue[it] }) {
+            localQueue = null
+        }
+    }
+
+    // Stable per-song identity — NEVER the slot index. A positional key makes
+    // every swap recreate the moved rows, which drops the reorderable gesture
+    // mid-drag (the "moves one slot per grab" bug) and skips placement animations.
+    fun songKeyOf(t: Track): String = when {
+        t.neteaseId != 0L -> "nid_${t.neteaseId}"
+        !t.filePath.isNullOrBlank() -> "fp_${t.filePath}"
+        !t.contentUri.isNullOrBlank() -> "cu_${t.contentUri}"
+        else -> "ti_${t.title}_${t.artist}"
+    }
+
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val reorderableState = rememberReorderableLazyListState(
+        lazyListState = listState,
+        onMove = { from, to ->
+            // Keys are stable song ids; resolve them against the CURRENT list
+            // (the mirror is already up to date from the previous move).
+            val base = ArrayList(localQueue ?: controllerQueue)
+            val fromIdx = base.indexOfFirst { songKeyOf(it) == from.key.toString() }
+            val toIdx = base.indexOfFirst { songKeyOf(it) == to.key.toString() }
+            if (fromIdx < 0 || toIdx < 0 || fromIdx == toIdx) return@rememberReorderableLazyListState
+            // Public API: adjusts the playing index and republishes queueTracks;
+            // the local mirror makes the swap render this frame.
+            controller.moveInQueue(fromIdx, toIdx)
+            base.add(toIdx, base.removeAt(fromIdx))
+            localQueue = ArrayList(base)
+        }
+    )
+
+    // Stagger window: the entry cascade only plays for a short moment right
+    // after the sheet opens. Rows that enter composition LATER (scroll loading)
+    // appear instantly — otherwise scrolling down makes each new row wait out
+    // its own stagger delay before it "pops" in.
+    var staggerOpen by remember { mutableStateOf(staggeredEntry) }
+    LaunchedEffect(staggeredEntry) {
+        if (staggeredEntry) {
+            staggerOpen = true
+            delay(1800L)
+            staggerOpen = false
+        } else {
+            staggerOpen = false
+        }
+    }
+
+    LazyColumn(
+        state = listState,
+        modifier = modifier.fillMaxSize(),
+        contentPadding = contentPadding,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        item(key = "queue_header") { header() }
+        itemsIndexed(
+            items = queueList,
+            key = { _, tr -> songKeyOf(tr) }
+        ) { index, track ->
+            // Exact slot match against the controller's index — string
+            // comparisons break when a title repeats.
+            val isPlaying = state.queueIndex == index
+            val liveIndex by rememberUpdatedState(index)
+
+            // Staggered entry (sheet only), windowed by staggerOpen above.
+            val enterStaggered = staggeredEntry && staggerOpen
+            val rowEnter = remember(enterStaggered) { Animatable(if (enterStaggered) 0f else 1f) }
+            LaunchedEffect(enterStaggered) {
+                if (enterStaggered) {
+                    delay(minOf(index * 30L, 600L))
+                    rowEnter.animateTo(
+                        1f,
+                        tween(220, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+                    )
+                } else {
+                    rowEnter.snapTo(1f)
+                }
+            }
+
+            // PixelPlayer QueuePlaylistSongItem styling: the row surface and its
+            // album art morph their corner radius between the current song (60dp,
+            // a "pill") and ordinary rows (22dp / 8dp). The current song is also
+            // marked by primary-coloured bold text and an animated equalizer.
+            val cornerRadius by animateDpAsState(
+                targetValue = if (isPlaying) 60.dp else 22.dp,
+                animationSpec = tween(240, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+                label = "queue_row_corner"
+            )
+            val albumCornerRadius by animateDpAsState(
+                targetValue = if (isPlaying) 60.dp else 8.dp,
+                animationSpec = tween(240, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+                label = "queue_album_corner"
+            )
+            val itemShape = RoundedCornerShape(cornerRadius)
+            val albumShape = RoundedCornerShape(albumCornerRadius)
+
+            ReorderableItem(
+                state = reorderableState,
+                key = songKeyOf(track),
+                enabled = true,
+                animateItemModifier = Modifier.animateItemPlacement(
+                    tween(220, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+                )
+            ) { isDragging ->
+                val dragScale by animateFloatAsState(
+                    targetValue = if (isDragging) 1.02f else 1f,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioNoBouncy,
+                        stiffness = Spring.StiffnessMediumLow
+                    ),
+                    label = "queue_drag_scale"
+                )
+
+            Surface(
+                onClick = { controller.playQueueIndex(liveIndex) },
+                shape = itemShape,
+                color = MaterialTheme.colorScheme.surfaceContainerLowest,
+                tonalElevation = if (isDragging) 4.dp else 1.dp,
+                shadowElevation = if (isDragging) 4.dp else 1.dp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .zIndex(if (isDragging) 100f else 1f)
+                    .graphicsLayer {
+                        scaleX = dragScale
+                        scaleY = dragScale
+                        val enterOffset = (1f - rowEnter.value) * 64f
+                        translationY = if (isDragging) 0f else enterOffset
+                        alpha = rowEnter.value
+                    }
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp, vertical = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    // Track Cover Thumbnail — corners morph with the current-song state.
+                    Surface(
+                        modifier = Modifier.size(42.dp),
+                        shape = albumShape,
+                        color = MaterialTheme.colorScheme.secondaryContainer
+                    ) {
+                        val rowCover = rememberCoverBitmap(track.coverBytes, track.coverThumbPath ?: track.coverLocalPath)
+                        if (rowCover != null) {
+                            Image(
+                                bitmap = rowCover,
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    Icons.Default.Album,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(22.dp),
+                                    tint = MaterialTheme.colorScheme.onSecondaryContainer
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.width(16.dp))
+
+                    // Song Title, Artist · Album
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = track.title ?: "未知歌曲",
+                            fontSize = 16.sp,
+                            fontWeight = if (isPlaying) FontWeight.Bold else FontWeight.Normal,
+                            color = if (isPlaying) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = "${track.artist ?: "未知歌手"}${if (!track.album.isNullOrBlank()) " · ${track.album}" else ""}",
+                            fontSize = 14.sp,
+                            color = if (isPlaying) MaterialTheme.colorScheme.primary.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                        )
+                    }
+
+                    if (isPlaying) {
+                        PlayingEqIcon(
+                            modifier = Modifier
+                                .padding(start = 8.dp)
+                                .size(width = 18.dp, height = 16.dp),
+                            color = MaterialTheme.colorScheme.secondary,
+                            isPlaying = state.playing
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                    } else {
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
+
+                    // Reorderable drag handle — the library drives the whole
+                    // gesture (tracking, swap-on-scroll, edge auto-scroll).
+                    // 2.2.0 exposes this as a ReorderableCollectionItemScope
+                    // member (draggableHandle), callable inside ReorderableItem.
+                    Icon(
+                        imageVector = Icons.Default.DragHandle,
+                        contentDescription = "拖拽排序",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                        modifier = Modifier
+                            .padding(horizontal = 6.dp)
+                            .size(28.dp)
+                            .draggableHandle(
+                                enabled = true,
+                                interactionSource = remember { MutableInteractionSource() },
+                                onDragStarted = { },
+                                onDragStopped = { }
+                            )
+                    )
+
+                    // Remove Button
+                    IconButton(
+                        onClick = { controller.removeFromQueue(liveIndex) },
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "删除",
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+            }
+        }
+        if (queueList.isEmpty()) {
+            item(key = "queue_empty") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(32.dp),
+                    contentAlignment = Alignment.Center
+                ) { emptyContent() }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QueueScreen(state: PlayerUiState, controller: PlayerController) {
+    Column(Modifier.fillMaxSize()) {
+        Text(
+            "播放队列 · ${state.queueTracks.size}",
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+        )
+        DraggableQueueList(
+            state = state,
+            controller = controller,
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            staggeredEntry = false,
+            emptyContent = { EmptyState("播放队列为空", "从歌曲列表选择一首开始播放") { } }
+        )
+    }
+}
+
+@Composable
+private fun PlaylistScreen(state: PlayerUiState, controller: PlayerController) {
+    LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                val coverBitmap = rememberCoverBitmap(null, state.playlistCoverPath)
+                Surface(Modifier.size(112.dp), shape = ShapeLarge, color = MaterialTheme.colorScheme.secondaryContainer) {
+                    if (coverBitmap != null) {
+                        Image(
+                            bitmap = coverBitmap,
+                            contentDescription = "歌单封面",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Icon(Icons.Default.Album, contentDescription = null, modifier = Modifier.padding(30.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                    }
+                }
+                Column(Modifier.padding(start = 16.dp)) {
+                    Text(state.playlistTitle.ifBlank { "歌单" }, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                    Text("${state.playlistTracks.size} 首歌曲", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Button(onClick = { if (state.playlistTracks.isNotEmpty()) controller.playPlaylistTrack(0) }, modifier = Modifier.padding(vertical = 12.dp)) { Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text("播放全部") }
+        }
+        itemsIndexed(
+            state.playlistTracks,
+            key = { index, song -> "playlist_song_${song.id}_$index" },
+            contentType = { _, _ -> "song" }
+        ) { index, song ->
+            SongRow(
+                title = song.name ?: "未知歌曲",
+                artist = song.artist ?: "未知歌手",
+                coverPath = song.coverThumbPath ?: song.coverUrl,
+                onClick = { controller.playPlaylistTrack(index) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun AlbumScreen(state: PlayerUiState, controller: PlayerController) {
+    if (state.albumLoading && state.albumTracks.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator()
+        }
+        return
+    }
+    LazyColumn(
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                val coverBitmap = rememberCoverBitmap(null, state.albumCoverPath)
+                Surface(Modifier.size(128.dp), shape = ShapeLarge, color = MaterialTheme.colorScheme.secondaryContainer) {
+                    if (coverBitmap != null) {
+                        Image(
+                            bitmap = coverBitmap,
+                            contentDescription = "专辑封面",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Icon(Icons.Default.Album, contentDescription = null, modifier = Modifier.padding(34.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                    }
+                }
+                Column(Modifier.padding(start = 16.dp)) {
+                    Text(state.albumTitle.ifBlank { "专辑" }, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                    if (state.albumArtist.isNotBlank()) Text(state.albumArtist, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (state.albumYear.isNotBlank()) Text(state.albumYear, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("${state.albumTracks.size} 首歌曲", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Button(onClick = { if (state.albumTracks.isNotEmpty()) controller.playAlbumTrack(0) }, modifier = Modifier.padding(vertical = 12.dp)) {
+                Icon(Icons.Default.PlayArrow, contentDescription = null)
+                Spacer(Modifier.width(6.dp))
+                Text("播放全部")
+            }
+        }
+        itemsIndexed(state.albumTracks, key = { index, song -> "${song.id}_$index" }) { index, song ->
+            SongRow(
+                title = song.name ?: "未知歌曲",
+                artist = song.artist ?: "未知歌手",
+                coverPath = song.coverThumbPath ?: song.coverUrl,
+                onClick = { controller.playAlbumTrack(index) }
+            )
+        }
+        if (!state.albumLoading && state.albumTracks.isEmpty()) {
+            item { EmptyState("暂无专辑歌曲", "专辑内容加载失败或为空") { controller.openAlbum(state.openAlbumId) } }
+        }
+    }
+}
+
+@Composable
+private fun SettingsScreen(settings: SettingsCore, controller: PlayerController) {
+    var category by remember { mutableStateOf(SettingsCatalog.APPEARANCE) }
+    // SettingsCore isn't observable: a tap writes the store but nothing
+    // recomposes this screen (its params never change), so controls appeared
+    // dead until some unrelated recomposition landed. Bumping this counter on
+    // every change forces the rows to re-read their values immediately.
+    var revision by remember { mutableIntStateOf(0) }
+    Column(Modifier.fillMaxSize()) {
+        Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            settings.categories().forEach { item ->
+                if (item == SettingsCatalog.LOCAL || item == SettingsCatalog.ABOUT || item == SettingsCatalog.LYRIC || item == SettingsCatalog.PLAYBACK || item == SettingsCatalog.APPEARANCE || item == SettingsCatalog.AI) {
+                    if (item == category) Button(onClick = { category = item }) { Text(item) }
+                    else OutlinedButton(onClick = { category = item }) { Text(item) }
+                }
+            }
+        }
+        LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            items(settings.rows(category), key = { it.key }) { spec ->
+                SettingRow(spec, settings, controller, revision) { revision++ }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingRow(
+    spec: SettingSpec,
+    settings: SettingsCore,
+    controller: PlayerController,
+    @Suppress("UNUSED_PARAMETER") revision: Int,
+    onChanged: () -> Unit
+) {
+    if (spec.dependsOn.isNotBlank() && !settings.bool(spec.dependsOn)) return
+    val type = spec.type
+    val providerText = if (spec.provider.isNotBlank()) settings.info(spec.provider) else ""
+    val description = providerText.ifBlank { spec.desc }
+    val currentInt = settings.intOf(spec.key).coerceIn(spec.min, spec.max)
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(spec.title, fontWeight = FontWeight.Medium)
+                    if (description.isNotBlank()) {
+                        Text(description, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                when (type) {
+                    SettingSpec.SWITCH -> Switch(settings.bool(spec.key), {
+                        settings.setValue(spec.key, it)
+                        onChanged()
+                    })
+                    SettingSpec.ACTION -> TextButton(onClick = {
+                        settings.invoke(spec.action)
+                        onChanged()
+                    }) { Text(spec.button.ifBlank { "执行" }) }
+                    SettingSpec.STEPPER -> {
+                        IconButton(
+                            onClick = { settings.bump(spec.key, -1); onChanged() },
+                            enabled = currentInt > spec.min
+                        ) { Icon(Icons.Default.Remove, contentDescription = "减少") }
+                        Text(formatSettingValue(spec, currentInt), modifier = Modifier.sizeIn(minWidth = 52.dp), textAlign = TextAlign.Center)
+                        IconButton(
+                            onClick = { settings.bump(spec.key, 1); onChanged() },
+                            enabled = currentInt < spec.max
+                        ) { Icon(Icons.Default.Add, contentDescription = "增加") }
+                    }
+                    SettingSpec.SLIDER -> Text(formatSettingValue(spec, currentInt), fontSize = 12.sp)
+                    SettingSpec.SEGMENTED, SettingSpec.RADIO, SettingSpec.DROPDOWN -> Unit
+                    SettingSpec.TEXT, SettingSpec.PATH -> Unit
+                    else -> Text(settings.str(spec.key).ifBlank { currentInt.toString() }, fontSize = 12.sp)
+                }
+            }
+            when (type) {
+                SettingSpec.SLIDER -> {
+                    val steps = ((spec.max - spec.min) / spec.step - 1).coerceAtLeast(0)
+                    Slider(
+                        value = currentInt.toFloat(),
+                        onValueChange = { value ->
+                            val stepped = (spec.min + ((value - spec.min) / spec.step).roundToInt() * spec.step)
+                                .coerceIn(spec.min, spec.max)
+                            settings.setValue(spec.key, stepped)
+                            onChanged()
+                        },
+                        valueRange = spec.min.toFloat()..spec.max.toFloat(),
+                        steps = steps
+                    )
+                }
+                SettingSpec.SEGMENTED, SettingSpec.RADIO, SettingSpec.DROPDOWN -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        spec.options.forEachIndexed { index, option ->
+                            if (index == settings.intOf(spec.key)) {
+                                Button(onClick = {}, enabled = false) { Text(option, maxLines = 1) }
+                            } else {
+                                OutlinedButton(onClick = {
+                                    settings.setValue(spec.key, index)
+                                    onChanged()
+                                }) { Text(option, maxLines = 1) }
+                            }
+                        }
+                    }
+                }
+                SettingSpec.TEXT, SettingSpec.PATH -> {
+                    var value by remember(spec.key, revision) { mutableStateOf(settings.str(spec.key)) }
+                    OutlinedTextField(
+                        value = value,
+                        onValueChange = { value = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        placeholder = { Text(spec.hint) },
+                        readOnly = type == SettingSpec.PATH
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (type == SettingSpec.PATH) {
+                            OutlinedButton(onClick = { settings.pickDirectory(spec.key); onChanged() }) {
+                                Text("选择目录")
+                            }
+                        } else {
+                            Button(onClick = { settings.setValue(spec.key, value); onChanged() }) {
+                                Text(spec.button.ifBlank { "应用" })
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun formatSettingValue(spec: SettingSpec, value: Int): String {
+    val shown = if (spec.scale == 1) value.toString()
+    else String.format(java.util.Locale.US, "%.2f", value.toFloat() / spec.scale.toFloat())
+    return shown + spec.unit
+}
+
+@Composable
+private fun AccountScreen(state: PlayerUiState) {
+    Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Icon(Icons.Default.Person, contentDescription = null, modifier = Modifier.size(88.dp), tint = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.height(12.dp))
+        Text(state.userName.ifBlank { "未登录" }, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+        Text("网易云音乐账户", color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun ArtistScreen(
+    state: PlayerUiState,
+    controller: PlayerController,
+    openAlbum: (Long) -> Unit
+) {
+    if (state.artistLoading && state.artistSongs.isEmpty() && state.artistAlbums.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator()
+        }
+        return
+    }
+
+    LazyColumn(
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val avatar = rememberCoverBitmap(null, state.artistCoverPath)
+                Surface(
+                    modifier = Modifier.size(112.dp),
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.secondaryContainer
+                ) {
+                    if (avatar != null) {
+                        Image(
+                            bitmap = avatar,
+                            contentDescription = "歌手头像",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Icon(
+                            Icons.Default.Person,
+                            contentDescription = null,
+                            modifier = Modifier.padding(28.dp),
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                    }
+                }
+                Column(
+                    modifier = Modifier.padding(start = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        state.artistName.ifBlank { "歌手" },
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        "${state.artistSongs.size} 首热门歌曲 · ${state.artistAlbums.size} 张专辑",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+        if (state.artistBriefDesc.isNotBlank()) {
+            item {
+                Text(
+                    state.artistBriefDesc,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    lineHeight = 20.sp,
+                    modifier = Modifier.padding(vertical = 4.dp)
+                )
+            }
+        }
+        if (state.artistSongs.isNotEmpty()) {
+            item { SectionTitle("热门歌曲") }
+            itemsIndexed(
+                state.artistSongs,
+                key = { index, song -> "artist_song_${song.id}_$index" }
+            ) { index, song ->
+                SongRow(
+                    title = song.name ?: "未知歌曲",
+                    artist = song.artist ?: state.artistName,
+                    coverPath = song.coverThumbPath ?: song.coverUrl,
+                    onClick = { controller.playArtistSong(index) }
+                )
+            }
+        }
+        if (state.artistAlbums.isNotEmpty()) {
+            item { SectionTitle("专辑") }
+            items(
+                state.artistAlbums,
+                key = { album -> "artist_album_${album.id}" }
+            ) { album ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { openAlbum(album.id) }
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val cover = rememberCoverBitmap(null, album.coverThumbPath ?: album.coverUrl)
+                    Surface(
+                        modifier = Modifier.size(60.dp),
+                        shape = ShapeMedium,
+                        color = MaterialTheme.colorScheme.secondaryContainer
+                    ) {
+                        if (cover != null) {
+                            Image(
+                                bitmap = cover,
+                                contentDescription = "专辑封面",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            Icon(Icons.Default.Album, null, Modifier.padding(16.dp))
+                        }
+                    }
+                    Column(Modifier.padding(start = 12.dp)) {
+                        Text(album.name ?: "未命名专辑", fontWeight = FontWeight.Medium)
+                        Text(
+                            "${album.trackCount} 首歌曲",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+        if (!state.artistLoading && state.artistSongs.isEmpty() && state.artistAlbums.isEmpty()) {
+            item { EmptyState("暂无歌手信息", "网易云未返回该歌手的公开资料") { controller.openArtist(state.openArtistId) } }
+        }
+    }
+}
+
+@Composable
+@OptIn(androidx.compose.animation.ExperimentalAnimationApi::class)
+private fun PlayerControlsSection(
+    state: PlayerUiState,
+    controller: PlayerController,
+    isLiked: Boolean,
+    onLikeToggle: () -> Unit
+) {
+    val previousEnabled = !state.privateFmMode
+    val heartScale by animateFloatAsState(
+        targetValue = if (isLiked) 1.22f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "heart_pulse_scale"
+    )
+
+    // --- Transport row (PixelPlayer AnimatedPlaybackControls style): three
+    // pills that expand/compress on press — the tapped button widens (1.1x)
+    // while the other two narrow (0.65x), then settle back. Play/pause corners
+    // morph between "playing" (narrow) and "paused" (round, inviting a tap). ---
+    var lastClicked by remember { mutableStateOf<Int>(0) } // 0 none, -1 prev, 1 next, 2 play
+    fun weightFor(button: Int): Float = when (lastClicked) {
+        button -> 1.1f
+        0 -> 1f
+        else -> 0.65f
+    }
+    val prevWeight by animateFloatAsState(
+        targetValue = weightFor(-1),
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow),
+        label = "prev_weight"
+    )
+    val playWeight by animateFloatAsState(
+        targetValue = weightFor(2),
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow),
+        label = "play_weight"
+    )
+    val nextWeight by animateFloatAsState(
+        targetValue = weightFor(1),
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow),
+        label = "next_weight"
+    )
+    LaunchedEffect(lastClicked) {
+        if (lastClicked != 0) {
+            delay(if (lastClicked == 2) 220L else 600L)
+            lastClicked = 0
+        }
+    }
+
+    // IMPORTANT: everything below must live inside ONE root Column. A Composable
+    // body may emit multiple elements, but they all get added DIRECTLY to the
+    // caller's layout — the caller wraps us in a Box, so un-wrapped siblings
+    // would stack on top of each other (the transport row and toggle row ended
+    // up overlapping exactly like that).
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(80.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier
+                .weight(prevWeight)
+                .fillMaxHeight()
+                .clip(CircleShape)
+                .background(
+                    if (previousEnabled) MaterialTheme.colorScheme.secondaryContainer
+                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+                )
+                .semantics { contentDescription = "上一首" }
+                .clickable(
+                    enabled = previousEnabled,
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) {
+                    lastClicked = -1
+                    controller.prev()
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(Icons.Default.SkipPrevious, "上一首", Modifier.size(32.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
+        }
+
+        val playCorner by animateDpAsState(
+            targetValue = if (state.playing) 26.dp else 60.dp,
+            animationSpec = spring(
+                dampingRatio = Spring.DampingRatioNoBouncy,
+                stiffness = Spring.StiffnessMediumLow
+            ),
+            label = "play_corner"
+        )
+        Box(
+            Modifier
+                .weight(playWeight)
+                .fillMaxHeight()
+                .clip(RoundedCornerShape(playCorner))
+                .background(MaterialTheme.colorScheme.primary)
+                .semantics { contentDescription = "播放/暂停" }
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) {
+                    lastClicked = 2
+                    controller.toggle()
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            AnimatedContent(
+                targetState = state.playing,
+                transitionSpec = {
+                    (scaleIn(
+                        initialScale = 0.5f,
+                        animationSpec = spring(
+                            dampingRatio = Spring.DampingRatioMediumBouncy,
+                            stiffness = Spring.StiffnessMedium
+                        )
+                    ) + fadeIn(tween(140)))
+                        .togetherWith(scaleOut(targetScale = 0.5f, animationSpec = tween(100)) + fadeOut(tween(100)))
+                },
+                label = "play_pause_icon_morph"
+            ) { playing ->
+                Icon(
+                    if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    "播放/暂停",
+                    Modifier.size(36.dp),
+                    tint = MaterialTheme.colorScheme.onPrimary
+                )
+            }
+        }
+
+        Box(
+            Modifier
+                .weight(nextWeight)
+                .fillMaxHeight()
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.secondaryContainer)
+                .semantics { contentDescription = "下一首" }
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) {
+                    lastClicked = 1
+                    controller.next()
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(Icons.Default.SkipNext, "下一首", Modifier.size(32.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
+        }
+    }
+
+    Spacer(Modifier.height(14.dp))
+
+    // --- Bottom toggle row (PixelPlayer BottomToggleRow style): shuffle /
+    // repeat / favorite as three equal segments on a shared pill container. ---
+    Box(
+        Modifier
+            .width(264.dp)
+            .height(56.dp)
+            .clip(RoundedCornerShape(28.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            ToggleSegment(
+                modifier = Modifier.weight(1f),
+                active = state.playMode == 1,
+                activeColor = MaterialTheme.colorScheme.primary,
+                activeContent = MaterialTheme.colorScheme.onPrimary,
+                icon = Icons.Default.Shuffle,
+                desc = "随机",
+                enabled = !state.privateFmMode,
+                onClick = { controller.setPlayMode(if (state.playMode == 1) 0 else 1) }
+            )
+            ToggleDivider()
+            ToggleSegment(
+                modifier = Modifier.weight(1f),
+                active = state.playMode == 2,
+                activeColor = MaterialTheme.colorScheme.secondary,
+                activeContent = MaterialTheme.colorScheme.onSecondary,
+                icon = if (state.playMode == 2) Icons.Default.RepeatOne else Icons.Default.Repeat,
+                desc = "循环",
+                onClick = { controller.setPlayMode(if (state.playMode == 2) 0 else 2) }
+            )
+            ToggleDivider()
+            ToggleSegment(
+                modifier = Modifier.weight(1f),
+                active = isLiked,
+                activeColor = MaterialTheme.colorScheme.tertiary,
+                activeContent = MaterialTheme.colorScheme.onTertiary,
+                icon = if (isLiked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                desc = "收藏",
+                onClick = onLikeToggle,
+                iconScale = heartScale
+            )
+        }
+    }
+
+    } // Column root
+}
+
+@Composable
+private fun ToggleSegment(
+    modifier: Modifier,
+    active: Boolean,
+    activeColor: ComposeColor,
+    activeContent: ComposeColor,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    desc: String,
+    onClick: () -> Unit,
+    iconScale: Float = 1f,
+    enabled: Boolean = true
+) {
+    // The row owns the outer capsule. Only an active segment gets its own
+    // capsule, leaving the inactive segments visually separated but flat.
+    val container by animateColorAsState(
+        targetValue = when {
+            !enabled -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+            active -> activeColor
+            else -> ComposeColor.Transparent
+        },
+        animationSpec = tween(200),
+        label = "toggle_segment_container"
+    )
+    val content by animateColorAsState(
+        targetValue = if (!enabled) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+        else if (active) activeContent else MaterialTheme.colorScheme.onSurfaceVariant,
+        animationSpec = tween(200),
+        label = "toggle_segment_content"
+    )
+    Box(
+        modifier
+            .height(48.dp)
+            // The clip shape stays a pill for the whole lifetime. Snapping it
+            // to RectangleShape on deactivate made the outgoing fill become a
+            // square first and only then fade away, which read as a rectangle
+            // flashing across the segment. Only the fill colour animates now.
+            .clip(RoundedCornerShape(24.dp))
+            .background(container)
+            .semantics { contentDescription = desc }
+            .clickable(
+                enabled = enabled,
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            icon,
+            desc,
+            Modifier
+                .size(24.dp)
+                .graphicsLayer {
+                    scaleX = iconScale
+                    scaleY = iconScale
+                },
+            tint = content
+        )
+    }
+}
+
+@Composable
+private fun ToggleDivider() {
+    Box(
+        Modifier
+            .width(1.dp)
+            .height(24.dp)
+            .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+    )
+}
+
+// PixelPlayer PlayingEqIcon — a three-bar equalizer drawn on Canvas. Bars breathe
+// with continuous sine phase + a slow "wander" so the pattern doesn't repeat for
+// ~12s, and collapse to dots when paused. Matches the current-song indicator used
+// in their queue rows.
+@Composable
+private fun PlayingEqIcon(
+    modifier: Modifier = Modifier,
+    color: ComposeColor,
+    isPlaying: Boolean = true,
+    bars: Int = 3,
+    minHeightFraction: Float = 0.28f,
+    maxHeightFraction: Float = 1.0f,
+    gapFraction: Float = 0.30f
+) {
+    val fullRotation = (2f * PI).toFloat()
+    val phaseAnim = remember { Animatable(0f) }
+    val wanderAnim = remember { Animatable(0f) }
+
+    LaunchedEffect(isPlaying) {
+        if (!isPlaying) return@LaunchedEffect
+        while (true) {
+            val start = ((phaseAnim.value % fullRotation) + fullRotation) % fullRotation
+            phaseAnim.snapTo(start)
+            phaseAnim.animateTo(start + fullRotation, tween(3600, easing = LinearEasing))
+        }
+    }
+    LaunchedEffect(isPlaying) {
+        if (!isPlaying) return@LaunchedEffect
+        while (true) {
+            val start = ((wanderAnim.value % fullRotation) + fullRotation) % fullRotation
+            wanderAnim.snapTo(start)
+            wanderAnim.animateTo(start + fullRotation, tween(12000, easing = LinearEasing))
+        }
+    }
+
+    // 1 = full bars, 0 = dots (morphs smoothly on play/pause).
+    val activity by animateFloatAsState(
+        targetValue = if (isPlaying) 1f else 0f,
+        animationSpec = tween(240, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+        label = "eq_activity"
+    )
+    val speeds = remember(bars) { List(bars) { (it + 1).toFloat() } }
+    val shifts = remember(bars) { List(bars) { i -> i * 0.9f } }
+
+    Canvas(modifier) {
+        val phase = phaseAnim.value
+        val wander = wanderAnim.value
+        val w = size.width
+        val h = size.height
+        val tentativeBarW = w / (bars + (bars - 1) * (1f + gapFraction))
+        val gap = tentativeBarW * gapFraction
+        val barW = tentativeBarW
+        val corner = CornerRadius(barW / 2f, barW / 2f)
+
+        repeat(bars) { i ->
+            val slowShift = 0.6f * sin(wander + i * 0.4f)
+            val slowAmp = 0.85f + 0.15f * sin(wander * 0.5f + 1.1f + i * 0.3f)
+            val v = (sin(phase * speeds[i] + shifts[i] + slowShift) * slowAmp + 1f) * 0.5f
+            val eased = v * v * (3f - 2f * v)
+            val fracBars = minHeightFraction + (maxHeightFraction - minHeightFraction) * eased
+            val fracDots = 0.5f
+            val frac = fracDots + (fracBars - fracDots) * activity
+            val barH = h * frac
+            val x = i * (barW + gap)
+            val y = (h - barH) / 2f
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(x, y),
+                size = Size(barW, barH),
+                cornerRadius = corner
+            )
+        }
+    }
+}
+
+@OptIn(
+    androidx.compose.animation.ExperimentalAnimationApi::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class
+)
+@Composable
+private fun PlayerDetailScreen(
+    state: PlayerUiState,
+    controller: PlayerController,
+    openAlbum: (Long) -> Unit,
+    openArtist: (Long) -> Unit,
+    close: () -> Unit,
+    closing: Boolean = false
+) {
+    var activeTab by remember(state.trackKey) { mutableIntStateOf(0) }
+    var queueSheetOpen by remember(state.trackKey) { mutableStateOf(false) }
+    var dragX by remember { mutableFloatStateOf(0f) }
+    var dragY by remember { mutableFloatStateOf(0f) }
+    val coverBitmap = rememberCoverBitmap(state.coverBytes, state.coverPath)
+    val coverScale by animateFloatAsState(
+        targetValue = if (state.playing) 1f else 0.95f,
+        animationSpec = tween(260, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+        label = "detail_cover_scale"
+    )
+    val coverExpand = remember { Animatable(0f) }
+    val metaEnter = remember { Animatable(0f) }
+    val controlsEnter = remember { Animatable(0f) }
+
+    BackHandler {
+        if (queueSheetOpen) queueSheetOpen = false else close()
+    }
+
+    // Re-run the entrance timeline whenever this detail instance is mounted.
+    // Using Unit here allowed a rapidly reopened detail page to reuse a stale
+    // Animatable value from the previous instance and render only its backdrop.
+    LaunchedEffect(Unit) {
+        if (closing) return@LaunchedEffect
+        launch {
+            coverExpand.snapTo(0f)
+            // Keep the artwork and the detail-page entrance on one timeline.
+            coverExpand.animateTo(
+                1f,
+                tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+            )
+        }
+        launch {
+            metaEnter.snapTo(0f)
+            delay(DETAIL_META_DELAY_MS)
+            metaEnter.animateTo(1f, tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+        }
+        launch {
+            controlsEnter.snapTo(0f)
+            delay(DETAIL_CONTROLS_DELAY_MS)
+            controlsEnter.animateTo(1f, tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+        }
+    }
+
+    // Close every detail child on the same frame. The artwork no longer lingers
+    // after the buttons and progress track have disappeared.
+    LaunchedEffect(closing) {
+        if (!closing) return@LaunchedEffect
+        launch {
+            controlsEnter.animateTo(0f, tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+        }
+        launch {
+            metaEnter.animateTo(0f, tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+        }
+        launch {
+            coverExpand.animateTo(0f, tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+        }
+    }
+
+    // Opening the queue is intentionally idempotent.  A new coroutine scope
+    // cancels any in-flight closing transition before the sheet is made visible
+    // again, so a tap on the queue button can never be swallowed by stale drag
+    // state.
+    fun openQueueSheet() {
+        dragY = 0f
+        queueSheetOpen = false
+        queueSheetOpen = true
+    }
+
+    fun selectTab(tab: Int) { activeTab = tab.coerceIn(0, 1) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(activeTab) {
+                detectHorizontalDragGestures(
+                    onDragStart = { dragX = 0f },
+                    onHorizontalDrag = { change, amount -> change.consume(); dragX += amount },
+                    onDragEnd = {
+                        if (!queueSheetOpen && kotlin.math.abs(dragX) > 72f) {
+                            selectTab(if (dragX < 0f) 1 else 0)
+                        }
+                        dragX = 0f
+                    },
+                    onDragCancel = { dragX = 0f }
+                )
+            }
+            .pointerInput(activeTab) {
+                detectVerticalDragGestures(
+                    onDragStart = { dragY = 0f },
+                    onVerticalDrag = { change, amount -> change.consume(); dragY += amount },
+                    onDragEnd = {
+                        if (!queueSheetOpen) {
+                            when {
+                                dragY < -72f -> openQueueSheet()
+                                dragY > 72f -> close()
+                            }
+                        }
+                        dragY = 0f
+                    },
+                    onDragCancel = { dragY = 0f }
+                )
+            }
+    ) {
+        // Detail and navigation use the same MD3 surface container. Keeping a
+        // single colour source avoids the full-screen detail page becoming a
+        // different shade after repeated route transitions.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.surfaceContainer)
+        )
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .padding(horizontal = 24.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // This is the APK's single top row: back, centered tab switcher,
+            // and queue. Keeping them in one row avoids the later duplicated
+            // header that made the lyrics page look vertically displaced.
+            PlayerDetailHeader(
+                state = state,
+                activeTab = activeTab,
+                onTab = ::selectTab,
+                onClose = close,
+                onQueue = ::openQueueSheet
+            )
+            Spacer(Modifier.height(12.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                contentAlignment = Alignment.Center
+            ) {
+                AnimatedContent(
+                    targetState = activeTab,
+                    transitionSpec = {
+                        val forward = targetState > initialState
+                        (slideInHorizontally(
+                            initialOffsetX = { if (forward) it else -it },
+                            animationSpec = tween(360, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+                        ) + fadeIn(tween(260))).togetherWith(
+                            slideOutHorizontally(
+                                targetOffsetX = { if (forward) -it else it },
+                                animationSpec = tween(260, easing = androidx.compose.animation.core.FastOutLinearInEasing)
+                            ) + fadeOut(tween(180))
+                        )
+                    },
+                    label = "player_detail_tab"
+                ) { tab ->
+                    if (tab == 0) {
+                        ApkDetailTab(
+                            state = state,
+                            controller = controller,
+                            coverBitmap = coverBitmap,
+                            coverExpand = coverExpand.value,
+                            metaEnter = metaEnter.value,
+                            controlsEnter = controlsEnter.value,
+                            closing = closing,
+                            openAlbum = openAlbum,
+                            openArtist = openArtist,
+                            onOpenLyrics = { selectTab(1) }
+                        )
+                    } else {
+                        ApkLyricTab(
+                            state = state,
+                            controller = controller,
+                            coverBitmap = coverBitmap,
+                            coverScale = coverScale,
+                            openArtist = openArtist,
+                            onShowDetail = { selectTab(0) }
+                        )
+                    }
+                }
+            }
+        }
+
+        AnimatedVisibility(
+            visible = queueSheetOpen,
+            modifier = Modifier
+                .fillMaxSize()
+                .zIndex(20f),
+            enter = slideInVertically(
+                initialOffsetY = { it },
+                animationSpec = tween(360, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+            ) + fadeIn(tween(240)),
+            exit = slideOutVertically(
+                targetOffsetY = { it },
+                animationSpec = tween(280, easing = androidx.compose.animation.core.FastOutLinearInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { queueSheetOpen = false }
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .fillMaxHeight(0.82f)
+                        .navigationBarsPadding()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) {},
+                    shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    tonalElevation = 6.dp,
+                    shadowElevation = 12.dp
+                ) {
+                    Column(Modifier.fillMaxSize()) {
+                        Box(
+                            modifier = Modifier
+                                .padding(top = 4.dp)
+                                .fillMaxWidth()
+                                .height(36.dp)
+                                .align(Alignment.CenterHorizontally)
+                                .pointerInput(Unit) {
+                                    var sheetDragY = 0f
+                                    detectVerticalDragGestures(
+                                        onVerticalDrag = { change, amount ->
+                                            change.consume()
+                                            sheetDragY += amount
+                                        },
+                                        onDragEnd = {
+                                            if (sheetDragY > 56f) queueSheetOpen = false
+                                            sheetDragY = 0f
+                                        },
+                                        onDragCancel = { sheetDragY = 0f }
+                                    )
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                Modifier
+                                    .size(width = 36.dp, height = 4.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f))
+                            )
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 20.dp, end = 8.dp, top = 10.dp, bottom = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "播放队列 · ${state.queueTracks.size}",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.weight(1f)
+                            )
+                            IconButton(onClick = { queueSheetOpen = false }) {
+                                Icon(Icons.Default.Close, contentDescription = "关闭播放队列")
+                            }
+                        }
+                        DraggableQueueList(
+                            state = state,
+                            controller = controller,
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                            staggeredEntry = false,
+                            header = {},
+                            emptyContent = {
+                                EmptyState("播放队列为空", "从歌曲列表选择一首开始播放") { }
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlayerDetailHeader(
+    state: PlayerUiState,
+    activeTab: Int,
+    onTab: (Int) -> Unit,
+    onClose: () -> Unit,
+    onQueue: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        IconButton(onClick = onClose, modifier = Modifier.size(40.dp)) {
+            Icon(
+                Icons.Default.ArrowBack,
+                contentDescription = "返回",
+                modifier = Modifier.size(24.dp)
+            )
+        }
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh
+        ) {
+            Row(
+                modifier = Modifier.padding(3.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                DetailTabButton("播放详情", activeTab == 0) { onTab(0) }
+                DetailTabButton("歌词", activeTab == 1) { onTab(1) }
+            }
+        }
+        if (onQueue != null) {
+            IconButton(onClick = onQueue, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Default.QueueMusic, contentDescription = "播放队列", modifier = Modifier.size(24.dp))
+            }
+        } else {
+            Spacer(Modifier.size(40.dp))
+        }
+    }
+}
+
+@Composable
+private fun DetailTabButton(label: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(19.dp))
+            .background(
+                if (selected) MaterialTheme.colorScheme.secondaryContainer
+                else ComposeColor.Transparent
+            )
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
+            .padding(horizontal = 15.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            color = if (selected) MaterialTheme.colorScheme.onSecondaryContainer
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 13.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+        )
+    }
+}
+
+@Composable
+private fun ApkDetailTab(
+    state: PlayerUiState,
+    controller: PlayerController,
+    coverBitmap: androidx.compose.ui.graphics.ImageBitmap?,
+    coverExpand: Float,
+    metaEnter: Float,
+    controlsEnter: Float,
+    closing: Boolean,
+    openAlbum: (Long) -> Unit,
+    openArtist: (Long) -> Unit,
+    onOpenLyrics: () -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            contentAlignment = Alignment.Center
+        ) {
+            val coverSize = minOf(maxWidth, maxHeight)
+            ApkDetailCover(
+                state = state,
+                coverBitmap = coverBitmap,
+                modifier = Modifier
+                    .size(coverSize)
+                    .graphicsLayer {
+                        val expand = 0.15f + 0.85f * coverExpand
+                        scaleX = expand
+                        scaleY = expand
+                        // The detail artwork enters from the same lower-left
+                        // origin as the source MiniPlayer, and exits by
+                        // following this exact transform in reverse.
+                        translationX = (1f - coverExpand) * (-maxWidth.toPx() * 0.4f)
+                        translationY = (1f - coverExpand) * (maxHeight.toPx() * 0.85f)
+                        // During close the artwork must disappear on the same
+                        // frame as the rest of the detail content. Without
+                        // this, the 15% end-scale remains visible under the
+                        // page fade and looks like the cover pauses at the end.
+                        if (closing) alpha = coverExpand
+                    },
+                onClick = onOpenLyrics
+            )
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(58.dp)
+                .graphicsLayer {
+                    translationY = (1f - metaEnter) * 56f
+                    alpha = metaEnter
+                },
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            val title = state.title.ifBlank { "未在播放" }
+            val titleSize = when {
+                title.length > 48 -> 18.sp
+                title.length > 30 -> 21.sp
+                else -> 24.sp
+            }
+            Text(
+                text = title,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(34.dp)
+                    .clickable(
+                        enabled = state.albumId != 0L,
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { openAlbum(state.albumId) },
+                color = MaterialTheme.colorScheme.onSurface,
+                fontSize = titleSize,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            PlayingArtistLinks(
+                state = state,
+                openArtist = openArtist,
+                fontSize = 13.sp,
+                centered = true
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .graphicsLayer {
+                    translationY = (1f - controlsEnter) * 56f
+                    alpha = controlsEnter
+                }
+        ) {
+            Column {
+                // Keep the progress track and transport controls on the same
+                // animation channel so neither one lingers during close.
+                QmlLyricProgress(
+                    positionMs = state.positionMs,
+                    durationMs = state.durationMs,
+                    loading = state.loading,
+                    wavy = state.lyricProgressStyle == 0,
+                    onSeek = controller::seek,
+                    formatMs = ::formatPlayerTime,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                PlayerControlsSection(
+                    state = state,
+                    controller = controller,
+                    isLiked = state.liked,
+                    onLikeToggle = controller::toggleLike
+                )
+            }
+        }
+    }
+}
+
+private fun formatPlayerTime(ms: Long): String {
+    val seconds = (ms / 1000L).coerceAtLeast(0L)
+    return "${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}"
+}
+
+@Composable
+private fun ApkDetailCover(
+    state: PlayerUiState,
+    coverBitmap: androidx.compose.ui.graphics.ImageBitmap?,
+    modifier: Modifier,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = modifier
+            .clip(ShapeExtraLarge)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            ),
+        shape = ShapeExtraLarge,
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+    ) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Crossfade(
+                targetState = state.trackKey to coverBitmap,
+                animationSpec = tween(250),
+                label = "detail_cover_track_transition"
+            ) { (_, bitmap) ->
+                if (bitmap != null) {
+                    Image(
+                        bitmap = bitmap,
+                        contentDescription = "专辑封面",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Icon(
+                        Icons.Default.Album,
+                        contentDescription = null,
+                        modifier = Modifier.size(96.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            if (state.loading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(48.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    strokeWidth = 4.dp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ApkLyricTab(
+    state: PlayerUiState,
+    controller: PlayerController,
+    coverBitmap: androidx.compose.ui.graphics.ImageBitmap?,
+    coverScale: Float,
+    openArtist: (Long) -> Unit,
+    onShowDetail: () -> Unit
+) {
+    // No lyric data must never block entering this tab.  The core marks the
+    // cover-only state while lyrics are loading; once the list arrives the
+    // same layout animates into the compact artwork + lyric column used by
+    // the original APK.
+    // The cover state is derived from the actual lyric payload. A stale manual
+    // mode flag must not hide lyrics after they have finished loading.
+    val coverOnly = state.lyrics.isEmpty()
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        AnimatedContent(
+            targetState = coverOnly,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            transitionSpec = {
+                if (targetState) {
+                    (scaleIn(initialScale = 0.92f, animationSpec = tween(360)) + fadeIn(tween(260)))
+                        .togetherWith(scaleOut(targetScale = 1.06f, animationSpec = tween(260)) + fadeOut(tween(180)))
+                } else {
+                    (slideInVertically(initialOffsetY = { -it / 6 }, animationSpec = tween(420)) + fadeIn(tween(300)))
+                        .togetherWith(slideOutVertically(targetOffsetY = { it / 6 }, animationSpec = tween(260)) + fadeOut(tween(180)))
+                }
+            },
+            label = "lyrics_cover_layout"
+        ) { showCover ->
+            if (showCover) {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    QmlLyricCover(
+                        state = state,
+                        coverBitmap = coverBitmap,
+                        modifier = Modifier
+                            .fillMaxWidth(0.82f)
+                            .aspectRatio(1f)
+                            .graphicsLayer {
+                                scaleX = coverScale
+                                scaleY = coverScale
+                            },
+                        onTap = {
+                            onShowDetail()
+                        }
+                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = state.title.ifBlank { "未在播放" },
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        PlayingArtistLinks(state, openArtist, 13.sp, centered = true)
+                    }
+                }
+            } else {
+                Column(Modifier.fillMaxSize()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(72.dp)
+                            .padding(horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        QmlLyricCover(
+                            state = state,
+                            coverBitmap = coverBitmap,
+                            modifier = Modifier.size(56.dp),
+                            fixedSize = 56.dp,
+                            onTap = onShowDetail
+                        )
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(start = 14.dp),
+                            horizontalAlignment = Alignment.Start,
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text(
+                                text = state.title.ifBlank { "未在播放" },
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontSize = 19.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            PlayingArtistLinks(state, openArtist, 13.sp, centered = false)
+                        }
+                    }
+                    QmlLyricColumnRestored(
+                        state = state,
+                        modifier = Modifier.fillMaxSize(),
+                        onLineClick = { controller.seek(it) }
+                    )
+                }
+            }
+        }
+        QmlLyricTransport(
+            state = state,
+            controller = controller,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(112.dp),
+            formatMs = ::formatPlayerTime
+        )
+    }
+}
+
+@Composable
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+private fun QmlLyricPage(
+    state: PlayerUiState,
+    controller: PlayerController,
+    openArtist: (Long) -> Unit,
+    close: () -> Unit,
+    showCloseButton: Boolean = false
+) {
+    // This is the portrait structure of shared-qml/components/LyricOverlay.qml.
+    // It is mounted by PlayerDetailScreen's Lyrics tab. Keep its chrome and
+    // cover/lyrics behavior independent from the restored playback-detail tab.
+    var offsetPanelOpen by remember { mutableStateOf(false) }
+    var offsetValue by remember(state.trackKey, state.lyricOffsetMs) {
+        mutableFloatStateOf(state.lyricOffsetMs.toFloat())
+    }
+    val coverOnly = state.lyricsCoverOnly || state.coverModeManual
+    val coverBitmap = rememberCoverBitmap(state.coverBytes, state.coverPath)
+
+    fun formatMs(ms: Long): String {
+        val totalSeconds = (ms / 1000L).coerceAtLeast(0L)
+        return "${totalSeconds / 60}:${(totalSeconds % 60).toString().padStart(2, '0')}"
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        QmlLyricBackdrop(
+            state = state,
+            coverBitmap = coverBitmap,
+            modifier = Modifier.fillMaxSize()
+        )
+
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            if (maxWidth > maxHeight) {
+                QmlLyricLandscapeChrome(
+                    state = state,
+                    controller = controller,
+                    coverBitmap = coverBitmap,
+                    openArtist = openArtist,
+                    close = close,
+                    showCloseButton = false,
+                    offsetPanelOpen = offsetPanelOpen,
+                    onOffsetPanelOpenChange = { offsetPanelOpen = it },
+                    offsetValue = offsetValue,
+                    onOffsetValueChange = { offsetValue = it },
+                    modifier = Modifier.fillMaxSize(),
+                    formatMs = ::formatMs
+                )
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .statusBarsPadding()
+                        .navigationBarsPadding()
+                ) {
+            // QML top row: expand_more, image (when lyrics exist), sync.
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 6.dp, start = 6.dp, end = 6.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (showCloseButton) {
+                        IconButton(
+                            onClick = close,
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.KeyboardArrowDown,
+                                contentDescription = "关闭歌词",
+                                tint = ComposeColor.White,
+                                modifier = Modifier.size(28.dp)
+                            )
+                        }
+                    } else {
+                        Spacer(Modifier.size(40.dp))
+                    }
+                    Spacer(Modifier.weight(1f))
+                    if (!coverOnly) {
+                        IconButton(
+                            onClick = { controller.setCoverMode(true) },
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Album,
+                                contentDescription = "显示封面",
+                                tint = ComposeColor.White,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
+                    IconButton(
+                        onClick = {
+                            offsetPanelOpen = !offsetPanelOpen
+                        },
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Sync,
+                            contentDescription = "歌词偏移",
+                            tint = ComposeColor.White,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                }
+
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = offsetPanelOpen,
+                    enter = fadeIn(tween(160)) + scaleIn(
+                        initialScale = 0.9f,
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0f),
+                        animationSpec = tween(220)
+                    ),
+                    exit = fadeOut(tween(120)) + scaleOut(
+                        targetScale = 0.9f,
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0f),
+                        animationSpec = tween(150)
+                    ),
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .offset(y = 48.dp)
+                        .zIndex(10f)
+                ) {
+                    Surface(
+                        modifier = Modifier
+                            .widthIn(max = 320.dp)
+                            .fillMaxWidth(0.86f),
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        border = BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant
+                        ),
+                        tonalElevation = 4.dp,
+                        shadowElevation = 8.dp
+                    ) {
+                        Column(Modifier.padding(horizontal = 18.dp, vertical = 14.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("歌词偏移", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                                Text(
+                                    text = if (offsetValue > 0f) "+${offsetValue.toInt()} ms"
+                                    else "${offsetValue.toInt()} ms",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Text(
+                                "仅对当前歌曲生效 · 负值提前，正值延后",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Slider(
+                                value = offsetValue.coerceIn(-5000f, 5000f),
+                                onValueChange = {
+                                    offsetValue = (it / 50f).roundToInt() * 50f
+                                },
+                                valueRange = -5000f..5000f,
+                                steps = 199,
+                                onValueChangeFinished = {
+                                    controller.setLyricOffset(offsetValue.toInt())
+                                }
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("提前 5 秒", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("0", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("延后 5 秒", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            TextButton(
+                                onClick = {
+                                    offsetValue = 0f
+                                    controller.resetLyricOffset()
+                                },
+                                enabled = offsetValue != 0f,
+                                modifier = Modifier.align(Alignment.End)
+                            ) {
+                                Text("重置为 0")
+                            }
+                        }
+                    }
+                }
+            }
+
+            // QML title band. The title is not an album button in the original
+            // overlay; only the artist hit area is wired to the original artist route.
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 28.dp, vertical = 2.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = state.title.ifBlank { "未在播放" },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .basicMarquee(
+                            iterations = Int.MAX_VALUE,
+                            initialDelayMillis = 1000
+                        ),
+                    color = ComposeColor.White,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = state.artist.ifBlank { "未知歌手" },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .then(
+                            if (state.artistId != 0L) {
+                                Modifier.clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null
+                                ) { openArtist(state.artistId) }
+                            } else Modifier
+                        )
+                        .basicMarquee(
+                            iterations = Int.MAX_VALUE,
+                            initialDelayMillis = 1000
+                        ),
+                    color = ComposeColor.White.copy(alpha = 0.70f),
+                    fontSize = 14.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
+                Crossfade(
+                    targetState = coverOnly,
+                    animationSpec = tween(250),
+                    label = "qml_lyric_cover_mode"
+                ) { showCover ->
+                    if (showCover) {
+                        QmlLyricCover(
+                            state = state,
+                            coverBitmap = coverBitmap,
+                            modifier = Modifier.fillMaxSize(),
+                            onTap = {
+                                if (!state.lyricsCoverOnly) controller.setCoverMode(false)
+                            }
+                        )
+                    } else {
+                        QmlLyricColumnRestored(
+                            state = state,
+                            modifier = Modifier.fillMaxSize(),
+                            onLineClick = { controller.seek(it) }
+                        )
+                    }
+                }
+                // Soften the cover/title-to-lyrics seam: the upper edge is
+                // opaque and increasingly transparent downward, preventing a
+                // lyric glyph from being cut by a hard rectangular boundary.
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(96.dp)
+                        .align(Alignment.TopCenter)
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(
+                                    MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+                                    MaterialTheme.colorScheme.surface.copy(alpha = 0.58f),
+                                    ComposeColor.Transparent
+                                )
+                            )
+                        )
+                )
+            }
+
+            // QML transport is fixed to the bottom band, with 28dp side margins.
+                    QmlLyricTransport(
+                        state = state,
+                        controller = controller,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(120.dp)
+                            .padding(horizontal = 28.dp),
+                        formatMs = ::formatMs
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QmlLyricBackdrop(
+    state: PlayerUiState,
+    coverBitmap: androidx.compose.ui.graphics.ImageBitmap?,
+    modifier: Modifier = Modifier
+) {
+    val scheme = MaterialTheme.colorScheme
+    // The setting is deliberately not an animation switch anymore:
+    // true = blurred artwork, false = solid Monet/MD3 colour. There is no
+    // moving orb layer in either mode.
+    val useCover = state.lyricCoverBackground
+    // The scheme itself is regenerated from coverSeed. This is therefore one
+    // cover-derived Monet colour, not an artwork layer or a multi-colour wash.
+    val solidColor = if (state.dark) scheme.surfaceContainerHighest else scheme.primaryContainer
+    // Same stack as MiniPlayer, scaled up to the page: a softly blurred artwork
+    // at low alpha, then one strong translucent surface panel plus two faint
+    // Monet tints on top. The full-screen version previously kept only a 10–18%
+    // scrim, so the raw cover colour came through at almost full saturation and
+    // looked garish; this reuses the muted MiniPlayer balance instead.
+    Box(modifier = modifier.background(scheme.surfaceContainerHigh)) {
+        if (useCover && coverBitmap != null) {
+            Crossfade(
+                targetState = state.trackKey to coverBitmap,
+                animationSpec = tween(420),
+                label = "qml_cover_background"
+            ) { (_, bitmap) ->
+                Image(
+                    bitmap = bitmap,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .blur(34.dp)
+                        .graphicsLayer { alpha = 0.78f }
+                )
+            }
+        } else {
+            // No cover pixels are rendered when "封面背景" is disabled: the
+            // artwork layer is replaced by its own flat Monet colour so the
+            // glass panel below still has something to sit on.
+            Box(Modifier.fillMaxSize().background(solidColor))
+        }
+        WindowGlassBackdrop(
+            modifier = Modifier.fillMaxSize(),
+            radius = 42f,
+            overlay = scheme.surfaceContainerHigh.copy(alpha = 0.76f)
+        )
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(scheme.primaryContainer.copy(alpha = 0.22f))
+        )
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(scheme.primary.copy(alpha = 0.08f))
+        )
+    }
+}
+
+@Composable
+private fun QmlLyricCover(
+    state: PlayerUiState,
+    coverBitmap: androidx.compose.ui.graphics.ImageBitmap?,
+    modifier: Modifier = Modifier,
+    onTap: () -> Unit,
+    fixedSize: androidx.compose.ui.unit.Dp? = null
+) {
+    BoxWithConstraints(modifier = modifier) {
+        val available = minOf(maxWidth - 96.dp, maxHeight - 80.dp).coerceAtLeast(160.dp)
+        val coverSize = fixedSize ?: available.coerceAtMost(420.dp)
+        Box(
+            modifier = Modifier
+                .size(coverSize)
+                .align(Alignment.Center)
+                .clip(RoundedCornerShape((coverSize * 0.06f).coerceAtMost(24.dp)))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onTap
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Crossfade(
+                targetState = state.trackKey to coverBitmap,
+                animationSpec = tween(250),
+                label = "qml_cover_transition"
+            ) { (_, bitmap) ->
+                if (bitmap != null) {
+                    Image(
+                        bitmap = bitmap,
+                        contentDescription = "专辑封面",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Icon(
+                        Icons.Default.Album,
+                        contentDescription = null,
+                        modifier = Modifier.size(72.dp),
+                        tint = ComposeColor.White.copy(alpha = 0.70f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+private fun QmlLyricLandscapeChrome(
+    state: PlayerUiState,
+    controller: PlayerController,
+    coverBitmap: androidx.compose.ui.graphics.ImageBitmap?,
+    openArtist: (Long) -> Unit,
+    close: () -> Unit,
+    showCloseButton: Boolean = false,
+    offsetPanelOpen: Boolean,
+    onOffsetPanelOpenChange: (Boolean) -> Unit,
+    offsetValue: Float,
+    onOffsetValueChange: (Float) -> Unit,
+    modifier: Modifier = Modifier,
+    formatMs: (Long) -> String
+) {
+    val coverOnly = state.lyricsCoverOnly || state.coverModeManual
+
+    BoxWithConstraints(modifier = modifier) {
+        val regionWidth = if (coverOnly) maxWidth else maxWidth / 2
+        val targetCoverSize = minOf(
+            regionWidth - 96.dp,
+            maxHeight - 248.dp,
+            360.dp
+        ).coerceAtLeast(120.dp)
+        val coverSize by animateDpAsState(
+            targetValue = targetCoverSize,
+            animationSpec = spring(
+                dampingRatio = Spring.DampingRatioMediumBouncy,
+                stiffness = 180f
+            ),
+            label = "qml_landscape_cover_size"
+        )
+        val centerX = regionWidth / 2
+        val columnHeight = coverSize + 196.dp
+
+        if (!coverOnly) {
+            QmlLyricColumnRestored(
+                state = state,
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .width(maxWidth / 2)
+                    .align(Alignment.CenterEnd)
+            )
+        }
+
+        Column(
+            modifier = Modifier
+                .width(coverSize)
+                .height(columnHeight)
+                .align(Alignment.CenterStart)
+                .offset(x = centerX - coverSize / 2)
+        ) {
+            QmlLyricCover(
+                state = state,
+                coverBitmap = coverBitmap,
+                modifier = Modifier.size(coverSize),
+                fixedSize = coverSize,
+                onTap = { if (!state.lyricsCoverOnly) controller.setCoverMode(false) }
+            )
+            Text(
+                text = state.title.ifBlank { "未在播放" },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 20.dp)
+                    .basicMarquee(
+                        iterations = Int.MAX_VALUE,
+                        initialDelayMillis = 1000
+                    ),
+                color = ComposeColor.White,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = state.artist.ifBlank { "未知歌手" },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp)
+                    .then(
+                        if (state.artistId != 0L) {
+                            Modifier.clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) { openArtist(state.artistId) }
+                        } else Modifier
+                    )
+                    .basicMarquee(
+                        iterations = Int.MAX_VALUE,
+                        initialDelayMillis = 1000
+                    ),
+                color = ComposeColor.White.copy(alpha = 0.70f),
+                fontSize = 13.sp,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.weight(1f))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(18.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val transportEnabled = !state.privateFmMode
+                IconButton(
+                    onClick = { controller.cyclePlayMode() },
+                    enabled = transportEnabled,
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Icon(
+                        when (state.playMode) {
+                            1 -> Icons.Default.Shuffle
+                            2 -> Icons.Default.RepeatOne
+                            else -> Icons.Default.Repeat
+                        },
+                        contentDescription = "播放模式",
+                        tint = if (state.playMode == 0) ComposeColor.White.copy(alpha = 0.60f)
+                        else MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+                IconButton(
+                    onClick = { controller.prev() },
+                    enabled = transportEnabled,
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Icon(
+                        Icons.Default.SkipPrevious,
+                        contentDescription = "上一首",
+                        tint = ComposeColor.White.copy(alpha = if (transportEnabled) 1f else 0.38f),
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+                FilledIconButton(
+                    onClick = { controller.toggle() },
+                    modifier = Modifier.size(40.dp),
+                    colors = IconButtonDefaults.filledIconButtonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    )
+                ) {
+                    Icon(
+                        if (state.playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = "播放/暂停",
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+                IconButton(onClick = { controller.next() }, modifier = Modifier.size(40.dp)) {
+                    Icon(
+                        Icons.Default.SkipNext,
+                        contentDescription = "下一首",
+                        tint = ComposeColor.White,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+                IconButton(
+                    onClick = { controller.toggleLike() },
+                    enabled = state.likeable,
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Icon(
+                        if (state.liked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                        contentDescription = "收藏",
+                        tint = if (state.liked) ComposeColor(0xFFFF5277)
+                        else ComposeColor.White.copy(alpha = 0.60f),
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+            }
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(top = 6.dp, start = 6.dp, end = 6.dp)
+                .align(Alignment.TopCenter)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (showCloseButton) {
+                    IconButton(onClick = close, modifier = Modifier.size(40.dp)) {
+                        Icon(
+                            Icons.Default.KeyboardArrowDown,
+                            contentDescription = "关闭歌词",
+                            tint = ComposeColor.White,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+                } else {
+                    Spacer(Modifier.size(40.dp))
+                }
+                Spacer(Modifier.weight(1f))
+                if (!coverOnly) {
+                    IconButton(
+                        onClick = { controller.setCoverMode(true) },
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Album,
+                            contentDescription = "显示封面",
+                            tint = ComposeColor.White,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                }
+                IconButton(
+                    onClick = { onOffsetPanelOpenChange(!offsetPanelOpen) },
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Sync,
+                        contentDescription = "歌词偏移",
+                        tint = ComposeColor.White,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+            }
+
+            androidx.compose.animation.AnimatedVisibility(
+                visible = offsetPanelOpen,
+                enter = fadeIn(tween(160)) + scaleIn(
+                    initialScale = 0.9f,
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0f),
+                    animationSpec = tween(220)
+                ),
+                exit = fadeOut(tween(120)) + scaleOut(
+                    targetScale = 0.9f,
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0f),
+                    animationSpec = tween(150)
+                ),
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .offset(y = 48.dp)
+                    .zIndex(10f)
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .widthIn(max = 320.dp)
+                        .fillMaxWidth(0.86f),
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    tonalElevation = 4.dp,
+                    shadowElevation = 8.dp
+                ) {
+                    Column(Modifier.padding(horizontal = 18.dp, vertical = 14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("歌词偏移", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                            Text(
+                                text = if (offsetValue > 0f) "+${offsetValue.toInt()} ms"
+                                else "${offsetValue.toInt()} ms",
+                                color = MaterialTheme.colorScheme.primary,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Text(
+                            "仅对当前歌曲生效 · 负值提前，正值延后",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Slider(
+                            value = offsetValue.coerceIn(-5000f, 5000f),
+                            onValueChange = {
+                                onOffsetValueChange((it / 50f).roundToInt() * 50f)
+                            },
+                            valueRange = -5000f..5000f,
+                            steps = 199,
+                            onValueChangeFinished = {
+                                controller.setLyricOffset(offsetValue.toInt())
+                            }
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("提前 5 秒", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("0", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("延后 5 秒", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        TextButton(
+                            onClick = {
+                                onOffsetValueChange(0f)
+                                controller.resetLyricOffset()
+                            },
+                            enabled = offsetValue != 0f,
+                            modifier = Modifier.align(Alignment.End)
+                        ) {
+                            Text("重置为 0")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/*
+ * Snapshot-compatible lyric renderer.
+ *
+ * This follows the renderer recovered from qplayer-debug.apk (version 1.3.0,
+ * versionCode 67): the list is anchored at 35% of the viewport and is moved
+ * by one persistent spring driven by the current lyric index. Keeping the
+ * animation in one coroutine is important; separate per-frame list and row
+ * animations were the source of the vertical twitch in the later rewrite.
+ */
+
+/** Horizontal inset kept on both sides of every lyric row. */
+private val ROW_H_PADDING = 8.dp
+
+/** Slight lift of the line that is currently being sung (弹簧动效). */
+private const val LYRIC_WORD_LIFT_DP = -2.5f
+
+/**
+ * Type-size candidates for the strict lyric fit, largest first. The first one
+ * whose line count fits the measured width in two lines wins; the last one is
+ * used as a floor so a pathological line can never shrink to nothing.
+ */
+private val LYRIC_FIT_FACTORS = floatArrayOf(1f, 0.92f, 0.84f, 0.76f, 0.68f)
+
+/**
+ * Shared ripple bookkeeping for the lyric column. It only tracks *which line is
+ * focused* and bumps [pulse] when that line really changes — never on playback
+ * progress ticks, which would restart the wave every poll interval and make the
+ * whole column twitch.
+ */
+/** Distance the list must travel for [item]'s centre to land on the 35% anchor. */
+private fun lyricAnchorDelta(listState: LazyListState, item: LazyListItemInfo): Float {
+    val info = listState.layoutInfo
+    val anchor = info.viewportStartOffset +
+        (info.viewportEndOffset - info.viewportStartOffset) * 0.35f
+    return item.offset + item.size / 2f - anchor
+}
+
+/**
+ * Centres the focused lyric line exactly once. [animationSpec] null means
+ * "place it now", used right after a track change. This is the only thing that
+ * ever moves the list, so the centring, the ripple and the per-word colouring
+ * stay three independent systems.
+ */
+private suspend fun LazyListState.centerLyricLine(
+    index: Int,
+    animationSpec: androidx.compose.animation.core.AnimationSpec<Float>?
+) {
+    val visible = layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+    if (visible == null) {
+        animateScrollToItem(index)
+        withFrameNanos { }
+        val placed = layoutInfo.visibleItemsInfo.firstOrNull { it.index == index } ?: return
+        val delta = lyricAnchorDelta(this, placed)
+        if (kotlin.math.abs(delta) < 0.5f) return
+        if (animationSpec == null) scrollBy(delta) else animateScrollBy(delta, animationSpec)
+    } else {
+        val delta = lyricAnchorDelta(this, visible)
+        if (kotlin.math.abs(delta) < 0.5f) return
+        if (animationSpec == null) scrollBy(delta) else animateScrollBy(delta, animationSpec)
+    }
+}
+
+@Composable
+private fun QmlLyricColumnRestored(
+    state: PlayerUiState,
+    modifier: Modifier = Modifier,
+    onLineClick: (Long) -> Unit = {}
+) {
+    BoxWithConstraints(modifier = modifier) {
+        val centerPadding = (maxHeight * 0.42f).coerceAtLeast(32.dp)
+        val listState = rememberLazyListState()
+
+        // Strictly measured text column: the row keeps ROW_H_PADDING on each
+        // side, and the *widest* row (the enlarged current line, 1.12x) must
+        // still end inside the screen. Every row therefore lays its text out in
+        // contentWidth / maxRowScale, which is the real, measured budget — no
+        // line can be clipped by the window edge any more.
+        val rowContentWidth =
+            (maxWidth - ROW_H_PADDING * 2).coerceAtLeast(1.dp)
+        val maxRowScale = if (state.lyricScale) 1.12f else 1f
+        val lyricTextWidth = rowContentWidth / maxRowScale
+
+        // Centring is a separate system: it runs exactly once per focused line
+        // (and once per track/lyric load) and then stops. Nothing re-centres on
+        // playback ticks, and the ripple never asks for another scroll, so the
+        // two can never pull the column in opposite directions. 弹簧动效 picks
+        // the physics of this single glide (see the setting's own description).
+        val lyricScrollSpec: androidx.compose.animation.core.AnimationSpec<Float> =
+            if (state.lyricSpring) {
+                spring(dampingRatio = 0.85f, stiffness = 90f)
+            } else {
+                tween(320, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+            }
+
+        LaunchedEffect(state.trackKey, state.lyricsRevision, state.lyrics.size) {
+            withFrameNanos { }
+            var initialIndex = state.lyricIndex
+            if (initialIndex !in state.lyrics.indices) {
+                initialIndex = state.lyrics.indexOfFirst { it.startMs() >= 0L }
+            }
+            if (initialIndex !in state.lyrics.indices) return@LaunchedEffect
+            listState.scrollToItem(initialIndex)
+            withFrameNanos { }
+            listState.centerLyricLine(initialIndex, animationSpec = null)
+        }
+
+        LaunchedEffect(state.lyricIndex) {
+            val index = state.lyricIndex
+            if (index !in state.lyrics.indices) return@LaunchedEffect
+            listState.centerLyricLine(index, lyricScrollSpec)
+        }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            state = listState,
+            contentPadding = PaddingValues(vertical = centerPadding),
+            verticalArrangement = Arrangement.spacedBy(
+                (state.lyricLineSpacing.coerceIn(100, 250) * 24f / 200f)
+                    .dp.coerceAtLeast(10.dp)
+            ),
+            horizontalAlignment = Alignment.Start
+        ) {
+            itemsIndexed(
+                items = state.lyrics,
+                key = { index, line -> "apk_lyric_${line.startMs()}_$index" }
+            ) { index, line ->
+                LegacyQmlLyricRow(
+                    state = state,
+                    line = line,
+                    index = index,
+                    textWidth = lyricTextWidth,
+                    onClick = { onLineClick(line.startMs()) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            if (state.lyrics.isEmpty()) {
+                item {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            Icons.Default.Subtitles,
+                            contentDescription = null,
+                            modifier = Modifier.size(56.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "暂无歌词",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LegacyQmlLyricRow(
+    state: PlayerUiState,
+    line: LyricLine,
+    index: Int,
+    textWidth: Dp,
+    onClick: () -> Unit = {},
+    modifier: Modifier = Modifier
+) {
+    val active = state.lyricIndex == index
+    val distance = kotlin.math.abs(index - state.lyricIndex)
+    val targetScale = when {
+        !state.lyricScale -> 1f
+        active -> 1.12f
+        distance == 1 -> 0.91f
+        else -> 0.85f
+    }
+    val rowAnimation: androidx.compose.animation.core.AnimationSpec<Float> = if (state.lyricSpring) {
+        spring<Float>(dampingRatio = 1f, stiffness = 400f)
+    } else {
+        tween<Float>(280)
+    }
+    val scale by animateFloatAsState(
+        targetValue = targetScale,
+        animationSpec = rowAnimation,
+        label = "lyric_scale"
+    )
+    val targetAlpha = when {
+        active -> 1f
+        distance == 1 -> 0.68f
+        distance == 2 -> 0.42f
+        else -> 0.22f
+    }
+    val alphaAnimation: androidx.compose.animation.core.AnimationSpec<Float> =
+        if (state.lyricSpring) spring<Float>() else tween<Float>(240)
+    val alpha by animateFloatAsState(
+        targetValue = targetAlpha,
+        animationSpec = alphaAnimation,
+        label = "lyric_alpha"
+    )
+
+    // Ripple is disabled; keep this row layout-free so lyric changes cannot
+    // introduce a second vertical motion.
+    val scheme = MaterialTheme.colorScheme
+    val normalColor = if (state.lyricMd3Color) {
+        scheme.onSurfaceVariant
+    } else {
+        ComposeColor.White.copy(alpha = 0.46f)
+    }
+    val activeColor = if (state.lyricMd3Color) scheme.onSurface else ComposeColor.White
+    val sungColor = if (state.lyricMd3Color) scheme.primary else ComposeColor.White
+    val colorTarget = if (active) activeColor else normalColor
+    val colorAnimation: androidx.compose.animation.core.AnimationSpec<ComposeColor> =
+        if (state.lyricSpring) spring<ComposeColor>() else tween<ComposeColor>(240)
+    val color by animateColorAsState(
+        targetValue = colorTarget,
+        animationSpec = colorAnimation,
+        label = "lyric_color"
+    )
+
+    val baseSize = (state.lyricFontSize * 0.92f).coerceIn(14f, 36f)
+    // Strict fit: textWidth is the measured screen width divided by the largest
+    // row scale, so two lines in that budget always end inside the window. A
+    // line that would still need more than two lines steps its type size down
+    // (never below 68% of the configured size, so it stays legible). The value
+    // depends only on the line and the measured width, so it is stable per line
+    // and never animates or jitters.
+    val textMeasurer = rememberTextMeasurer()
+    val sourceText = line.text().trim()
+    val textBudgetPx = with(LocalDensity.current) { textWidth.roundToPx() }
+    val fitFactor = remember(sourceText, baseSize, textBudgetPx, textMeasurer) {
+        if (sourceText.isEmpty() || textBudgetPx <= 0) {
+            1f
+        } else {
+            var chosen = LYRIC_FIT_FACTORS.last()
+            for (factor in LYRIC_FIT_FACTORS) {
+                val measured = textMeasurer.measure(
+                    text = sourceText,
+                    style = androidx.compose.ui.text.TextStyle(
+                        fontSize = (baseSize * factor).sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = GoogleSansFlexBold
+                    ),
+                    constraints = Constraints(maxWidth = textBudgetPx)
+                )
+                if (measured.lineCount <= 2) {
+                    chosen = factor
+                    break
+                }
+            }
+            chosen
+        }
+    }
+    val fittedSize = baseSize * fitFactor
+    val lineHeight = (
+        fittedSize * state.lyricLineSpacing.coerceIn(100, 250) / 100f
+    ).coerceAtLeast(fittedSize * 1.10f)
+    val wordProgress = ArrayList<Float>(line.syllables.size)
+    line.syllables.forEach { syllable ->
+        val end = (syllable.startMs + syllable.durationMs)
+            .coerceAtLeast(syllable.startMs + 1L)
+        val target = when {
+            state.lyricPositionMs >= end -> 1f
+            state.lyricPositionMs <= syllable.startMs -> 0f
+            else -> (state.lyricPositionMs - syllable.startMs).toFloat() /
+                (end - syllable.startMs).toFloat()
+        }.coerceIn(0f, 1f)
+        // Completed/upcoming rows are static. Keeping an Animatable for every
+        // syllable in every visible row caused hundreds of animation states to
+        // wake during lyric scrolling; only the active row needs interpolation.
+        val progress = if (active) {
+            val animated by animateFloatAsState(
+                targetValue = target,
+                animationSpec = tween(110, easing = LinearEasing),
+                label = "lyric_word_progress"
+            )
+            animated
+        } else {
+            target
+        }
+        wordProgress += progress
+    }
+    val nextLineStart = state.lyrics.getOrNull(index + 1)?.startMs()
+        ?: (line.startMs() + 960L)
+    val plainTarget = if (active && state.lyricLinearAnim) {
+        ((state.lyricPositionMs - line.startMs()).toFloat() /
+            (nextLineStart - line.startMs()).coerceAtLeast(1L).toFloat())
+            .coerceIn(0f, 1f)
+    } else 0f
+    val linearProgress = if (active) {
+        val animated by animateFloatAsState(
+            targetValue = plainTarget,
+            animationSpec = tween(110, easing = LinearEasing),
+            label = "lyric_linear_progress"
+        )
+        animated
+    } else {
+        plainTarget
+    }
+    val text = LegacyQmlLyricAnnotatedText(
+        state = state,
+        line = line,
+        active = active,
+        wordProgress = wordProgress,
+        linearProgress = linearProgress,
+        normalColor = normalColor,
+        activeColor = activeColor,
+        sungColor = sungColor
+    )
+    val blurRadius = if (state.lyricEdgeBlur && distance > 0) {
+        (distance * 1.8f).coerceAtMost(10f).dp
+    } else 0.dp
+    val shadow = when {
+        state.lyricGlow && active -> Shadow(
+            color = scheme.primary.copy(alpha = 0.72f),
+            offset = Offset(0f, 1f),
+            blurRadius = 12f
+        )
+        state.lyricShadow -> Shadow(
+            color = ComposeColor.Black.copy(alpha = 0.35f),
+            offset = Offset(0f, 2f),
+            blurRadius = 4f
+        )
+        else -> null
+    }
+    val particleProgress = if (wordProgress.isNotEmpty()) {
+        wordProgress.average().toFloat()
+    } else {
+        ((state.lyricPositionMs - line.startMs()).toFloat() /
+            (line.endMs() - line.startMs()).coerceAtLeast(1L).toFloat())
+    }.coerceIn(0f, 1f)
+
+    Column(
+        modifier = modifier
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
+            // The padding must sit OUTSIDE the scaled layer. Inside it, every
+            // row scaled its own inset as well (the 1.12x line started 9dp in
+            // instead of 8dp, the 0.85x ones at 6.8dp), so the left edges never
+            // lined up. Outside, all rows share one exact left edge.
+            .padding(start = ROW_H_PADDING, end = ROW_H_PADDING, top = 12.dp)
+            .graphicsLayer {
+                transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0.5f)
+                scaleX = scale
+                scaleY = scale
+                this.alpha = alpha
+                translationY = 0f
+            }
+            .then(if (blurRadius > 0.dp) Modifier.blur(blurRadius) else Modifier),
+        horizontalAlignment = Alignment.Start
+    ) {
+        Box(Modifier.width(textWidth)) {
+            Text(
+                text = text,
+                color = ComposeColor.Unspecified,
+                textAlign = TextAlign.Start,
+                fontSize = fittedSize.sp,
+                lineHeight = lineHeight.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = GoogleSansFlexBold,
+                maxLines = 2,
+                overflow = TextOverflow.Clip,
+                style = androidx.compose.ui.text.TextStyle(shadow = shadow),
+                modifier = Modifier.fillMaxWidth()
+            )
+            if (state.lyricParticles && active) {
+                LyricParticleField(
+                    progress = particleProgress,
+                    color = MaterialTheme.colorScheme.primary,
+                    text = line.text().trim(),
+                    modifier = Modifier
+                        .matchParentSize()
+                )
+            }
+        }
+        if (!line.romaji.isNullOrBlank()) {
+            Text(
+                text = line.romaji.trim(),
+                modifier = Modifier
+                    .width(textWidth)
+                    .padding(top = 3.dp),
+                color = color.copy(alpha = 0.72f),
+                textAlign = TextAlign.Start,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = GoogleSansFlexBold
+            )
+        }
+        if (!line.translation.isNullOrBlank()) {
+            Text(
+                text = line.translation.trim(),
+                modifier = Modifier
+                    .width(textWidth)
+                    .padding(top = 2.dp),
+                color = color.copy(alpha = 0.68f),
+                textAlign = TextAlign.Start,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = GoogleSansFlexBold
+            )
+        }
+    }
+}
+
+@Composable
+private fun LyricParticleField(
+    progress: Float,
+    color: ComposeColor,
+    text: String,
+    modifier: Modifier = Modifier
+) {
+    val phase by rememberInfiniteTransition(label = "lyric_particles").animateFloat(
+        initialValue = 0f,
+        targetValue = (2f * PI).toFloat(),
+        animationSpec = infiniteRepeatable(tween(1800, easing = LinearEasing)),
+        label = "lyric_particle_phase"
+    )
+    Canvas(modifier) {
+        val count = 24
+        // Keep the convergence point inside the measured text box. At 1.0,
+        // placing it at the right edge would clip the entire last cluster and
+        // make the feature appear disabled on short lines.
+        val edge = 12f * density
+        val glyphCount = text.trim().length.coerceAtLeast(1)
+        val glyphIndex = (progress * (glyphCount - 1)).coerceIn(0f, (glyphCount - 1).toFloat())
+        val glyphWidth = (size.width / glyphCount.toFloat()).coerceIn(7f * density, 28f * density)
+        val glyphCenter = (size.width * ((glyphIndex + 0.5f) / glyphCount.toFloat()))
+            .coerceIn(edge, size.width - edge)
+        repeat(count) { i ->
+            val seed = i * 37.0f
+            // Keep particles close to the lyric box instead of floating far away.
+            val spread = (5f + (i % 4) * 2f) * density
+            val orbit = phase + seed
+            val slot = (i * 17 % count) / (count - 1f).coerceAtLeast(1f) - 0.5f
+            val targetX = (glyphCenter + slot * glyphWidth * 0.82f)
+                .coerceIn(edge, size.width - edge)
+            val convergence = (0.25f + 0.75f * progress).coerceIn(0.25f, 1f)
+            val x = targetX + sin(orbit) * spread * (1f - convergence)
+            val y = (size.height / 2f + cos(orbit * 1.31f) * spread * 0.32f * (1f - convergence))
+                .coerceIn(2f * density, size.height - 2f * density)
+            // The glow is intentionally visible even at the beginning of a
+            // line; previously the sub-pixel dots and low alpha made the
+            // enabled setting indistinguishable from no effect.
+            val alpha = (0.32f + 0.58f * progress).coerceIn(0f, 0.92f)
+            drawCircle(
+                color = color.copy(alpha = alpha * 0.20f),
+                radius = (3.8f + (i % 3) * 0.8f) * density,
+                center = Offset(x, y)
+            )
+            drawCircle(
+                color = color.copy(alpha = alpha),
+                radius = (1.35f + (i % 3) * 0.45f) * density,
+                center = Offset(x, y)
+            )
+        }
+    }
+}
+
+@Composable
+private fun LegacyQmlLyricAnnotatedText(
+    state: PlayerUiState,
+    line: LyricLine,
+    active: Boolean,
+    wordProgress: List<Float>,
+    linearProgress: Float,
+    normalColor: ComposeColor,
+    activeColor: ComposeColor,
+    sungColor: ComposeColor
+): androidx.compose.ui.text.AnnotatedString {
+    val source = line.text().trim()
+    return buildAnnotatedString {
+        if (source.isEmpty()) return@buildAnnotatedString
+        if (line.syllables.size > 1) {
+            line.syllables.forEachIndexed { syllableIndex, syllable ->
+                val progress = wordProgress.getOrNull(syllableIndex) ?: 0f
+                val color = if (active) {
+                    lyricMixColor(normalColor, sungColor, progress)
+                } else normalColor
+                withStyle(SpanStyle(color = color)) {
+                    append(syllable.text)
+                }
+            }
+        } else if (active && state.lyricLinearAnim) {
+            val characterProgress = source.length * linearProgress
+            source.forEachIndexed { charIndex, character ->
+                val progress = (characterProgress - charIndex).coerceIn(0f, 1f)
+                withStyle(SpanStyle(color = lyricMixColor(activeColor, sungColor, progress))) {
+                    append(character)
+                }
+            }
+        } else {
+            withStyle(SpanStyle(color = if (active) activeColor else normalColor)) {
+                append(source)
+            }
+        }
+    }
+}
+
+@Composable
+private fun QmlLyricColumnRestoredExperimental(
+    state: PlayerUiState,
+    modifier: Modifier = Modifier
+) {
+    val prepared = remember(state.lyrics, state.lyricsRevision, state.lyricLinearAnim) {
+        LyricTimeline.prepare(state.lyrics, state.lyricLinearAnim)
+    }
+    val lines = prepared.lines
+    val listState = rememberLazyListState()
+    val livePosition by rememberUpdatedState(state.lyricPositionMs)
+    var smoothPositionMs by remember(state.trackKey) {
+        mutableLongStateOf(state.lyricPositionMs)
+    }
+
+    // The original QPlayer page uses one stable playback clock for both the
+    // highlight and the scroll.  Keep this lightweight frame interpolation,
+    // but do not feed it into layout measurements or per-character transforms.
+    LaunchedEffect(state.trackKey, state.playing, state.lyricsRevision, lines.size) {
+        var observed = livePosition
+        var base = observed
+        var baseFrame = 0L
+        while (true) {
+            val frame = withFrameNanos { it }
+            val latest = livePosition
+            if (latest != observed) {
+                observed = latest
+                base = latest
+                baseFrame = frame
+            }
+            if (baseFrame == 0L) baseFrame = frame
+            smoothPositionMs = if (state.playing) {
+                base + ((frame - baseFrame) / 1_000_000L).coerceAtLeast(0L)
+            } else base
+        }
+    }
+
+    val activeGroup = lyricVisualGroupIndex(prepared.groups, smoothPositionMs)
+    val targetLine = prepared.groups.getOrNull(activeGroup)?.from
+        ?.takeIf { it in lines.indices }
+        ?: lyricIndexForPosition(lines, smoothPositionMs)
+
+    // A single target animation is the Compose equivalent of the old renderer's
+    // scroll spring. It is restarted only when the lyric group changes, never on
+    // every clock tick, so a paused line cannot visibly jump or reset.
+    LaunchedEffect(state.trackKey, state.lyricsRevision, targetLine, lines.size) {
+        if (targetLine !in lines.indices) return@LaunchedEffect
+        val visible = listState.layoutInfo.visibleItemsInfo
+            .firstOrNull { it.index == targetLine }
+        if (visible == null) {
+            listState.scrollToItem(targetLine)
+            withFrameNanos { }
+        }
+        val item = listState.layoutInfo.visibleItemsInfo
+            .firstOrNull { it.index == targetLine } ?: return@LaunchedEffect
+        val info = listState.layoutInfo
+        val anchor = info.viewportStartOffset +
+            (info.viewportEndOffset - info.viewportStartOffset) * 0.35f
+        listState.animateScrollBy(
+            item.offset + item.size / 2f - anchor,
+            animationSpec = tween(
+                durationMillis = 420,
+                easing = androidx.compose.animation.core.FastOutSlowInEasing
+            )
+        )
+    }
+
+    BoxWithConstraints(modifier = modifier) {
+        val topPadding = (maxHeight * 0.35f).coerceAtLeast(32.dp)
+        val bottomPadding = (maxHeight * 0.65f).coerceAtLeast(48.dp)
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            state = listState,
+            contentPadding = PaddingValues(top = topPadding, bottom = bottomPadding),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            itemsIndexed(
+                items = lines,
+                key = { index, line -> "restored_lyric_${line.startMs()}_$index" }
+            ) { index, line ->
+                val groupIndex = prepared.lineToGroup.getOrNull(index) ?: -1
+                val group = prepared.groups.getOrNull(groupIndex)
+                val focused = groupIndex == activeGroup
+                val active = if (group == null) 0f else lyricActiveK(
+                    smoothPositionMs, group.startMs, group.endMs
+                )
+                val distance = kotlin.math.abs(index - targetLine)
+                val main = !LyricTimeline.isBackground(line.vocalChannel)
+                val textColor = if (state.lyricMd3Color) {
+                    if (focused) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    ComposeColor.White.copy(alpha = if (focused) 1f else 0.42f)
+                }
+                val alpha = if (main) {
+                    if (focused) 1f else (0.55f - distance * 0.06f).coerceAtLeast(0.22f)
+                } else (0.26f + active * 0.42f)
+                val baseSize = state.lyricFontSize.coerceIn(14, 40).toFloat() *
+                    if (main) 1f else 0.72f
+                val alignRight = line.vocalChannel == LyricLine.VocalChannel.DUET_RIGHT ||
+                    line.vocalChannel == LyricLine.VocalChannel.BACKGROUND_RIGHT
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .graphicsLayer { this.alpha = alpha }
+                        .padding(horizontal = 28.dp),
+                    horizontalAlignment = if (alignRight) Alignment.End else Alignment.Start
+                ) {
+                    Text(
+                        text = line.text().trim(),
+                        modifier = Modifier.fillMaxWidth(),
+                        color = textColor,
+                        fontSize = baseSize.sp,
+                        lineHeight = (baseSize * 1.22f).sp,
+                        fontWeight = if (focused) FontWeight.Bold else FontWeight.Medium,
+                        fontFamily = GoogleSansFlexBold,
+                        textAlign = if (alignRight) TextAlign.End else TextAlign.Start,
+                        maxLines = 2,
+                        overflow = TextOverflow.Clip
+                    )
+                    if (!line.romaji.isNullOrBlank()) {
+                        Text(
+                            text = line.romaji!!.trim(),
+                            modifier = Modifier.fillMaxWidth(),
+                            color = textColor.copy(alpha = 0.72f),
+                            fontSize = (baseSize * 0.5f).sp,
+                            maxLines = 2,
+                            textAlign = if (alignRight) TextAlign.End else TextAlign.Start
+                        )
+                    }
+                    if (!line.translation.isNullOrBlank()) {
+                        Text(
+                            text = line.translation!!.trim(),
+                            modifier = Modifier.fillMaxWidth(),
+                            color = textColor.copy(alpha = 0.72f),
+                            fontSize = (baseSize * 0.5f).sp,
+                            maxLines = 2,
+                            textAlign = if (alignRight) TextAlign.End else TextAlign.Start
+                        )
+                    }
+                }
+            }
+            if (lines.isEmpty()) {
+                item {
+                    Text(
+                        "暂无歌词",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QmlLyricColumn(
+    state: PlayerUiState,
+    modifier: Modifier = Modifier
+) {
+    val prepared = remember(state.lyrics, state.lyricsRevision, state.lyricLinearAnim) {
+        LyricTimeline.prepare(state.lyrics, state.lyricLinearAnim)
+    }
+    val lines = prepared.lines
+    val listState = rememberLazyListState()
+    val livePosition by rememberUpdatedState(state.lyricPositionMs)
+    var smoothPositionMs by remember(state.trackKey) {
+        mutableLongStateOf(state.lyricPositionMs)
+    }
+    // The controller publishes a coarse UI snapshot. QPlayer's renderer uses
+    // the audio clock every frame, so interpolate between snapshots once and
+    // feed the same time to scroll, fill, and lift. This avoids independent
+    // per-word animations fighting the list layout.
+    LaunchedEffect(state.trackKey, state.playing, state.lyricsRevision, lines.size) {
+        var lastObserved = livePosition
+        var basePosition = lastObserved
+        var baseFrameNs = 0L
+        while (true) {
+            val frameNs = withFrameNanos { it }
+            val latest = livePosition
+            if (latest != lastObserved) {
+                lastObserved = latest
+                basePosition = latest
+                baseFrameNs = frameNs
+            }
+            if (baseFrameNs == 0L) baseFrameNs = frameNs
+            val elapsedMs = if (state.playing) {
+                ((frameNs - baseFrameNs) / 1_000_000L).coerceAtLeast(0L)
+            } else 0L
+            smoothPositionMs = (basePosition + elapsedMs).coerceAtLeast(0L)
+        }
+    }
+    val currentIndex = lyricIndexForPosition(lines, smoothPositionMs)
+    // Follow the prepared timeline's active group instead of the newest row.
+    // Duet/background rows can start inside the same group; using the raw row
+    // index made LazyColumn retarget by one item while the group was still
+    // singing, which looked like a vertical twitch during word playback.
+    val currentGroupIndex = lyricVisualGroupIndex(prepared.groups, smoothPositionMs)
+    val activeLineIndex = prepared.groups.getOrNull(currentGroupIndex)?.from
+        ?.takeIf { it in lines.indices } ?: currentIndex
+    val liveActiveLineIndex by rememberUpdatedState(activeLineIndex)
+    val liveCurrentGroupIndex by rememberUpdatedState(currentGroupIndex)
+    val liveSpring by rememberUpdatedState(state.lyricSpring)
+    var rippleElapsedMs by remember(state.trackKey, state.lyricsRevision) {
+        mutableLongStateOf(900L)
+    }
+    var rippleDistancePx by remember(state.trackKey, state.lyricsRevision) {
+        mutableFloatStateOf(0f)
+    }
+    var rippleDirection by remember(state.trackKey, state.lyricsRevision) {
+        mutableIntStateOf(1)
+    }
+
+    BoxWithConstraints(modifier = modifier) {
+        val topPadding = (maxHeight * 0.35f).coerceAtLeast(32.dp)
+        val bottomPadding = (maxHeight * 0.65f).coerceAtLeast(48.dp)
+
+        // One persistent spring follows the QML/Skia anchor. It is intentionally
+        // not restarted for every lyric tick, which keeps the line transition
+        // continuous and also handles lyrics arriving after playback started.
+        LaunchedEffect(state.trackKey, state.lyricsRevision, lines.size) {
+            if (lines.isEmpty()) return@LaunchedEffect
+
+            suspend fun centerItem(index: Int) {
+                val item = listState.layoutInfo.visibleItemsInfo
+                    .firstOrNull { it.index == index } ?: return
+                val info = listState.layoutInfo
+                val anchor = info.viewportStartOffset +
+                    (info.viewportEndOffset - info.viewportStartOffset) * 0.35f
+                listState.scroll {
+                    scrollBy(item.offset + item.size / 2f - anchor)
+                }
+            }
+
+            val initial = liveActiveLineIndex.takeIf { it in lines.indices } ?: 0
+            listState.scrollToItem(initial)
+            withFrameNanos { }
+            centerItem(initial)
+
+            var velocity = 0f
+            var lastFrameNs = 0L
+            var previousTarget = initial
+            var rippleStartNs = 0L
+            while (true) {
+                val frameNs = withFrameNanos { it }
+                if (lastFrameNs == 0L) {
+                    lastFrameNs = frameNs
+                    continue
+                }
+                val dt = ((frameNs - lastFrameNs) / 1_000_000_000f)
+                    .coerceIn(0.008f, 0.05f)
+                lastFrameNs = frameNs
+                val target = liveActiveLineIndex.takeIf { it in lines.indices } ?: previousTarget
+                if (target != previousTarget) {
+                    if (liveSpring) {
+                        val oldItem = listState.layoutInfo.visibleItemsInfo
+                            .firstOrNull { it.index == previousTarget }
+                        val newItem = listState.layoutInfo.visibleItemsInfo
+                            .firstOrNull { it.index == target }
+                        rippleDistancePx = if (oldItem != null && newItem != null) {
+                            kotlin.math.abs(
+                                (newItem.offset + newItem.size / 2f) -
+                                    (oldItem.offset + oldItem.size / 2f)
+                            ).coerceIn(0f, 420f)
+                        } else 0f
+                        rippleDirection = if (target > previousTarget) 1 else -1
+                        rippleStartNs = frameNs
+                    } else {
+                        rippleDistancePx = 0f
+                        rippleStartNs = 0L
+                    }
+                    previousTarget = target
+                }
+                rippleElapsedMs = if (rippleStartNs == 0L) {
+                    900L
+                } else {
+                    ((frameNs - rippleStartNs) / 1_000_000L).coerceIn(0L, 900L)
+                }
+                if (listState.isScrollInProgress) {
+                    velocity = 0f
+                    continue
+                }
+                var item = listState.layoutInfo.visibleItemsInfo
+                    .firstOrNull { it.index == target }
+                if (item == null) {
+                    // A target can briefly be outside the composed window after a
+                    // seek or a fast line change. Never call scrollToItem here:
+                    // that instant reposition was the visible "jump, then
+                    // recenter" at lyric boundaries. Bring the target in from
+                    // the nearest composed edge and let the same spring continue
+                    // on the next frame. This keeps the handoff continuous while
+                    // still recovering from a large discontinuity.
+                    val visible = listState.layoutInfo.visibleItemsInfo
+                    val edge = if (target < visible.firstOrNull()?.index ?: target) {
+                        visible.firstOrNull()
+                    } else {
+                        visible.lastOrNull()
+                    }
+                    if (edge == null) {
+                        velocity = 0f
+                        continue
+                    }
+                    val info = listState.layoutInfo
+                    val anchor = info.viewportStartOffset +
+                        (info.viewportEndOffset - info.viewportStartOffset) * 0.35f
+                    val edgeError = edge.offset + edge.size / 2f - anchor
+                    val bridgeError = if (target < edge.index) {
+                        edgeError - edge.size.toFloat()
+                    } else {
+                        edgeError + edge.size.toFloat()
+                    }
+                    listState.dispatchRawDelta(
+                        bridgeError.coerceIn(-160f, 160f)
+                    )
+                    velocity = 0f
+                    continue
+                }
+                val info = listState.layoutInfo
+                val anchor = info.viewportStartOffset +
+                    (info.viewportEndOffset - info.viewportStartOffset) * 0.35f
+                val error = item.offset + item.size / 2f - anchor
+                val stiffness = 65f
+                val damping = if (liveSpring) 11f else 14f
+                velocity += (error * stiffness - velocity * damping) * dt
+                if (kotlin.math.abs(error) < 0.35f && kotlin.math.abs(velocity) < 1f) {
+                    velocity = 0f
+                } else {
+                    // Avoid a suspend scroll mutation on every frame; this
+                    // leaves the list's layout pass free to present the wave.
+                    listState.dispatchRawDelta(velocity * dt)
+                }
+            }
+        }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            state = listState,
+            contentPadding = PaddingValues(top = topPadding, bottom = bottomPadding),
+            verticalArrangement = Arrangement.spacedBy(0.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            itemsIndexed(
+                items = lines,
+                key = { index, line -> "qml_lyric_${line.startMs()}_$index" }
+            ) { index, line ->
+                val groupIndex = prepared.lineToGroup.getOrNull(index) ?: -1
+                val group = prepared.groups.getOrNull(groupIndex)
+                val groupStart = group?.startMs ?: line.startMs()
+                val groupEnd = group?.endMs ?: line.endMs()
+                QmlLyricRow(
+                    state = state,
+                    line = line,
+                    index = index,
+                    groupStartMs = groupStart,
+                    groupEndMs = groupEnd,
+                    focused = groupIndex >= 0 && groupIndex == liveCurrentGroupIndex,
+                    animatePerToken = prepared.animatablePerToken,
+                    positionMs = smoothPositionMs,
+                    focusIndex = activeLineIndex,
+                    rippleElapsedMs = rippleElapsedMs,
+                    rippleDistancePx = rippleDistancePx,
+                    rippleDirection = rippleDirection,
+                    springEnabled = state.lyricSpring,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun QmlLyricRow(
+    state: PlayerUiState,
+    line: LyricLine,
+    index: Int,
+    groupStartMs: Long,
+    groupEndMs: Long,
+    focused: Boolean,
+    animatePerToken: Boolean,
+    positionMs: Long,
+    focusIndex: Int,
+    rippleElapsedMs: Long,
+    rippleDistancePx: Float,
+    rippleDirection: Int,
+    springEnabled: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val isBackground = LyricTimeline.isBackground(line.vocalChannel)
+    // This is already the original QPlayer time-domain curve. A second
+    // animateFloatAsState restarted on every clock sample and made the column
+    // twitch during word playback.
+    val distance = kotlin.math.abs(index - focusIndex)
+    val activeK = lyricActiveK(positionMs, groupStartMs, groupEndMs)
+    val alphaTarget = if (isBackground) {
+        0.18f + 0.52f * activeK
+    } else {
+        0.22f + 0.78f * activeK
+    }
+    val alpha = if (!isBackground && distance in 1..2) {
+        maxOf(alphaTarget, 0.30f)
+    } else alphaTarget
+    val scaleTarget = if (isBackground) {
+        lyricBackgroundScale(positionMs, groupStartMs, groupEndMs)
+    } else if (state.lyricScale) {
+        0.97f + 0.17f * activeK
+    } else {
+        1f
+    }
+    val scale = scaleTarget
+    val textScale = if (!isBackground && state.lyricScale) {
+        0.97f + 0.17f * activeK
+    } else 1f
+    // Ripple is disabled for now; keep the parameters in the renderer API so
+    // the original QML timing code can be restored without changing callers.
+    val rippleOffset = 0f
+
+    val baseSize = state.lyricFontSize.coerceIn(14, 40).toFloat() *
+        if (isBackground) 0.70f else 1f
+    val requestedLineHeight = baseSize * state.lyricLineSpacing.coerceIn(100, 250) / 100f
+    // Keep a stable line box while the active row changes font size. Without a
+    // minimum box, a 100% line-spacing setting lets Text remeasure on every
+    // syllable tick, which feeds a tiny height change back into LazyColumn and
+    // produces the visible vertical twitch.
+    val lineHeight = if (isBackground) {
+        requestedLineHeight
+    } else {
+        maxOf(requestedLineHeight, baseSize * 1.20f)
+    }
+    val mainVisualLines = if (line.text().trim().length > 18) 2 else 1
+    val rowHeight = with(LocalDensity.current) {
+        lineHeight.sp.toDp() * mainVisualLines.toFloat() +
+            (if (!line.romaji.isNullOrBlank()) (baseSize * 0.55f).sp.toDp() else 0.dp) +
+            (if (!line.translation.isNullOrBlank()) (baseSize * 0.55f).sp.toDp() else 0.dp)
+    }
+    val rightAligned = line.vocalChannel == LyricLine.VocalChannel.DUET_RIGHT ||
+        line.vocalChannel == LyricLine.VocalChannel.BACKGROUND_RIGHT
+    val textAlign = if (rightAligned) TextAlign.End else TextAlign.Start
+    val lyricWeight = when (state.lyricFontWeight.coerceIn(0, 3)) {
+        0 -> FontWeight.Thin
+        1 -> FontWeight.Light
+        2 -> FontWeight.Normal
+        else -> FontWeight.Medium
+    }
+
+    val wordProgress = ArrayList<Float>(line.syllables.size)
+    line.syllables.forEachIndexed { syllableIndex, syllable ->
+        val end = (syllable.startMs + syllable.durationMs)
+            .coerceAtLeast(syllable.startMs + 1L)
+        val target = when {
+            positionMs <= syllable.startMs -> 0f
+            positionMs >= end -> 1f
+            else -> (positionMs - syllable.startMs).toFloat() /
+                (end - syllable.startMs).toFloat()
+        }
+        wordProgress += if (animatePerToken) target.coerceIn(0f, 1f) else 1f
+    }
+
+    // Resolve theme colors outside remember. MaterialTheme is a composable
+    // read and cannot be called from remember's non-composable calculation.
+    val unplayedColor = if (state.lyricMd3Color) {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    } else ComposeColor.White.copy(alpha = 0.46f)
+    val playedColor = if (state.lyricMd3Color) {
+        MaterialTheme.colorScheme.primary
+    } else ComposeColor.White
+    // The original renderer moves a narrow color edge through the shaped glyphs.
+    // Compose's TextStyle brush is laid out against the whole Text box, which
+    // makes the edge wrong after wrapping and can recolor several Chinese
+    // characters at once. Build one span per timed character instead. Each span
+    // is continuously interpolated from the idle color to the played color, so
+    // a syllable still sweeps left-to-right even when the source groups several
+    // characters into one timed token.
+    val text = androidx.compose.runtime.remember(
+        line,
+        wordProgress,
+        focused,
+        state.lyricLinearAnim,
+        state.lyricMd3Color,
+        unplayedColor,
+        playedColor
+    ) {
+        buildAnnotatedString {
+            if (line.syllables.isEmpty()) return@buildAnnotatedString
+            line.syllables.forEachIndexed { syllableIndex, syllable ->
+                val progress = wordProgress.getOrNull(syllableIndex) ?: 0f
+                val value = syllable.text
+                val count = value.codePointCount(0, value.length).coerceAtLeast(1)
+                var charOffset = 0
+                repeat(count) { charIndex ->
+                    val nextOffset = value.offsetByCodePoints(charOffset, 1)
+                    val charProgress = if (!animatePerToken || !focused) {
+                        1f
+                    } else {
+                        // Do not make the character itself jump from idle to lit.
+                        // Distribute a timed token across its code points, matching
+                        // the old renderer's continuous sweep position.
+                        val start = charIndex.toFloat() / count.toFloat()
+                        val end = (charIndex + 1).toFloat() / count.toFloat()
+                        when {
+                            progress <= start -> 0f
+                            progress >= end -> 1f
+                            else -> lyricSmoothstep((progress - start) / (end - start))
+                        }
+                    }
+                    val color = lyricMixColor(unplayedColor, playedColor, charProgress)
+                    withStyle(
+                        SpanStyle(
+                            color = color,
+                        )
+                    ) {
+                        append(value.substring(charOffset, nextOffset))
+                    }
+                    charOffset = nextOffset
+                }
+            }
+        }
+    }
+    val shadow = if (state.lyricShadow || (state.lyricGlow && focused)) {
+        Shadow(
+            color = ComposeColor.Black.copy(alpha = if (state.lyricShadow) 0.48f else 0.28f),
+            offset = Offset(0f, 2f),
+            blurRadius = if (state.lyricGlow && focused) 7f else 2.2f
+        )
+    } else null
+    val edgeBlur = if (state.lyricEdgeBlur && distance > 0) {
+        // Keep the immediately adjacent two rows legible while still giving
+        // the focused line visual separation from the distant rows.
+        (distance * 1.05f).coerceAtMost(4.5f).dp
+    } else 0.dp
+
+    Column(
+        modifier = modifier
+            .graphicsLayer {
+                this.alpha = alpha
+                // Main lyrics grow by font size, not by scaling the whole row.
+                // This preserves the left/right text anchors and keeps the row's
+                // layout independent from the emphasis animation.
+                scaleX = if (isBackground) scale else 1f
+                scaleY = if (isBackground) scale else 1f
+                translationY = 0f
+                transformOrigin = androidx.compose.ui.graphics.TransformOrigin(
+                    if (rightAligned) 1f else 0f,
+                    0.5f
+                )
+            }
+            .then(if (edgeBlur > 0.dp) Modifier.blur(edgeBlur) else Modifier)
+            // Keep LazyColumn's item measurement independent from the live
+            // syllable BaselineShift and the active font-size emphasis.
+            .height(rowHeight)
+            .padding(horizontal = 28.dp),
+        horizontalAlignment = if (rightAligned) Alignment.End else Alignment.Start
+    ) {
+        // Particle lyrics also work for ordinary LRC lines. Older code gated
+        // this on animatePerToken, so songs without syllable timestamps never
+        // showed anything even when the setting was enabled. Overlay the
+        // particles on the measured text area so they remain visible around
+        // the focused line instead of occupying a separate 12dp strip.
+        val particleProgress = if (wordProgress.isNotEmpty()) {
+            wordProgress.average().toFloat()
+        } else {
+            ((positionMs - groupStartMs).toFloat() /
+                (groupEndMs - groupStartMs).coerceAtLeast(1L).toFloat())
+        }.coerceIn(0f, 1f)
+        Box(Modifier.fillMaxWidth()) {
+            Text(
+                text = text,
+                textAlign = textAlign,
+                fontSize = (baseSize * textScale).sp,
+                lineHeight = lineHeight.sp,
+                fontWeight = lyricWeight,
+                fontFamily = GoogleSansFlexBold,
+                color = playedColor,
+                maxLines = mainVisualLines,
+                overflow = TextOverflow.Clip,
+                style = androidx.compose.ui.text.TextStyle(
+                    shadow = shadow
+                ),
+                modifier = Modifier.fillMaxWidth()
+            )
+            if (state.lyricParticles && focused) {
+                LyricParticleField(
+                    progress = particleProgress,
+                    color = if (state.lyricMd3Color) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    },
+                    text = line.text().trim(),
+                    modifier = Modifier.matchParentSize()
+                )
+            }
+        }
+        if (!line.romaji.isNullOrBlank()) {
+            Text(
+                text = line.romaji.trim(),
+                textAlign = textAlign,
+                fontSize = (baseSize * 0.5f).sp,
+                lineHeight = (baseSize * 0.55f).sp,
+                fontWeight = lyricWeight,
+                fontFamily = GoogleSansFlexBold,
+                color = (if (state.lyricMd3Color) MaterialTheme.colorScheme.onSurfaceVariant
+                else ComposeColor.White).copy(alpha = 0.75f),
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+        if (!line.translation.isNullOrBlank()) {
+            Text(
+                text = line.translation.trim(),
+                textAlign = textAlign,
+                fontSize = (baseSize * 0.5f).sp,
+                lineHeight = (baseSize * 0.55f).sp,
+                fontWeight = lyricWeight,
+                fontFamily = GoogleSansFlexBold,
+                color = (if (state.lyricMd3Color) MaterialTheme.colorScheme.onSurfaceVariant
+                else ComposeColor.White).copy(alpha = 0.75f),
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}
+
+private fun qmlLyricLift(
+    positionMs: Long,
+    startMs: Long,
+    durationMs: Long,
+    spring: Boolean
+): Float {
+    val elapsedMs = (positionMs - startMs).coerceAtLeast(0L)
+    if (elapsedMs <= 0L) return 0f
+
+    if (!spring) {
+        // LyricRowRenderer's non-spring path: cubic ease-out with a one-second
+        // minimum, so short Chinese syllables do not snap upward.
+        val duration = maxOf(1000L, durationMs)
+        val progress = (elapsedMs.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+        val remaining = 1f - progress
+        return 1f - remaining * remaining * remaining
+    }
+
+    // This is LyricRowRenderer.liftSpring(), slowed slightly for Compose's text
+    // rasterizer. The pixel amplitude is applied at BaselineShift, not here.
+    val elapsed = elapsedMs / 1000.0 * 0.72
+    val omega0 = 3.7416574
+    val zeta = 0.935414
+    val damped = zeta * omega0
+    val frequency = omega0 * kotlin.math.sqrt(1.0 - zeta * zeta)
+    val envelope = kotlin.math.exp(-damped * elapsed)
+    val value = 1.0 - envelope * (
+        kotlin.math.cos(frequency * elapsed) +
+            (damped / frequency) * kotlin.math.sin(frequency * elapsed)
+        )
+    return value.coerceIn(0.0, 1.0).toFloat()
+}
+
+private fun lyricMixColor(from: ComposeColor, to: ComposeColor, progress: Float): ComposeColor {
+    val p = progress.coerceIn(0f, 1f)
+    return ComposeColor(
+        red = from.red + (to.red - from.red) * p,
+        green = from.green + (to.green - from.green) * p,
+        blue = from.blue + (to.blue - from.blue) * p,
+        alpha = from.alpha + (to.alpha - from.alpha) * p
+    )
+}
+
+@Composable
+private fun QmlLyricTransport(
+    state: PlayerUiState,
+    controller: PlayerController,
+    modifier: Modifier = Modifier,
+    formatMs: (Long) -> String
+) {
+    Column(modifier = modifier) {
+        Spacer(Modifier.height(18.dp))
+        QmlLyricProgress(
+            positionMs = state.positionMs,
+            durationMs = state.durationMs,
+            loading = state.loading,
+            wavy = state.lyricProgressStyle == 0,
+            onSeek = controller::seek,
+            formatMs = formatMs,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(Modifier.weight(1f))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            FilledIconButton(
+                onClick = { controller.toggle() },
+                modifier = Modifier.size(40.dp),
+                colors = IconButtonDefaults.filledIconButtonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
+                )
+            ) {
+                Icon(
+                    if (state.playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = "播放/暂停",
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+    }
+}
+
+@Composable
+private fun QmlLyricProgress(
+    positionMs: Long,
+    durationMs: Long,
+    loading: Boolean,
+    wavy: Boolean,
+    onSeek: (Long) -> Unit,
+    formatMs: (Long) -> String,
+    modifier: Modifier = Modifier
+) {
+    val duration = durationMs.coerceAtLeast(1L)
+    var dragging by remember { mutableStateOf(false) }
+    var dragPosition by remember { mutableLongStateOf(0L) }
+    val current = if (dragging) dragPosition else positionMs.coerceIn(0L, duration)
+    val rawProgress = (current.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+    val progress by animateFloatAsState(
+        targetValue = rawProgress,
+        animationSpec = tween(180, easing = LinearEasing),
+        label = "md3_progress_position"
+    )
+    val trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+    val progressColor = MaterialTheme.colorScheme.primary
+    val progressHandleColor = MaterialTheme.colorScheme.primary
+
+    Column(modifier = modifier.widthIn(max = 600.dp)) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(32.dp)
+                .pointerInput(duration, wavy) {
+                    fun seekAt(x: Float) {
+                        val fraction = (x / size.width.toFloat()).coerceIn(0f, 1f)
+                        onSeek((fraction * duration).toLong())
+                    }
+                    detectTapGestures { offset -> seekAt(offset.x) }
+                }
+                .pointerInput(duration) {
+                    detectHorizontalDragGestures(
+                        onDragStart = { offset ->
+                            dragging = true
+                            dragPosition = ((offset.x / size.width.toFloat())
+                                .coerceIn(0f, 1f) * duration).toLong()
+                        },
+                        onDragEnd = {
+                            onSeek(dragPosition)
+                            dragging = false
+                        },
+                        onDragCancel = { dragging = false },
+                        onHorizontalDrag = { change, _ ->
+                            change.consume()
+                            dragPosition = ((change.position.x / size.width.toFloat())
+                                .coerceIn(0f, 1f) * duration).toLong()
+                        }
+                    )
+                }
+        ) {
+            Canvas(Modifier.fillMaxSize()) {
+                val centerY = size.height / 2f
+                if (wavy) {
+                    val amplitude = if (dragging) 4.dp.toPx() else 2.5.dp.toPx()
+                    val stroke = Stroke(
+                        width = if (dragging) 5.dp.toPx() else 3.dp.toPx(),
+                        cap = StrokeCap.Round
+                    )
+                    val thumbGap = 20.dp.toPx()
+                    val thumbX = (size.width * progress).coerceIn(
+                        thumbGap / 2f,
+                        size.width - thumbGap / 2f
+                    )
+                    val activeEnd = thumbX - thumbGap / 2f
+                    val inactiveStart = thumbX + thumbGap / 2f
+                    var x = 0f
+                    // Original APK: fixed two-cycle waveform. Progress changes
+                    // its colour boundary, never stretches the wave itself. The
+                    // handle has the same MD3 gap as the straight track.
+                    while (x < size.width) {
+                        val nextX = (x + 2f).coerceAtMost(size.width)
+                        val y1 = centerY + sin((x / size.width) * (4f * PI).toFloat()) * amplitude
+                        val y2 = centerY + sin((nextX / size.width) * (4f * PI).toFloat()) * amplitude
+                        if (nextX <= activeEnd) {
+                            drawLine(progressColor, Offset(x, y1), Offset(nextX, y2), stroke.width, StrokeCap.Round)
+                        } else if (x >= inactiveStart) {
+                            drawLine(trackColor, Offset(x, y1), Offset(nextX, y2), stroke.width, StrokeCap.Round)
+                        }
+                        x = nextX
+                    }
+                    if (!loading) {
+                        val handleWidth = if (dragging) 5.dp.toPx() else 4.dp.toPx()
+                        val handleHeight = if (dragging) 28.dp.toPx() else 22.dp.toPx()
+                        drawRoundRect(
+                            color = progressHandleColor,
+                            topLeft = Offset(thumbX - handleWidth / 2f, centerY - handleHeight / 2f),
+                            size = Size(handleWidth, handleHeight),
+                            cornerRadius = CornerRadius(handleWidth / 2f, handleWidth / 2f)
+                        )
+                    }
+                } else {
+                    val trackHeight = if (dragging) 14.dp.toPx() else 10.dp.toPx()
+                    val radius = trackHeight / 2f
+                    val thumbGap = 20.dp.toPx()
+                    val thumbX = (size.width * progress).coerceIn(
+                        4.dp.toPx() + thumbGap / 2f,
+                        size.width - 4.dp.toPx() - thumbGap / 2f
+                    )
+                    val activeEnd = (thumbX - thumbGap / 2f).coerceAtLeast(0f)
+                    val inactiveStart = (thumbX + thumbGap / 2f).coerceAtMost(size.width)
+                    if (activeEnd > 0f) drawRoundRect(
+                        color = progressColor,
+                        topLeft = Offset(0f, centerY - radius),
+                        size = Size(activeEnd, trackHeight),
+                        cornerRadius = CornerRadius(radius, radius)
+                    )
+                    if (inactiveStart < size.width) drawRoundRect(
+                        color = trackColor,
+                        topLeft = Offset(inactiveStart, centerY - radius),
+                        size = Size(size.width - inactiveStart, trackHeight),
+                        cornerRadius = CornerRadius(radius, radius)
+                    )
+                    val handleWidth = if (dragging) 5.dp.toPx() else 4.dp.toPx()
+                    val handleHeight = if (dragging) 28.dp.toPx() else 22.dp.toPx()
+                    drawRoundRect(
+                        color = progressHandleColor,
+                        topLeft = Offset(thumbX - handleWidth / 2f, centerY - handleHeight / 2f),
+                        size = Size(handleWidth, handleHeight),
+                        cornerRadius = CornerRadius(handleWidth / 2f, handleWidth / 2f)
+                    )
+                }
+            }
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 6.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                formatMs(current),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                formatMs(duration),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+@OptIn(androidx.compose.animation.ExperimentalAnimationApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
+private fun LoginDialog(controller: PlayerController, state: PlayerUiState, close: () -> Unit) {
+    var loginMode by remember { mutableIntStateOf(0) }
+    var cookieText by remember { mutableStateOf("") }
+    val initialSuccessRevision = remember { state.webLoginSuccessRevision }
+
+    LaunchedEffect(Unit) {
+        controller.clearWebLoginError()
+    }
+    LaunchedEffect(loginMode) {
+        controller.clearWebLoginError()
+        if (loginMode == 0) {
+            controller.startQrLogin()
+            while (true) {
+                delay(800L)
+                controller.pollQrLogin()
+            }
+        } else {
+            controller.cancelWebLogin()
+        }
+    }
+    LaunchedEffect(state.loggedIn, state.webLoginSuccessRevision) {
+        if (state.loggedIn || state.webLoginSuccessRevision > initialSuccessRevision) close()
+    }
+
+    AlertDialog(
+        onDismissRequest = {
+            if (!state.webLoginBusy) {
+                controller.cancelWebLogin()
+                close()
+            }
+        },
+        icon = { Icon(Icons.Default.Login, contentDescription = null) },
+        title = { Text("登录网易云音乐") },
+        text = {
+            Column(
+                modifier = Modifier.heightIn(min = 260.dp, max = 420.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (loginMode == 0) Button(onClick = {}, modifier = Modifier.weight(1f)) {
+                        Text("扫码")
+                    } else OutlinedButton(onClick = { loginMode = 0 }, modifier = Modifier.weight(1f)) {
+                        Text("扫码")
+                    }
+                    if (loginMode == 1) Button(onClick = {}, modifier = Modifier.weight(1f)) {
+                        Text("网页登录")
+                    } else OutlinedButton(
+                        onClick = { loginMode = 1 },
+                        enabled = state.webLoginAvailable,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("网页登录")
+                    }
+                    if (loginMode == 2) Button(onClick = {}, modifier = Modifier.weight(1f)) {
+                        Text("Cookie")
+                    } else OutlinedButton(onClick = { loginMode = 2 }, modifier = Modifier.weight(1f)) {
+                        Text("Cookie")
+                    }
+                }
+
+                when (loginMode) {
+                    0 -> {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(220.dp)
+                                .background(ComposeColor.White, ShapeMedium),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            val matrix = state.qrImage
+                            if (matrix.isEmpty() || state.qrStatus == 0) {
+                                CircularProgressIndicator()
+                            } else {
+                                Canvas(Modifier.size(200.dp)) {
+                                    val matrixSize = matrix.size
+                                    if (matrixSize > 0) {
+                                        val cell = size.width / matrixSize
+                                        matrix.forEachIndexed { y, row ->
+                                            row.forEachIndexed { x, dark ->
+                                                if (dark) {
+                                                    drawRect(
+                                                        color = ComposeColor.Black,
+                                                        topLeft = Offset(x * cell, y * cell),
+                                                        size = Size(cell + 0.5f, cell + 0.5f)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Text(
+                            when (state.qrStatus) {
+                                0 -> "正在获取二维码…"
+                                802 -> "已扫码，请在手机上确认"
+                                803 -> "登录成功"
+                                800 -> "二维码已过期，正在刷新…"
+                                else -> "请用网易云音乐 App 扫码"
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    1 -> {
+                        Text(
+                            "将在网易云官网登录，成功后会自动读取并验证 Cookie。",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (state.webLoginError.isNotBlank()) {
+                            Text(state.webLoginError, color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                    else -> {
+                        Text(
+                            "粘贴网易云 music.163.com 的 Cookie 请求头。成功后会加密保存。",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        OutlinedTextField(
+                            value = cookieText,
+                            onValueChange = { cookieText = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Cookie 请求头") },
+                            minLines = 3,
+                            maxLines = 5
+                        )
+                        if (state.webLoginError.isNotBlank()) {
+                            Text(state.webLoginError, color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            when (loginMode) {
+                0 -> TextButton(onClick = { controller.startQrLogin() }) { Text("刷新二维码") }
+                1 -> Button(
+                    onClick = { controller.startWebLogin() },
+                    enabled = !state.webLoginBusy
+                ) { Text(if (state.webLoginBusy) "正在等待登录…" else "打开网易云官网") }
+                else -> Button(
+                    onClick = { controller.submitCookieLogin(cookieText) },
+                    enabled = cookieText.isNotBlank() && !state.webLoginBusy
+                ) { Text(if (state.webLoginBusy) "正在验证…" else "验证并登录") }
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = {
+                    controller.cancelWebLogin()
+                    close()
+                },
+                enabled = !state.webLoginBusy
+            ) { Text("取消") }
+        }
+    )
+}
+
+@Composable
+private fun PlaylistCard(playlist: NeteasePlaylist, onClick: () -> Unit) {
+    val coverBitmap = rememberCoverBitmap(null, playlist.coverThumbPath ?: playlist.coverUrl)
+    Card(Modifier.width(164.dp).clickable { onClick() }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
+        Column {
+            Surface(Modifier.fillMaxWidth().height(164.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
+                if (coverBitmap != null) {
+                    Image(
+                        bitmap = coverBitmap,
+                        contentDescription = "歌单封面",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Icon(Icons.Default.Album, contentDescription = null, modifier = Modifier.padding(54.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                }
+            }
+            Text(playlist.name ?: "未命名歌单", modifier = Modifier.padding(start = 10.dp, top = 10.dp, end = 10.dp), maxLines = 2, fontWeight = FontWeight.Medium)
+            Text("${playlist.trackCount} 首歌曲", modifier = Modifier.padding(10.dp), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun PlaylistListRow(playlist: NeteasePlaylist, onClick: () -> Unit) {
+    val coverBitmap = rememberCoverBitmap(null, playlist.coverThumbPath ?: playlist.coverUrl)
+    Row(Modifier.fillMaxWidth().clickable { onClick() }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Surface(Modifier.size(60.dp), shape = ShapeMedium, color = MaterialTheme.colorScheme.secondaryContainer) {
+            if (coverBitmap != null) {
+                Image(
+                    bitmap = coverBitmap,
+                    contentDescription = "歌单封面",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Icon(Icons.Default.Album, null, Modifier.padding(16.dp))
+            }
+        }
+        Column(Modifier.padding(start = 12.dp)) { Text(playlist.name ?: "未命名歌单", fontWeight = FontWeight.Medium); Text("${playlist.trackCount} 首歌曲", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+    }
+}
+
+@Composable
+private fun SongRow(
+    title: String,
+    artist: String,
+    coverBytes: ByteArray? = null,
+    coverPath: String? = null,
+    onClick: () -> Unit
+) {
+    val coverBitmap = rememberCoverBitmap(coverBytes, coverPath)
+    val interactionSource = remember { MutableInteractionSource() }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(interactionSource = interactionSource, indication = LocalIndication.current) { onClick() }
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Surface(Modifier.size(48.dp), shape = ShapeSmall, color = MaterialTheme.colorScheme.surfaceContainerHighest) {
+            if (coverBitmap != null) {
+                Image(
+                    bitmap = coverBitmap,
+                    contentDescription = "专辑封面",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Icon(Icons.Default.Album, null, Modifier.padding(12.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        Column(Modifier.weight(1f).padding(start = 12.dp)) { Text(title, maxLines = 1); Text(artist, maxLines = 1, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        Icon(Icons.Default.ArrowForward, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun SectionTitle(text: String) { Text(text, fontSize = 19.sp, fontWeight = FontWeight.SemiBold) }
+
+@Composable
+private fun EmptyState(title: String, subtitle: String, action: () -> Unit) {
+    Column(Modifier.fillMaxSize().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+        Icon(Icons.Default.Album, contentDescription = null, modifier = Modifier.size(64.dp), tint = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.height(12.dp)); Text(title, fontSize = 18.sp, fontWeight = FontWeight.Medium); Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(16.dp)); OutlinedButton(onClick = action) { Icon(Icons.Default.Refresh, null); Spacer(Modifier.width(6.dp)); Text("刷新") }
+    }
+}
+
+// Preview uses the same UI composables as the Activity. Only the data and actions
+// are static, so Android Studio does not need to construct a PlayerController.
+@Preview(
+    name = "QPlayer 主页面",
+    showBackground = true,
+    showSystemUi = false,
+    widthDp = 412,
+    heightDp = 892
+)
+@Composable
+private fun QPlayerHomePreview() {
+    val state = remember { previewPlayerState() }
+    MaterialTheme(colorScheme = rememberQPlayerColorScheme(state.coverSeed, dark = false, enabled = true)) {
+        Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
+            topBar = {
+                ComposeTopBar(
+                    route = ComposeRoute(ComposeScreen.HOME),
+                    state = state,
+                    canGoBack = false,
+                    onBack = {},
+                    onQueue = {},
+                    onSettings = {},
+                    onAccount = {}
+                )
+            },
+            bottomBar = {
+                StandardBottomNav(
+                    modifier = Modifier.fillMaxWidth(),
+                    screen = ComposeScreen.HOME,
+                    showLocalTab = true,
+                    onScreen = {},
+                    onSearch = {}
+                )
+            }
+        ) { padding ->
+            Box(Modifier.fillMaxSize().padding(padding)) {
+                HomeScreen(
+                    state = state,
+                    openPlaylist = {},
+                    playRecommendation = {},
+                    refresh = {}
+                )
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    MiniPlayer(
+                        modifier = Modifier.fillMaxWidth(),
+                        state = state,
+                        onOpen = {},
+                        onSeek = {},
+                        onToggle = {},
+                        onPrevious = {},
+                        onNext = {}
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun previewPlayerState(): PlayerUiState {
+    val playlists = listOf("每日推荐", "私人雷达").mapIndexed { index, title ->
+        NeteasePlaylist().apply {
+            id = index + 1L
+            name = title
+            trackCount = 24 + index * 8
+        }
+    }
+    val songs = (1..3).map { index ->
+        NeteaseSong().apply {
+            id = index.toLong()
+            name = "示例歌曲 $index"
+            artist = "示例歌手"
+            album = "示例专辑"
+        }
+    }
+    return PlayerUiState(
+        title = "示例歌曲",
+        artist = "示例歌手",
+        album = "示例专辑",
+        playing = true,
+        positionMs = 42_000,
+        durationMs = 215_000,
+        coverSeed = "#2d6a75",
+        recommendPlaylists = playlists,
+        recommendations = songs
+    )
+}
