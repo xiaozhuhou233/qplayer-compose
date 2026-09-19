@@ -121,7 +121,11 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
    见第七节第七轮；**下一步仍是听感，然后才是接线**。
    **第五轮（2026-09-19：每个边界一行说明混音结果、无 AI 答案改用 8 秒交叉淡化、置信度换成"窗口自洽"、
    下一首音频预缓存 —— 四项都已装机验证；期间发现**真正的瓶颈是周期选择**，见第七节⑤）**都已实现，
-   见第七节（含未验证项与风险清单）—— **下一步第一件事是听感**（第四轮与第五轮都没让任何一次
+   见第七节（含未验证项与风险清单）—— **第九轮（2026-09-19）把调性强度在真实音乐上重新校准了：
+   `KeyAnalysis` 去掉 log 压缩、强度改成"与不可能混的调"的余量、新增 `KeyProfile.MIN_TRIAD` 第二把门、
+   `MixMatch` 不再把"移调没意义"当成"调打架"、磁盘格式 VERSION 5；过门 8/36 → 21/36，
+   **第一次在两首不同的歌上跑出变速+移调+低频互换（已装机验证）** —— 见第七节第九轮。**
+   **下一步第一件事仍然是**听感**（第四/五/八/九轮都没让任何一次
    过渡真的播给人听过；第五轮只证明了 8000ms 兜底"进了状态机并开始 ramp"），优先确认：
    (a) **合适的对子到底能不能跑出变速/改调**（日志里找 `incoming mix applied ... platform reports
    speed x...`；若每条合适的边界都是 `the backend did not apply the mix`，说明这台设备在 parked
@@ -709,6 +713,11 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
       不动速度/调时也写明 `speed x1.0000 on B (tempo already holds: 12ms of drift over 8000ms)`、
       `pitch x1.0000 on B (0 semitones: keys already sit together, …)`，再接 `bass swap at 5000ms`
       / `bass swap off (settings)`。**判据：一行必须能区分"没混音（含为什么）"与"这个包没有混音"**。
+      ⚠️ **第九轮起这一段的调名后面多一个 `(triad 0.32)`**（`KeyProfile.label()` 现在把它印出来，
+      因为门可以因为三和弦占比拒绝一个调，那它就必须在同一行里看得见）；并且**出现过、
+      但不值得做的移调**会写成：`pitch x1.0000 on B (0 semitones: keys already sit together, …
+      , chroma distance 0.18; -2 was allowed but only reaches 0.17, so nothing is applied)` ——
+      这与"根本没有移调可用"（没有分号那半句）是两件事，**不要把它们当同一行**。
   - **② 没有 AI 答案时不再选最听不见的那种（Task 2）**：`AiTransitionChooser.plan` 的
     `rule: no AI decision yet` 分支原来用的是本地规则自己的 kind —— 而对"两首都够长"的对子，
     规则给的正是 `SILENCE_TRIM`（250ms 缝），于是一个晚到几秒的 AI 答案会把边界降级成"什么都没发生"。
@@ -1233,6 +1242,118 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
        （网格→MixMatch→plan→后端→EQ），**不能**证明"两首不同的歌混在一起好听"。
     6. `MIN_BPM/MAX_BPM` 会挡住"整首歌都在 2:3 上、真拍低于 55"的极端情况（本轮没遇到）。
 
+- **2026-09-19 第九轮：调性强度——在真实音乐上重新校准（chroma 折叠的是压缩过的幅度 + 强度是"亚军"的
+  余量，两件都错）—— 装机验证，`mix:` 第一次真的在**两首不同的歌**上跑出变速+移调+低频互换**
+  上一轮留下的下一件事。结论：**门不是要放宽，估计器是坏的**；改完之后 36 首里 21 首过门（原来 8 首），
+  并且**变速（`setPlaybackParams` 真的拉伸）第一次在真机上被走到**。
+  - **测量工具（全在 `D:\qplayer-dev\harness\`，PC 侧，可复用）**：把设备的 36 个 `.f32` 窗口（24 字节/帧
+    的 float32，`/data/local/tmp/bd/out/`）**逐个**拉到 `harness/f32/`（**不要 `cat *` 拼一个文件**：文件名
+    里就有采样率，拼了就丢了）。`KeyCalib.java`（旧强度 + 候选测量的表）、`ChromaLab.java`（chroma 折叠方式
+    的参数化：压缩函数/按 bin 求和还是求平均/逐帧归一化/下限频率/高频权重）、`VariantTable.java`、
+    `Score.java`（**带真值表的准确率计分**）、`Strength.java`（真实曲目 + 7 个负例的分布）、
+    `Pairs.java`（**编的是仓库里那份** `BeatAnalysis`/`KeyProfile`/`KeyAnalysis`/`MixMatch`，对全部
+    36 首两两跑 `MixMatch.between`，把"过门/被拒+原因"都打出来）。PC 与设备数字**逐位一致**（下面的
+    真机日志与 `Pairs.java` 的数字最后一位相同）。
+  - **① 真正的病：chroma 几乎是平的。** `KeyAnalysis` 把 `log1p(幅度)` 在**五个八度的约 400 个 bin 上相加**，
+    等于给每个音级都堆上一个近似常数。实测 36 首真实窗口：**每 bin 0.066–0.097，而均匀分布是 0.083**；
+    冠军调自己的三和弦只占 **0.255–0.268**（均匀是 0.25）——它根本没有描述调性，**16/36 首都被报成 A minor**
+    （这正是"31 首低于 0.25"的来源）。改成**直接折叠幅度**（去掉 log 压缩）后：三和弦 0.26–0.41、
+    准确率表（下）大幅改善。**注意当初加 log 的理由（"别让一个低音主宰 profile"）不成立**：低音偏置由
+    权重锥（400Hz 以下满权）和归一化处理，压缩反而把音级信息抹平了。
+  - **② 强度不该是"与亚军的余量"。** 真实音乐里亚军几乎总是**关系大小调或五度**（36 首里 24 首），
+    而 `camelotCompatible` 本来就要混它们 —— 所以旧读数测的是"调式歧义"，不是"有没有调"。现在
+    **强度 = (冠军 − 最好的"不可能混的调") / `MARGIN_FOR_FULL_CONFIDENCE`（仍是 0.35）**，
+    `MIN_STRENGTH` 保持 0.25（**数字没动，动的是它背后的测量**——与第八轮 `BeatAnalysis` 的
+    和声关系检查同一个思路）。
+  - **③ 一个测量分不开，所以加了第二把门**：`KeyProfile.MIN_TRIAD = 0.28`（冠军自己的主音/三度/五度
+    必须占到 profile 的 28%，均匀是 25%）。理由是一条**构造出来的负例**：带固定频谱包络的噪声
+    （低通 + 两个共振峰 + 3.1Hz 包络，也就是语音/掌声/镲片洗音在 chroma 里的样子）在余量上得 **0.469**，
+    高于本库一半以上的真歌。它的 profile 是平的（三和弦 0.270）。**两把门一起**才让它出局。
+    `triadWeight()` 从 `chroma()` 现算，所以**磁盘格式不需要变**（12 字节 profile 的量化保留形状）。
+  - **实测分布（36 首真实 30s 窗口，PC 与设备一致；门 = 余量 ≥0.25 且三和弦 ≥0.28）**：
+
+    | | 旧（压缩 + 亚军余量） | 新（幅度 + 无关调余量，两把门） |
+    |---|---|---|
+    | 过门 | **8/36**（0.02–0.24 的有 31 首） | **21/36**（余量 0.012–1.54，中位 0.44；三和弦 0.261–0.407） |
+    | 报成 A minor | 16/36 | 5/36 |
+
+    **负例（全部 7 个都不进门）**：白噪 0.089/0.261、440Hz 纯音 0.000/0.994（被余量拒）、数字静音（无
+    chroma）、无音高鼓组 0.192/0.272（两边都差一点）、纯音+噪声 0.029、**带包络的噪声 0.469/0.270**
+    （余量过了、三和弦拒）、粉噪 0.461/0.273（同上）。**最薄的一条是 0.270 vs 0.28**（见风险 2）。
+  - **真值核对（13 首查了外部 key 库：tunebat/musicstax/songbpm/Music Gateway 一类，多数有多个来源互相印证）**：
+    过门的 11 首里 **7 首完全正确、3 首同 Camelot 号或差一格**（D#/Ab、G#/Db、Gmin/Eb 这些），
+    **1 首差两格**（90210：测得 B minor，外部来源在 A minor / E minor / B minor 之间互相矛盾）。
+    旧估计器在同一批里只有 **5/13 落在正确的和声邻域**（`double take` 报 Gmin 而真值 Ab、
+    `Flashing Lights` 报 Amin 而真值 F#m、`Runaway` 报 Amin 而真值 C#m/E、`Edamame` 报 Amin 而真值 Bm）。
+    ⚠️ **这些"真值"本身是算法产的**（外部库和我们的估计器同属一类方法，同一首歌常常互相打架），
+    所以这张表是**弱真值**，只能当趋势看。
+  - **④ 顺手修掉一个被这次校准暴露出来的 `MixMatch` 缺陷**：一个被 Camelot 允许、但改善不到
+    `MIN_KEY_IMPROVEMENT = 0.05` 的移调，会让 `bestShift != 0` 走进拒绝分支 →
+    **把"移调没意义"变成"这两个调打架"**。实测它拒掉了 `White Iverson → The Other Side Of Paradise`
+    （chroma 距离 **0.18**，速度 1.033x —— 类里每一条阈值都说这两首合适）。现在这种情况
+    **什么都不做**（= `pitch x1.0000 "keys already sit together"`，与"根本没有移调可用"同一条出路），
+    并在日志里写 `; -2 was allowed but only reaches 0.17, so nothing is applied`；
+    `atZero > MAX_KEY_DISTANCE` 的真打架仍然用原来的措辞拒绝。**注意返回值也要一致**：
+    第一版只改了日志没把 `bestShift` 归零，`semitones()` 仍是 -2（测试抓到的，已修）。
+    **效果：本库合适的**不同歌**对子从 5 对变成 9 对。**
+  - **磁盘格式 VERSION 4 → 5**（布局没变，只是**profile 是旧折叠法算的**）：旧文件里的 key 是平
+    profile 的产物，读进来就是"用错误理由信任/拒绝一个调"，与 3→4 同一个理由。真机日志确认：
+    `disk cache written: … .bpm (29 B)` → 重新测量。
+  - **装机验证（真机 efaa83b2，`transitionKind` 临时强制成 2=CROSSFADE，测完已还原成 0）**：
+    队列 `[Moonlight, I'm Waiting (Radio Edit)]`（**两首不同的歌**；`positionMs=90090`），
+    原始日志（`D:\qplayer-dev\harness\round9-device.log`）：
+    · 两侧 profile 由**设备自己**测出，与 PC 逐位一致：
+      `beat profile for n1408295636: BeatProfile{120.1BPM/0.37 (prom 0.81), KeyProfile{B major/1.00 (triad 0.32), camelot 1B}, first beat=19ms, period=500ms}`、
+      `beat profile for n1388960663: BeatProfile{127.8BPM/0.62 (prom 0.38), KeyProfile{A minor/1.00 (triad 0.38), camelot 8A}, first beat=19ms, period=470ms}`。
+    · 决策行（原样）：
+      `transition: slot 0 -> 1: CROSSFADE 重叠=long 9801ms, curve=EQUAL_POWER (mix: overlap 8000->9801ms at A's tempo and key); remaining=24154ms, length=135090/270000ms, streamable=yes/yes, 智能过渡=on; beat: A=127.8BPM/0.62 (prom 0.38) B=120.1BPM/0.37 (prom 0.81), align=on (mix: speed x1.0637 on B (120.1->127.8BPM, +6.4%); pitch x1.0595 on B (+1 semitone: B major/1.00 (triad 0.32) (1B) -> C major/1.00 (triad 0.32) (8B), chroma distance 0.18->0.09); overlap 9801ms = 21 beats of A at A's tempo, drift 0ms by construction; entry 200->19ms; bass swap at 4700ms)`
+    · 执行链（每一步都成功）：
+      `incoming setDataSource + prepareAsync (startMuted=false, IncomingMix{x1.0637, pitch x1.0595, bassSwap=4700ms})` →
+      **`incoming mix applied to the INCOMING player (speed x1.0637 pitch x1.0595 asked; platform reports speed x1.0637 pitch x1.0595; …)`**
+      （**回读**）→ `bass swap armed: … 1 band(s) below 200Hz …` → `crossfade begin over 9745ms` →
+      `CROSSFADE ramping 9745ms into queue slot 1 (EQUAL_POWER)` → `bass swap done: the incoming track owns the low end now` →
+      `transition promoted, releasing the outgoing player (the incoming is at 19769ms; the overlap already played 10385ms at IncomingMix{…})` →
+      `easing the promoted track back to its own tempo and pitch over 6000ms (from x1.0637 / x1.0595)` →
+      `the promoted track is back at its own tempo and pitch` → `promoted queue slot 1 (I'm Waiting (Radio Edit)) at 19811ms`。
+      之后 `dumpsys audio` 只剩一路 `state:started … sampleRate=44100`，**P0 没有复发**。
+    · **这一条同时补上了第四轮/第八轮最大的缺口**：`setPlaybackParams` 在 parked 状态下**平台真的吃下去了**
+      （speed 与 pitch 都回读一致），而且升降的还原跑完了 —— 第四轮风险 1 里那个"如果抛异常就挪到 start 之后"
+      的方案**不需要了**。
+  - **本轮没做的事 / 风险（重要）**：
+    1. **仍然没有任何人听过**。这一轮的所有验收仍是日志：10 秒重叠、±6.4% 的拉伸、+1 半音的移调、
+       低频那一刀、6 秒还原 —— **全部没听过**（第五/八/九轮都一样）。本轮动作幅度是历来最大的
+       （同时变了速度、音高、低频），所以**听感这一条比任何时候都更该先做**。
+    2. **`MIN_TRIAD = 0.28` 的余量很薄**：最接近的负例（带包络的噪声）是 0.270，而真实音乐这一侧
+       最低的三首是 0.261/0.262/0.269（被判不信任，方向安全）。**换风格要重新看这条**。
+       两个旋钮的实测敏感度：阈值 0.26 → 24/36 过门（噪声也过？不，噪声在余量那侧被拒）；
+       0.28 → 21/36；0.30 → 20/36。
+    3. **样本量**：36 首一个库，其中 **13 首有外部真值**，而且外部真值本身不可靠（见上）。古典/现场/
+       freestyle 没有样本。`MIN_STRENGTH = 0.25` 与 `MARGIN_FOR_FULL_CONFIDENCE = 0.35` 这两个数字
+       是**沿用的**（不是重新拟合的）：新测量 + 旧标尺 = 门的实际位置在"余量 0.0875"，
+       这是刻意的（文档/日志都引用 0.25）。
+    4. **chroma 改了，所以 `KeyProfile.distance` 的尺度也变了**（平 profile 时距离天然小，
+       0.03–0.2；现在真实对子常见 0.16–0.33）。`MAX_KEY_DISTANCE = 0.55` 与
+       `MIN_KEY_IMPROVEMENT = 0.05` 是**旧 chroma 上校准的**，本轮**没有重新校准它们**
+       （`MixMatchTest` 的合成三和弦仍然过）。**换库/换风格时要回头看这两个数。**
+    5. `Pairs.java` 里 9 对合适对子中，**2 对是 `speed x1.0000`（速度本来就合得上）**，
+       真正带变速的是 4 对；**移调只有 3 对非零**（-2/-1/+1 半音各一）。样本依然小。
+    6. 移调方向正确性只有"外部真值 + profile 距离改善"两层，**没有听感**；最坏方向仍是
+       "移对了、但两首都听得出被改过调"（6 秒内还原）。
+    7. ⚠️ 观察（**不是本轮改的**，但没人验证过）：`incoming mix applied` 那行的措辞是
+       `… it is parked, and was started by the call` —— 也就是 **incoming 在 arm 那一刻就被
+       `setPlaybackParams` 启动了**（静音滚动），到 ramp 开始时它已经跑了约 9 秒，晋升时它的位置是
+       **19769ms** 而重叠只"放过"10385ms。**听者因此从没听到 incoming 的前 ~9 秒**。
+       若这不是设计意图（P6 原文说 PARKED 由 `beginCrossfade` 起播），下一轮要查
+       `AndroidAudioBackend.applyIncomingMix` 里的 start 调用；`playAt` 的 handoff 下限用的是
+       `max(backend.position(), floor)`，所以它**跟着高的那个走**，不会重播。
+  - **交付（Task B/C）**：debug APK `android-shell/app/build/outputs/apk/debug/app-debug.apk`，
+    **98,295,855 字节**（ORT 的 arm64 `.so` 是大头；release 包未签名不能装）。
+    **已发布为 GitHub Release 资产**（不提交进仓库，`.gitignore` 里的 `*.apk` 保持原样）：
+    分支 `feat/ai-dj-transition`（commit `65976c5`，**`main` 未动**）、tag `ai-dj-transition-2026-09-19`、
+    页面 `https://github.com/xiaozhuhou233/qplayer-compose/releases/tag/ai-dj-transition-2026-09-19`、
+    直链 `https://github.com/xiaozhuhou233/qplayer-compose/releases/download/ai-dj-transition-2026-09-19/app-debug.apk`
+    （实测 200，重定向到 CDN）。
+
 **顺序**：P1 → P3 → P5 → P4 → P6。不要先做 P6。（P1/P2/P3/P7、**P6** 与 **P4 的分析+对齐**都已落地；
 剩下的仍是**听觉验证**（P4 现在有装机证据了：能 align=on，但**听感**仍未验证），然后才是 P5 低频互换
 与 P4 的下一步"变速对拍"（`setPlaybackParams` 把 B 拉到 A 的 BPM —— 本轮只对齐了网格，没有拉速度，
@@ -1244,8 +1365,15 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
 各段自己选的周期"）：**赢的判据是攻击能量，不是相关**（错格的相关确实更高，见第八轮）；而且
 **只改周期会把通过率从 12/18 拉到 10/18** —— 门里"段内 support"那一半会犯**同样的 2:3 错**，
 所以它也得跟着和声感知（`segmentSupport`）；两件事一起做才回到 12/18，且**错的网格从 1 首过门变成 0 首**。
-**下一件事**：调性估计器的强度阈值（36 首里 31 首低于 `MIN_STRENGTH = 0.25`，5 首过门的又两两速度不相近
-→ `合拍改调` 的变速/移调在真实库上仍然跑不起来）；然后是**听感**（第五轮/第八轮都没让任何人听过）。
+**下一件事（有数据支撑）—— ✅ 第九轮已做（见第七节末尾）**：调性估计器的强度阈值。**结论与设想不一样，
+记在这里免得重走**：问题**不在阈值**，而在**两处测量**——(a) chroma 折叠的是 `log1p(幅度)` 再逐 bin 相加，
+在五个八度上把每个音级都堆成常数（36 首真实窗口每 bin 0.066–0.097，均匀是 0.083；16 首被报成 A minor）；
+(b) 强度是"与亚军的余量"，而真实音乐里亚军几乎总是关系大小调或五度（24/36），**那正是本来就要混的**。
+所以：**改折叠方式（用幅度）+ 把余量改成"与不可能混的调比" + 加第二把门（三和弦占比）**；
+`MIN_STRENGTH = 0.25` 这个数字**没有动**。过门率 8/36 → **21/36**，并且**第一次让两首不同的歌在真机上
+跑完了变速+移调+低频互换**（`Moonlight → I'm Waiting`，speed x1.0637 / pitch x1.0595 / bass swap，
+平台回读一致）。**下一步仍然是听感**（第五/八/九轮都没让任何人听过），而且这一轮同时动了速度/音高/低频，
+所以它比前两轮更该先被听。之后才是**接线预渲染混音**（第七轮 Phase C 的文件仍然没有任何代码读它）。
 
 ## 八、工作方式（为了省上下文，请遵守）
 
