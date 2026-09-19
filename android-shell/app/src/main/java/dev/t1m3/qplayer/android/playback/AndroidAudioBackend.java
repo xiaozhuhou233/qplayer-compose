@@ -139,16 +139,6 @@ public final class AndroidAudioBackend implements AudioBackend {
         if (mp == null) return;
         try {
             mp.setSurface(surface);
-            // A Surface that arrives while playback is already running starts the video
-            // pipeline at the preceding sync frame, so the picture replayed the last
-            // second or two while the audio — a separate stream that never stopped —
-            // carried on. Landing it on the frame the audio is already at removes that
-            // catch-up. Skipped at the start of a track (position 0), where there is
-            // nothing to catch up to.
-            if (prepared && (wantPlay || mp.isPlaying())) {
-                int position = mp.getCurrentPosition();
-                if (position > 0) mp.seekTo(position, MediaPlayer.SEEK_CLOSEST);
-            }
         } catch (Throwable ignored) { }
     }
 
