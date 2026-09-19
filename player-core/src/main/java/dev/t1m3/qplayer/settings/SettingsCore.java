@@ -195,6 +195,9 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         if (spec == null || p == null) return;
         Object v = normalize(spec, raw);
         if (v == null || v.equals(p.peek())) return;
+        if ("aiProvider".equals(key)) {
+            saveAiProviderFields(((Number) p.peek()).intValue());
+        }
         p.set(v);
         persist(spec, v);
         apply(spec, v);
@@ -207,8 +210,18 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         String model = "gpt-5.6-luna";
         if (provider == 1) { url = "https://api.deepseek.com/v1"; model = "deepseek-flash"; }
         else if (provider == 3) { url = "https://generativelanguage.googleapis.com/v1beta"; model = "gemini-3.5-flash-lite"; }
-        setValueSilently("aiBaseUrl", url);
-        setValueSilently("aiModel", model);
+        String savedUrl = str("aiProviderUrl_" + provider);
+        String savedKey = str("aiProviderKey_" + provider);
+        String savedModel = str("aiProviderModel_" + provider);
+        setValueSilently("aiBaseUrl", savedUrl.isEmpty() ? url : savedUrl);
+        setValueSilently("aiApiKey", savedKey);
+        setValueSilently("aiModel", savedModel.isEmpty() ? model : savedModel);
+    }
+
+    private void saveAiProviderFields(int provider) {
+        setValueSilently("aiProviderUrl_" + provider, str("aiBaseUrl"));
+        setValueSilently("aiProviderKey_" + provider, str("aiApiKey"));
+        setValueSilently("aiProviderModel_" + provider, str("aiModel"));
     }
 
     private void setValueSilently(String key, String value) {

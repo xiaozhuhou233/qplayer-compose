@@ -9,6 +9,9 @@ public class NeteaseArtist {
     public String name;
     /** Avatar URL (CDN). Renderer fetches bytes lazily. */
     public String coverUrl;
+    /** The big header image the artist uploaded to their NetEase page (the
+     *  artist detail payload's {@code cover}), used as the page's hero backdrop. */
+    public String headerUrl;
     /** CDN thumbnail URL (coverUrl + ?param=128y128) for QML Image.source. */
     public String coverThumbPath;
     public String briefDesc;

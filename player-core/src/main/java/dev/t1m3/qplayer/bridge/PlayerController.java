@@ -1,7 +1,10 @@
 package dev.t1m3.qplayer.bridge;
 
+import java.io.IOException;
+
 import dev.t1m3.qplayer.audio.AudioBackend;
 import dev.t1m3.qplayer.ai.AiClient;
+import dev.t1m3.qplayer.bili.BiliClient;
 import dev.t1m3.qplayer.ai.AiPlaylistResult;
 import dev.t1m3.qplayer.ai.WebSearchClient;
 import dev.t1m3.qplayer.audio.MetadataReader;
@@ -150,6 +153,26 @@ public final class PlayerController {
         t.setDaemon(true);
         return t;
     });
+    // Lyrics are resolved by racing two sources (see fetchLyricsRacing). The race
+    // must never wait behind the worker that started it, so it gets its own pool
+    // rather than sharing lyricWorker's two threads — two songs fetching at once
+    // would otherwise occupy both of them and stall every inner task.
+    private final ExecutorService lyricRaceWorker = Executors.newFixedThreadPool(4, r -> {
+        Thread t = new Thread(r, "qplayer-lyric-race");
+        t.setDaemon(true);
+        return t;
+    });
+    // NetEase audio resolves get their own lane for the same head-of-line reason
+    // searchWorker/customWorker/cacheWorker above exist: `worker` also carries
+    // queue saves, home/playlist reads and scrobbles, so a tap on a search result
+    // could sit behind any of them before its URL was even requested. This is the
+    // path the user is waiting on with their finger on the screen, so nothing else
+    // may share its queue.
+    private final ExecutorService resolveWorker = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "qplayer-resolve");
+        t.setDaemon(true);
+        return t;
+    });
     // offlinePlaylistFallback's background retry (Thread.sleep-and-retry-online)
     // needs its own queue for the same reason as the three above: it deliberately
     // blocks its own thread for the whole retry interval, and doing that on
@@ -267,6 +290,15 @@ public final class PlayerController {
     // the queue has been reordered or another song has started; checking only the
     // numeric queue index is not enough because that index can be reused.
     private final AtomicLong lyricLoadGeneration = new AtomicLong();
+    /** Number of attempts made for one track's lyrics before an empty result is
+     *  treated as "this song has none". */
+    private static final int LYRIC_FETCH_ATTEMPTS = 3;
+    /** Base backoff between those attempts (multiplied by the attempt number). */
+    private static final long LYRIC_RETRY_MS = 1_500L;
+    /** Set by the lyric sources when they failed for a reason that may pass (a
+     *  timeout, a 5xx, risk control) as opposed to answering "no lyrics". Only
+     *  then is an empty result worth retrying — see loadNeteaseLyrics. */
+    private volatile boolean lyricFetchTransient = false;
     private volatile PlaybackListener playbackListener;
 
     /** Host hook (e.g. the Android foreground service) notified on the main thread
@@ -406,6 +438,10 @@ public final class PlayerController {
     // when a track actually starts. Stops a persistently-failing track from looping
     // error→re-resolve→error forever instead of advancing.
     private volatile long errorRetryId = -1;
+    /** BILI counterpart of {@link #errorRetryId}: the bvid whose stream has already
+     *  been re-resolved once after a playback error, so a stream that keeps failing
+     *  cannot loop for ever. Reset by the same successful-start path. */
+    private volatile String biliErrorRetryBvid = null;
     /** Number of consecutive tracks that failed before audio actually started.
      *  Bounds automatic skipping when an entire queue is unavailable. */
     private volatile int consecutivePlaybackFailures;
@@ -436,6 +472,7 @@ public final class PlayerController {
     /** Id of the current Netease track's album, used by Android Compose to open
      *  the existing album detail route from the now-playing title. */
     public final Property<Long> playingAlbumId = new Property<>(0L);
+    public final Property<Long> playingSongId = new Property<>(0L);
     public final Property<String> coverUrl = new Property<>("");
     /** Absolute path to the current track's cover in the disk cache, or "" when not
      *  cached. QML prefers it over {@link #coverUrl} so the now-playing art shows with
@@ -476,6 +513,13 @@ public final class PlayerController {
      *  (centers the cover) and the host compositor (drops the side lyric column in
      *  landscape) read it. */
     public final Property<Boolean> lyricsCoverOnly = new Property<>(Boolean.TRUE);
+    /** True while the lyrics of the current track are still being resolved (a
+     *  netease/custom-api fetch is in flight). The host lyric page shows its
+     *  loading animation on this instead of guessing with a timeout, so a slow
+     *  fetch and a track that simply has no lyrics are finally distinguishable:
+     *  the flag clears as soon as ANY result — including an empty list — is
+     *  published through {@link #applyLyrics}. */
+    public final Property<Boolean> lyricsLoading = new Property<>(Boolean.FALSE);
     /** User-toggled cover view (LyricOverlay.qml's "switch to cover" button / tapping
      *  the cover to switch back) — independent of {@link #lyricsCoverOnly}'s automatic
      *  no-lyrics detection. The two are OR'd together wherever the effective cover-only
@@ -517,6 +561,58 @@ public final class PlayerController {
     public final Property<Integer> resultCount = new Property<>(0);
     public final Property<Boolean> searchLoading = new Property<>(false);
     public final Property<Boolean> searchHasMore = new Property<>(false);
+    /** Best artist match for the current query, pinned above the song results.
+     *  Id is 0 when nothing matched. */
+    public final Property<Long> searchArtistId = new Property<>(0L);
+    public final Property<String> searchArtistName = new Property<>("");
+    public final Property<String> searchArtistCoverPath = new Property<>("");
+    /** Whether the signed-in user already follows {@link #searchArtistId}, so the
+     *  pinned card's button shows the real state. */
+    public final Property<Boolean> searchArtistFollowed = new Property<>(false);
+
+    // ---- Bilibili (PiliPlusX-style source) ------------------------------------
+    /** Video search results, shown on the search page's second tab. */
+    public final Property<List<BiliClient.BiliVideo>> biliSearchResults =
+            new Property<>(Collections.<BiliClient.BiliVideo>emptyList());
+    public final Property<Boolean> biliSearchLoading = new Property<>(false);
+    public final Property<Boolean> biliLoggedIn = new Property<>(false);
+    /** The QR the phone app has to scan; empty when no login is in flight. */
+    public final Property<String> biliQrUrl = new Property<>("");
+    /** 0 nothing / 1 waiting for scan / 2 scanned, confirm on the phone /
+     *  3 logged in / 4 expired. Mirrors the TV-login flow's poll codes. */
+    public final Property<Integer> biliQrStatus = new Property<>(0);
+    public final Property<String> biliError = new Property<>("");
+    /** True while a B站 video owns the backend — the shell renders a video surface
+     *  instead of the artwork, and hides the lyric tab. */
+    public final Property<Boolean> biliPlaying = new Property<>(false);
+    /** UP-authored chapter starts of the playing B站 video, as fractions of its
+     *  duration — the form a progress bar can mark directly. Empty for the many
+     *  videos without chapters, and cleared on every track change. */
+    public final Property<List<Float>> biliChapterMarks =
+            new Property<>(Collections.<Float>emptyList());
+
+    /** The logged-in user's B站 favourite folders, for the 歌单 entry. When a folder
+     *  id was passed to {@link #loadBiliFavFolders(long)}, each entry also carries
+     *  whether it already holds that video — the picker's pre-selection. */
+    public final Property<List<BiliClient.BiliFavFolder>> biliFavFolders =
+            new Property<>(Collections.<BiliClient.BiliFavFolder>emptyList());
+    public final Property<Boolean> biliFavLoading = new Property<>(false);
+    public final Property<String> biliFavError = new Property<>("");
+
+    /** One favourite folder's videos, for its content page. Loaded in full so tapping
+     *  any entry can queue the rest of the folder from that point. */
+    public final Property<List<BiliClient.BiliFavItem>> biliFavItems =
+            new Property<>(Collections.<BiliClient.BiliFavItem>emptyList());
+    public final Property<Boolean> biliFavItemsLoading = new Property<>(false);
+    /** Title of the folder {@link #biliFavItems} belongs to, for the page header. */
+    public final Property<String> biliFavItemsTitle = new Property<>("");
+    /** Capped so a pathological folder cannot queue for ever: 25 pages of 40. */
+    private static final int BILI_FAV_MAX_PAGES = 25;
+    /** Signing, search, parts and playurl all go through one client so the wbi key
+     *  cache and the login cookies are shared. */
+    private final BiliClient bili = new BiliClient(15000);
+    private final java.util.concurrent.atomic.AtomicLong biliLoginGeneration =
+            new java.util.concurrent.atomic.AtomicLong();
     /** Search results from the user-configured custom API source (independent of
      *  {@link #searchResults}'s netease source), shown in their own SearchPage.qml
      *  section. Empty when the custom source isn't configured/enabled. */
@@ -624,6 +720,9 @@ public final class PlayerController {
     public final Property<Boolean> wideLayout = new Property<>(false);
     public final Property<String> artistName = new Property<>("");
     public final Property<String> artistCoverPath = new Property<>("");
+    /** The artist's uploaded header image (NetEase artist page artwork), used as
+     *  the artist page's hero backdrop. Empty when the artist has none. */
+    public final Property<String> artistHeaderPath = new Property<>("");
     public final Property<String> artistBriefDesc = new Property<>("");
     public final Property<Boolean> artistLoading = new Property<>(false);
     public final Property<List<NeteaseSong>> artistSongs = new Property<>(Collections.<NeteaseSong>emptyList());
@@ -768,6 +867,7 @@ public final class PlayerController {
         // backend prepares asynchronously, so the position at play() time is stale).
         backend.setOnStarted(() -> {
             errorRetryId = -1;
+            biliErrorRetryBvid = null;
             consecutivePlaybackFailures = 0;
             stoppedLyricPositionMs = Math.max(0L, backend.position());
             playbackStarted = true;
@@ -1167,6 +1267,9 @@ public final class PlayerController {
 
     /** Publish a new lyric list and derive {@link #lyricsCoverOnly}. */
     private void applyLyrics(List<LyricLine> ly) {
+        // Every publish — lyrics, an instrumental marker or a plain "this track
+        // has none" — ends the wait for this track.
+        lyricsLoading.set(false);
         List<LyricLine> published = ly != null ? ly : Collections.<LyricLine>emptyList();
         lyrics.set(published);
         lyricsRevision.set(lyricsRevision.peek() + 1L);
@@ -1636,6 +1739,37 @@ public final class PlayerController {
         playAt(i);
     }
 
+    /** Append a track to the current queue without changing playback. */
+    public void enqueueTrack(Track track) {
+        if (track == null) return;
+        queue.add(track);
+        queueTracks.set(new ArrayList<>(queue));
+    }
+
+    /** Append a NetEase result without starting playback. */
+    public void enqueueNeteaseSong(NeteaseSong song) {
+        if (song == null) return;
+        enqueueTrack(toTrack(song));
+    }
+
+    /** Append one row from the unified search result list. */
+    public void enqueueSearchRow(int rowIndex) {
+        List<SearchRow> rows = searchRows.peek();
+        if (rows == null || rowIndex < 0 || rowIndex >= rows.size()) return;
+        SearchRow row = rows.get(rowIndex);
+        if (row == null) return;
+        if ("netease".equals(row.kind)) {
+            List<NeteaseSong> songs = searchResults.peek();
+            if (songs != null && row.index >= 0 && row.index < songs.size()) enqueueNeteaseSong(songs.get(row.index));
+        } else if ("local".equals(row.kind)) {
+            List<Track> songs = localSearchResults.peek();
+            if (songs != null && row.index >= 0 && row.index < songs.size()) enqueueTrack(songs.get(row.index));
+        } else {
+            List<CustomSong> songs = customSearchResults.peek();
+            if (songs != null && row.index >= 0 && row.index < songs.size()) enqueueTrack(toTrackCustom(songs.get(row.index)));
+        }
+    }
+
     /** Move a slot in the live queue from 'from' to 'to'. */
     public void moveInQueue(int from, int to) {
         if (from < 0 || from >= queue.size() || to < 0 || to >= queue.size() || from == to) return;
@@ -2055,7 +2189,18 @@ public final class PlayerController {
                 com.google.gson.JsonObject o = el.getAsJsonObject();
                 Track t = new Track();
                 String src = o.has("source") ? o.get("source").getAsString() : "NETEASE";
-                t.source = "LOCAL".equals(src) ? Track.Source.LOCAL : Track.Source.NETEASE;
+                // Plain ternary used to fold every unknown source into NETEASE,
+                // which would silently resurrect a B站 queue entry as a song. Map
+                // the known names and keep anything else as-is-but-harmless.
+                if ("LOCAL".equals(src)) {
+                    t.source = Track.Source.LOCAL;
+                } else if ("CUSTOM_API".equals(src)) {
+                    t.source = Track.Source.CUSTOM_API;
+                } else if ("BILI".equals(src)) {
+                    t.source = Track.Source.BILI;
+                } else {
+                    t.source = Track.Source.NETEASE;
+                }
                 t.neteaseId = o.has("neteaseId") ? o.get("neteaseId").getAsLong() : 0;
                 t.title    = o.has("title")    && !o.get("title").isJsonNull()    ? o.get("title").getAsString()    : "";
                 t.artist   = o.has("artist")   && !o.get("artist").isJsonNull()   ? o.get("artist").getAsString()   : "";
@@ -2461,8 +2606,18 @@ public final class PlayerController {
         } else {
             backend.pause();
         }
+        // The bottom toggle row's height is driven by biliPlaying, so it must already
+        // describe the INCOMING track here. Resetting it to false and letting the
+        // async bili resolve flip it back to true made the row flash open and shut
+        // on every part change. This also keeps a video track on its surface
+        // (loading) from the outset instead of showing artwork first and swapping to
+        // the picture mid-load.
+        final boolean incomingIsBili = queue.get(i).source == Track.Source.BILI;
         post(() -> {
             loading.set(true);
+            biliPlaying.set(incomingIsBili);
+            // Belongs to the outgoing part; the incoming one's own fetch republishes.
+            biliChapterMarks.set(Collections.<Float>emptyList());
             applyLyrics(Collections.<LyricLine>emptyList());
             applyCover(null, currentCoverRevision);
             coverPath.set("");
@@ -2474,6 +2629,12 @@ public final class PlayerController {
         // resolution. Previously a normal NetEase track waited for songUrlInfo()
         // and any unblock fallback to finish, so playback could already be audible
         // while the lyric request had not even started.
+        // A network lyric fetch is about to start for this track, so the host
+        // lyric page shows its loading animation until the result lands. Must be
+        // set AFTER the blanking above, which clears the flag via applyLyrics().
+        // Local tracks parse synchronously and publish at once, so they never
+        // enter the loading state and never flash an indicator.
+        lyricsLoading.set(t.source == Track.Source.NETEASE || t.source == Track.Source.CUSTOM_API);
         if (t.source == Track.Source.NETEASE) {
             loadNeteaseLyrics(t, i);
         } else if (t.source == Track.Source.CUSTOM_API) {
@@ -2490,7 +2651,8 @@ public final class PlayerController {
             playingArtistId.set(t.artistId);
             album.set(orEmpty(t.album));
             playingAlbumId.set(t.albumId);
-            coverUrl.set(orEmpty(thumbUrl(t.coverUrl, "512")));
+            playingSongId.set(t.neteaseId);
+            coverUrl.set(coverFetchUrl(t, "512"));
             durationMs.set(t.durationMs);
             positionMs.set(resumeMs);
             currentLiked.set(t.neteaseId != 0 && likedSet.contains(t.neteaseId));
@@ -2536,6 +2698,12 @@ public final class PlayerController {
             } else {
                 resolveAndPlayNetease(t, i, resumeMs, currentCoverRevision);
             }
+        } else if (t.source == Track.Source.BILI) {
+            // A BILI track owns no file and no lasting url: the CDN links carry
+            // short-lived tokens, so a url cached from an earlier play would just
+            // 403. Every play re-resolves. resolveAndPlayBili then publishes the
+            // video's own metadata and hands the url to the shared backend.
+            resolveAndPlayBili(t, i, resumeMs, currentCoverRevision);
         } else if (t.source == Track.Source.CUSTOM_API) {
             if (t.streamUrl != null) {
                 Logger.info("play custom-api (cached url): {}", t.title);
@@ -2614,7 +2782,7 @@ public final class PlayerController {
         // lyric page sat on its gray placeholder even though a perfectly good cover was
         // already showing elsewhere. A blurred full-screen backdrop doesn't need more
         // detail than this anyway.
-        final String url = thumbUrl(t.coverUrl, "1024");
+        final String url = coverFetchUrl(t, "1024");
 
         // Check disk cache first.
         String cachedImg = diskCache.getImage(url);
@@ -2740,7 +2908,7 @@ public final class PlayerController {
             // preloadAdjacent, which takes updateCover's coverBytes fast path and
             // gets its coverPath from here, left the lyric page on its placeholder
             // while the fluid backdrop and Monet seed came up fine from the same bytes.
-            String cached = diskCache.getImage(thumbUrl(t.coverUrl, "1024"));
+            String cached = diskCache.getImage(coverFetchUrl(t, "1024"));
             if (cached != null) return cached;
         }
         return "";
@@ -2761,7 +2929,7 @@ public final class PlayerController {
         }
         if (t.coverUrl == null || t.coverUrl.isEmpty()) return null;
         // Same 1024px cap as updateCover() -- see its comment for why.
-        String url = thumbUrl(t.coverUrl, "1024");
+        String url = coverFetchUrl(t, "1024");
         String cachedImg = diskCache.getImage(url);
         if (cachedImg != null) {
             byte[] d = readBytesFromFile(cachedImg);
@@ -2837,7 +3005,13 @@ public final class PlayerController {
                 }
             } catch (Throwable ignored) { }
         }
-        byte[] data = downloadBytes("https://amlldb.bikonoo.com/ncm-lyrics/" + songId + ".ttml");
+        // Third-party mirror with a short leash: 8s of waiting on a host that is
+        // often unreachable was the single biggest source of "lyrics take ages to
+        // appear". NetEase is asked in parallel anyway (fetchLyricsRacing), so a
+        // timeout here costs nothing but the mirror's own answer.
+        byte[] data = downloadBytes(
+                "https://amlldb.bikonoo.com/ncm-lyrics/" + songId + ".ttml",
+                LYRIC_MIRROR_TIMEOUT_MS);
         if (data == null || data.length == 0) return Collections.emptyList();
         // Cache for next time.
         diskCache.cacheLyric(data, songId);
@@ -3242,7 +3416,12 @@ public final class PlayerController {
      *  audio-cache fast path, which bypasses the URL resolve that used to fetch them. */
     private void loadNeteaseLyrics(Track t, int expectedIndex) {
         final long songId = t.neteaseId;
-        if (songId == 0) return;
+        // Nothing to fetch: end the wait immediately instead of leaving the host
+        // page in its loading state forever.
+        if (songId == 0) {
+            post(() -> lyricsLoading.set(false));
+            return;
+        }
         final long requestGeneration = lyricLoadGeneration.get();
         List<LyricLine> mem = lyricMem.get(songId);
         if (mem != null) {   // preloaded / recently played -> apply instantly
@@ -3258,10 +3437,37 @@ public final class PlayerController {
         // concurrently with updateCover()'s own worker-queued download instead of
         // sitting behind it -- see lyricWorker's field javadoc.
         lyricWorker.submit(() -> {
-            List<LyricLine> ly = fetchNeteaseLyrics(songId);
+            // One attempt can lose a race with a flaky mirror/CDN and come back
+            // empty even though the song does have lyrics. That used to be final:
+            // the page kept the artwork until something else happened to request
+            // the lyrics again, which is why they sometimes only appeared after
+            // the user scrubbed the transport. Retry a transient empty result a
+            // couple of times — but only when a source actually failed, so a song
+            // that genuinely has no lyrics costs exactly one request.
+            List<LyricLine> ly = Collections.emptyList();
+            for (int attempt = 1; attempt <= LYRIC_FETCH_ATTEMPTS; attempt++) {
+                lyricFetchTransient = false;
+                try {
+                    ly = fetchNeteaseLyrics(songId);
+                } catch (Throwable e) {
+                    Logger.warn("lyric fetch failed for {}: {}", songId, e.getMessage());
+                    lyricFetchTransient = true;
+                }
+                if (!ly.isEmpty()) break;
+                if (!lyricFetchTransient || attempt == LYRIC_FETCH_ATTEMPTS) break;
+                Logger.info("lyric fetch transient-empty for {} (attempt {}/{})",
+                        songId, attempt, LYRIC_FETCH_ATTEMPTS);
+                try {
+                    Thread.sleep(LYRIC_RETRY_MS * attempt);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            final List<LyricLine> fetched = ly;
             post(() -> {
                 if (isCurrentLyricRequest(songId, expectedIndex, requestGeneration)) {
-                    applyLyrics(ly);
+                    applyLyrics(fetched);
                 }
             });
         });
@@ -3283,7 +3489,12 @@ public final class PlayerController {
      *  head-of-line-blocking reason resolveAndPlayCustom does. */
     private void loadCustomLyrics(Track t, int expectedIndex) {
         final String id = t.customId;
-        if (id == null || id.isEmpty()) return;
+        // No lyric endpoint configured for this source: end the wait at once
+        // rather than leaving the host page loading indefinitely.
+        if (id == null || id.isEmpty()) {
+            post(() -> lyricsLoading.set(false));
+            return;
+        }
         List<LyricLine> mem = customLyricMem.get(id);
         if (mem != null) {
             post(() -> { if (playIndex == expectedIndex) applyLyrics(mem); });
@@ -3317,10 +3528,102 @@ public final class PlayerController {
     private List<LyricLine> fetchNeteaseLyrics(long songId) {
         List<LyricLine> mem = lyricMem.get(songId);
         if (mem != null) return mem;
-        List<LyricLine> lines = tryAmllTtml(songId);
-        if (lines.isEmpty()) lines = neteaseLyricCacheFirst(songId);
+        List<LyricLine> lines = fetchLyricsRacing(songId);
         if (!lines.isEmpty()) lyricMem.put(songId, lines);
         return lines;
+    }
+
+    /** How long either lyric source may take before the other one's answer is used. */
+    private static final long LYRIC_RACE_TIMEOUT_MS = 6_000L;
+    /** Timeout for the third-party AMLL mirror alone; NetEase runs in parallel. */
+    private static final int LYRIC_MIRROR_TIMEOUT_MS = 4_000;
+    /** Grace window for the AMLL mirror once NetEase has already answered. */
+    private static final long LYRIC_MIRROR_GRACE_MS = 700L;
+    /** Songs the mirror had nothing for (or was too slow for) this session, so a
+     *  replay does not pay for the mirror again. */
+    private final java.util.Set<Long> lyricMirrorMisses =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** Ask both lyric sources at once and keep the first usable answer. The AMLL
+     *  mirror is a third-party host that is regularly slow or unreachable, and
+     *  asking NetEase only after its full timeout is what made lyrics take many
+     *  seconds to appear (or never show up before the track ended). The mirror
+     *  still wins when it answers quickly, because its word-level timing is
+     *  better; NetEase no longer has to queue behind it. */
+    private List<LyricLine> fetchLyricsRacing(long songId) {
+        java.util.concurrent.Future<List<LyricLine>> netease =
+                lyricRaceWorker.submit(() -> neteaseLyricCacheFirst(songId));
+        java.util.concurrent.Future<List<LyricLine>> mirror = lyricMirrorMisses.contains(songId)
+                ? null
+                : lyricRaceWorker.submit(() -> tryAmllTtml(songId));
+        long deadline = System.currentTimeMillis() + LYRIC_RACE_TIMEOUT_MS;
+        List<LyricLine> neteaseLines = null;
+        List<LyricLine> mirrorLines = null;
+        while (System.currentTimeMillis() < deadline) {
+            if (mirror != null && mirrorLines == null && mirror.isDone()) {
+                mirrorLines = quietly(mirror);
+                if (mirrorLines != null && !mirrorLines.isEmpty()) {
+                    // Word-level timing from the mirror: the better answer.
+                    netease.cancel(true);
+                    return mirrorLines;
+                }
+            }
+            if (neteaseLines == null && netease.isDone()) {
+                neteaseLines = quietly(netease);
+                if (neteaseLines != null && !neteaseLines.isEmpty()) {
+                    if (mirror == null) return neteaseLines;
+                    // Give the mirror a short grace window to upgrade the result,
+                    // then go with the answer we already have.
+                    long graceEnd = System.currentTimeMillis() + LYRIC_MIRROR_GRACE_MS;
+                    while (mirrorLines == null && !mirror.isDone()
+                            && System.currentTimeMillis() < graceEnd) {
+                        sleepQuietly(40L);
+                    }
+                    if (mirrorLines == null && mirror.isDone()) mirrorLines = quietly(mirror);
+                    if (mirrorLines != null && !mirrorLines.isEmpty()) return mirrorLines;
+                    if (mirrorLines == null) {
+                        // Still hanging: do not make this song's next play wait
+                        // for the mirror again.
+                        mirror.cancel(true);
+                        rememberLyricMirrorMiss(songId);
+                    }
+                    return neteaseLines;
+                }
+            }
+            if ((mirror == null || mirror.isDone()) && netease.isDone()) break;
+            sleepQuietly(40L);
+        }
+        if (mirror != null) {
+            if (mirror.isDone()) mirrorLines = quietly(mirror);
+            else { mirror.cancel(true); rememberLyricMirrorMiss(songId); }
+        }
+        if (netease.isDone()) neteaseLines = quietly(netease);
+        else netease.cancel(true);
+        if (mirrorLines != null && !mirrorLines.isEmpty()) return mirrorLines;
+        return neteaseLines == null ? Collections.<LyricLine>emptyList() : neteaseLines;
+    }
+
+    private static List<LyricLine> quietly(
+            java.util.concurrent.Future<List<LyricLine>> future) {
+        try {
+            List<LyricLine> lines = future.get();
+            return lines == null ? Collections.<LyricLine>emptyList() : lines;
+        } catch (Throwable e) {
+            return Collections.emptyList();
+        }
+    }
+
+    private void rememberLyricMirrorMiss(long songId) {
+        if (lyricMirrorMisses.size() > 400) lyricMirrorMisses.clear();
+        lyricMirrorMisses.add(songId);
+    }
+
+    private static void sleepQuietly(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private static final Gson LYRIC_GSON = new Gson();
@@ -3350,6 +3653,9 @@ public final class PlayerController {
             return LyricParser.fromNeteaseStrings(nl.yrc, nl.lrc, nl.tlyric, nl.romalrc);
         } catch (Throwable e) {
             Logger.warn("lyric load failed for {}: {}", songId, e.getMessage());
+            // A throw here is a failed request, not an answer: the caller may
+            // retry. An empty payload below is definitive and won't be retried.
+            lyricFetchTransient = true;
             return Collections.emptyList();
         }
     }
@@ -3461,29 +3767,21 @@ public final class PlayerController {
         // isn't actually explained yet and unblock's per-source latency in
         // particular is worth watching across more real sessions.
         long tSubmit = System.currentTimeMillis();
-        worker.submit(() -> {
+        resolveWorker.submit(() -> {
             long t0 = System.currentTimeMillis();
             long queueWaitMs = t0 - tSubmit;
-            if (queueWaitMs > 50) Logger.info("netease: timing queued behind other worker tasks for {}ms", queueWaitMs);
+            if (queueWaitMs > 50) Logger.info("netease: timing queued behind other resolve tasks for {}ms", queueWaitMs);
             try {
+                // Rapid taps: skip the round trip entirely once another track has
+                // taken over, so the newest resolve is not stuck behind this one.
+                if (playIndex != expectedIndex) return;
                 Logger.info("netease: resolve song {} (loggedIn={}, level={})",
                         songId, netease.isLoggedIn(), playLevel);
-                // Legacy /search/get returns no album picUrl, so search-sourced tracks
-                // arrive without a cover; fetch song detail to fill any missing field.
-                if (t.title == null || t.title.isEmpty()
-                        || t.albumId == 0L
-                        || t.coverUrl == null || t.coverUrl.isEmpty()) {
-                    NeteaseSong sd = netease.songDetail(songId);
-                    Logger.info("netease: timing songDetail +{}ms", System.currentTimeMillis() - t0);
-                    if (sd != null) {
-                        if (t.title == null || t.title.isEmpty()) t.title = sd.name;
-                        if (t.artist == null || t.artist.isEmpty()) t.artist = sd.artist;
-                        if (t.album == null || t.album.isEmpty()) t.album = sd.album;
-                        if (t.albumId == 0L) t.albumId = sd.albumId;
-                        if (t.coverUrl == null || t.coverUrl.isEmpty()) t.coverUrl = sd.coverUrl;
-                        if (t.durationMs <= 0) t.durationMs = sd.durationMs;
-                    }
-                }
+                // Legacy /search/get returns no album picUrl, so search-sourced
+                // tracks arrive without a cover. The song detail used to be fetched
+                // HERE, which put a whole extra round trip in front of the audio URL
+                // for every search result the user tapped. It now runs after the
+                // track is audible — see enrichTrackMetadataAsync.
                 NeteaseClient.UrlInfo info = netease.songUrlInfo(songId, playLevel);
                 Logger.info("netease: timing songUrlInfo +{}ms", System.currentTimeMillis() - t0);
                 // Official url wins only when it's a full track. A trial-only clip,
@@ -3530,7 +3828,7 @@ public final class PlayerController {
                         playingArtistId.set(t.artistId);
                         album.set(orEmpty(t.album));
                         playingAlbumId.set(t.albumId);
-                        coverUrl.set(orEmpty(thumbUrl(t.coverUrl, "512")));
+                        coverUrl.set(coverFetchUrl(t, "512"));
                         durationMs.set(t.durationMs);
                     });
                     updateCover(t, expectedIndex, expectedCoverRevision);
@@ -3539,6 +3837,10 @@ public final class PlayerController {
                     playingIntent = true;
                     post(() -> playing.set(true));
                     notifyPlayback();
+                    // Sound is already starting: fill in the fields the search row
+                    // did not carry (album id, cover) on the general queue, where an
+                    // extra round trip cannot delay anything the user is waiting on.
+                    enrichTrackMetadataAsync(t, expectedIndex);
                     // Populate the disk cache so later plays are served locally.
                     cacheAudioAsync(t);
                 });
@@ -3546,6 +3848,60 @@ public final class PlayerController {
                 Logger.warn("netease resolve failed for {}: {}", songId, e.getMessage());
                 onMain(() -> skipUnplayable(expectedIndex, "解析失败"));
             }
+        });
+    }
+
+    /** True when a track still lacks the metadata only a song-detail call can
+     *  supply (search rows carry no album id and no cover URL). */
+    private static boolean needsSongDetail(Track t) {
+        return t.title == null || t.title.isEmpty()
+                || t.albumId == 0L
+                || t.coverUrl == null || t.coverUrl.isEmpty();
+    }
+
+    /** Fills in the fields a search result doesn't carry (title, album id, cover,
+     *  duration) *after* the track is audible, then refreshes the now-playing
+     *  properties and the cover. Running this before the resolve — as it used to —
+     *  cost every tapped search result a whole extra round trip before its audio
+     *  URL was even requested. */
+    private void enrichTrackMetadataAsync(Track t, int expectedIndex) {
+        if (t.neteaseId == 0L || !needsSongDetail(t)) return;
+        worker.submit(() -> {
+            NeteaseSong sd;
+            long t0 = System.currentTimeMillis();
+            try {
+                sd = netease.songDetail(t.neteaseId);
+            } catch (Throwable e) {
+                Logger.warn("songDetail failed for {}: {}", t.neteaseId, e.getMessage());
+                return;
+            }
+            Logger.info("netease: timing songDetail (background) +{}ms",
+                    System.currentTimeMillis() - t0);
+            if (sd == null) return;
+            onMain(() -> {
+                if (playIndex != expectedIndex) return;   // user moved on
+                if (t.title == null || t.title.isEmpty()) t.title = sd.name;
+                if (t.artist == null || t.artist.isEmpty()) t.artist = sd.artist;
+                if (t.album == null || t.album.isEmpty()) t.album = sd.album;
+                if (t.albumId == 0L) t.albumId = sd.albumId;
+                if (t.coverUrl == null || t.coverUrl.isEmpty()) t.coverUrl = sd.coverUrl;
+                if (t.durationMs <= 0) t.durationMs = sd.durationMs;
+                post(() -> {
+                    if (playIndex != expectedIndex) return;
+                    title.set(orEmpty(t.title));
+                    artist.set(orEmpty(t.artist));
+                    playingArtistIdsCsv.set(orEmpty(t.artistIdsCsv));
+                    playingArtistNamesCsv.set(orEmpty(t.artistNamesCsv));
+                    playingArtistId.set(t.artistId);
+                    album.set(orEmpty(t.album));
+                    playingAlbumId.set(t.albumId);
+                    coverUrl.set(coverFetchUrl(t, "512"));
+                    durationMs.set(t.durationMs);
+                });
+                // The switch that started this track owns the current revision;
+                // updateCover ignores anything stale.
+                updateCover(t, expectedIndex, coverRevision.get());
+            });
         });
     }
 
@@ -3603,6 +3959,326 @@ public final class PlayerController {
             }
         }
         applyLyrics(Collections.<LyricLine>emptyList());
+    }
+
+    /** Loads the user's B站 favourite folders. Pass a video's avid to have each folder
+     *  report whether it already holds it (the picker's pre-selection); pass 0 for the
+     *  plain 歌单 listing. */
+    public void loadBiliFavFolders(long rid) {
+        post(() -> { biliFavLoading.set(true); biliFavError.set(""); });
+        worker.submit(() -> {
+            List<BiliClient.BiliFavFolder> folders;
+            String error = "";
+            try {
+                folders = bili.favFolders(rid);
+                // The endpoint answers code:0 with data:null for a logged-out caller,
+                // which is indistinguishable from "no folders" — so the empty result
+                // has to be explained by the session instead.
+                if (folders.isEmpty() && bili.selfMid() == 0L) error = "请先登录 B 站";
+            } catch (Throwable e) {
+                Logger.warn("bili fav folders failed: {}", e.toString());
+                folders = Collections.emptyList();
+                error = e.getMessage() == null ? "加载失败" : e.getMessage();
+            }
+            final List<BiliClient.BiliFavFolder> out = folders;
+            final String err = error;
+            post(() -> {
+                biliFavFolders.set(out);
+                biliFavError.set(err);
+                biliFavLoading.set(false);
+            });
+        });
+    }
+
+    /** Same as {@link #loadBiliFavFolders(long)}, for callers that hold a bvid (the
+     *  queue does) rather than the avid the API wants. Resolves the avid on the worker
+     *  first, then loads the folders with their per-folder {@code containsItem}. */
+    public void loadBiliFavFoldersForBvid(String bvid) {
+        if (bvid == null || bvid.isEmpty()) {
+            loadBiliFavFolders(0L);
+            return;
+        }
+        post(() -> { biliFavLoading.set(true); biliFavError.set(""); });
+        worker.submit(() -> {
+            long avid = 0L;
+            try {
+                avid = bili.videoAid(bvid);
+            } catch (Throwable e) {
+                Logger.warn("bili aid lookup failed for {}: {}", bvid, e.toString());
+            }
+            // Falls back to the plain listing: the picker still works, it just cannot
+            // pre-tick the folders this video is already in.
+            loadBiliFavFolders(avid);
+        });
+    }
+
+    /** Plays a whole favourite folder: every video in it becomes the queue, so the
+     *  normal next/previous and the B站 queue path carry on from there. */
+    public void playBiliFavFolder(BiliClient.BiliFavFolder folder) {
+        if (folder == null || folder.mediaId == 0L) return;
+        post(() -> { loading.set(true); biliFavError.set(""); });
+        worker.submit(() -> {
+            try {
+                List<Track> q = new ArrayList<>();
+                for (int page = 1; page <= BILI_FAV_MAX_PAGES; page++) {
+                    List<BiliClient.BiliFavItem> items = bili.favItems(folder.mediaId, page, 40);
+                    for (BiliClient.BiliFavItem item : items) q.add(toTrackFav(item));
+                    if (items.size() < 40) break;
+                }
+                if (q.isEmpty()) {
+                    post(() -> { loading.set(false); showToast("这个收藏夹是空的"); });
+                    return;
+                }
+                Logger.info("bili fav folder \"{}\": {} videos queued", folder.title, q.size());
+                final List<Track> queue = q;
+                onMain(() -> playQueue(queue, 0));
+            } catch (Throwable e) {
+                Logger.warn("bili fav folder failed: {}", e.toString());
+                post(() -> {
+                    loading.set(false);
+                    showToast("收藏夹加载失败：" + e.getMessage());
+                });
+            }
+        });
+    }
+
+    /** Loads one favourite folder's videos for its content page. Every page is fetched
+     *  up front — the pages are small (40 max) and it means tapping any entry can queue
+     *  the whole folder from that point with no further network work. */
+    public void loadBiliFavItems(long mediaId, String title) {
+        if (mediaId == 0L) return;
+        final String heading = title == null ? "" : title;
+        post(() -> {
+            biliFavItemsLoading.set(true);
+            biliFavItems.set(Collections.<BiliClient.BiliFavItem>emptyList());
+            biliFavItemsTitle.set(heading);
+        });
+        worker.submit(() -> {
+            List<BiliClient.BiliFavItem> all = new ArrayList<>();
+            try {
+                for (int page = 1; page <= BILI_FAV_MAX_PAGES; page++) {
+                    List<BiliClient.BiliFavItem> items = bili.favItems(mediaId, page, 40);
+                    all.addAll(items);
+                    if (items.size() < 40) break;
+                }
+            } catch (Throwable e) {
+                Logger.warn("bili fav items failed: {}", e.toString());
+                post(() -> showToast("收藏夹内容加载失败：" + e.getMessage()));
+            }
+            final List<BiliClient.BiliFavItem> out = all;
+            post(() -> {
+                biliFavItems.set(out);
+                biliFavItemsLoading.set(false);
+            });
+        });
+    }
+
+    /** Plays the already-loaded folder from {@code index}. The whole folder becomes the
+     *  queue, so next/previous walk the rest of it — which is what "playing a folder"
+     *  means here, whether the tap landed on its first entry or its twentieth. */
+    public void playBiliFavItemAt(int index) {
+        List<BiliClient.BiliFavItem> items = biliFavItems.peek();
+        if (items == null || items.isEmpty()) {
+            showToast("这个收藏夹是空的");
+            return;
+        }
+        if (index < 0 || index >= items.size()) return;
+        List<Track> q = new ArrayList<>(items.size());
+        for (BiliClient.BiliFavItem item : items) q.add(toTrackFav(item));
+        Logger.info("bili fav folder \"{}\": {} videos queued from #{}",
+                biliFavItemsTitle.peek(), q.size(), index);
+        playQueue(q, index);
+    }
+
+    /** Adds and/or removes the playing video from B站 favourite folders, then
+     *  republishes the folder list so a picker shows the new state.
+     *
+     *  <p>The UI must go through here rather than calling the client: the write is a
+     *  network round trip (plus the bvid → avid hop) and belongs on the worker, never
+     *  on whatever thread the dialog is on. */
+    public void setBiliFavs(String bvid, List<Long> addMediaIds, List<Long> delMediaIds) {
+        if (bvid == null || bvid.isEmpty()) return;
+        if (!bili.canWrite()) {
+            post(() -> showToast("请先登录 B 站"));
+            return;
+        }
+        final List<Long> add = addMediaIds == null ? Collections.<Long>emptyList() : new ArrayList<>(addMediaIds);
+        final List<Long> del = delMediaIds == null ? Collections.<Long>emptyList() : new ArrayList<>(delMediaIds);
+        if (add.isEmpty() && del.isEmpty()) return;
+        worker.submit(() -> {
+            try {
+                long avid = bili.videoAid(bvid);
+                if (avid == 0L) {
+                    post(() -> showToast("没找到这个视频"));
+                    return;
+                }
+                bili.favDeal(avid, add, del);
+                Logger.info("bili favs updated for {}: +{} -{}", bvid, add.size(), del.size());
+                post(() -> showToast("收藏已更新"));
+                // Republish so an open picker reflects what just happened.
+                loadBiliFavFolders(avid);
+            } catch (Throwable e) {
+                Logger.warn("bili fav update failed: {}", e.toString());
+                post(() -> showToast("收藏失败：" + e.getMessage()));
+            }
+        });
+    }
+
+    /** A favourite-folder video as a real queue track. Its cid comes from the listing's
+     *  {@code ugc.first_cid}, so its first part can start without another round trip. */
+    private static Track toTrackFav(BiliClient.BiliFavItem item) {
+        Track t = new Track();
+        t.source = Track.Source.BILI;
+        t.biliBvid = item.bvid;
+        t.biliCid = item.firstCid;
+        t.title = item.title;
+        t.artist = item.author;
+        t.coverUrl = item.coverUrl;
+        t.durationMs = item.durationSeconds > 0 ? item.durationSeconds * 1000L : 0L;
+        return t;
+    }
+
+    /** A B站 video part as a real queue track. */
+    private Track toTrackBili(BiliClient.BiliVideo v, long cid, String partTitle) {
+        Track t = new Track();
+        t.source = Track.Source.BILI;
+        t.biliBvid = v.bvid;
+        t.biliCid = cid;
+        t.title = partTitle != null && !partTitle.isEmpty() ? partTitle : v.title;
+        t.artist = v.author;
+        t.coverUrl = v.coverUrl;
+        t.durationMs = v.durationSeconds > 0 ? v.durationSeconds * 1000L : 0L;
+        return t;
+    }
+
+    /** Play a B站 video the way the rest of the app expects: its parts become the
+     *  queue, so the media session, notification, position bookkeeping and the queue
+     *  list all treat it as an ordinary track instead of a detour. */
+    public void playBiliCollection(BiliClient.BiliVideo video) {
+        if (video == null || video.bvid == null || video.bvid.isEmpty()) return;
+        worker.submit(() -> {
+            try {
+                java.util.List<BiliClient.BiliPart> parts = bili.parts(video.bvid);
+                java.util.List<Track> q = new java.util.ArrayList<>();
+                if (parts.isEmpty()) {
+                    q.add(toTrackBili(video, video.cid, video.title));
+                } else {
+                    for (int i = 0; i < parts.size(); i++) {
+                        BiliClient.BiliPart part = parts.get(i);
+                        // An untitled part must not fall back to the video's own title:
+                        // every such part would then be labelled identically, leaving the
+                        // queue rows indistinguishable. P-numbers are what bilibili's own
+                        // player shows for these anyway.
+                        String label = part.title != null && !part.title.isEmpty()
+                                ? part.title : "P" + (i + 1);
+                        Track t = toTrackBili(video, part.cid, label);
+                        if (part.durationSeconds > 0) t.durationMs = part.durationSeconds * 1000L;
+                        q.add(t);
+                    }
+                }
+                onMain(() -> playQueue(q, 0));
+            } catch (Throwable e) {
+                Logger.warn("bili collection failed for {}: {}", video.bvid, e.getMessage());
+                post(() -> showToast("B 站视频加载失败：" + e.getMessage()));
+            }
+        });
+    }
+
+    /** BILI counterpart of resolveAndPlayNetease: ask for the progressive stream,
+     *  publish the video's own metadata through the normal now-playing properties,
+     *  then start it on the shared backend (which also owns the video surface, so
+     *  picture and sound stay on one clock). */
+    private void resolveAndPlayBili(Track t, int expectedIndex, long resumeMs,
+                                    long expectedCoverRevision) {
+        resolveWorker.submit(() -> {
+            try {
+                if (playIndex != expectedIndex) return;
+                final String url = bili.progressiveUrl(t.biliBvid, t.biliCid, 64);
+                if (url == null) {
+                    onMain(() -> skipUnplayable(expectedIndex, "B站取流失败"));
+                    return;
+                }
+                // onMain defers this body to the main looper, which puts it OUTSIDE
+                // the try/catch below: anything it throws (startBiliStream reaching
+                // the backend, publishing properties) would be an uncaught main-
+                // thread crash instead of the graceful skip the worker path gets.
+                // It therefore guards itself.
+                onMain(() -> {
+                    try {
+                        startBiliStream(t, url, expectedIndex, resumeMs, expectedCoverRevision);
+                    } catch (Throwable e) {
+                        Logger.warn("bili start failed for {}: {}", t.biliBvid, e.toString());
+                        skipUnplayable(expectedIndex, "B站播放失败");
+                    }
+                });
+            } catch (Throwable e) {
+                Logger.warn("bili resolve failed for {}: {}", t.biliBvid, e.getMessage());
+                onMain(() -> skipUnplayable(expectedIndex, "B站解析失败"));
+            }
+        });
+    }
+
+    /** Publish a resolved BILI stream's metadata and hand the url to the backend.
+     *  Main thread only — see {@link #resolveAndPlayBili}. */
+    private void startBiliStream(Track t, String url, int expectedIndex, long resumeMs,
+                                 long expectedCoverRevision) {
+        if (playIndex != expectedIndex) return;
+        t.streamUrl = url;
+        post(() -> {
+            title.set(orEmpty(t.title));
+            artist.set(orEmpty(t.artist));
+            album.set("哔哩哔哩");
+            playingArtistId.set(0L);
+            playingArtistIdsCsv.set("");
+            playingArtistNamesCsv.set("");
+            playingSongId.set(0L);
+            currentLiked.set(false);
+            currentLikeable.set(false);
+            coverUrl.set(coverFetchUrl(t, "512"));
+            durationMs.set(t.durationMs);
+            biliPlaying.set(true);
+            loading.set(false);
+        });
+        updateCover(t, expectedIndex, expectedCoverRevision);
+        playBackend(url, resumeMs);
+        playingIntent = true;
+        post(() -> playing.set(true));
+        notifyPlayback();
+        // The UP's chapters, for the marks on the full-screen progress bar. Fetched
+        // behind the stream (the picture is already coming up) and never awaited:
+        // most videos have none, so this must not delay anything.
+        final String bvid = t.biliBvid;
+        final long cid = t.biliCid;
+        final long chapterDurationMs = t.durationMs;
+        worker.submit(() -> {
+            List<Float> marks;
+            try {
+                marks = toChapterMarks(bili.chapters(bvid, cid), chapterDurationMs);
+            } catch (Throwable e) {
+                Logger.warn("bili chapters failed for {}: {}", bvid, e.getMessage());
+                marks = Collections.emptyList();
+            }
+            final List<Float> out = marks;
+            post(() -> { if (playIndex == expectedIndex) biliChapterMarks.set(out); });
+        });
+    }
+
+    /** Chapter start offsets as fractions of {@code durationMs} — the form the
+     *  progress bar draws from. The start of the bar (0) is skipped because it is
+     *  where the track already begins, as is any offset past the known duration
+     *  (a part whose length the listing under-reported). */
+    private static List<Float> toChapterMarks(List<BiliClient.BiliChapter> chapters,
+                                              long durationMs) {
+        if (chapters == null || chapters.isEmpty() || durationMs <= 0L) {
+            return Collections.emptyList();
+        }
+        List<Float> marks = new ArrayList<>(chapters.size());
+        for (BiliClient.BiliChapter c : chapters) {
+            if (c.fromMs <= 0L) continue;
+            float fraction = (float) ((double) c.fromMs / (double) durationMs);
+            if (fraction > 0f && fraction < 1f) marks.add(fraction);
+        }
+        return marks;
     }
 
     private static Track toTrack(NeteaseSong s) {
@@ -3753,6 +4429,13 @@ public final class PlayerController {
                 sb.append("{\"source\":\"").append(t.source).append('"');
                 if (t.neteaseId != 0) sb.append(",\"neteaseId\":").append(t.neteaseId);
                 if (t.customId != null) sb.append(",\"customId\":").append(jsonStr(t.customId));
+                // bvid + cid are the only handle a restored BILI entry has on its
+                // video: Saved without them it comes back as a track that can never
+                // be resolved.
+                if (t.biliBvid != null) {
+                    sb.append(",\"biliBvid\":").append(jsonStr(t.biliBvid));
+                    sb.append(",\"biliCid\":").append(t.biliCid);
+                }
                 sb.append(",\"title\":").append(jsonStr(t.title));
                 sb.append(",\"artist\":").append(jsonStr(t.artist));
                 if (t.artistId != 0) sb.append(",\"artistId\":").append(t.artistId);
@@ -3805,10 +4488,18 @@ public final class PlayerController {
                 com.google.gson.JsonObject o = el.getAsJsonObject();
                 Track t = new Track();
                 String src = o.has("source") ? o.get("source").getAsString() : "NETEASE";
+                // An unrecognised name must not fall through to NETEASE: that turned a
+                // saved BILI entry into a netease track with id 0, which then resolved
+                // against netease — one wasted round trip per entry — before being
+                // skipped, so a restored bili queue never played at all.
                 t.source = "LOCAL".equals(src) ? Track.Source.LOCAL
                         : "CUSTOM_API".equals(src) ? Track.Source.CUSTOM_API
+                        : "BILI".equals(src) ? Track.Source.BILI
                         : Track.Source.NETEASE;
                 t.neteaseId = o.has("neteaseId") ? o.get("neteaseId").getAsLong() : 0;
+                t.biliBvid = o.has("biliBvid") && !o.get("biliBvid").isJsonNull()
+                        ? o.get("biliBvid").getAsString() : null;
+                t.biliCid = o.has("biliCid") ? o.get("biliCid").getAsLong() : 0L;
                 t.customId  = o.has("customId")  && !o.get("customId").isJsonNull()  ? o.get("customId").getAsString()  : null;
                 t.title     = o.has("title")     && !o.get("title").isJsonNull()     ? o.get("title").getAsString()     : "";
                 t.artist    = o.has("artist")    && !o.get("artist").isJsonNull()    ? o.get("artist").getAsString()    : "";
@@ -3829,9 +4520,9 @@ public final class PlayerController {
                     // has a file to read and the now-playing card / SMTC keeps its art.
                     t.coverLocalPath = o.has("coverLocalPath") && !o.get("coverLocalPath").isJsonNull()
                             ? o.get("coverLocalPath").getAsString() : null;
-                } else if (t.source == Track.Source.CUSTOM_API) {
-                    // No netease-CDN thumbnail convention for a custom source — the
-                    // cover url doubles as its own thumbnail (matches CustomApiClient).
+                } else if (t.source == Track.Source.CUSTOM_API || t.source == Track.Source.BILI) {
+                    // Neither source follows netease's CDN resize convention — their
+                    // cover url doubles as its own list-row art.
                     t.coverThumbPath = t.coverUrl;
                 } else if (t.coverUrl != null && !t.coverUrl.isEmpty()) {
                     // NETEASE row art is a CDN thumbnail URL derived from coverUrl; the
@@ -3867,7 +4558,7 @@ public final class PlayerController {
                     playingArtistId.set(cur.artistId);
                     album.set(cur.album != null ? cur.album : "");
                     playingAlbumId.set(cur.albumId);
-                    coverUrl.set(thumbUrl(cur.coverUrl != null ? cur.coverUrl : "", "512"));
+                    coverUrl.set(coverFetchUrl(cur, "512"));
                     durationMs.set(cur.durationMs);
                     // So the progress bar shows the resume point before playback
                     // actually starts (toggle() only plays on the user's first tap).
@@ -4351,6 +5042,278 @@ public final class PlayerController {
         searchRows.set(rows);
     }
 
+    /** Artists the signed-in user follows, resolved once and kept in step by
+     *  {@link #toggleSearchArtistFollow()}. */
+    private final java.util.Set<Long> followedArtists =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private volatile boolean followedArtistsLoaded = false;
+    private volatile String currentArtistQuery = "";
+
+    /** Best artist match for a query, for the card pinned above the song results.
+     *  Runs on searchWorker so it coalesces with the song search the same
+     *  keystroke started, and publishes nothing when the query has already moved
+     *  on. */
+    public void searchArtist(String keyword) {
+        if (keyword == null || keyword.trim().isEmpty()) {
+            currentArtistQuery = "";
+            post(() -> {
+                searchArtistId.set(0L);
+                searchArtistName.set("");
+                searchArtistCoverPath.set("");
+                searchArtistFollowed.set(false);
+            });
+            return;
+        }
+        final String query = keyword.trim();
+        currentArtistQuery = query;
+        searchWorker.submit(() -> {
+            try {
+                List<NeteaseArtist> found = netease.searchArtists(query, 1);
+                final NeteaseArtist top = found.isEmpty() ? null : found.get(0);
+                final boolean followed = top != null && isArtistFollowed(top.id);
+                if (!query.equals(currentArtistQuery)) return;
+                post(() -> {
+                    if (!query.equals(currentArtistQuery)) return;
+                    searchArtistId.set(top == null ? 0L : top.id);
+                    searchArtistName.set(top == null || top.name == null ? "" : top.name);
+                    searchArtistCoverPath.set(top == null || top.coverUrl == null
+                            ? "" : thumbUrl(top.coverUrl, "256"));
+                    searchArtistFollowed.set(followed);
+                });
+            } catch (Throwable e) {
+                Logger.warn("artist search failed for {}: {}", query, e.getMessage());
+            }
+        });
+    }
+
+    /** Follow / unfollow the artist pinned in the search page. The button flips
+     *  immediately and flips back if the request is refused (not signed in, or
+     *  risk control), so it never claims a state the account doesn't have. */
+    public void toggleSearchArtistFollow() {
+        Long current = searchArtistId.peek();
+        final long artistId = current == null ? 0L : current;
+        if (artistId == 0L) return;
+        final boolean follow = !(searchArtistFollowed.peek() == true);
+        post(() -> searchArtistFollowed.set(follow));
+        searchWorker.submit(() -> {
+            boolean ok;
+            try {
+                ok = netease.artistFollow(artistId, follow);
+            } catch (Throwable e) {
+                Logger.warn("artist follow failed for {}: {}", artistId, e.getMessage());
+                ok = false;
+            }
+            if (ok) {
+                if (follow) followedArtists.add(artistId); else followedArtists.remove(artistId);
+                post(() -> showToast(follow ? "已关注该歌手" : "已取消关注"));
+            } else {
+                post(() -> {
+                    searchArtistFollowed.set(!follow);
+                    showToast(loggedIn.peek() ? "操作失败，请稍后重试" : "请先登录后再关注");
+                });
+            }
+        });
+    }
+
+    /** Whether the account follows {@code artistId}. The first call resolves the
+     *  followed-artist list; a failure leaves it unknown, which reads as "not
+     *  followed" rather than blocking the card. */
+    private boolean isArtistFollowed(long artistId) {
+        if (!followedArtistsLoaded) {
+            try {
+                followedArtists.addAll(netease.followedArtistIds(100));
+                followedArtistsLoaded = true;
+            } catch (Throwable e) {
+                Logger.warn("artist sublist failed: {}", e.getMessage());
+            }
+        }
+        return followedArtists.contains(artistId);
+    }
+
+    // ------------------------------------------------------------- Bilibili
+
+    /** Search bilibili for videos — the search page's second tab. */
+    public void searchBili(String keyword) {
+        final String query = keyword == null ? "" : keyword.trim();
+        if (query.isEmpty()) {
+            post(() -> {
+                biliSearchResults.set(Collections.<BiliClient.BiliVideo>emptyList());
+                biliSearchLoading.set(false);
+            });
+            return;
+        }
+        post(() -> { biliSearchLoading.set(true); biliError.set(""); });
+        worker.submit(() -> {
+            try {
+                List<BiliClient.BiliVideo> found = bili.searchVideo(query, 1);
+                post(() -> { biliSearchResults.set(found); biliSearchLoading.set(false); });
+            } catch (Throwable e) {
+                Logger.warn("bili search failed for {}: {}", query, e.getMessage());
+                post(() -> {
+                    biliSearchResults.set(Collections.<BiliClient.BiliVideo>emptyList());
+                    biliSearchLoading.set(false);
+                    biliError.set(e.getMessage() == null ? "B 站搜索失败" : e.getMessage());
+                });
+            }
+        });
+    }
+
+    /** TV QR login, step 1: fetch a QR and poll it until the phone confirms. Every
+     *  code the poll returns is published so the dialog can say what it is waiting
+     *  for (waiting for scan / scanned, confirm on the phone / expired). */
+    public void startBiliLogin() {
+        final long generation = biliLoginGeneration.incrementAndGet();
+        post(() -> { biliQrStatus.set(0); biliQrUrl.set(""); biliError.set(""); });
+        worker.submit(() -> {
+            BiliClient.QrCode qr;
+            try {
+                qr = bili.requestLoginQr();
+            } catch (Throwable e) {
+                Logger.warn("bili qr request failed: {}", e.getMessage());
+                post(() -> {
+                    if (biliLoginGeneration.get() != generation) return;
+                    biliQrStatus.set(4);
+                    biliError.set(e.getMessage() == null ? "获取二维码失败" : e.getMessage());
+                });
+                return;
+            }
+            post(() -> {
+                if (generation != biliLoginGeneration.get()) return;
+                biliQrUrl.set(qr.url);
+                biliQrStatus.set(1);
+            });
+            for (int attempt = 0; attempt < 60; attempt++) {
+                if (biliLoginGeneration.get() != generation) return;
+                try {
+                    Thread.sleep(3000L);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                int status;
+                try {
+                    status = bili.pollLoginQr(qr.authCode);
+                } catch (Throwable e) {
+                    Logger.warn("bili qr poll failed: {}", e.getMessage());
+                    continue;
+                }
+                if (status == 2) {
+                    post(() -> {
+                        if (generation != biliLoginGeneration.get()) return;
+                        biliQrStatus.set(3);
+                        biliQrUrl.set("");
+                        biliLoggedIn.set(bili.isLoggedIn());
+                    });
+                    return;
+                }
+                if (status == 3) {
+                    post(() -> {
+                        if (generation != biliLoginGeneration.get()) return;
+                        biliQrStatus.set(4);
+                        biliQrUrl.set("");
+                    });
+                    return;
+                }
+                if (status == 1) {
+                    post(() -> {
+                        if (generation == biliLoginGeneration.get()) biliQrStatus.set(2);
+                    });
+                }
+            }
+            post(() -> {
+                if (generation != biliLoginGeneration.get()) return;
+                biliQrStatus.set(4);
+                biliQrUrl.set("");
+            });
+        });
+    }
+
+    /** Closing the dialog stops the poll loop. */
+    public void cancelBiliLogin() {
+        biliLoginGeneration.incrementAndGet();
+        post(() -> { biliQrUrl.set(""); biliQrStatus.set(0); });
+    }
+
+    public void logoutBili() {
+        bili.logout();
+        post(() -> biliLoggedIn.set(false));
+    }
+
+    /** Play a B站 video's stream. Deliberately NOT a {@code Track}/{@code queue}
+     *  entry (the queue is persisted by source name, so adding an enum value would
+     *  ripple through the save format): this resolves the progressive stream and
+     *  hands it straight to the backend, and publishes the video's own title /
+     *  uploader / cover so the mini player shows what is playing. The surface and
+     *  the collection walk come in the next slice. */
+    public void playBiliVideo(dev.t1m3.qplayer.bili.BiliClient.BiliVideo video) {
+        if (video == null || video.bvid == null || video.bvid.isEmpty()) return;
+        post(() -> { loading.set(true); biliError.set(""); });
+        worker.submit(() -> {
+            try {
+                long cid = video.cid;
+                if (cid == 0L) {
+                    java.util.List<dev.t1m3.qplayer.bili.BiliClient.BiliPart> parts =
+                            bili.parts(video.bvid);
+                    if (!parts.isEmpty()) cid = parts.get(0).cid;
+                }
+                final String url = bili.progressiveUrl(video.bvid, cid, 64);
+                if (url == null) {
+                    post(() -> { loading.set(false); showToast("B 站取流失败"); });
+                    return;
+                }
+                byte[] cover = null;
+                if (video.coverUrl != null && !video.coverUrl.isEmpty()) {
+                    try {
+                        cover = downloadBytes(video.coverUrl, 8000);
+                    } catch (Throwable ignored) { }
+                }
+                final byte[] coverBytes = cover;
+                final long revision = coverRevision.incrementAndGet();
+                onMain(() -> {
+                    post(() -> {
+                        title.set(video.title == null ? "" : video.title);
+                        artist.set(video.author == null ? "" : video.author);
+                        album.set("哔哩哔哩");
+                        // The uploader is shown as the artist, but they are not a
+                        // netease artist: clearing the ids keeps the name a plain
+                        // label instead of a link into the artist page.
+                        playingArtistId.set(0L);
+                        playingArtistIdsCsv.set("");
+                        playingArtistNamesCsv.set("");
+                        playingAlbumId.set(0L);
+                        playingSongId.set(0L);
+                        currentLiked.set(false);
+                        currentLikeable.set(false);
+                        durationMs.set(video.durationSeconds * 1000L);
+                        positionMs.set(0L);
+                        if (coverBytes != null) applyCover(coverBytes, revision);
+                    });
+                    post(() -> biliPlaying.set(true));
+                    playBackend(url, 0L);
+                    playingIntent = true;
+                    post(() -> playing.set(true));
+                    notifyPlayback();
+                    post(() -> loading.set(false));
+                });
+            } catch (Throwable e) {
+                Logger.warn("bili play failed for {}: {}", video.bvid, e.getMessage());
+                post(() -> { loading.set(false); showToast("B 站播放失败：" + e.getMessage()); });
+            }
+        });
+    }
+
+    /** Restore a saved B站 session (the shell keeps the cookie header in settings,
+     *  because the core owns no storage of its own). */
+    public void restoreBiliSession(String cookieHeader) {
+        bili.setCookieHeader(cookieHeader);
+        post(() -> biliLoggedIn.set(bili.isLoggedIn()));
+    }
+
+    /** The client itself, for the playback stage (parts / playurl). */
+    public BiliClient biliClient() {
+        return bili;
+    }
+
     /** Route a click on the unified search list (SearchPage.qml) back to the
      *  right source-specific play method by {@link SearchRow#kind}. */
     public void playSearchRow(int rowIndex) {
@@ -4412,6 +5375,19 @@ public final class PlayerController {
                                  : url + "?param=" + size + "y" + size;
     }
 
+    /** The url to actually fetch {@code t}'s artwork from. Only Netease's CDN
+     *  understands the {@code ?param=WxH} resize suffix {@link #thumbUrl} appends;
+     *  a BILI cover lives on {@code i0.hdslb.com}, where an unknown query string is
+     *  at best ignored and at worst answered with a 4xx — which would leave the
+     *  now-playing card on no artwork at all. So a BILI cover is fetched as the
+     *  plain url the search result carried. All the cover paths (updateCover,
+     *  loadCoverBytes, coverDiskPath, the coverUrl property) must agree on this
+     *  string, since the disk cache is keyed by it. */
+    private static String coverFetchUrl(Track t, String size) {
+        if (t.source == Track.Source.BILI) return orEmpty(t.coverUrl);
+        return thumbUrl(t.coverUrl, size);
+    }
+
     /** Batch-build {@link NeteaseSong#coverThumbPath} for a list of songs. */
     private static void buildSongThumbs(List<NeteaseSong> songs, String size) {
         if (songs == null) return;
@@ -4422,9 +5398,9 @@ public final class PlayerController {
         }
     }
 
-    /** Handle a playback error from the audio backend. For netease tracks whose
-     *  cached streamUrl went stale (expired VIP link, region lock, etc.), clear
-     *  the cache and re-resolve. Everything else falls through to autoAdvance. */
+    /** Handle a playback error from the audio backend. Tracks whose stream url goes
+     *  stale mid-playback are re-resolved and resumed at the current position; anything
+     *  else falls through to autoAdvance. */
     private void onPlaybackError() {
         Track t = currentTrack();
         // Retry a netease track once: clear the (likely stale) url and re-resolve.
@@ -4442,6 +5418,26 @@ public final class PlayerController {
                     t.neteaseId, resumeMs);
             t.streamUrl = null;
             resolveAndPlayNetease(t, idx, resumeMs, coverRevision.get());
+            return;
+        }
+        // A B站 stream url carries a short-lived token, so a long video fails
+        // mid-playback once it expires — the address is the only thing that went
+        // stale, the position is still good. Re-resolve and carry on from where the
+        // audio was. Without this the error landed in skipUnplayable, which for a
+        // one-entry queue pauses outright: playback simply stopped until the user
+        // re-opened it, which is what a ~20 minute video ran into.
+        if (t != null && t.source == Track.Source.BILI && t.biliBvid != null
+                && !t.biliBvid.equals(biliErrorRetryBvid)) {
+            biliErrorRetryBvid = t.biliBvid;
+            int idx = playIndex;
+            long backendMs = Math.max(0L, backend.position());
+            Long shown = positionMs.peek();
+            long resumeMs = Math.max(backendMs, shown != null ? shown : 0L);
+            beginLyricClockLoad(resumeMs);
+            Logger.warn("playback error on bili {} cid {}, re-resolving the stream at {}ms",
+                    t.biliBvid, t.biliCid, resumeMs);
+            t.streamUrl = null;
+            resolveAndPlayBili(t, idx, resumeMs, coverRevision.get());
             return;
         }
         skipUnplayable(playIndex, "音频加载失败");
@@ -4597,6 +5593,7 @@ public final class PlayerController {
         artistLoading.set(true);
         artistName.set("");
         artistCoverPath.set("");
+        artistHeaderPath.set("");
         artistBriefDesc.set("");
         artistSongs.set(Collections.<NeteaseSong>emptyList());
         artistAlbums.set(Collections.<NeteaseAlbum>emptyList());
@@ -4614,6 +5611,9 @@ public final class PlayerController {
                     artistName.set(artist != null && artist.name != null ? artist.name : "");
                     artistCoverPath.set(artist != null && artist.coverUrl != null
                             ? thumbUrl(artist.coverUrl, "256") : "");
+                    artistHeaderPath.set(artist != null && artist.headerUrl != null
+                            && !artist.headerUrl.isEmpty()
+                            ? thumbUrl(artist.headerUrl, "1024") : "");
                     artistBriefDesc.set(artist != null && artist.briefDesc != null ? artist.briefDesc : "");
                     artistSongs.set(hotSongs);
                     artistAlbums.set(albums);
@@ -5028,7 +6028,7 @@ public final class PlayerController {
     public void generateAiPlaylist(String baseUrl, String apiKey, String model,
             String request, int count, boolean replaceQueue, boolean excludeLiked) {
         generateAiPlaylist(baseUrl, apiKey, model, request, count, replaceQueue, excludeLiked,
-                false, "", "", false);
+                false, "", "", false, false);
     }
 
     /** Same as the legacy overload, with optional user-provided web search. */
@@ -5036,21 +6036,54 @@ public final class PlayerController {
             String request, int count, boolean replaceQueue, boolean excludeLiked,
             boolean webSearchEnabled, String webSearchUrl, String webSearchKey,
             boolean forceKnowledge) {
+        generateAiPlaylist(baseUrl, apiKey, model, request, count, replaceQueue, excludeLiked,
+                webSearchEnabled, webSearchUrl, webSearchKey, forceKnowledge, false);
+    }
+
+    /** Same generation flow, with an explicit opt-in to use a small liked-song
+     * sample as a taste signal. This is used only by the long-press shortcut. */
+    public void generateAiPlaylist(String baseUrl, String apiKey, String model,
+            String request, int count, boolean replaceQueue, boolean excludeLiked,
+            boolean webSearchEnabled, String webSearchUrl, String webSearchKey,
+            boolean forceKnowledge, boolean useLikedPreferences) {
         if (count <= 0 || baseUrl == null || baseUrl.trim().isEmpty()) return;
-        aiLoading.set(true); aiError.set(""); aiProgress.set("正在读取我喜欢的音乐…"); aiSummary.set(""); aiDetails.set("");
+        aiLoading.set(true); aiError.set(""); aiProgress.set("正在准备 AI 推荐…"); aiSummary.set(""); aiDetails.set("");
         worker.execute(() -> {
             try {
-                NeteasePlaylist liked = null;
-                for (NeteasePlaylist p : myPlaylists.peek())
-                    if (p != null && ("我喜欢的音乐".equals(p.name) || !p.owned)) { liked = p; break; }
-                if (liked == null) throw new IllegalStateException("未找到我喜欢的音乐歌单");
-                List<NeteaseSong> samples = netease.playlistTracks(liked.id, 1000);
-                StringBuilder text = new StringBuilder();
+                // Normal requests deliberately do not read local playlists.
+                // The long-press taste shortcut opts into a bounded sample.
+                String text = "";
                 Set<Long> likedIds = new HashSet<>();
-                for (NeteaseSong s : samples) { if (s == null) continue; likedIds.add(s.id); text.append(s.name).append(" - ").append(s.artist).append('\n'); }
+                if (useLikedPreferences) {
+                    try {
+                        long likedPlaylistId = favoritePid;
+                        if (likedPlaylistId == 0L) {
+                            for (NeteasePlaylist p : myPlaylists.peek()) {
+                                if (p != null && "我喜欢的音乐".equals(p.name)) { likedPlaylistId = p.id; break; }
+                            }
+                        }
+                        if (likedPlaylistId != 0L) {
+                            List<NeteaseSong> taste = new ArrayList<>(netease.playlistTracks(likedPlaylistId, 200));
+                            Collections.shuffle(taste);
+                            if (taste.size() > 20) taste = new ArrayList<>(taste.subList(0, 20));
+                            StringBuilder tasteText = new StringBuilder();
+                            for (NeteaseSong s : taste) {
+                                if (s == null) continue;
+                                likedIds.add(s.id);
+                                if (tasteText.length() > 0) tasteText.append('\n');
+                                tasteText.append(s.name).append(" - ").append(s.artist);
+                            }
+                            text = tasteText.toString();
+                        }
+                    } catch (Throwable ignored) {
+                        // Taste analysis is best effort; AI can still respond.
+                    }
+                }
                 post(() -> aiProgress.set("正在让 AI 分析音乐风格并生成推荐…"));
                 String webContext = "";
-                boolean needsWebSearch = hasWebSearchIntentImproved(request);
+                // Always use the provider knowledge base; ordinary prompts
+                // must not be blocked by optional web-search configuration.
+                boolean needsWebSearch = false;
                 if (webSearchEnabled && needsWebSearch) {
                     if (webSearchKey == null || webSearchKey.trim().isEmpty()) {
                         if (forceKnowledge) webContext = "[KNOWLEDGE_BASE_FALLBACK] 未提供联网资料，请使用模型内置音乐知识库，必须输出可搜索的真实歌名和歌手。";
@@ -5070,15 +6103,32 @@ public final class PlayerController {
                         }
                     }
                 }
-                AiPlaylistResult rec = new AiClient(baseUrl, apiKey, model, 60000)
-                        .generatePlaylist(text.toString(), request, count, webContext);
+                AiPlaylistResult rec = null;
+                IOException lastAiError = null;
+                for (int attempt = 1; attempt <= 3 && rec == null; attempt++) {
+                    try {
+                        rec = new AiClient(baseUrl, apiKey, model, 60000)
+                                .generatePlaylist(text, request, count,
+                                        forceKnowledge
+                                                ? "[KNOWLEDGE_BASE_ONLY] 强制使用模型内置知识库，禁止联网搜索，输出真实可搜索歌曲。"
+                                                : "");
+                    } catch (IOException retryable) {
+                        lastAiError = retryable;
+                        final int retryNo = attempt;
+                        post(() -> aiProgress.set("AI 未返回有效歌曲，正在重试（" + retryNo + "/3）…"));
+                    }
+                }
+                if (rec == null) throw new IllegalStateException(
+                        lastAiError == null ? "AI 三次均未返回有效歌曲" : "AI 三次均未返回有效歌曲：" + lastAiError.getMessage());
+                final AiPlaylistResult finalRec = rec;
                 StringBuilder detail = new StringBuilder();
                 for (AiPlaylistResult.Song x : rec.songs) {
                     detail.append(x.title).append(" — ").append(x.artist);
                     if (x.reason != null && !x.reason.trim().isEmpty()) detail.append("\n  ").append(x.reason);
                     detail.append('\n');
                 }
-                post(() -> { aiSummary.set(rec.summary == null ? "" : rec.summary); aiDetails.set(detail.toString()); aiProgress.set("正在通过网易云搜索匹配真实歌曲…"); });
+                final String finalDetail = detail.toString();
+                post(() -> { aiSummary.set(finalRec.summary == null ? "" : finalRec.summary); aiDetails.set(finalDetail); aiProgress.set("正在通过网易云搜索匹配真实歌曲…"); });
                 List<NeteaseSong> resolved = new ArrayList<>();
                 for (AiPlaylistResult.Song x : rec.songs) {
                     List<NeteaseSong> candidates = netease.searchSongs(x.title + " " + x.artist, 30, 0);

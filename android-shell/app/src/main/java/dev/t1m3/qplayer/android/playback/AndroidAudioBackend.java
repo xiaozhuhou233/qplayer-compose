@@ -73,13 +73,20 @@ public final class AndroidAudioBackend implements AudioBackend {
         mp.setOnPreparedListener(this::onPrepared);
         mp.setOnCompletionListener(p -> onCompleted(p));
         mp.setOnErrorListener(this::onPlayerError);
+        mp.setOnVideoSizeChangedListener(this::onVideoSizeChanged);
         player = mp;
         try {
             Logger.info("MediaPlayer: setDataSource + prepareAsync");
             setDataSource(mp, src);
             mp.prepareAsync();
-        } catch (IOException | IllegalStateException e) {
-            Logger.error("MediaPlayer setDataSource failed: {}", e.getMessage());
+        } catch (IOException | IllegalStateException | IllegalArgumentException
+                 | SecurityException e) {
+            // IllegalArgumentException/SecurityException come from the (Context, Uri,
+            // headers) overload used for the bili CDN, and from a malformed string
+            // source; both are unchecked, so without them here they escape play()
+            // and — on the resolve path, which calls it from a deferred main-thread
+            // runnable — become an uncaught exception instead of a skipped track.
+            Logger.error("MediaPlayer setDataSource failed: {}", e.toString());
             releasePlayer();
         }
     }
@@ -88,12 +95,108 @@ public final class AndroidAudioBackend implements AudioBackend {
      *  overload — the {@code String} overload has no calling context to resolve it
      *  and prepareAsync then fails async with extra=MEDIA_ERROR_SYSTEM (0x80000000).
      *  http(s) urls and plain file paths take the string overload. */
+    private android.view.Surface videoSurface;
+    /** Source picture size as the player last reported it; 0 until a stream reports
+     *  one. The UI frames the video box from this so a 4:3 source keeps its 4:3 (and
+     *  full-screen fits rather than crops it). */
+    private volatile int videoWidth;
+    private volatile int videoHeight;
+    private volatile VideoSizeListener videoSizeListener;
+
+    /** Told the source picture size whenever it becomes known. Fires on the media
+     *  thread — hop to the main one before touching UI state. */
+    public interface VideoSizeListener {
+        void onVideoSize(int width, int height);
+    }
+
+    public void setVideoSizeListener(VideoSizeListener l) {
+        videoSizeListener = l;
+    }
+
+    /** Source picture width/height, or 0 until the stream reports them. */
+    public int videoWidth() {
+        return videoWidth;
+    }
+
+    public int videoHeight() {
+        return videoHeight;
+    }
+
+    /** Bilibili playback is video: the shell hands the SurfaceView's surface to the
+     *  very same MediaPlayer that owns the audio, so picture and sound share one
+     *  clock instead of being two decoders that have to be kept in sync.
+     *
+     *  <p>A recomposed or resized SurfaceView reports the SAME surface again, and
+     *  re-attaching it makes the platform re-render the picture — which reads as the
+     *  video replaying its last moment. So the player is only ever touched on a real
+     *  change. The picture is always fitted into the surface (the player's default
+     *  scaling mode), never cropped: the source's own aspect ratio is what the UI
+     *  frames, so a 4:3 video has to keep its 4:3. */
+    public synchronized void attachVideoSurface(android.view.Surface surface) {
+        if (surface == videoSurface) return;
+        videoSurface = surface;
+        MediaPlayer mp = player;
+        if (mp == null) return;
+        try {
+            mp.setSurface(surface);
+            // A Surface that arrives while playback is already running starts the video
+            // pipeline at the preceding sync frame, so the picture replayed the last
+            // second or two while the audio — a separate stream that never stopped —
+            // carried on. Landing it on the frame the audio is already at removes that
+            // catch-up. Skipped at the start of a track (position 0), where there is
+            // nothing to catch up to.
+            if (prepared && (wantPlay || mp.isPlaying())) {
+                int position = mp.getCurrentPosition();
+                if (position > 0) mp.seekTo(position, MediaPlayer.SEEK_CLOSEST);
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    /** Hand the surface back only if it is still the live one. A surface being torn
+     *  down must never blank a newer one that has already taken over: the outgoing
+     *  SurfaceView's {@code surfaceDestroyed} can arrive after the incoming one's
+     *  {@code surfaceCreated}, and a blind detach then left the player rendering
+     *  nowhere until the next attach — the picture appearing to jump back. */
+    public synchronized void detachVideoSurface(android.view.Surface surface) {
+        if (surface == null || videoSurface != surface) return;
+        videoSurface = null;
+        MediaPlayer mp = player;
+        if (mp != null) {
+            try {
+                mp.setSurface(null);
+            } catch (Throwable ignored) { }
+        }
+    }
+
+    private void onVideoSizeChanged(MediaPlayer mp, int width, int height) {
+        if (width <= 0 || height <= 0) return;
+        videoWidth = width;
+        videoHeight = height;
+        VideoSizeListener l = videoSizeListener;
+        if (l != null) l.onVideoSize(width, height);
+    }
+
     private void setDataSource(MediaPlayer mp, String src) throws IOException {
         if (src.startsWith("content://")) {
             mp.setDataSource(appContext, Uri.parse(src));
+        } else if (isBiliCdn(src)) {
+            // Bilibili's CDN answers 403 unless the request carries a bilibili
+            // Referer, so the bare stream URL never plays — the reference client
+            // sends these headers on every media request too.
+            java.util.Map<String, String> headers = new java.util.HashMap<>();
+            headers.put("Referer", "https://www.bilibili.com/");
+            headers.put("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+            mp.setDataSource(appContext, Uri.parse(src), headers);
         } else {
             mp.setDataSource(src);
         }
+    }
+
+    /** Hosts the bilibili streams are served from (upos mirrors + akamai). */
+    private static boolean isBiliCdn(String url) {
+        return url != null && (url.contains("bilivideo") || url.contains("bilibili")
+                || url.contains("akamaized") || url.contains("biliapi"));
     }
 
     private synchronized void onPrepared(MediaPlayer preparedPlayer) {
@@ -101,6 +204,10 @@ public final class AndroidAudioBackend implements AudioBackend {
         // media thread. Never let an old source start, publish onStarted, or apply its
         // state to the replacement MediaPlayer after a rapid track switch.
         if (player != preparedPlayer) return;
+        // The surface may have been attached before prepare finished.
+        if (videoSurface != null) {
+            try { preparedPlayer.setSurface(videoSurface); } catch (Throwable ignored) { }
+        }
         prepared = true;
         Logger.info("MediaPlayer: prepared, duration={}ms", preparedPlayer.getDuration());
         applyVolume();
@@ -328,5 +435,11 @@ public final class AndroidAudioBackend implements AudioBackend {
             player = null;
         }
         prepared = false;
+        // The next stream reports its own picture size; until then the UI must not
+        // keep framing the box to the previous video's shape.
+        videoWidth = 0;
+        videoHeight = 0;
+        VideoSizeListener sizeListener = videoSizeListener;
+        if (sizeListener != null) sizeListener.onVideoSize(0, 0);
     }
 }

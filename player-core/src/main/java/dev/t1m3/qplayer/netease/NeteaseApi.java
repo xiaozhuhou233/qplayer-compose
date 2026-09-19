@@ -68,6 +68,16 @@ final class NeteaseApi {
             "/api/playlist/subscribe");
     static final Endpoint PLAYLIST_UNSUBSCRIBE = checked(
             "/api/playlist/unsubscribe");
+    /** Artist counterpart of the playlist subscribe pair, same eapi+checkToken
+     *  transport (api-enhanced's artist_sub / artist_unsub). */
+    static final Endpoint ARTIST_SUBSCRIBE = checked(
+            "/api/artist/sub");
+    static final Endpoint ARTIST_UNSUBSCRIBE = checked(
+            "/api/artist/unsub");
+    /** The artists the signed-in user follows, so the follow button can show the
+     *  real state instead of assuming "not followed". */
+    static final Endpoint ARTIST_SUBLIST = endpoint(
+            "/api/artist/sublist", Transport.WEAPI);
     static final Endpoint LOGIN_STATUS = endpoint(
             "/api/w/nuser/account/get", Transport.WEAPI);
     static final Endpoint USER_PLAYLIST = endpoint(

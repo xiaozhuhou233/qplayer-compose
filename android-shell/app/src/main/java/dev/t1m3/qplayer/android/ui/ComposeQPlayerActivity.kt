@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.util.Log
 import android.os.Handler
 import android.os.Looper
+import android.view.HapticFeedbackConstants
 import android.util.LruCache
 import java.io.File
 import java.net.HttpURLConnection
@@ -25,6 +26,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.EnterTransition
@@ -34,7 +39,9 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
@@ -55,6 +62,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.scrollBy
@@ -120,6 +128,7 @@ import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
@@ -130,11 +139,17 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.ContainedLoadingIndicator
 import androidx.compose.material3.Divider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -142,6 +157,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MotionScheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
@@ -149,11 +165,18 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.darkColorScheme
@@ -161,6 +184,8 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.foundation.border
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -180,6 +205,7 @@ import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.input.pointer.pointerInput
@@ -188,9 +214,16 @@ import androidx.compose.ui.input.pointer.changedToDownIgnoreConsumed
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontFamily
@@ -207,7 +240,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.roundToInt
@@ -237,9 +275,7 @@ import dev.t1m3.qplayer.lyric.LyricTimeline
 import kotlinx.coroutines.delay
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
-import androidx.compose.foundation.Canvas
 import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.Stroke
 
@@ -284,6 +320,15 @@ class ComposeQPlayerActivity : ComponentActivity() {
         }
 
         val backend: AudioBackend = AndroidAudioBackend(this)
+        videoBackend = backend as? AndroidAudioBackend
+        videoBackend?.setVideoSizeListener { w, h ->
+            // Fires on the media thread; publish on the main one so this is an
+            // ordinary Compose state write.
+            runOnUiThread {
+                videoSourceWidth = w
+                videoSourceHeight = h
+            }
+        }
         reader = dev.t1m3.qplayer.android.library.AndroidMetadataReader(this)
         controller = sharedController ?: PlayerController(backend, reader).also {
             sharedController = it
@@ -394,9 +439,202 @@ class ComposeQPlayerActivity : ComponentActivity() {
     }
 }
 
-private enum class ComposeScreen { HOME, SEARCH, LIBRARY, LOCAL, PRIVATE_FM, QUEUE, SETTINGS, ACCOUNT, PLAYLIST, ALBUM, ARTIST, LYRICS }
+private enum class ComposeScreen { HOME, SEARCH, LIBRARY, LOCAL, PRIVATE_FM, QUEUE, SETTINGS, ACCOUNT, PLAYLIST, ALBUM, ARTIST, LYRICS, BILI_FAV, BILI_FAV_DETAIL }
 
 /** A screen plus the id needed to restore the exact drill-down destination. */
+/** The concrete MediaPlayer-backed backend, so the UI can hand a video surface
+ *  to the very player that owns the audio. */
+private var videoBackend: AndroidAudioBackend? = null
+
+/** Source picture size as the shared player last reported it (0 until a stream
+ *  reports one). The video box is framed from this so a 4:3 video keeps its 4:3
+ *  instead of being squeezed into a fixed 16:9 frame. */
+private var videoSourceWidth by mutableStateOf(0)
+private var videoSourceHeight by mutableStateOf(0)
+
+/** Where the picture must be drawn right now, in window coordinates, reported by
+ *  whichever slot is showing it (the mini player's cover, the detail page's box, or
+ *  the whole window in full-screen). One node at the app root draws it, so the player
+ *  is handed a Surface once and never rebuilds the picture — a fresh Surface makes it
+ *  start the video pipeline at the preceding sync frame, which is the "replays the
+ *  last second" seen whenever the picture moved between slots. */
+private var videoSlotRect by mutableStateOf<androidx.compose.ui.geometry.Rect?>(null)
+
+/** Priority of the slot that last reported, so a transition frame with both slots
+ *  composed cannot leave the lower one (the mini player) in charge. */
+private var videoSlotPriority by mutableStateOf(0)
+
+/** Set while a panel has to draw over the picture — the detail page's queue sheet is
+ *  the only one that overlaps it. The layer is parked off-window for that (see
+ *  [VideoLayer]) rather than dropped, so its Surface survives. */
+private var videoSlotObscured by mutableStateOf(false)
+
+/** Side padding the full-screen picture keeps, matching the horizontal padding the
+ *  rest of the app's pages use — the video never runs to the screen edge. */
+private const val VIDEO_SIDE_PADDING_DP = 24f
+
+/** The one B站 video surface for the whole window.
+ *
+ *  It lives in an overlay added above the Compose content (see
+ *  [installVideoOverlay]) and is afterwards only ever moved and resized — never
+ *  detached, never replaced by a second SurfaceView, and never put in another
+ *  window. That matters because detaching destroys the Surface: when a new one is
+ *  handed to the player it re-renders the stream from the preceding sync frame,
+ *  which is the "replays the last second" seen when the video changed box (opening
+ *  the player) or window (the full-screen dialog used to own a second SurfaceView of
+ *  its own). With one surface that is only ever resized, the same Surface object
+ *  stays attached and the picture is never rebuilt. */
+private var videoOverlay: android.widget.FrameLayout? = null
+private var videoSurfaceView: android.view.SurfaceView? = null
+private var videoOverlayParent: android.view.ViewGroup? = null
+private var videoOverlayOutline: android.view.ViewOutlineProvider? = null
+/** Box (window coordinates) the overlay must cover while not full-screen. */
+private var videoInlineBounds by mutableStateOf<androidx.compose.ui.geometry.Rect?>(null)
+/** True while the full-screen transport dialog is up. */
+private var videoFullscreen by mutableStateOf(false)
+
+/** Adds the video overlay to the window. Called once from onCreate, so the Surface
+ *  exists before any playback needs it. */
+private fun installVideoOverlay(activity: android.app.Activity) {
+    if (videoOverlay != null) return
+    val parent = activity.findViewById<android.view.ViewGroup>(android.R.id.content) ?: return
+    val radius = 32f * activity.resources.displayMetrics.density
+    val outline = object : android.view.ViewOutlineProvider() {
+        override fun getOutline(view: android.view.View, o: android.graphics.Outline) {
+            o.setRoundRect(0, 0, view.width, view.height, radius)
+        }
+    }
+    videoOverlayOutline = outline
+
+    val holder = android.widget.FrameLayout(activity).apply {
+        clipToOutline = true
+        outlineProvider = outline
+        visibility = android.view.View.GONE
+        // The picture is fitted inside this holder rather than stretched across it, so
+        // in full-screen the letterbox bars have to be painted here.
+        setBackgroundColor(android.graphics.Color.BLACK)
+    }
+    // The overlay sits above the Compose UI, so it — not the box drawn under it — is
+    // what a tap on the picture reaches. Double-tap switches full-screen; a single tap
+    // is deliberately left free (in full-screen it shows/hides the controls, and this
+    // view is under that dialog while it is up).
+    val gestures = android.view.GestureDetector(
+        activity,
+        object : android.view.GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(e: android.view.MotionEvent): Boolean = true
+
+            override fun onDoubleTap(e: android.view.MotionEvent): Boolean {
+                // Only ever enters: while full-screen is up the controls dialog is a
+                // window above this one, so it owns both gestures there.
+                if (!videoFullscreen) videoFullscreen = true
+                return true
+            }
+        }
+    )
+    holder.setOnTouchListener { _, event -> gestures.onTouchEvent(event) }
+    // The picture for B站 playback: the same MediaPlayer that owns the audio renders
+    // into this surface, so picture and sound share one clock.
+    //
+    // Kept at the default Z order on purpose. setZOrderOnTop(true) lifts the surface
+    // above everything the window paints, which also lifted it above the app's own
+    // panels — the queue sheet ended up behind a floating video. At the default order
+    // the surface shows through the window where this view is, and anything drawn
+    // over it (dialogs, the queue sheet) stays on top where it belongs.
+    val surface = android.view.SurfaceView(activity)
+    surface.holder.addCallback(object : android.view.SurfaceHolder.Callback {
+        override fun surfaceCreated(h: android.view.SurfaceHolder) {
+            videoBackend?.attachVideoSurface(h.surface)
+        }
+        override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, hh: Int) {
+            // Resizing keeps the same Surface (a new surface object is never handed
+            // over), so the backend sees no change and leaves the player alone.
+            videoBackend?.attachVideoSurface(h.surface)
+        }
+        override fun surfaceDestroyed(h: android.view.SurfaceHolder) {
+            videoBackend?.detachVideoSurface(h.surface)
+        }
+    })
+    holder.addView(surface, android.widget.FrameLayout.LayoutParams(
+        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+        android.view.ViewGroup.LayoutParams.MATCH_PARENT))
+    parent.addView(holder, android.widget.FrameLayout.LayoutParams(
+        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+        android.view.ViewGroup.LayoutParams.MATCH_PARENT))
+    videoOverlay = holder
+    videoSurfaceView = surface
+    videoOverlayParent = parent
+}
+
+/** Lays the overlay out: over the inline box, or across the whole window in
+ *  full-screen.
+ *
+ *  <p>The holder is what changes size/position — the SurfaceView inside it is never
+ *  detached, so the Surface it owns survives (see [videoOverlay]). The picture is
+ *  then given the source's own shape, centred, and never stretched or cropped: in
+ *  full-screen it is fitted inside the window minus the same side padding the rest of
+ *  the app uses, and the holder's black background supplies the bars. */
+private fun positionVideoOverlay(fullscreen: Boolean,
+                                 inline: androidx.compose.ui.geometry.Rect?,
+                                 aspect: Float) {
+    val holder = videoOverlay ?: return
+    val parent = videoOverlayParent ?: return
+    val picture = videoSurfaceView ?: return
+    val lp = holder.layoutParams as? android.widget.FrameLayout.LayoutParams ?: return
+    val pictureLp = picture.layoutParams as? android.widget.FrameLayout.LayoutParams ?: return
+    val safeAspect = if (aspect > 0.01f && aspect.isFinite()) aspect else 16f / 9f
+
+    if (fullscreen) {
+        // Full-screen is laid out as MATCH_PARENT so a rotation resize needs no help.
+        holder.outlineProvider = null
+        holder.clipToOutline = false
+        lp.width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+        lp.height = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+        lp.leftMargin = 0
+        lp.topMargin = 0
+        val pad = (VIDEO_SIDE_PADDING_DP * holder.resources.displayMetrics.density).toInt()
+        val availableW = (parent.width - 2 * pad).coerceAtLeast(1)
+        val availableH = parent.height.coerceAtLeast(1)
+        var w = availableW
+        var h = (w / safeAspect).toInt()
+        if (h > availableH) {
+            h = availableH
+            w = (h * safeAspect).toInt()
+        }
+        pictureLp.width = w.coerceAtLeast(1)
+        pictureLp.height = h.coerceAtLeast(1)
+        pictureLp.gravity = android.view.Gravity.CENTER
+    } else {
+        if (inline == null || inline.width <= 0f || inline.height <= 0f) {
+            holder.visibility = android.view.View.GONE
+            return
+        }
+        // boundsInWindow is in window coordinates; the overlay is a child of the
+        // window's content view, so subtract where that view starts.
+        val loc = IntArray(2)
+        parent.getLocationInWindow(loc)
+        holder.outlineProvider = videoOverlayOutline
+        holder.clipToOutline = true
+        lp.width = inline.width.toInt()
+        lp.height = inline.height.toInt()
+        lp.leftMargin = (inline.left - loc[0]).toInt()
+        lp.topMargin = (inline.top - loc[1]).toInt()
+        // The Compose box already has the source's shape, so the picture just fills it.
+        pictureLp.width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+        pictureLp.height = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+        pictureLp.gravity = android.view.Gravity.CENTER
+    }
+    picture.layoutParams = pictureLp
+    holder.visibility = android.view.View.VISIBLE
+    holder.layoutParams = lp
+}
+
+/** Takes the picture off screen. The Surface goes with it (the view is no longer
+ *  shown), so the backend also drops it — leaving the player with no video output,
+ *  which is what a detail page that is not open should look like. */
+private fun hideVideoOverlay() {
+    videoOverlay?.visibility = android.view.View.GONE
+}
+
 private data class ComposeRoute(
     val screen: ComposeScreen,
     val id: Long = 0L
@@ -407,7 +645,7 @@ private data class ComposeRoute(
 private val screenOrder = listOf(
     ComposeScreen.HOME, ComposeScreen.SEARCH, ComposeScreen.LIBRARY, ComposeScreen.LOCAL,
     ComposeScreen.QUEUE, ComposeScreen.SETTINGS, ComposeScreen.ACCOUNT, ComposeScreen.PLAYLIST,
-    ComposeScreen.ALBUM, ComposeScreen.ARTIST
+    ComposeScreen.ALBUM, ComposeScreen.ARTIST, ComposeScreen.BILI_FAV, ComposeScreen.BILI_FAV_DETAIL
 )
 
 private data class PlayerUiState(
@@ -419,6 +657,7 @@ private data class PlayerUiState(
     val artistNamesCsv: String = "",
     val album: String = "",
     val albumId: Long = 0L,
+    val songId: Long = 0L,
     val positionMs: Long = 0,
     /** Playback time adjusted by the lyric offset; used only by lyric rendering. */
     val lyricPositionMs: Long = 0,
@@ -480,6 +719,32 @@ private data class PlayerUiState(
     val albumYear: String = "",
     val albumTracks: List<NeteaseSong> = emptyList(),
     val albumLoading: Boolean = false,
+    val lyricsLoading: Boolean = false,
+    val artistHeaderPath: String = "",
+    val biliSearchResults: List<dev.t1m3.qplayer.bili.BiliClient.BiliVideo> = emptyList(),
+    val biliSearchLoading: Boolean = false,
+    val biliLoggedIn: Boolean = false,
+    val biliQrUrl: String = "",
+    val biliQrStatus: Int = 0,
+    val biliError: String = "",
+    val biliPlaying: Boolean = false,
+    val biliChapterMarks: List<Float> = emptyList(),
+    /** B站收藏夹列表（歌单页入口与收藏弹框共用）。 */
+    val biliFavFolders: List<dev.t1m3.qplayer.bili.BiliClient.BiliFavFolder> = emptyList(),
+    val biliFavLoading: Boolean = false,
+    /** 空列表时用来说明原因：未登录时接口返回 code:0 但 data:null，只能靠这条区分。 */
+    val biliFavError: String = "",
+    /** 当前打开的收藏夹内容。 */
+    val biliFavItems: List<dev.t1m3.qplayer.bili.BiliClient.BiliFavItem> = emptyList(),
+    val biliFavItemsLoading: Boolean = false,
+    val biliFavItemsTitle: String = "",
+    val searchArtistId: Long = 0L,
+    val searchArtistName: String = "",
+    val searchArtistCoverPath: String = "",
+    val searchArtistFollowed: Boolean = false,
+    val playlistLoading: Boolean = false,
+    val homeLoading: Boolean = false,
+    val searchLoading: Boolean = false,
     val coverBytes: ByteArray? = null,
     val coverPath: String? = null,
     val coverSeed: String = "",
@@ -607,6 +872,7 @@ private fun controllerState(controller: PlayerController, settings: SettingsCore
         artistNamesCsv = currentTrack?.artistNamesCsv ?: "",
         album = controller.album.peek() ?: "",
         albumId = controller.playingAlbumId.peek() ?: 0L,
+        songId = controller.playingSongId.peek() ?: 0L,
         positionMs = livePositionMs,
         lyricPositionMs = liveLyricPositionMs,
         durationMs = controller.durationMs.peek() ?: 0L,
@@ -684,12 +950,35 @@ private fun controllerState(controller: PlayerController, settings: SettingsCore
         albumYear = controller.albumPublishYear.peek() ?: "",
         albumTracks = cached("albumTracks", controller.albumTracks.peek()),
         albumLoading = controller.albumLoading.peek() == true,
+        lyricsLoading = controller.lyricsLoading.peek() == true,
+        artistHeaderPath = controller.artistHeaderPath.peek() ?: "",
+        biliSearchResults = controller.biliSearchResults.peek() ?: emptyList(),
+        biliSearchLoading = controller.biliSearchLoading.peek() == true,
+        biliLoggedIn = controller.biliLoggedIn.peek() == true,
+        biliQrUrl = controller.biliQrUrl.peek() ?: "",
+        biliQrStatus = controller.biliQrStatus.peek() ?: 0,
+        biliError = controller.biliError.peek() ?: "",
+        biliPlaying = controller.biliPlaying.peek() == true,
+        biliChapterMarks = controller.biliChapterMarks.peek() ?: emptyList(),
+        biliFavFolders = controller.biliFavFolders.peek() ?: emptyList(),
+        biliFavLoading = controller.biliFavLoading.peek() == true,
+        biliFavError = controller.biliFavError.peek() ?: "",
+        biliFavItems = controller.biliFavItems.peek() ?: emptyList(),
+        biliFavItemsLoading = controller.biliFavItemsLoading.peek() == true,
+        biliFavItemsTitle = controller.biliFavItemsTitle.peek() ?: "",
+        searchArtistId = controller.searchArtistId.peek() ?: 0L,
+        searchArtistName = controller.searchArtistName.peek() ?: "",
+        searchArtistCoverPath = controller.searchArtistCoverPath.peek() ?: "",
+        searchArtistFollowed = controller.searchArtistFollowed.peek() == true,
+        playlistLoading = controller.playlistLoading.peek() == true,
+        homeLoading = controller.homeLoading.peek() == true,
+        searchLoading = controller.searchLoading.peek() == true,
         dark = settings.resolvedDarkValue()
     )
 }
 
 @Composable
-private fun rememberQPlayerColorScheme(seed: String, dark: Boolean, enabled: Boolean): ColorScheme {
+private fun rememberQPlayerColorScheme(seed: String, dark: Boolean, enabled: Boolean, paletteStyle: Int = 0, paletteChroma: Int = 1, settingsRevision: Int = 0): ColorScheme {
     val fallback = ComposeColor(0xFF6750A4)
     val target = remember(seed, enabled) {
         if (enabled) parseSeedColor(seed) ?: fallback else fallback
@@ -699,7 +988,7 @@ private fun rememberQPlayerColorScheme(seed: String, dark: Boolean, enabled: Boo
         animationSpec = tween(durationMillis = 700),
         label = "dynamic_seed_color"
     )
-    return remember(primary, dark) { qPlayerColorScheme(primary, dark) }
+    return remember(primary, dark, paletteStyle, paletteChroma, settingsRevision) { qPlayerColorScheme(primary, dark, paletteStyle, paletteChroma) }
 }
 
 private fun parseSeedColor(seed: String): ComposeColor? {
@@ -877,20 +1166,25 @@ private fun lchColor(tone: Float, chroma: Float, hue: Float): ComposeColor {
     return at(lo) ?: ComposeColor(0xFF808080)
 }
 
-private fun qPlayerColorScheme(seed: ComposeColor, dark: Boolean): ColorScheme {
+private fun qPlayerColorScheme(seed: ComposeColor, dark: Boolean, paletteStyle: Int = 0, paletteChroma: Int = 1): ColorScheme {
     val hue = seedLch(seed)[2]
+    val hsv = FloatArray(3)
+    Color.RGBToHSV((seed.red * 255f).toInt(), (seed.green * 255f).toInt(), (seed.blue * 255f).toInt(), hsv)
+    val neutralCover = hsv[1] < 0.08f
     // Secondary keeps the SOURCE hue (as real M3 does). Rotating it +24° in
     // Lab space jumps hue families — a violet cover seed (H≈305°) lands its
     // containers in hot pink (H≈329°), which is exactly the pink nav pill seen
     // on device. Tertiary keeps the +60° expressive offset (lyric accent only).
-    val hue2 = hue
-    val hue3 = (hue + 60f) % 360f
+    val hue2 = when (paletteStyle) { 2 -> (hue + 30f) % 360f; 3 -> (hue + 18f) % 360f; else -> hue }
+    val hue3 = when (paletteStyle) { 1 -> (hue + 90f) % 360f; 2 -> (hue + 60f) % 360f; 3 -> (hue + 120f) % 360f; else -> (hue + 60f) % 360f }
+    val boost = when (paletteStyle) { 0 -> 0.85f; 1 -> 1.25f; 2 -> 1.05f; else -> 1.15f } * (0.75f + paletteChroma * 0.25f)
     // Expressive chroma: punchy accents, neutral surfaces that still carry the hue.
-    fun p(tone: Float) = lchColor(tone, 48f, hue)
-    fun s(tone: Float) = lchColor(tone, 24f, hue2)
-    fun tr(tone: Float) = lchColor(tone, 32f, hue3)
-    fun n(tone: Float) = lchColor(tone, 8f, hue)
-    fun nv(tone: Float) = lchColor(tone, 12f, hue)
+    fun chroma(value: Float) = if (neutralCover) 0f else value
+    fun p(tone: Float) = lchColor(tone, chroma(48f * boost), hue)
+    fun s(tone: Float) = lchColor(tone, chroma((if (paletteStyle == 3) 32f else 24f) * boost), hue2)
+    fun tr(tone: Float) = lchColor(tone, chroma((if (paletteStyle == 1) 40f else 32f) * boost), hue3)
+    fun n(tone: Float) = lchColor(tone, chroma((if (paletteStyle == 2) 10f else 8f) * boost), hue)
+    fun nv(tone: Float) = lchColor(tone, chroma(12f * boost), hue)
     return if (dark) {
         darkColorScheme(
             primary = p(80f), onPrimary = p(20f),
@@ -951,6 +1245,37 @@ private fun rememberPlayerState(controller: PlayerController, settings: Settings
 }
 
 private fun pageTransitionTransform(preset: Int, forward: Boolean): ContentTransform {
+    // Ported from legado-with-MD3's MainActivity NavDisplay transitionSpec: only one
+    // layer translates (the incoming page crosses a full width) while the other
+    // moves a quarter and fades, and the motion is slow (480ms slide / 360ms fade)
+    // so each frame covers less distance — a dropped frame stops being visible,
+    // which is what "not stuttering" actually comes down to.
+    val fosin = androidx.compose.animation.core.FastOutSlowInEasing
+    val linOut = androidx.compose.animation.core.LinearOutSlowInEasing
+    if (forward) {
+        return (slideInHorizontally(
+            animationSpec = tween(480, easing = fosin),
+            initialOffsetX = { it }
+        ) + fadeIn(tween(360, easing = linOut))).togetherWith(
+            slideOutHorizontally(
+                animationSpec = tween(480, easing = fosin),
+                targetOffsetX = { it / 4 }
+            ) + fadeOut(tween(360, easing = linOut))
+        )
+    }
+    // Pop: the page being returned to comes back from a quarter away, while the
+    // page being left shrinks and fades.
+    return (slideInHorizontally(
+        animationSpec = tween(480, easing = fosin),
+        initialOffsetX = { -it / 4 }
+    ) + fadeIn(tween(360, easing = linOut))).togetherWith(
+        scaleOut(targetScale = 0.8f, animationSpec = tween(480, easing = fosin)) +
+            fadeOut(tween(360))
+    )
+}
+
+@Suppress("unused")
+private fun legacyPageTransitionTransform(preset: Int, forward: Boolean): ContentTransform {
     val easing = androidx.compose.animation.core.FastOutSlowInEasing
     return when (preset) {
         SettingsCatalog.PAGE_TRANSITION_FADE -> {
@@ -1000,19 +1325,115 @@ private fun pageTransitionTransform(preset: Int, forward: Boolean): ContentTrans
     }
 }
 
-private const val DETAIL_MOTION_MS = 300
+private const val DETAIL_MOTION_MS = 360
 private const val DETAIL_META_DELAY_MS = 60L
 private const val DETAIL_CONTROLS_DELAY_MS = 110L
 private const val DETAIL_EXIT_TOTAL_MS = DETAIL_MOTION_MS.toLong()
 
-@OptIn(androidx.compose.animation.ExperimentalAnimationApi::class)
+/** How long the 定时条 must be left alone before its countdown starts. */
+private const val SLEEP_SETTLE_MS = 3_500L
+
+/** Flight time of the shared container/cover, per the Material container transform. */
+private const val SHARED_MOTION_MS = 460
+
+/** Pages joined by a shared cover/container: their page transition stays a plain
+ *  fade, because the official guidance is to keep everything that is not the
+ *  shared element simple instead of running a second full-screen animation. */
+private fun sharedCoverRoute(screen: ComposeScreen): Boolean =
+    screen == ComposeScreen.ARTIST ||
+        screen == ComposeScreen.ALBUM ||
+        screen == ComposeScreen.PLAYLIST
+
+@OptIn(
+    androidx.compose.animation.ExperimentalAnimationApi::class,
+    ExperimentalSharedTransitionApi::class,
+    ExperimentalMaterial3ExpressiveApi::class,
+)
 @Composable
 private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCore) {
     val state = rememberPlayerState(controller, settings)
+    var sleepMinutes by remember { mutableIntStateOf(0) }
+    var sleepRemaining by remember { mutableLongStateOf(0L) }
+    // False while the countdown is still waiting for the user to finish sliding
+    // the 定时条, so the control can show that it is holding, not counting.
+    var sleepArmed by remember { mutableStateOf(false) }
+    LaunchedEffect(sleepMinutes) {
+        if (sleepMinutes <= 0) { sleepRemaining = 0L; sleepArmed = false; return@LaunchedEffect }
+        // Show the chosen duration immediately, but do not start counting yet.
+        // Every slider move changes sleepMinutes and therefore restarts this
+        // effect, so the settle delay below can only expire once the slider has
+        // been left alone for SLEEP_SETTLE_MS — each new slide re-arms it. The
+        // countdown also always starts from the value that was picked last
+        // instead of continuing from a stale remainder of an earlier setting.
+        sleepRemaining = sleepMinutes * 60L
+        sleepArmed = false
+        delay(SLEEP_SETTLE_MS)
+        sleepArmed = true
+        var left = sleepRemaining
+        while (left > 0L) {
+            sleepRemaining = left
+            delay(1000L)
+            left--
+        }
+        // The controller has no pause() — only toggle(). Guarding on the actual
+        // playing state keeps "到时自动暂停" a pause: a blind toggle() would
+        // *start* playback when the user had already paused by hand before the
+        // countdown expired.
+        if (controller.playing.peek() == true) controller.toggle()
+        sleepMinutes = 0
+        sleepRemaining = 0L
+        sleepArmed = false
+    }
+    // B站 session survives restarts: the core keeps the cookies in memory, so the
+    // shell stores the cookie header in settings and hands it back on launch.
+    // The cookie lives in a file next to the app's own data: a custom key in the
+    // settings store is dropped on load because it is not part of the settings
+    // catalog, which is why the login did not survive a restart.
+    val biliContext = LocalContext.current
+    val biliCookieFile = remember { java.io.File(biliContext.filesDir, "bili_cookies.txt") }
+    LaunchedEffect(Unit) {
+        val saved = runCatching { biliCookieFile.takeIf { it.exists() }?.readText() }.getOrNull()
+        if (!saved.isNullOrBlank()) controller.restoreBiliSession(saved)
+    }
+    LaunchedEffect(state.biliLoggedIn) {
+        if (state.biliLoggedIn) {
+            runCatching { biliCookieFile.writeText(controller.biliClient().cookieHeader()) }
+        }
+    }
+    // SettingsCore is also used by the legacy QML settings bridge and its
+    // values are not Compose snapshot state.  Observe the small settings
+    // surface used by the theme so palette changes are visible immediately,
+    // without requiring a route change or activity restart.
+    var paletteRevision by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(250)
+            paletteRevision++
+        }
+    }
     var navigationStack by remember {
         mutableStateOf(listOf(ComposeRoute(ComposeScreen.HOME)))
     }
     var loginOpen by remember { mutableStateOf(false) }
+    // The card the user just tapped: its cover is the same bitmapped URL the
+    // detail page will want, so handing it over means the shared element flies
+    // with real artwork instead of an empty placeholder (and nothing re-loads on
+    // landing).
+    var openedAlbum by remember { mutableStateOf<Pair<Long, String>?>(null) }
+    // Same hand-off for playlists: the row's own thumbnail is the bitmap the detail
+    // page wants first, so the shared cover flies with real artwork instead of the
+    // empty placeholder the page shows until the core publishes its cover path.
+    var openedPlaylist by remember { mutableStateOf<Pair<Long, String>?>(null) }
+    var miniPlayerVisible by remember { mutableStateOf(true) }
+    val miniScrollConnection = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (available.y < -1f) miniPlayerVisible = false
+                else if (available.y > 1f) miniPlayerVisible = true
+                return Offset.Zero
+            }
+        }
+    }
     // True while the player detail page is on its way out. The page reads it to
     // play its own entrance animation backwards, so leaving looks like the
     // entrance running in reverse instead of the page sliding away intact.
@@ -1072,29 +1493,64 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
     val scheme = rememberQPlayerColorScheme(
         seed = state.coverSeed,
         dark = state.dark,
-        enabled = settings.bool("monet")
+        enabled = settings.bool("monet"),
+        paletteStyle = settings.intOf("paletteStyle").coerceIn(0, 3),
+        paletteChroma = settings.intOf("paletteChroma").coerceIn(0, 2),
+        settingsRevision = paletteRevision
     )
-    MaterialTheme(colorScheme = scheme) {
+    // Same as legado's LegadoTheme: the official expressive motion scheme drives
+    // every Material component (sheets, menus, buttons) instead of per-call specs.
+    MaterialTheme(
+        colorScheme = scheme,
+        motionScheme = MotionScheme.expressive()
+    ) {
         Surface(modifier = Modifier.fillMaxSize(), color = scheme.background) {
+            // Official shared-element host, wrapping the whole navigation (Scaffold
+            // included) so a container flying between pages is composited above the
+            // bottom navigation and the mini player instead of being cut by them.
+            SharedTransitionLayout {
+            val sharedTransitionScope = this
+            // The row that flew away gets its text back once the flight is over —
+            // otherwise its title would stay hidden until the next tap.
+            LaunchedEffect(sharedTransitionScope.isTransitionActive) {
+                if (!sharedTransitionScope.isTransitionActive) leavingCoverKey = null
+            }
             AnimatedContent(
                 modifier = Modifier.fillMaxSize(),
                 targetState = route.screen == ComposeScreen.LYRICS && !detailClosing,
                 transitionSpec = {
+                    val motion = tween<Float>(
+                        durationMillis = DETAIL_MOTION_MS,
+                        easing = androidx.compose.animation.core.FastOutSlowInEasing
+                    )
                     if (targetState && !initialState) {
+                        // The detail page grows out of the same bottom zone as
+                        // the MiniPlayer.  Scale and translation share one
+                        // clock, so the cover/container do not appear as two
+                        // unrelated page transitions.
                         (slideInVertically(
-                            initialOffsetY = { it },
+                            initialOffsetY = { fullHeight -> fullHeight },
                             animationSpec = tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing)
-                        ) + fadeIn(tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing)))
-                            .togetherWith(fadeOut(tween(220)))
+                        ) + scaleIn(
+                            initialScale = 0.92f,
+                            transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 1f),
+                            animationSpec = motion
+                        ) + fadeIn(motion)).togetherWith(
+                            fadeOut(tween(DETAIL_MOTION_MS / 2))
+                        )
                     } else {
-                        // Exact reverse of the detail entrance: the detail
-                        // page travels back down while the underlying route
-                        // fades back in. Avoid a second, unrelated scale step.
-                        fadeIn(tween(220)).togetherWith(
+                        // Exact reverse: the detail surface contracts toward
+                        // the MiniPlayer anchor while the base surface fades
+                        // in underneath it.
+                        fadeIn(motion).togetherWith(
                             slideOutVertically(
-                                targetOffsetY = { it },
+                                targetOffsetY = { fullHeight -> fullHeight },
                                 animationSpec = tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing)
-                            ) + fadeOut(tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+                            ) + scaleOut(
+                                targetScale = 0.92f,
+                                transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 1f),
+                                animationSpec = motion
+                            ) + fadeOut(motion)
                         )
                     }
                 },
@@ -1121,7 +1577,11 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                 }
                             },
                             close = ::closeDetail,
-                            closing = detailClosing
+                            closing = detailClosing,
+                            sleepMinutes = sleepMinutes,
+                            sleepRemaining = sleepRemaining,
+                            sleepArmed = sleepArmed,
+                            onSleepMinutesChanged = { sleepMinutes = it }
                         )
                     }
                 } else {
@@ -1164,7 +1624,9 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                             }
                         }
                     ) { padding ->
-                    Box(Modifier.fillMaxSize().padding(padding)) {
+                    Box(Modifier.fillMaxSize().padding(padding).nestedScroll(miniScrollConnection)) {
+                        // Official shared-element API: the layout owns the overlay and
+                        // the two scopes that a screen needs to bind an element.
                         AnimatedContent(
                             modifier = Modifier.fillMaxSize(),
                             targetState = route,
@@ -1172,16 +1634,39 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                 // Restore the shared page-transition setting used by
                                 // the original QML shell. Lyrics keeps its own
                                 // player-sheet animation above.
-                                val forward = screenOrder.indexOf(targetState.screen) >= screenOrder.indexOf(initialState.screen)
-                                pageTransitionTransform(pageTransitionPreset, forward)
+                                if (sharedCoverRoute(targetState.screen) || sharedCoverRoute(initialState.screen)) {
+                                    if (sharedCoverRoute(targetState.screen)) {
+                                        // Opening: the page's own content stays invisible
+                                        // for the first ~60% of the container's 450ms
+                                        // expansion, then fades in over 150ms with a
+                                        // slight rise — so nothing is ever stretched or
+                                        // half-printed over the list it came from.
+                                        (fadeIn(tween(150, delayMillis = 270)) +
+                                            slideInVertically(
+                                                animationSpec = tween(150, delayMillis = 270),
+                                                initialOffsetY = { it / 28 }
+                                            )) togetherWith fadeOut(tween(120))
+                                    } else {
+                                        // Going back: the list fades straight in while
+                                        // the detail page leaves early, which is the
+                                        // entrance played in reverse.
+                                        fadeIn(tween(220)) togetherWith fadeOut(tween(140))
+                                    }
+                                } else {
+                                    val forward = screenOrder.indexOf(targetState.screen) >= screenOrder.indexOf(initialState.screen)
+                                    pageTransitionTransform(pageTransitionPreset, forward)
+                                }
                             },
                             label = "page_transition"
                         ) { visibleRoute ->
                             when (visibleRoute.screen) {
                                 ComposeScreen.HOME -> HomeScreen(
                                     state = state,
-                                    openPlaylist = { id ->
+                                    sharedTransitionScope = sharedTransitionScope,
+                                    animatedVisibilityScope = this,
+                                    openPlaylist = { id, cover ->
                                         controller.openPlaylist(id)
+                                        openedPlaylist = id to cover
                                         navigateTo(ComposeRoute(ComposeScreen.PLAYLIST, id))
                                     },
                                     playRecommendation = { index -> controller.playRecommendation(index) },
@@ -1189,25 +1674,83 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                     controller = controller,
                                     settings = settings
                                 )
-                                ComposeScreen.SEARCH -> SearchScreen(state, controller)
+                                ComposeScreen.SEARCH -> SearchScreen(
+                                    state = state,
+                                    controller = controller,
+                                    sharedTransitionScope = sharedTransitionScope,
+                                    animatedVisibilityScope = this
+                                ) { id ->
+                                    if (id != 0L) {
+                                        controller.openArtist(id)
+                                        navigateTo(ComposeRoute(ComposeScreen.ARTIST, id))
+                                    }
+                                }
                                 ComposeScreen.LIBRARY -> LibraryScreen(
                                     state = state,
-                                    openLogin = { loginOpen = true }
-                                ) { id ->
+                                    sharedTransitionScope = sharedTransitionScope,
+                                    animatedVisibilityScope = this,
+                                    openLogin = { loginOpen = true },
+                                    openBiliFav = {
+                                        navigateTo(ComposeRoute(ComposeScreen.BILI_FAV))
+                                    },
+                                    openPlaylist = { id, cover ->
                                     controller.openPlaylist(id)
+                                    openedPlaylist = id to cover
                                     navigateTo(ComposeRoute(ComposeScreen.PLAYLIST, id))
-                                }
+                                    },
+                                    controller = controller
+                                )
                                 ComposeScreen.LOCAL -> LocalScreen(state, controller)
-                                ComposeScreen.QUEUE -> QueueScreen(state, controller)
+                                ComposeScreen.QUEUE -> QueueScreen(state, controller, sleepMinutes, sleepRemaining, sleepArmed) { sleepMinutes = it }
                                 ComposeScreen.SETTINGS -> SettingsScreen(settings, controller)
-                                ComposeScreen.ACCOUNT -> AccountScreen(state)
-                                ComposeScreen.PLAYLIST -> PlaylistScreen(state, controller)
-                                ComposeScreen.ALBUM -> AlbumScreen(state, controller)
+                                ComposeScreen.ACCOUNT -> AccountScreen(state, controller)
+                                ComposeScreen.BILI_FAV -> BiliFavFoldersScreen(
+                                    state = state,
+                                    controller = controller,
+                                    onOpen = { mediaId ->
+                                        // The route only carries the id; the title rides
+                                        // along separately so the content page can label
+                                        // its header and its load call.
+                                        biliFavDetailTitle = state.biliFavFolders
+                                            .firstOrNull { it.mediaId == mediaId }
+                                            ?.title.orEmpty()
+                                        navigateTo(ComposeRoute(ComposeScreen.BILI_FAV_DETAIL, mediaId))
+                                    }
+                                )
+                                ComposeScreen.BILI_FAV_DETAIL -> BiliFavItemsScreen(
+                                    state = state,
+                                    controller = controller,
+                                    mediaId = visibleRoute.id
+                                )
+                                ComposeScreen.PLAYLIST -> PlaylistScreen(
+                                    state = state,
+                                    controller = controller,
+                                    playlistId = visibleRoute.id,
+                                    fallbackCoverPath = openedPlaylist
+                                        ?.takeIf { it.first == visibleRoute.id }
+                                        ?.second.orEmpty(),
+                                    sharedTransitionScope = sharedTransitionScope,
+                                    animatedVisibilityScope = this
+                                )
+                                ComposeScreen.ALBUM -> AlbumScreen(
+                                    state = state,
+                                    controller = controller,
+                                    albumId = visibleRoute.id,
+                                    fallbackCoverPath = openedAlbum
+                                        ?.takeIf { it.first == visibleRoute.id }
+                                        ?.second.orEmpty(),
+                                    sharedTransitionScope = sharedTransitionScope,
+                                    animatedVisibilityScope = this
+                                )
                                 ComposeScreen.ARTIST -> ArtistScreen(
                                     state = state,
                                     controller = controller,
-                                    openAlbum = { id ->
+                                    artistId = visibleRoute.id,
+                                    sharedTransitionScope = sharedTransitionScope,
+                                    animatedVisibilityScope = this,
+                                    openAlbum = { id, cover ->
                                         controller.openAlbum(id)
+                                        openedAlbum = id to cover
                                         navigateTo(ComposeRoute(ComposeScreen.ALBUM, id))
                                     }
                                 )
@@ -1228,7 +1771,7 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                 // The player strip belongs to the content
                                 // screens; the settings page is a pure form and
                                 // must not carry it.
-                                visible = state.title.isNotBlank() &&
+                                visible = miniPlayerVisible && state.title.isNotBlank() &&
                                     screen != ComposeScreen.SETTINGS,
                                 enter = slideInVertically { it } + fadeIn(tween(300)),
                                 exit = slideOutVertically { it } + fadeOut(tween(220))
@@ -1274,6 +1817,10 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                 }
             }
         }
+        }
+        // Drawn last among the app's own layers: above every screen and the mini player
+        // strip, below the login dialog. This is the app's only video node.
+        VideoLayer(state = state, controller = controller)
         if (loginOpen) LoginDialog(controller, state) { loginOpen = false }
     }
 }
@@ -1290,6 +1837,7 @@ private fun ComposeTopBar(
     onSettings: () -> Unit,
     onAccount: () -> Unit
 ) {
+    val haptic = LocalView.current
     val title = when (route.screen) {
         ComposeScreen.HOME -> "推荐"
         ComposeScreen.SEARCH -> "搜索"
@@ -1311,19 +1859,19 @@ private fun ComposeTopBar(
         title = { Text(title) },
         navigationIcon = {
             if (canGoBack) {
-                IconButton(onClick = onBack) {
+                IconButton(onClick = { haptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); onBack() }) {
                     Icon(Icons.Default.ArrowBack, contentDescription = "返回")
             }
             }
         },
         actions = {
-            IconButton(onClick = onQueue) {
+            IconButton(onClick = { haptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); onQueue() }) {
                 Icon(Icons.Default.QueueMusic, contentDescription = "播放队列")
             }
-            IconButton(onClick = onSettings) {
+            IconButton(onClick = { haptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); onSettings() }) {
                 Icon(Icons.Default.Settings, contentDescription = "设置")
             }
-            IconButton(onClick = onAccount) {
+            IconButton(onClick = { haptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); onAccount() }) {
                 Icon(if (state.loggedIn) Icons.Default.AccountCircle else Icons.Default.Login, contentDescription = "账户")
             }
         }
@@ -1338,6 +1886,7 @@ private fun StandardBottomNav(
     onScreen: (ComposeScreen) -> Unit,
     onSearch: () -> Unit
 ) {
+    val haptic = LocalView.current
     val items = listOf(
         Triple(ComposeScreen.HOME, Icons.Default.Home, "主页"),
         Triple(ComposeScreen.LIBRARY, Icons.Default.LibraryMusic, "歌单"),
@@ -1354,6 +1903,7 @@ private fun StandardBottomNav(
             NavigationBarItem(
                 selected = screen == target,
                 onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                     if (target == ComposeScreen.SEARCH) onSearch()
                     else if (screen != target) onScreen(target)
                 },
@@ -1396,6 +1946,15 @@ private fun PrivateFmFab(
 }
 
 @Composable
+private fun rememberHapticAction(action: () -> Unit): () -> Unit {
+    val view = LocalView.current
+    val latestAction = rememberUpdatedState(action)
+    return remember(view) {
+        { view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); latestAction.value() }
+    }
+}
+
+@Composable
 private fun WindowGlassBackdrop(
     modifier: Modifier = Modifier,
     radius: Float = 34f,
@@ -1423,11 +1982,14 @@ private fun MiniPlayer(
     onNext: () -> Unit
 ) {
     val coverBitmap = rememberCoverBitmap(state.coverBytes, state.coverPath)
+    val miniHaptic = LocalView.current
+    val hapticOpen = rememberHapticAction(onOpen)
+    val openInteraction = remember { MutableInteractionSource() }
     Surface(
         modifier = modifier
             .fillMaxWidth()
             .height(64.dp)
-            .clickable { onOpen() },
+            .clickable(interactionSource = openInteraction, indication = null) { hapticOpen() },
         shape = RoundedCornerShape(32.dp),
         tonalElevation = 1.dp,
         shadowElevation = 7.dp,
@@ -1490,10 +2052,15 @@ private fun MiniPlayer(
                     },
                 contentAlignment = Alignment.Center
             ) {
-                CircularCoverProgress(
-                    state = state,
-                    modifier = Modifier.fillMaxSize()
-                )
+                // The ring is the music queue's progress. A B站 video is not part of it
+                // and carries its own bar in full-screen, so the ring is left off while
+                // one is playing.
+                if (!state.biliPlaying) {
+                    CircularCoverProgress(
+                        state = state,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
                 AnimatedContent(
                     targetState = state.trackKey to coverBitmap,
                     transitionSpec = {
@@ -1559,7 +2126,7 @@ private fun MiniPlayer(
                     .size(32.dp)
                     .clip(RoundedCornerShape(playCorner))
                     .background(MaterialTheme.colorScheme.primaryContainer)
-                    .clickable(onClick = onToggle),
+                    .clickable(onClick = { miniHaptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); onToggle() }),
                 contentAlignment = Alignment.Center
             ) {
                 AnimatedContent(
@@ -1581,7 +2148,7 @@ private fun MiniPlayer(
                     icon = Icons.Default.SkipPrevious,
                     contentDescription = "上一首",
                     enabled = true,
-                    onClick = onPrevious
+                    onClick = { miniHaptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); onPrevious() }
                 )
                 Spacer(Modifier.width(5.dp))
             }
@@ -1589,7 +2156,7 @@ private fun MiniPlayer(
                 icon = Icons.Default.SkipNext,
                 contentDescription = "下一首",
                 enabled = true,
-                onClick = onNext
+                onClick = { miniHaptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); onNext() }
             )
             }
         }
@@ -1781,10 +2348,16 @@ private fun rememberCoverBitmap(bytes: ByteArray?, path: String?): androidx.comp
     return bitmap
 }
 
+@OptIn(
+    androidx.compose.material3.ExperimentalMaterial3Api::class,
+    ExperimentalSharedTransitionApi::class,
+)
 @Composable
 private fun HomeScreen(
     state: PlayerUiState,
-    openPlaylist: (Long) -> Unit,
+    sharedTransitionScope: SharedTransitionScope,
+    animatedVisibilityScope: AnimatedVisibilityScope,
+    openPlaylist: (Long, String) -> Unit,
     playRecommendation: (Int) -> Unit,
     refresh: () -> Unit,
     controller: PlayerController? = null,
@@ -1792,6 +2365,8 @@ private fun HomeScreen(
 ) {
     var aiText by remember { mutableStateOf("") }
     var aiOpen by remember { mutableStateOf(false) }
+    var aiPreferenceMode by remember { mutableStateOf(false) }
+    var aiPreferenceCount by remember { mutableFloatStateOf(20f) }
     var aiMode by remember { mutableStateOf<Boolean?>(null) }
     var aiLoading by remember { mutableStateOf(false) }
     var aiError by remember { mutableStateOf("") }
@@ -1815,18 +2390,44 @@ private fun HomeScreen(
         item { Text(if (state.userName.isBlank()) "你好" else "你好，${state.userName}", fontSize = 27.sp, fontWeight = FontWeight.SemiBold) }
         item {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.QueueMusic, contentDescription = null, modifier = Modifier.size(28.dp))
-                Spacer(Modifier.width(8.dp))
-                OutlinedTextField(aiText, { aiText = it }, Modifier.weight(1f), placeholder = { Text("输入内容与你的AI DJ会面") }, singleLine = true, shape = RoundedCornerShape(18.dp))
-                IconButton(onClick = { if (aiText.isNotBlank()) { aiMode = null; aiError = ""; aiSongs = emptyList(); aiOpen = true } }) {
-                    Icon(Icons.Default.AutoAwesome, contentDescription = "打开 AI DJ")
-                }
+                OutlinedTextField(aiText, { aiText = it }, Modifier.weight(1f), placeholder = { Text("今天想听点什么呢？告诉你的ai吧！") }, singleLine = true, shape = RoundedCornerShape(18.dp))
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .combinedClickable(
+                            onClick = {
+                                if (aiText.isNotBlank()) {
+                                    aiPreferenceMode = false; aiMode = null; aiLoading = false
+                                    aiError = ""; aiSongs = emptyList(); aiProgress = ""
+                                    aiSummary = ""; aiDetails = ""; aiOpen = true
+                                }
+                            },
+                            onLongClick = {
+                                aiPreferenceMode = true; aiMode = true; aiLoading = false
+                                aiPreferenceCount = (settings?.intOf("aiTasteCount") ?: 20).coerceIn(1, 40).toFloat()
+                                aiError = ""; aiSongs = emptyList(); aiProgress = ""
+                                aiSummary = ""; aiDetails = ""; aiOpen = true
+                            }
+                        ),
+                    contentAlignment = Alignment.Center
+                ) { Icon(Icons.Default.AutoAwesome, contentDescription = "打开 AI DJ") }
             }
         }
         item {
             SectionTitle("推荐歌单")
             LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
-                items(state.recommendPlaylists) { playlist -> PlaylistCard(playlist) { openPlaylist(playlist.id) } }
+                items(state.recommendPlaylists, key = { it.id }) { playlist ->
+                    PlaylistCard(
+                        playlist = playlist,
+                        sharedTransitionScope = sharedTransitionScope,
+                        animatedVisibilityScope = animatedVisibilityScope,
+                        onClick = {
+                            leavingCoverKey = "playlist_card_${playlist.id}"
+                            openPlaylist(playlist.id, playlist.coverThumbPath ?: playlist.coverUrl ?: "")
+                        }
+                    )
+                }
             }
         }
         item { SectionTitle("每日推荐") }
@@ -1839,39 +2440,100 @@ private fun HomeScreen(
                 title = song.name ?: "未知歌曲",
                 artist = song.artist ?: "未知歌手",
                 coverPath = song.coverThumbPath ?: song.coverUrl,
-                onClick = { playRecommendation(index) }
+                onClick = { playRecommendation(index) },
+                onLongPressQueue = { controller?.enqueueNeteaseSong(song) }
             )
         }
         if (state.recommendPlaylists.isEmpty() && state.recommendations.isEmpty()) {
-            item { EmptyState("暂无推荐内容", "点击刷新后重新加载", refresh) }
+            item {
+                // Same rule as the playlist/album/artist pages: while the fetch
+                // is in flight the page waits with the expressive loader; once
+                // it ends (success or failure) the empty state with its refresh
+                // button takes over. Kept as an item instead of an early return
+                // so the AI DJ dialog this screen owns is never unmounted.
+                if (state.homeLoading) {
+                    LoadingPlaceholder(
+                        modifier = Modifier.fillMaxWidth().height(260.dp),
+                        text = "正在加载推荐歌单…"
+                    )
+                } else {
+                    EmptyState("暂无推荐内容", "点击刷新后重新加载", refresh)
+                }
+            }
         }
     }
     if (aiOpen) AlertDialog(
-        onDismissRequest = { aiOpen = false },
+        onDismissRequest = { aiOpen = false; aiPreferenceMode = false },
         title = { Text("AI DJ") },
-        text = { Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("请选择生成方式")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Button(onClick = { aiMode = false }) { Text("创建歌单") }
-                Button(onClick = { aiMode = true }) { Text("生成播放列表") }
+        text = { Column(
+            modifier = Modifier.widthIn(max = 360.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            if (!aiPreferenceMode) {
+                Text("请选择生成方式")
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    SegmentedButton(selected = aiMode == false, onClick = { aiMode = false }, shape = SegmentedButtonDefaults.itemShape(0, 2)) { Text("创建歌单") }
+                    SegmentedButton(selected = aiMode == true, onClick = { aiMode = true }, shape = SegmentedButtonDefaults.itemShape(1, 2)) { Text("生成播放列表") }
+                }
+            } else {
+                Text("随机偏好推荐")
+                Text("推荐数量：${aiPreferenceCount.toInt()} 首")
+                Slider(
+                    value = aiPreferenceCount,
+                    onValueChange = { aiPreferenceCount = it },
+                    valueRange = 1f..40f,
+                    steps = 38
+                )
+                Button(onClick = {
+                    aiLoading = true
+                    controller?.generateAiPlaylist(
+                        settings?.str("aiBaseUrl") ?: "", settings?.str("aiApiKey") ?: "",
+                        settings?.str("aiModel") ?: "",
+                        "严格根据提供的听歌样本分析偏好，随机生成多种类型的歌曲，必须返回不同风格的真实歌曲，不要重复样本。",
+                        aiPreferenceCount.toInt().coerceIn(1, 40), true, false, false, "", "",
+                        settings?.bool("aiForceKnowledge") == true, true
+                    )
+                }, enabled = !aiLoading) { Text("开始生成") }
             }
-            if (aiMode != null) Button(onClick = {
+            if (!aiPreferenceMode && aiMode != null) Button(onClick = {
                 controller?.generateAiPlaylist(
                     settings?.str("aiBaseUrl") ?: "", settings?.str("aiApiKey") ?: "",
                     settings?.str("aiModel") ?: "", aiText, extractAiCount(aiText),
                     aiMode == true, settings?.bool("aiExcludeLiked") == true,
-                    settings?.bool("aiWebSearchEnabled") != false,
-                    settings?.str("aiWebSearchUrl") ?: "https://api.tavily.com/search",
-                    settings?.str("aiWebSearchKey") ?: "",
-                    settings?.bool("aiForceKnowledge") == true
+                    false, "", "",
+                    settings?.bool("aiForceKnowledge") == true, false
                 )
             }, enabled = !aiLoading) { Text("开始生成") }
-            if (aiLoading) { CircularProgressIndicator(); Text("AI 正在分析歌曲并搜索网易云匹配结果…") }
-            if (aiProgress.isNotBlank()) Text(aiProgress, color = MaterialTheme.colorScheme.primary)
+            if (aiLoading) {
+                // While the AI works this is the only thing the dialog shows: the
+                // contained expressive indicator, sized up. The old "正在让 AI
+                // 分析…" progress lines and the "Mixing..." label are gone.
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    ExpressiveLoadingIndicator(size = 72.dp, withContainer = true)
+                }
+            }
             if (aiError.isNotBlank()) Text(aiError, color = MaterialTheme.colorScheme.error)
             if (aiSummary.isNotBlank()) Text("AI 推荐说明：\n$aiSummary")
-            if (aiDetails.isNotBlank()) Text("AI 返回的推荐理由：\n$aiDetails")
-            if (aiSongs.isNotEmpty()) { Text("已找到 ${aiSongs.size} 首歌曲："); aiSongs.take(8).forEach { Text("• ${it.name} — ${it.artist}") } }
+            if (aiDetails.isNotBlank()) {
+                Text("AI 返回的推荐理由：")
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 280.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    aiDetails.lines().forEach { line ->
+                        val isSongHeader = line.isNotBlank() && !line.startsWith("  ")
+                        Text(line, fontWeight = if (isSongHeader) FontWeight.Bold else FontWeight.Normal)
+                    }
+                }
+            }
+            if (settings?.bool("aiShowOutput") == true && aiError.isNotBlank()) {
+                Text("AI 原始输出/错误信息：", fontWeight = FontWeight.Bold)
+                Text(aiError, modifier = Modifier.fillMaxWidth().heightIn(max = 180.dp).verticalScroll(rememberScrollState()))
+            }
         } }, confirmButton = {}
     )
 }
@@ -1882,22 +2544,58 @@ private fun extractAiCount(request: String): Int {
 }
 
 @Composable
-private fun SearchScreen(state: PlayerUiState, controller: PlayerController) {
+@OptIn(ExperimentalSharedTransitionApi::class)
+private fun SearchScreen(
+    state: PlayerUiState,
+    controller: PlayerController,
+    sharedTransitionScope: SharedTransitionScope,
+    animatedVisibilityScope: AnimatedVisibilityScope,
+    openPlaylist: (Long, String) -> Unit = { _, _ -> },
+    openArtist: (Long) -> Unit
+) {
     var query by remember { mutableStateOf("") }
+    var searchTab by remember { mutableIntStateOf(0) }   // 0 网易云 / 1 B站
+    val listState = rememberLazyListState()
+    val neteaseRows = if (searchTab == 0) state.searchRows else emptyList()
+    val biliRows = if (searchTab == 1) state.biliSearchResults else emptyList()
+    // A new query replaces the results, but the list keeps its old scroll offset —
+    // which left the pinned artist card hidden above the fold until the user
+    // scrolled up. Put the list back at the top whenever the query changes hands.
+    LaunchedEffect(state.searchArtistId, state.searchRows.size) {
+        if (listState.firstVisibleItemIndex > 0) listState.scrollToItem(0)
+    }
+    fun submitSearch(value: String = query) {
+        if (value.isBlank()) return
+        controller.search(value)
+        controller.searchLocal(value)
+        controller.searchCustom(value)
+        // Best artist match for the same query, shown pinned above the songs.
+        controller.searchArtist(value)
+        controller.searchBili(value)
+    }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(query, { query = it }, Modifier.weight(1f), label = { Text("搜索歌曲、专辑或歌手") }, singleLine = true)
+            OutlinedTextField(query, { value -> query = value; submitSearch(value) }, Modifier.weight(1f), label = { Text("搜索歌曲、专辑或歌手") }, singleLine = true)
             IconButton(onClick = {
-                if (query.isNotBlank()) {
-                    controller.search(query)
-                    controller.searchLocal(query)
-                    controller.searchCustom(query)
-                }
+                submitSearch()
             }) { Icon(Icons.Default.Search, contentDescription = "搜索") }
         }
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SearchSourceTab("网易云", searchTab == 0, Modifier.weight(1f)) { searchTab = 0 }
+            SearchSourceTab("B站", searchTab == 1, Modifier.weight(1f)) { searchTab = 1 }
+        }
+        LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            if (state.searchArtistId != 0L && searchTab == 0) {
+                item(key = "search_artist_pinned") {
+                    SearchArtistCard(
+                        state = state,
+                        onOpen = { openArtist(state.searchArtistId) },
+                        onFollow = { controller.toggleSearchArtistFollow() }
+                    )
+                }
+            }
             itemsIndexed(
-                state.searchRows,
+                neteaseRows,
                 key = { index, row -> "search_${row.kind}_${row.id}_$index" },
                 contentType = { _, _ -> "song" }
             ) { index, row ->
@@ -1905,31 +2603,263 @@ private fun SearchScreen(state: PlayerUiState, controller: PlayerController) {
                     title = row.name ?: "未知歌曲",
                     artist = row.artist ?: row.kindLabel ?: "",
                     coverPath = row.coverThumbPath,
-                    onClick = { controller.playSearchRow(index) }
+                    onClick = { controller.playSearchRow(index) },
+                    onLongPressQueue = { controller.enqueueSearchRow(index) }
                 )
+            }
+            itemsIndexed(
+                biliRows,
+                key = { index, video -> "bili_${video.bvid}_$index" },
+                contentType = { _, _ -> "bili" }
+            ) { _, video ->
+                BiliVideoRow(video) { controller.playBiliCollection(video) }
             }
         }
     }
 }
 
+/** 两个搜索来源的切换按钮。 */
+@Composable
+private fun SearchSourceTab(text: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Surface(
+        modifier = modifier.clickable(onClick = onClick),
+        shape = RoundedCornerShape(percent = 50),
+        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHigh
+    ) {
+        Text(
+            text,
+            modifier = Modifier.padding(vertical = 8.dp),
+            textAlign = TextAlign.Center,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+/**
+ * 一行 B 站搜索结果：左侧 16:9 缩略图（右下角时长角标），右侧标题 + UP 主 + 播放量，
+ * 排列方式照 PiliPlusX 的列表。
+ */
+@Composable
+private fun BiliVideoRow(
+    video: dev.t1m3.qplayer.bili.BiliClient.BiliVideo,
+    onClick: () -> Unit
+) {
+    val cover = rememberCoverBitmap(null, video.coverUrl)
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .clip(ShapeMedium)
+            .clickable(onClick = onClick),
+        shape = ShapeMedium,
+        color = ComposeColor.Transparent
+    ) {
+        Row(Modifier.fillMaxWidth().padding(6.dp)) {
+            Box(Modifier.width(140.dp).height(88.dp).clip(ShapeSmall).background(MaterialTheme.colorScheme.surfaceContainerHighest)) {
+                if (cover != null) {
+                    Image(bitmap = cover, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                }
+                if (video.durationText.isNotBlank()) {
+                    Text(
+                        video.durationText,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(4.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(ComposeColor.Black.copy(alpha = 0.6f))
+                            .padding(horizontal = 4.dp, vertical = 1.dp),
+                        color = ComposeColor.White,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+            Column(Modifier.weight(1f).padding(start = 10.dp)) {
+                Text(
+                    video.title.ifBlank { "无标题" },
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    video.author,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (video.playCount > 0) {
+                    Text(
+                        "播放 " + formatCount(video.playCount),
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun formatCount(value: Long): String = when {
+    value >= 100_000_000L -> String.format(java.util.Locale.ROOT, "%.1f亿", value / 100_000_000.0)
+    value >= 10_000L -> String.format(java.util.Locale.ROOT, "%.1f万", value / 10_000.0)
+    else -> value.toString()
+}
+
+/**
+ * The artist that matches the current query, pinned above the song results:
+ * avatar on the left, name in the middle, follow button on the right. The button
+ * reads the account's real follow state (see PlayerController.searchArtist) and
+ * writes back through the NetEase artist sub/unsub endpoints.
+ */
+@Composable
+private fun SearchArtistCard(
+    state: PlayerUiState,
+    onOpen: () -> Unit,
+    onFollow: () -> Unit
+) {
+    val avatar = rememberCoverBitmap(null, state.searchArtistCoverPath)
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 6.dp)
+            .clickable { onOpen() }
+,
+        shape = ShapeLarge,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                modifier = Modifier.size(48.dp),
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.secondaryContainer
+            ) {
+                if (avatar != null) {
+                    Image(
+                        bitmap = avatar,
+                        contentDescription = "歌手头像",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Icon(
+                        Icons.Default.Person,
+                        contentDescription = null,
+                        modifier = Modifier.padding(12.dp),
+                        tint = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                }
+            }
+            Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                Text(
+                    state.searchArtistName.ifBlank { "歌手" },
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    "歌手",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (state.searchArtistFollowed) {
+                OutlinedButton(onClick = onFollow) { Text("已关注") }
+            } else {
+                Button(onClick = onFollow) { Text("关注") }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 private fun LibraryScreen(
     state: PlayerUiState,
+    sharedTransitionScope: SharedTransitionScope,
+    animatedVisibilityScope: AnimatedVisibilityScope,
     openLogin: () -> Unit,
-    openPlaylist: (Long) -> Unit
+    openPlaylist: (Long, String) -> Unit,
+    openBiliFav: () -> Unit,
+    controller: PlayerController,
 ) {
-    if (!state.loggedIn) {
+    var createOpen by remember { mutableStateOf(false) }
+    var createName by remember { mutableStateOf("") }
+    // A B站-only session still gets in: the 收藏夹 entry below is theirs to open, and
+    // the netease list would simply come back empty.
+    if (!state.loggedIn && !state.biliLoggedIn) {
         EmptyState("登录后查看你的歌单", "使用网易云账号登录", openLogin)
         return
     }
     LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        item { SectionTitle("我的歌单") }
+        item(key = "bili_fav_entry") {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(ShapeMedium)
+                    .clickable { openBiliFav() },
+                shape = ShapeMedium,
+                color = MaterialTheme.colorScheme.surfaceContainerHigh
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("B站收藏夹", fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            if (state.biliLoggedIn) "查看并播放收藏的 B站视频"
+                            else "登录 B站 后可查看",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        "›",
+                        fontSize = 20.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+        item {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                SectionTitle("我的歌单")
+                Spacer(Modifier.weight(1f))
+                IconButton(onClick = { createOpen = true }) { Icon(Icons.Default.Add, "创建歌单") }
+            }
+        }
         items(
             state.myPlaylists,
             key = { playlist -> "playlist_${playlist.id}" },
             contentType = { "playlist" }
-        ) { playlist -> PlaylistListRow(playlist) { openPlaylist(playlist.id) } }
+        ) { playlist ->
+            PlaylistListRow(
+                playlist = playlist,
+                sharedTransitionScope = sharedTransitionScope,
+                animatedVisibilityScope = animatedVisibilityScope,
+                onClick = {
+                    leavingCoverKey = "playlist_row_${playlist.id}"
+                    openPlaylist(playlist.id, playlist.coverThumbPath ?: playlist.coverUrl ?: "")
+                },
+                onDelete = { controller.deletePlaylist(playlist.id) }
+            )
+        }
     }
+    if (createOpen) AlertDialog(
+        onDismissRequest = { createOpen = false },
+        title = { Text("创建歌单") },
+        text = { OutlinedTextField(createName, { createName = it }, label = { Text("歌单名称") }, singleLine = true) },
+        confirmButton = { TextButton(enabled = createName.isNotBlank(), onClick = { controller.createPlaylist(createName); createName = ""; createOpen = false }) { Text("创建") } },
+        dismissButton = { TextButton(onClick = { createOpen = false }) { Text("取消") } }
+    )
 }
 
 @Composable
@@ -1950,7 +2880,8 @@ private fun LocalScreen(state: PlayerUiState, controller: PlayerController) {
                 artist = track.artist ?: "未知歌手",
                 coverBytes = track.coverBytes,
                 coverPath = track.coverThumbPath ?: track.coverLocalPath,
-                onClick = { controller.play(index) }
+                onClick = { controller.play(index) },
+                onLongPressQueue = { controller.enqueueTrack(track) }
             )
         }
     }
@@ -1995,6 +2926,11 @@ private fun DraggableQueueList(
         t.neteaseId != 0L -> "nid_${t.neteaseId}"
         !t.filePath.isNullOrBlank() -> "fp_${t.filePath}"
         !t.contentUri.isNullOrBlank() -> "cu_${t.contentUri}"
+        // bvid + cid identifies one part exactly. Without this a BILI queue falls
+        // through to title+artist, and two parts sharing a title (a multi-P video
+        // whose pages are unnamed) produce a duplicate key -- which Compose rejects
+        // with an IllegalArgumentException while composing the queue list.
+        !t.biliBvid.isNullOrBlank() -> "bv_${t.biliBvid}_${t.biliCid}"
         else -> "ti_${t.title}_${t.artist}"
     }
 
@@ -2083,9 +3019,10 @@ private fun DraggableQueueList(
                 state = reorderableState,
                 key = songKeyOf(track),
                 enabled = true,
-                animateItemModifier = Modifier.animateItemPlacement(
-                    tween(220, easing = androidx.compose.animation.core.FastOutSlowInEasing)
-                )
+                // The reorderable library handles item placement animation for
+                // this Compose version; animateItemPlacement is not available
+                // in the project's pinned foundation dependency.
+                animateItemModifier = Modifier
             ) { isDragging ->
                 val dragScale by animateFloatAsState(
                     targetValue = if (isDragging) 1.02f else 1f,
@@ -2230,7 +3167,7 @@ private fun DraggableQueueList(
 }
 
 @Composable
-private fun QueueScreen(state: PlayerUiState, controller: PlayerController) {
+private fun QueueScreen(state: PlayerUiState, controller: PlayerController, sleepMinutes: Int, sleepRemaining: Long, sleepArmed: Boolean, onMinutesChanged: (Int) -> Unit) {
     Column(Modifier.fillMaxSize()) {
         Text(
             "播放队列 · ${state.queueTracks.size}",
@@ -2241,20 +3178,109 @@ private fun QueueScreen(state: PlayerUiState, controller: PlayerController) {
         DraggableQueueList(
             state = state,
             controller = controller,
+            modifier = Modifier.weight(1f),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             staggeredEntry = false,
             emptyContent = { EmptyState("播放队列为空", "从歌曲列表选择一首开始播放") { } }
         )
+        SleepTimerControl(sleepMinutes, sleepRemaining, onMinutesChanged, sleepArmed)
     }
 }
 
 @Composable
-private fun PlaylistScreen(state: PlayerUiState, controller: PlayerController) {
-    LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+private fun SleepTimerControl(minutes: Int, remaining: Long, onMinutesChanged: (Int) -> Unit, armed: Boolean = true) {
+    val haptic = rememberHapticAction { }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+        Text(
+            when {
+                minutes == 0 -> "定时播放：未开启"
+                !armed -> "定时播放：已设置 ${minutes} 分钟，滑动结束后开始计时…"
+                else -> "定时播放：${remaining / 60}:${(remaining % 60).toString().padStart(2, '0')} 后暂停"
+            },
+            fontWeight = FontWeight.Medium
+        )
+        Slider(
+            value = minutes.toFloat(),
+            onValueChange = { value -> haptic(); onMinutesChanged(value.roundToInt().coerceIn(0, 120)) },
+            valueRange = 0f..120f,
+            steps = 119,
+            modifier = Modifier.fillMaxWidth().height(28.dp)
+        )
+        Text(
+            if (minutes == 0) "滑动设置 1–120 分钟"
+            else if (!armed) "停手 ${SLEEP_SETTLE_MS / 1000} 秒后开始倒计时"
+            else "已设置 ${minutes} 分钟，到时自动暂停播放",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+private fun PlaylistScreen(
+    state: PlayerUiState,
+    controller: PlayerController,
+    playlistId: Long,
+    fallbackCoverPath: String = "",
+    sharedTransitionScope: SharedTransitionScope,
+    animatedVisibilityScope: AnimatedVisibilityScope,
+) {
+    // The core flags an in-flight playlist fetch; until the first track lands
+    // there is nothing to show, so the page waits with the expressive loader
+    // instead of an empty "0 首歌曲" header (the QML shell does the same with
+    // player.playlistLoading).
+    val sharedMotion = tween<androidx.compose.ui.geometry.Rect>(
+        durationMillis = SHARED_MOTION_MS,
+        easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+    )
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .then(
+                with(sharedTransitionScope) {
+                    Modifier.sharedBounds(
+                        sharedContentState = rememberSharedContentState(
+                            "playlist_container_$playlistId"
+                        ),
+                        animatedVisibilityScope = animatedVisibilityScope,
+                        
+                        clipInOverlayDuringTransition = OverlayClip(RoundedCornerShape(0.dp))
+                    )
+                }
+            )
+    ) {
+        // The card this page grows out of. Zero radius here against the card's
+        // 16dp is what makes the corners flatten as the container expands.
+    LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                val coverBitmap = rememberCoverBitmap(null, state.playlistCoverPath)
-                Surface(Modifier.size(112.dp), shape = ShapeLarge, color = MaterialTheme.colorScheme.secondaryContainer) {
+                val coverBitmap = rememberCoverBitmap(
+                    null,
+                    state.playlistCoverPath.ifBlank { fallbackCoverPath }
+                )
+                Surface(
+                    modifier = Modifier
+                        .size(112.dp)
+                        .then(
+                            with(sharedTransitionScope) {
+                                Modifier.sharedBounds(
+                                    sharedContentState = rememberSharedContentState(
+                                        "playlist_cover_$playlistId"
+                                    ),
+                                    animatedVisibilityScope = animatedVisibilityScope,
+                                    
+                                    clipInOverlayDuringTransition = OverlayClip(
+                                        RoundedCornerShape(rememberSharedCoverTransitionRadius("playlist_cover_$playlistId", COVER_OVERLAY_CLIP, animatedVisibilityScope))
+                                    )
+                                )
+                            }
+                        ),
+                    shape = ShapeLarge,
+                    color = MaterialTheme.colorScheme.secondaryContainer
+                ) {
                     if (coverBitmap != null) {
                         Image(
                             bitmap = coverBitmap,
@@ -2273,6 +3299,15 @@ private fun PlaylistScreen(state: PlayerUiState, controller: PlayerController) {
             }
             Button(onClick = { if (state.playlistTracks.isNotEmpty()) controller.playPlaylistTrack(0) }, modifier = Modifier.padding(vertical = 12.dp)) { Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text("播放全部") }
         }
+        if (state.playlistLoading && state.playlistTracks.isEmpty()
+            && !sharedTransitionScope.isTransitionActive) {
+            item {
+                LoadingPlaceholder(
+                    Modifier.fillMaxWidth().height(200.dp),
+                    "正在加载歌单歌曲…"
+                )
+            }
+        }
         itemsIndexed(
             state.playlistTracks,
             key = { index, song -> "playlist_song_${song.id}_$index" },
@@ -2282,28 +3317,81 @@ private fun PlaylistScreen(state: PlayerUiState, controller: PlayerController) {
                 title = song.name ?: "未知歌曲",
                 artist = song.artist ?: "未知歌手",
                 coverPath = song.coverThumbPath ?: song.coverUrl,
-                onClick = { controller.playPlaylistTrack(index) }
+                onClick = { controller.playPlaylistTrack(index) },
+                onLongPressQueue = { controller.enqueueNeteaseSong(song) }
             )
         }
     }
+    }
 }
 
+@OptIn(ExperimentalSharedTransitionApi::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun AlbumScreen(state: PlayerUiState, controller: PlayerController) {
-    if (state.albumLoading && state.albumTracks.isEmpty()) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator()
-        }
-        return
-    }
+private fun AlbumScreen(
+    state: PlayerUiState,
+    controller: PlayerController,
+    albumId: Long,
+    fallbackCoverPath: String = "",
+    sharedTransitionScope: SharedTransitionScope,
+    animatedVisibilityScope: AnimatedVisibilityScope,
+) {
+    // Material's decelerate curve (0.2, 0, 0, 1): leaves quickly and settles softly.
+    // A linear tween reads as mechanical and a spring overshoots the container's
+    // bounds, so this is the curve the container transform is specified with.
+    val sharedMotion = tween<androidx.compose.ui.geometry.Rect>(
+        durationMillis = SHARED_MOTION_MS,
+        easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+    )
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .then(
+                with(sharedTransitionScope) {
+                    Modifier.sharedBounds(
+                        sharedContentState = rememberSharedContentState(
+                            "album_container_$albumId"
+                        ),
+                        animatedVisibilityScope = animatedVisibilityScope,
+                        
+                        // Square against the card's 16dp: each end carries its own
+                        // shape, so nothing is re-cut mid-flight.
+                        clipInOverlayDuringTransition = OverlayClip(RoundedCornerShape(0.dp))
+                    )
+                }
+            )
+    ) {
     LazyColumn(
+        modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                val coverBitmap = rememberCoverBitmap(null, state.albumCoverPath)
-                Surface(Modifier.size(128.dp), shape = ShapeLarge, color = MaterialTheme.colorScheme.secondaryContainer) {
+                val coverBitmap = rememberCoverBitmap(
+                    null,
+                    state.albumCoverPath.ifBlank { fallbackCoverPath }
+                )
+                Surface(
+                    modifier = Modifier
+                        .size(168.dp)
+                        .then(
+                            with(sharedTransitionScope) {
+                                Modifier.sharedBounds(
+                                    sharedContentState = rememberSharedContentState(
+                                        "album_cover_$albumId"
+                                    ),
+                                    animatedVisibilityScope = animatedVisibilityScope,
+                                    
+                                    clipInOverlayDuringTransition = OverlayClip(
+                                        RoundedCornerShape(rememberSharedCoverTransitionRadius("album_cover_$albumId", COVER_OVERLAY_CLIP, animatedVisibilityScope))
+                                    )
+                                )
+                            }
+                        ),
+                    shape = ShapeLarge,
+                    color = MaterialTheme.colorScheme.secondaryContainer
+                ) {
                     if (coverBitmap != null) {
                         Image(
                             bitmap = coverBitmap,
@@ -2328,17 +3416,28 @@ private fun AlbumScreen(state: PlayerUiState, controller: PlayerController) {
                 Text("播放全部")
             }
         }
+        if (state.albumLoading && state.albumTracks.isEmpty()
+            && !sharedTransitionScope.isTransitionActive) {
+            item {
+                LoadingPlaceholder(
+                    Modifier.fillMaxWidth().height(200.dp),
+                    "正在加载专辑歌曲…"
+                )
+            }
+        }
         itemsIndexed(state.albumTracks, key = { index, song -> "${song.id}_$index" }) { index, song ->
             SongRow(
                 title = song.name ?: "未知歌曲",
                 artist = song.artist ?: "未知歌手",
                 coverPath = song.coverThumbPath ?: song.coverUrl,
-                onClick = { controller.playAlbumTrack(index) }
+                onClick = { controller.playAlbumTrack(index) },
+                onLongPressQueue = { controller.enqueueNeteaseSong(song) }
             )
         }
         if (!state.albumLoading && state.albumTracks.isEmpty()) {
             item { EmptyState("暂无专辑歌曲", "专辑内容加载失败或为空") { controller.openAlbum(state.openAlbumId) } }
         }
+    }
     }
 }
 
@@ -2353,7 +3452,7 @@ private fun SettingsScreen(settings: SettingsCore, controller: PlayerController)
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             settings.categories().forEach { item ->
-                if (item == SettingsCatalog.LOCAL || item == SettingsCatalog.ABOUT || item == SettingsCatalog.LYRIC || item == SettingsCatalog.PLAYBACK || item == SettingsCatalog.APPEARANCE || item == SettingsCatalog.AI) {
+                if (item == SettingsCatalog.LOCAL || item == SettingsCatalog.ABOUT || item == SettingsCatalog.LYRIC || item == SettingsCatalog.PLAYBACK || item == SettingsCatalog.APPEARANCE || item == SettingsCatalog.PALETTE || item == SettingsCatalog.AI) {
                     if (item == category) Button(onClick = { category = item }) { Text(item) }
                     else OutlinedButton(onClick = { category = item }) { Text(item) }
                 }
@@ -2484,116 +3583,256 @@ private fun formatSettingValue(spec: SettingSpec, value: Int): String {
 }
 
 @Composable
-private fun AccountScreen(state: PlayerUiState) {
-    Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+private fun AccountScreen(state: PlayerUiState, controller: PlayerController) {
+    var biliLoginOpen by remember { mutableStateOf(false) }
+    Column(
+        Modifier.fillMaxSize().padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
         Icon(Icons.Default.Person, contentDescription = null, modifier = Modifier.size(88.dp), tint = MaterialTheme.colorScheme.primary)
         Spacer(Modifier.height(12.dp))
         Text(state.userName.ifBlank { "未登录" }, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
         Text("网易云音乐账户", color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+        Spacer(Modifier.height(28.dp))
+        Divider(Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.outlineVariant)
+        Spacer(Modifier.height(20.dp))
+
+        Text(
+            if (state.biliLoggedIn) "已登录" else "未登录",
+            fontSize = 20.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Text("哔哩哔哩账户", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "用于搜索与播放 B 站视频（MV、现场版等）",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center
+        )
+        Spacer(Modifier.height(14.dp))
+        if (state.biliLoggedIn) {
+            OutlinedButton(onClick = { controller.logoutBili() }) { Text("退出 B 站账号") }
+        } else {
+            Button(onClick = {
+                biliLoginOpen = true
+                controller.startBiliLogin()
+            }) { Text("登录 B 站") }
+        }
+        if (state.biliError.isNotBlank() && state.biliQrStatus == 4) {
+            Spacer(Modifier.height(8.dp))
+            Text(state.biliError, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+        }
+    }
+
+    if (biliLoginOpen) {
+        BiliLoginDialog(
+            state = state,
+            onDismiss = {
+                biliLoginOpen = false
+                controller.cancelBiliLogin()
+            }
+        )
     }
 }
 
+/** 扫码登录 B 站：显示 TV 登录二维码，文案跟随轮询状态。 */
 @Composable
+private fun BiliLoginDialog(state: PlayerUiState, onDismiss: () -> Unit) {
+    val qrBitmap = remember(state.biliQrUrl) {
+        if (state.biliQrUrl.isBlank()) null else runCatching {
+            val matrix = com.google.zxing.qrcode.QRCodeWriter().encode(
+                state.biliQrUrl,
+                com.google.zxing.BarcodeFormat.QR_CODE,
+                512, 512
+            )
+            val pixels = IntArray(matrix.width * matrix.height)
+            for (y in 0 until matrix.height) {
+                for (x in 0 until matrix.width) {
+                    pixels[y * matrix.width + x] = if (matrix.get(x, y)) {
+                        android.graphics.Color.BLACK
+                    } else {
+                        android.graphics.Color.WHITE
+                    }
+                }
+            }
+            val bitmap = android.graphics.Bitmap.createBitmap(
+                matrix.width, matrix.height, android.graphics.Bitmap.Config.ARGB_8888
+            )
+            bitmap.setPixels(pixels, 0, matrix.width, 0, 0, matrix.width, matrix.height)
+            bitmap.asImageBitmap()
+        }.getOrNull()
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("登录哔哩哔哩") },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                when {
+                    state.biliQrStatus == 3 -> Text("登录成功")
+                    state.biliQrStatus == 4 -> Text("二维码已过期，请重新打开", color = MaterialTheme.colorScheme.error)
+                    state.biliQrStatus == 2 -> Text("已扫码，请在手机上确认")
+                    qrBitmap != null -> {
+                        Image(
+                            bitmap = qrBitmap,
+                            contentDescription = "B站登录二维码",
+                            modifier = Modifier.size(220.dp)
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Text("用哔哩哔哩 App 扫描二维码", fontSize = 13.sp)
+                    }
+                    else -> Text("正在获取二维码…")
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(if (state.biliQrStatus == 3) "完成" else "取消") }
+        }
+    )
+}
+
+@Composable
+@OptIn(ExperimentalSharedTransitionApi::class, ExperimentalMaterial3ExpressiveApi::class)
 private fun ArtistScreen(
     state: PlayerUiState,
     controller: PlayerController,
-    openAlbum: (Long) -> Unit
+    artistId: Long,
+    sharedTransitionScope: SharedTransitionScope,
+    animatedVisibilityScope: AnimatedVisibilityScope,
+    openAlbum: (Long, String) -> Unit
 ) {
     if (state.artistLoading && state.artistSongs.isEmpty() && state.artistAlbums.isEmpty()) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator()
-        }
+        LoadingPlaceholder(Modifier.fillMaxSize(), "正在加载歌手作品…")
         return
     }
 
+    // Material's decelerate curve (0.2, 0, 0, 1): leaves quickly and settles softly.
+    // A linear tween reads as mechanical and a spring overshoots the container's
+    // bounds, so this is the curve the container transform is specified with.
+    val sharedMotion = tween<androidx.compose.ui.geometry.Rect>(
+        durationMillis = SHARED_MOTION_MS,
+        easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+    )
+    val listState = rememberLazyListState()
+    val heroBitmap = rememberCoverBitmap(
+        null,
+        state.artistHeaderPath.ifBlank { state.artistCoverPath }
+    )
+    // Monet again: the page keeps the cover-derived theme (the same palette every
+    // other screen uses) instead of a colour sampled out of the artist's photo, and
+    // the hero only has to blend into that theme's surface.
+    val backdrop = MaterialTheme.colorScheme.background
+    Box(Modifier.fillMaxSize()) {
     LazyColumn(
-        contentPadding = PaddingValues(16.dp),
+        state = listState,
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                val avatar = rememberCoverBitmap(null, state.artistCoverPath)
-                Surface(
-                    modifier = Modifier.size(112.dp),
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.secondaryContainer
-                ) {
-                    if (avatar != null) {
-                        Image(
-                            bitmap = avatar,
-                            contentDescription = "歌手头像",
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    } else {
-                        Icon(
-                            Icons.Default.Person,
-                            contentDescription = null,
-                            modifier = Modifier.padding(28.dp),
-                            tint = MaterialTheme.colorScheme.onSecondaryContainer
-                        )
-                    }
-                }
-                Column(
-                    modifier = Modifier.padding(start = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text(
-                        state.artistName.ifBlank { "歌手" },
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        "${state.artistSongs.size} 首热门歌曲 · ${state.artistAlbums.size} 张专辑",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
+            ArtistHero(
+                state = state,
+                backdrop = backdrop,
+                heroBitmap = heroBitmap
+            )
         }
-        if (state.artistBriefDesc.isNotBlank()) {
-            item {
-                Text(
-                    state.artistBriefDesc,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    lineHeight = 20.sp,
-                    modifier = Modifier.padding(vertical = 4.dp)
-                )
-            }
-        }
+        // Order asked for by the user: the ten best-known songs first, then the
+        // discography, and the long biography last so it does not push either of
+        // them below the fold. The core already hands the songs over in NetEase's
+        // popularity order, so the first ten are the top ten.
         if (state.artistSongs.isNotEmpty()) {
-            item { SectionTitle("热门歌曲") }
+            item { Box(Modifier.padding(horizontal = 16.dp)) { SectionTitle("热门歌曲") } }
             itemsIndexed(
-                state.artistSongs,
+                state.artistSongs.take(ARTIST_TOP_SONG_COUNT),
                 key = { index, song -> "artist_song_${song.id}_$index" }
             ) { index, song ->
+                Box(Modifier.padding(horizontal = 16.dp)) {
                 SongRow(
                     title = song.name ?: "未知歌曲",
                     artist = song.artist ?: state.artistName,
                     coverPath = song.coverThumbPath ?: song.coverUrl,
-                    onClick = { controller.playArtistSong(index) }
+                    onClick = { controller.playArtistSong(index) },
+                    onLongPressQueue = { controller.enqueueNeteaseSong(song) }
                 )
+                }
             }
         }
         if (state.artistAlbums.isNotEmpty()) {
-            item { SectionTitle("专辑") }
+            item { Box(Modifier.padding(horizontal = 16.dp)) { SectionTitle("专辑") } }
             items(
                 state.artistAlbums,
                 key = { album -> "artist_album_${album.id}" }
             ) { album ->
+    // The card's own text is not part of the shared element: it has to be gone in
+    // 80ms so it can never ghost underneath the detail page's text.
+    val listTextAlpha by animateFloatAsState(
+        targetValue = if (leavingCoverKey == "album_row_${album.id}") 0f else 1f,
+        animationSpec = tween(80),
+        label = "list_text_fade"
+    )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                ) {
+                // The official container transform starts from a real container:
+                // this card IS the element that grows into the album page, so it has
+                // its own background and 16dp corners rather than being a bare row.
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp)
+                        .clickable {
+                            leavingCoverKey = "album_row_${album.id}"
+                            openAlbum(album.id, album.coverThumbPath ?: album.coverUrl ?: "")
+                        }
+                        .then(
+                            with(sharedTransitionScope) {
+                                Modifier.sharedBounds(
+                                    sharedContentState = rememberSharedContentState(
+                                        "album_container_${album.id}"
+                                    ),
+                                    animatedVisibilityScope = animatedVisibilityScope,
+                                    // M3 expressive motion scheme — the same source the
+                                    // framework uses, a spatial spring with an emphasised
+                                    // curve instead of a linear tween.
+                                    
+                                    resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
+                                    clipInOverlayDuringTransition = OverlayClip(
+                                        RoundedCornerShape(16.dp)
+                                    )
+                                )
+                            }
+                        ),
+                    shape = RoundedCornerShape(16.dp),
+                    color = ComposeColor.Transparent
+                ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { openAlbum(album.id) }
-                        .padding(vertical = 6.dp),
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     val cover = rememberCoverBitmap(null, album.coverThumbPath ?: album.coverUrl)
                     Surface(
-                        modifier = Modifier.size(60.dp),
+                        modifier = Modifier
+                            .size(60.dp)
+                            .then(
+                                with(sharedTransitionScope) {
+                                    Modifier.sharedBounds(
+                                        sharedContentState = rememberSharedContentState(
+                                            "album_cover_${album.id}"
+                                        ),
+                                        animatedVisibilityScope = animatedVisibilityScope,
+                                        
+                                        clipInOverlayDuringTransition = OverlayClip(
+                                            RoundedCornerShape(rememberSharedCoverTransitionRadius("album_cover_${album.id}", COVER_OVERLAY_CLIP, animatedVisibilityScope))
+                                        )
+                                    )
+                                }
+                            ),
                         shape = ShapeMedium,
                         color = MaterialTheme.colorScheme.secondaryContainer
                     ) {
@@ -2608,7 +3847,7 @@ private fun ArtistScreen(
                             Icon(Icons.Default.Album, null, Modifier.padding(16.dp))
                         }
                     }
-                    Column(Modifier.padding(start = 12.dp)) {
+                    Column(Modifier.padding(start = 12.dp).graphicsLayer { alpha = listTextAlpha }) {
                         Text(album.name ?: "未命名专辑", fontWeight = FontWeight.Medium)
                         Text(
                             "${album.trackCount} 首歌曲",
@@ -2617,13 +3856,250 @@ private fun ArtistScreen(
                         )
                     }
                 }
+                }
             }
         }
+        }   // if (artistAlbums.isNotEmpty())
         if (!state.artistLoading && state.artistSongs.isEmpty() && state.artistAlbums.isEmpty()) {
             item { EmptyState("暂无歌手信息", "网易云未返回该歌手的公开资料") { controller.openArtist(state.openArtistId) } }
         }
+        if (state.artistBriefDesc.isNotBlank()) {
+            item { SectionTitle("歌手简介") }
+            item {
+                Text(
+                    state.artistBriefDesc,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    lineHeight = 20.sp,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+            }
+        }
     }
 }
+
+/**
+ * The artist's hero band: their uploaded artwork blurred behind a gradient that
+ * fades into the page's extracted colour, with the avatar and name sitting on the
+ * left of that fused band — floating over the top of the song list below it.
+ */
+    }
+@Composable
+private fun ArtistHero(
+    state: PlayerUiState,
+    backdrop: ComposeColor,
+    heroBitmap: androidx.compose.ui.graphics.ImageBitmap?,
+    modifier: Modifier = Modifier
+) {
+    val avatar = rememberCoverBitmap(null, state.artistCoverPath)
+    Box(modifier.fillMaxWidth().height(ARTIST_HERO_HEIGHT)) {
+        if (heroBitmap != null) {
+            Image(
+                bitmap = heroBitmap,
+                contentDescription = "歌手背景",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+            // Only the artwork's tail is blurred, and only where it has to blend into
+            // the page colour below — blurring the whole picture was what made it
+            // look like a smudge rather than a photo.
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.22f)
+                    .align(Alignment.BottomCenter)
+                    .blur(24.dp)
+            ) {
+                Image(
+                    bitmap = heroBitmap,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+        // Top stays readable under the status bar, the middle keeps the artwork
+        // intact, and the bottom melts into the page colour with no seam.
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        0.00f to ComposeColor.Black.copy(alpha = 0.40f),
+                        0.18f to ComposeColor.Transparent,
+                        0.55f to backdrop.copy(alpha = 0.55f),
+                        0.85f to backdrop,
+                        1.00f to backdrop
+                    )
+                )
+        )
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 16.dp, end = 16.dp, bottom = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                modifier = Modifier
+                    .size(72.dp)
+                    .border(2.dp, ComposeColor.White.copy(alpha = 0.45f), CircleShape),
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.secondaryContainer
+            ) {
+                if (avatar != null) {
+                    Image(
+                        bitmap = avatar,
+                        contentDescription = "歌手头像",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Icon(
+                        Icons.Default.Person,
+                        contentDescription = null,
+                        modifier = Modifier.padding(18.dp),
+                        tint = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                }
+            }
+            Column(Modifier.padding(start = 14.dp)) {
+                Text(
+                    state.artistName.ifBlank { "歌手" },
+                    color = ComposeColor.White,
+                    fontSize = 26.sp,
+                    fontWeight = FontWeight.Black,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    "${minOf(state.artistSongs.size, ARTIST_TOP_SONG_COUNT)} 首热门歌曲 · ${state.artistAlbums.size} 张专辑",
+                    color = ComposeColor.White.copy(alpha = 0.72f),
+                    fontSize = 13.sp
+                )
+            }
+        }
+    }
+}
+
+/**
+ * MD3 Emphasized motion for the container transform, chosen by direction: the
+ * expansion launches fast and settles with a long, soft damping tail
+ * (Emphasized Decelerate); the collapse runs the same motion backwards, which is
+ * shorter and steeper (Emphasized Accelerate).
+ */
+private val CoverExpandEasing = CubicBezierEasing(0.05f, 0.7f, 0.1f, 1.0f)
+private val CoverCollapseEasing = CubicBezierEasing(0.3f, 0f, 0.8f, 0.15f)
+private const val COVER_EXPAND_MS = 450
+private const val COVER_COLLAPSE_MS = 250
+
+/** Enter or exit, decided by whether the shared bounds are growing. */
+private fun coverBoundsTransform(
+    initial: androidx.compose.ui.geometry.Rect,
+    target: androidx.compose.ui.geometry.Rect
+): androidx.compose.animation.core.FiniteAnimationSpec<androidx.compose.ui.geometry.Rect> {
+    val expanding = target.width * target.height >= initial.width * initial.height
+    return tween(
+        durationMillis = if (expanding) COVER_EXPAND_MS else COVER_COLLAPSE_MS,
+        easing = if (expanding) CoverExpandEasing else CoverCollapseEasing
+    )
+}
+
+private const val SHARED_COVER_RADIUS_CACHE_MAX = 256
+
+/** Same corner-radius hand-over as legado-with-MD3's CoilBookCover: the source page
+ *  records the cover's radius while it sits still, and the destination reads it back
+ *  under the same key so both ends of the flight agree on the corners. */
+private val sharedCoverRadiusCache =
+    androidx.compose.runtime.mutableStateMapOf<String, androidx.compose.ui.unit.Dp>()
+
+@Composable
+private fun rememberSharedCoverTransitionRadius(
+    sharedCoverKey: String?,
+    radius: androidx.compose.ui.unit.Dp,
+    animatedVisibilityScope: AnimatedVisibilityScope?
+): androidx.compose.ui.unit.Dp {
+    if (sharedCoverKey == null || animatedVisibilityScope == null) return radius
+    val transition = animatedVisibilityScope.transition
+    val startRadius = sharedCoverRadiusCache[sharedCoverKey] ?: radius
+    val animatedRadiusValue by transition.animateFloat(label = "cover_corner_radius") { state ->
+        if (state == androidx.compose.animation.EnterExitState.Visible) radius.value
+        else startRadius.value
+    }
+    LaunchedEffect(sharedCoverKey, radius, transition.currentState, transition.targetState) {
+        if (transition.currentState == androidx.compose.animation.EnterExitState.Visible &&
+            transition.targetState == androidx.compose.animation.EnterExitState.Visible
+        ) {
+            sharedCoverRadiusCache[sharedCoverKey] = radius
+            if (sharedCoverRadiusCache.size > SHARED_COVER_RADIUS_CACHE_MAX) {
+                sharedCoverRadiusCache.keys.firstOrNull { it != sharedCoverKey }
+                    ?.let(sharedCoverRadiusCache::remove)
+            }
+        }
+    }
+    return animatedRadiusValue.dp
+}
+
+/**
+ * Key of the cover the user just tapped. Only that row's text fades out for the
+ * flight — `isTransitionActive` is true for the whole page, so using it directly
+ * blanked every row's text (and looked like the list "refreshing itself").
+ */
+private var leavingCoverKey by mutableStateOf<String?>(null)
+
+/** Corner radius the flying cover is clipped to (ShapeLarge-ish). */
+private val COVER_OVERLAY_CLIP = 20.dp
+
+/** Height of the artist page's hero band (backdrop + avatar/name). */
+private val ARTIST_HERO_HEIGHT = 200.dp
+
+/**
+ * Backdrop colour for the artist page: the average of the artwork's darker, less
+ * saturated pixels — the job Palette's darkMutedSwatch would do — darkened further
+ * so white text always reads on it. Null until there is artwork to read.
+ */
+private fun darkMutedBackdrop(bitmap: androidx.compose.ui.graphics.ImageBitmap?): ComposeColor? {
+    if (bitmap == null || bitmap.width <= 0 || bitmap.height <= 0) return null
+    // A band through the middle of the artwork instead of the whole bitmap: same
+    // tone, a quarter of the pixel-array allocation, and off the frame that opens
+    // the page.
+    val bandHeight = (bitmap.height / 4).coerceAtLeast(1)
+    val pixels = bitmap.toPixelMap(
+        startY = (bitmap.height - bandHeight) / 2,
+        height = bandHeight
+    )
+    var sumR = 0L
+    var sumG = 0L
+    var sumB = 0L
+    var count = 0
+    var x = 0
+    while (x < pixels.width) {
+        var y = 0
+        while (y < pixels.height) {
+            val c = pixels[x, y]
+            val maxC = maxOf(c.red, c.green, c.blue)
+            val minC = minOf(c.red, c.green, c.blue)
+            val sat = if (maxC <= 0f) 0f else (maxC - minC) / maxC
+            if (sat < 0.85f && maxC < 0.95f) {
+                sumR += (c.red * 255f).toLong()
+                sumG += (c.green * 255f).toLong()
+                sumB += (c.blue * 255f).toLong()
+                count++
+            }
+            y += 16
+        }
+        x += 16
+    }
+    if (count == 0) return null
+    return ComposeColor(
+        red = (sumR / count / 255f * 0.55f).coerceIn(0f, 1f),
+        green = (sumG / count / 255f * 0.55f).coerceIn(0f, 1f),
+        blue = (sumB / count / 255f * 0.55f).coerceIn(0f, 1f)
+    )
+}
+
+/** How many of an artist's best-known songs the artist page lists up front. */
+private const val ARTIST_TOP_SONG_COUNT = 10
+
+
 
 @Composable
 @OptIn(androidx.compose.animation.ExperimentalAnimationApi::class)
@@ -2631,8 +4107,10 @@ private fun PlayerControlsSection(
     state: PlayerUiState,
     controller: PlayerController,
     isLiked: Boolean,
-    onLikeToggle: () -> Unit
+    onLikeToggle: () -> Unit,
+    onLikeLongPress: () -> Unit = {}
 ) {
+    val haptic = LocalView.current
     val previousEnabled = !state.privateFmMode
     val heartScale by animateFloatAsState(
         targetValue = if (isLiked) 1.22f else 1f,
@@ -2705,6 +4183,7 @@ private fun PlayerControlsSection(
                     indication = null
                 ) {
                     lastClicked = -1
+                    haptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                     controller.prev()
                 },
             contentAlignment = Alignment.Center
@@ -2732,6 +4211,7 @@ private fun PlayerControlsSection(
                     indication = null
                 ) {
                     lastClicked = 2
+                    haptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                     controller.toggle()
                 },
             contentAlignment = Alignment.Center
@@ -2771,6 +4251,7 @@ private fun PlayerControlsSection(
                     indication = null
                 ) {
                     lastClicked = 1
+                    haptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                     controller.next()
                 },
             contentAlignment = Alignment.Center
@@ -2783,9 +4264,14 @@ private fun PlayerControlsSection(
 
     // --- Bottom toggle row (PixelPlayer BottomToggleRow style): shuffle /
     // repeat / favorite as three equal segments on a shared pill container. ---
+    // Hidden for video playback: these control a music queue that a video is not
+    // part of. Collapsing the height plus the existing clip takes them off screen.
+    var biliFavPickerOpen by remember { mutableStateOf(false) }
     Box(
         Modifier
             .width(264.dp)
+            // Shown for video playback too: 收藏 is meaningful there (it favourites the
+            // B站 video), which is why the row is no longer collapsed away for a video.
             .height(56.dp)
             .clip(RoundedCornerShape(28.dp))
             .background(MaterialTheme.colorScheme.surfaceContainerHigh)
@@ -2824,8 +4310,18 @@ private fun PlayerControlsSection(
                 activeContent = MaterialTheme.colorScheme.onTertiary,
                 icon = if (isLiked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                 desc = "收藏",
-                onClick = onLikeToggle,
+                // 视频收藏进 B站 收藏夹（弹框 → setBiliFavs），歌曲仍走原来的喜欢。
+                onClick = { if (state.biliPlaying) biliFavPickerOpen = true else onLikeToggle() },
+                onLongClick = onLikeLongPress,
                 iconScale = heartScale
+            )
+        }
+        if (biliFavPickerOpen) {
+            BiliFavPickerDialog(
+                state = state,
+                controller = controller,
+                bvid = state.queueTracks.getOrNull(state.queueIndex)?.biliBvid.orEmpty(),
+                onDismiss = { biliFavPickerOpen = false }
             )
         }
     }
@@ -2844,7 +4340,9 @@ private fun ToggleSegment(
     onClick: () -> Unit,
     iconScale: Float = 1f,
     enabled: Boolean = true
+    ,onLongClick: () -> Unit = {}
 ) {
+    val hapticView = LocalView.current
     // The row owns the outer capsule. Only an active segment gets its own
     // capsule, leaving the inactive segments visually separated but flat.
     val container by animateColorAsState(
@@ -2872,11 +4370,13 @@ private fun ToggleSegment(
             .clip(RoundedCornerShape(24.dp))
             .background(container)
             .semantics { contentDescription = desc }
-            .clickable(
+            .combinedClickable(
                 enabled = enabled,
                 interactionSource = remember { MutableInteractionSource() },
-                indication = null
-            ) { onClick() },
+                indication = null,
+                onClick = { hapticView.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); onClick() },
+                onLongClick = { hapticView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); onLongClick() }
+            ),
         contentAlignment = Alignment.Center
     ) {
         Icon(
@@ -2989,10 +4489,41 @@ private fun PlayerDetailScreen(
     openAlbum: (Long) -> Unit,
     openArtist: (Long) -> Unit,
     close: () -> Unit,
-    closing: Boolean = false
+    closing: Boolean = false,
+    sleepMinutes: Int = 0,
+    sleepRemaining: Long = 0L,
+    sleepArmed: Boolean = true,
+    onSleepMinutesChanged: (Int) -> Unit = {}
 ) {
     var activeTab by remember(state.trackKey) { mutableIntStateOf(0) }
+    // A bili video has no lyrics: never leave the page on the lyric tab while one
+    // is playing.
+    LaunchedEffect(state.biliPlaying) {
+        if (state.biliPlaying) activeTab = 0
+    }
     var queueSheetOpen by remember(state.trackKey) { mutableStateOf(false) }
+    // Sharing: NetEase's open API hands out links, not WeChat/QQ share sheets (that
+    // card flow is their own app's Tencent SDK integration), so the honest action is
+    // to copy the song's canonical link.
+    val shareContext = LocalContext.current
+    val shareAction: () -> Unit = {
+        val id = state.songId
+        if (id == 0L) {
+            android.widget.Toast.makeText(
+                shareContext, "本地歌曲暂时无法生成分享链接",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+        } else {
+            val link = "https://music.163.com/song?id=$id"
+            val clipboard =
+                shareContext.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            clipboard?.setPrimaryClip(ClipData.newPlainText("歌曲链接", link))
+            android.widget.Toast.makeText(
+                shareContext, "已复制分享链接",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
     var dragX by remember { mutableFloatStateOf(0f) }
     var dragY by remember { mutableFloatStateOf(0f) }
     val coverBitmap = rememberCoverBitmap(state.coverBytes, state.coverPath)
@@ -3001,52 +4532,17 @@ private fun PlayerDetailScreen(
         animationSpec = tween(260, easing = androidx.compose.animation.core.FastOutSlowInEasing),
         label = "detail_cover_scale"
     )
-    val coverExpand = remember { Animatable(0f) }
-    val metaEnter = remember { Animatable(0f) }
-    val controlsEnter = remember { Animatable(0f) }
+    val detailProgress = remember { Animatable(0f) }
+    val coverExpand = detailProgress
+    val metaEnter = detailProgress
+    val controlsEnter = detailProgress
 
     BackHandler {
         if (queueSheetOpen) queueSheetOpen = false else close()
     }
 
-    // Re-run the entrance timeline whenever this detail instance is mounted.
-    // Using Unit here allowed a rapidly reopened detail page to reuse a stale
-    // Animatable value from the previous instance and render only its backdrop.
-    LaunchedEffect(Unit) {
-        if (closing) return@LaunchedEffect
-        launch {
-            coverExpand.snapTo(0f)
-            // Keep the artwork and the detail-page entrance on one timeline.
-            coverExpand.animateTo(
-                1f,
-                tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing)
-            )
-        }
-        launch {
-            metaEnter.snapTo(0f)
-            delay(DETAIL_META_DELAY_MS)
-            metaEnter.animateTo(1f, tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing))
-        }
-        launch {
-            controlsEnter.snapTo(0f)
-            delay(DETAIL_CONTROLS_DELAY_MS)
-            controlsEnter.animateTo(1f, tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing))
-        }
-    }
-
-    // Close every detail child on the same frame. The artwork no longer lingers
-    // after the buttons and progress track have disappeared.
     LaunchedEffect(closing) {
-        if (!closing) return@LaunchedEffect
-        launch {
-            controlsEnter.animateTo(0f, tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing))
-        }
-        launch {
-            metaEnter.animateTo(0f, tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing))
-        }
-        launch {
-            coverExpand.animateTo(0f, tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing))
-        }
+        detailProgress.animateTo(if (closing) 0f else 1f, tween(DETAIL_MOTION_MS, easing = FastOutSlowInEasing))
     }
 
     // Opening the queue is intentionally idempotent.  A new coroutine scope
@@ -3118,6 +4614,7 @@ private fun PlayerDetailScreen(
                 activeTab = activeTab,
                 onTab = ::selectTab,
                 onClose = close,
+                onShare = shareAction,
                 onQueue = ::openQueueSheet
             )
             Spacer(Modifier.height(12.dp))
@@ -3130,16 +4627,8 @@ private fun PlayerDetailScreen(
                 AnimatedContent(
                     targetState = activeTab,
                     transitionSpec = {
-                        val forward = targetState > initialState
-                        (slideInHorizontally(
-                            initialOffsetX = { if (forward) it else -it },
-                            animationSpec = tween(360, easing = androidx.compose.animation.core.FastOutSlowInEasing)
-                        ) + fadeIn(tween(260))).togetherWith(
-                            slideOutHorizontally(
-                                targetOffsetX = { if (forward) -it else it },
-                                animationSpec = tween(260, easing = androidx.compose.animation.core.FastOutLinearInEasing)
-                            ) + fadeOut(tween(180))
-                        )
+                        fadeIn(tween(300, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+                            .togetherWith(fadeOut(tween(220, easing = androidx.compose.animation.core.FastOutLinearInEasing)))
                     },
                     label = "player_detail_tab"
                 ) { tab ->
@@ -3155,6 +4644,7 @@ private fun PlayerDetailScreen(
                             openAlbum = openAlbum,
                             openArtist = openArtist,
                             onOpenLyrics = { selectTab(1) }
+                            ,playlists = state.myPlaylists
                         )
                     } else {
                         ApkLyricTab(
@@ -3170,6 +4660,10 @@ private fun PlayerDetailScreen(
             }
         }
 
+        // The root VideoLayer draws above this page's content, so it would float over
+        // this sheet. Park it while the sheet is up; parking keeps the Surface alive, so
+        // closing the sheet does not rebuild the picture.
+        LaunchedEffect(queueSheetOpen) { videoSlotObscured = queueSheetOpen }
         AnimatedVisibility(
             visible = queueSheetOpen,
             modifier = Modifier
@@ -3253,6 +4747,7 @@ private fun PlayerDetailScreen(
                                 Icon(Icons.Default.Close, contentDescription = "关闭播放队列")
                             }
                         }
+                            SleepTimerControl(sleepMinutes, sleepRemaining, onSleepMinutesChanged, sleepArmed)
                         DraggableQueueList(
                             state = state,
                             controller = controller,
@@ -3278,6 +4773,7 @@ private fun PlayerDetailHeader(
     onTab: (Int) -> Unit,
     onClose: () -> Unit,
     onQueue: (() -> Unit)? = null,
+    onShare: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -3292,16 +4788,25 @@ private fun PlayerDetailHeader(
                 modifier = Modifier.size(24.dp)
             )
         }
-        Surface(
-            shape = RoundedCornerShape(16.dp),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh
-        ) {
-            Row(
-                modifier = Modifier.padding(3.dp),
-                verticalAlignment = Alignment.CenterVertically
+        // A video has no lyrics, so there is nothing to switch to: the pill and its
+        // two buttons are not composed at all while one plays.
+        if (!state.biliPlaying) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh
             ) {
-                DetailTabButton("播放详情", activeTab == 0) { onTab(0) }
-                DetailTabButton("歌词", activeTab == 1) { onTab(1) }
+                Row(
+                    modifier = Modifier.padding(3.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    DetailTabButton("播放详情", activeTab == 0) { onTab(0) }
+                    DetailTabButton("歌词", activeTab == 1) { onTab(1) }
+                }
+            }
+        }
+        if (onShare != null) {
+            IconButton(onClick = onShare, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Default.Share, contentDescription = "分享", modifier = Modifier.size(24.dp))
             }
         }
         if (onQueue != null) {
@@ -3353,7 +4858,9 @@ private fun ApkDetailTab(
     openAlbum: (Long) -> Unit,
     openArtist: (Long) -> Unit,
     onOpenLyrics: () -> Unit
+    ,playlists: List<NeteasePlaylist> = emptyList()
 ) {
+    var playlistDialog by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -3365,6 +4872,45 @@ private fun ApkDetailTab(
                 .weight(1f),
             contentAlignment = Alignment.Center
         ) {
+            // Playing a video: it keeps its own shape instead of the square artwork
+            // box, and tapping it is not a tab switch.
+            if (state.biliPlaying) {
+                // Framed to the source's own shape: a 4:3 video gets a 4:3 box instead
+                // of being squeezed into a fixed 16:9 one. Only falls back to 16:9
+                // until the stream has reported its size.
+                val videoAspect = if (videoSourceHeight > 0) {
+                    videoSourceWidth.toFloat() / videoSourceHeight.toFloat()
+                } else {
+                    16f / 9f
+                }
+                // Reserves the box and reports it; the picture itself is drawn by the
+                // root VideoLayer, so the player keeps one Surface for the session.
+                // Double-tap enters full-screen — a single tap is reserved for the
+                // full-screen show/hide-controls toggle, so the mode change always
+                // takes a deliberate gesture.
+                VideoSlotReporter(
+                    priority = 2,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(videoAspect)
+                        .clip(ShapeExtraLarge)
+                        .pointerInput(Unit) {
+                            detectTapGestures(onDoubleTap = { videoFullscreen = true })
+                        }
+                )
+                DisposableEffect(Unit) {
+                    onDispose {
+                        videoFullscreen = false
+                        videoSlotPriority = 0
+                        videoSlotObscured = false
+                        // Nothing wants the picture any more; without this the layer
+                        // would keep drawing at this page's last box over whatever
+                        // screen comes next.
+                        videoSlotRect = null
+                    }
+                }
+                return@BoxWithConstraints
+            }
             val coverSize = minOf(maxWidth, maxHeight)
             ApkDetailCover(
                 state = state,
@@ -3456,16 +5002,497 @@ private fun ApkDetailTab(
                     state = state,
                     controller = controller,
                     isLiked = state.liked,
-                    onLikeToggle = controller::toggleLike
+                    onLikeToggle = controller::toggleLike,
+                    onLikeLongPress = { playlistDialog = true }
                 )
             }
         }
     }
+    if (playlistDialog) AlertDialog(
+        onDismissRequest = { playlistDialog = false },
+        title = { Text("添加到歌单") },
+        text = {
+            LazyColumn(Modifier.heightIn(max = 360.dp)) {
+                items(playlists, key = { it.id }) { playlist ->
+                    Text(
+                        playlist.name ?: "未命名歌单",
+                        modifier = Modifier.fillMaxWidth().clickable {
+                            controller.addToPlaylist(playlist.id, state.songId)
+                            playlistDialog = false
+                        }.padding(16.dp)
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { playlistDialog = false }) { Text("取消") } }
+    )
 }
 
 private fun formatPlayerTime(ms: Long): String {
     val seconds = (ms / 1000L).coerceAtLeast(0L)
     return "${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}"
+}
+
+/** The Activity hosting a composition context, unwrapping the ContextWrapper layers
+ *  LocalContext can carry (a themed wrapper, for instance). */
+private fun activityOf(context: android.content.Context?): android.app.Activity? {
+    var ctx = context
+    while (ctx is android.content.ContextWrapper) {
+        if (ctx is android.app.Activity) return ctx
+        ctx = ctx.baseContext
+    }
+    return null
+}
+
+/** Full-screen video: the transport bar and the exit gesture in a borderless,
+ *  transparent dialog. The picture is NOT here — it is drawn by the window overlay
+ *  the activity owns, which has been resized to the whole window, and shows through
+ *  this dialog. A SurfaceView of its own would live in the dialog's separate window,
+ *  so entering and leaving full-screen would destroy and recreate the surface and
+ *  make the player rebuild the picture (the "replays a second" this replaces).
+ *  The window is also taken to landscape with the system bars hidden while it is up
+ *  — a 16:9 picture in a portrait window is otherwise squeezed, or boxed into a
+ *  strip. */
+@Composable
+private fun BiliFullscreenControls(
+    state: PlayerUiState,
+    onToggle: () -> Unit,
+    onSeek: (Long) -> Unit,
+    onExit: () -> Unit
+) {
+    var showControls by remember { mutableStateOf(true) }
+    // Drawn over the picture in the SAME window (see VideoLayer): a gesture layer plus
+    // these controls is all there is, so nothing here can dim or cover the video. A
+    // double tap leaves full-screen; a single tap only shows/hides the controls, so the
+    // mode change always takes a deliberate gesture.
+    Box(
+        Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onTap = { showControls = !showControls },
+                    onDoubleTap = { onExit() }
+                )
+            }
+    ) {
+        if (showControls) {
+                // The transport bar doubles as the seek control, and carries the UP's
+                // chapter starts as ticks on the track.
+                QmlLyricProgress(
+                    positionMs = state.positionMs,
+                    durationMs = state.durationMs,
+                    loading = state.loading,
+                    wavy = false,
+                    onSeek = onSeek,
+                    formatMs = ::formatPlayerTime,
+                    chapterMarks = state.biliChapterMarks,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 8.dp)
+                )
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 72.dp)
+                        .size(56.dp),
+                    shape = CircleShape,
+                    color = ComposeColor.White.copy(alpha = 0.18f)
+                ) {
+                    Box(Modifier.clickable { onToggle() }, contentAlignment = Alignment.Center) {
+                        Icon(
+                            if (state.playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = null,
+                            tint = ComposeColor.White
+                        )
+                    }
+                }
+            }
+        }
+}
+
+/** A slot that wants the video picture: reports its box (in window coordinates) and
+ *  draws nothing itself. Only one slot is live at a time — the mini player and the
+ *  detail page are the two branches of the root's AnimatedContent, so they never
+ *  coexist — and the highest one wins if a transition frame has both. */
+@Composable
+private fun VideoSlotReporter(priority: Int, modifier: Modifier = Modifier) {
+    Box(
+        modifier.onGloballyPositioned {
+            if (videoSlotPriority <= priority) {
+                videoSlotPriority = priority
+                videoSlotRect = it.boundsInWindow()
+            }
+        }
+    )
+}
+
+/** The one place the B站 picture is drawn.
+ *
+ *  <p>Always composed, and afterwards only moved and resized, so the player keeps the
+ *  same Surface for the whole session and is never made to rebuild the picture. A slot
+ *  that wants the video reports its box ([videoSlotRect]); when nothing wants it, or a
+ *  panel has to draw over it, the layer is parked just off-window — parked, not
+ *  dropped, so the Surface stays alive.
+ *
+ *  <p>The full-screen controls are drawn here, over the picture, instead of in a
+ *  dialog: a dialog is a second window, and the platform dims the window beneath it,
+ *  which darkened the whole picture for as long as full-screen was up. */
+@Composable
+private fun VideoLayer(state: PlayerUiState, controller: PlayerController) {
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val activity = activityOf(LocalContext.current)
+    val fullscreen = videoFullscreen && state.biliPlaying
+
+    // Landscape + immersive with full-screen's lifetime. The activity declares
+    // configChanges=orientation|screenSize, so this resizes in place rather than
+    // recreating the composition and losing the playback state.
+    DisposableEffect(fullscreen) {
+        val window = activity?.window
+        val bars = window?.let { WindowCompat.getInsetsController(it, it.decorView) }
+        if (fullscreen) {
+            activity?.requestedOrientation =
+                android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            bars?.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            bars?.hide(WindowInsetsCompat.Type.systemBars())
+        }
+        onDispose {
+            if (fullscreen) {
+                bars?.show(WindowInsetsCompat.Type.systemBars())
+                activity?.requestedOrientation =
+                    android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            }
+        }
+    }
+
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val windowW = with(density) { maxWidth.toPx() }
+        val windowH = with(density) { maxHeight.toPx() }
+        val slot = videoSlotRect
+        val wanted = state.biliPlaying && !videoSlotObscured && (fullscreen || slot != null)
+        val aspect = if (videoSourceHeight > 0) {
+            videoSourceWidth.toFloat() / videoSourceHeight.toFloat()
+        } else {
+            16f / 9f
+        }
+        // Parked a window-width to the left: composed, sized, out of sight.
+        val target = when {
+            !wanted -> androidx.compose.ui.geometry.Rect(
+                -(windowW + 64f), 0f, -(windowW + 63f), 1f
+            )
+            fullscreen -> {
+                // The source's own shape, inside the window minus the same side padding
+                // the rest of the app uses, centred.
+                val pad = with(density) { 24.dp.toPx() }
+                val availableW = (windowW - 2 * pad).coerceAtLeast(1f)
+                val availableH = windowH.coerceAtLeast(1f)
+                val pictureW = if (availableW / availableH > aspect) {
+                    availableH * aspect
+                } else {
+                    availableW
+                }
+                val pictureH = pictureW / aspect
+                androidx.compose.ui.geometry.Rect(
+                    (windowW - pictureW) / 2f,
+                    (windowH - pictureH) / 2f,
+                    (windowW + pictureW) / 2f,
+                    (windowH + pictureH) / 2f
+                )
+            }
+            else -> slot ?: return@BoxWithConstraints
+        }
+        if (fullscreen) {
+            // Matte for the letterbox bars, under the picture.
+            Box(Modifier.fillMaxSize().background(ComposeColor.Black))
+        }
+        // The gesture belongs to the layer, not to the slot that reported the box: the
+        // picture node sits above the page and would swallow a double tap aimed at the
+        // box underneath it. In full-screen the controls layer handles the gestures, so
+        // this one is only attached while the picture is inline.
+        val videoModifier = Modifier
+            .offset(
+                x = with(density) { target.left.toDp() },
+                y = with(density) { target.top.toDp() }
+            )
+            .size(
+                with(density) { target.width.toDp() },
+                with(density) { target.height.toDp() }
+            )
+        Box(
+            modifier = if (fullscreen) {
+                videoModifier
+            } else {
+                videoModifier.pointerInput(Unit) {
+                    detectTapGestures(onDoubleTap = { videoFullscreen = true })
+                }
+            }
+        ) {
+            BiliVideoSurface(Modifier.fillMaxSize())
+        }
+        if (fullscreen) {
+            BiliFullscreenControls(
+                state = state,
+                onToggle = { controller.toggle() },
+                onSeek = { controller.seek(it) },
+                onExit = { videoFullscreen = false }
+            )
+        }
+    }
+}
+
+/** Title of the folder the content page was opened for. Kept beside the route rather
+ *  than inside it: the route only carries a Long id, and the title is also what the
+ *  core publishes for the page header once its items load. */
+private var biliFavDetailTitle by mutableStateOf("")
+
+/** 收藏夹多选框：列出用户的 B站收藏夹，已收藏的打勾；确定时**只提交差异**（新增的
+ *  进 add、取消的进 del），所以点开不改、直接确定不会发出任何写请求。 */
+@Composable
+private fun BiliFavPickerDialog(
+    state: PlayerUiState,
+    controller: PlayerController,
+    bvid: String,
+    onDismiss: () -> Unit
+) {
+    // 打开时按这个视频拉一次（rid 变体）：既填充列表，也拿到每个夹的已收藏状态。
+    LaunchedEffect(bvid) { controller.loadBiliFavFoldersForBvid(bvid) }
+    // 进入时的状态来自接口的 containsItem；用户改动只体现在 selected 上。
+    val original = state.biliFavFolders.filter { it.containsItem }.map { it.mediaId }.toSet()
+    var selected by remember(original) { mutableStateOf(original) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("收藏到 B站收藏夹") },
+        text = {
+            when {
+                state.biliFavLoading -> Text("正在加载收藏夹…")
+                state.biliFavFolders.isEmpty() ->
+                    Text(state.biliFavError.ifBlank { "没有可用的收藏夹" })
+                else -> LazyColumn {
+                    itemsIndexed(state.biliFavFolders, key = { _, f -> f.mediaId }) { _, folder ->
+                        val checked = folder.mediaId in selected
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    selected = if (checked) selected - folder.mediaId
+                                    else selected + folder.mediaId
+                                }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                if (checked) "✓" else "　",
+                                fontSize = 15.sp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                folder.title.ifBlank { "未命名收藏夹" },
+                                fontSize = 14.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Box(
+                Modifier
+                    .clickable(enabled = bvid.isNotBlank()) {
+                        val add = selected.filter { it !in original }
+                        val del = original.filter { it !in selected }
+                        if (add.isNotEmpty() || del.isNotEmpty()) {
+                            controller.setBiliFavs(bvid, add, del)
+                        }
+                        onDismiss()
+                    }
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
+            ) { Text("确定") }
+        },
+        dismissButton = {
+            Box(
+                Modifier
+                    .clickable { onDismiss() }
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
+            ) { Text("取消") }
+        }
+    )
+}
+
+/** B站收藏夹列表 — the 歌单 entry's destination.
+ *
+ *  An empty list has to be explained by [PlayerUiState.biliFavError]: the API answers
+ *  `code:0` with `data:null` for a logged-out caller, so a bare empty list would read
+ *  as "this account has no folders". */
+@Composable
+private fun BiliFavFoldersScreen(
+    state: PlayerUiState,
+    controller: PlayerController,
+    onOpen: (Long) -> Unit
+) {
+    LaunchedEffect(Unit) { controller.loadBiliFavFolders(0L) }
+    when {
+        state.biliFavLoading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("正在加载收藏夹…", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        state.biliFavFolders.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text(
+                state.biliFavError.ifBlank { "这个账号还没有 B站收藏夹" },
+                fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        else -> LazyColumn(Modifier.fillMaxSize()) {
+            itemsIndexed(state.biliFavFolders, key = { _, f -> f.mediaId }) { _, folder ->
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                        .clip(ShapeMedium)
+                        .clickable { onOpen(folder.mediaId) },
+                    shape = ShapeMedium,
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                folder.title.ifBlank { "未命名收藏夹" },
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                "${folder.mediaCount} 个视频" +
+                                    if (folder.privateFolder) " · 私密" else "",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Text(
+                            "›",
+                            fontSize = 20.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** One favourite folder's videos. Tapping any entry queues the WHOLE folder from that
+ *  entry (see [PlayerController.playBiliFavItemAt]) — that is what "playing a folder"
+ *  means here, and it needs no further network work because the folder was loaded in
+ *  full on the way in. */
+@Composable
+private fun BiliFavItemsScreen(
+    state: PlayerUiState,
+    controller: PlayerController,
+    mediaId: Long
+) {
+    LaunchedEffect(mediaId) { controller.loadBiliFavItems(mediaId, biliFavDetailTitle) }
+    when {
+        state.biliFavItemsLoading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("正在加载收藏夹…", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        state.biliFavItems.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("这个收藏夹是空的", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        else -> LazyColumn(Modifier.fillMaxSize()) {
+            itemsIndexed(state.biliFavItems, key = { i, item -> "fav_${item.avid}_$i" }) { index, item ->
+                val playing = state.queueIndex >= 0 &&
+                    state.queueIndex < state.queueTracks.size &&
+                    state.queueTracks[state.queueIndex].biliBvid == item.bvid
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                        .clip(ShapeMedium)
+                        .clickable { controller.playBiliFavItemAt(index) },
+                    shape = ShapeMedium,
+                    color = if (playing) MaterialTheme.colorScheme.secondaryContainer
+                    else MaterialTheme.colorScheme.surfaceContainerHigh
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        rememberCoverBitmap(null, item.coverUrl)?.let { art ->
+                            Image(
+                                bitmap = art,
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.size(56.dp).clip(ShapeSmall)
+                            )
+                            Spacer(Modifier.width(10.dp))
+                        }
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                item.title.ifBlank { item.bvid },
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                item.author,
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        if (item.durationSeconds > 0) {
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                formatPlayerTime(item.durationSeconds * 1000L),
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** The video picture for B站 playback: a plain SurfaceView handed to the shared
+ *  MediaPlayer, so the sound keeps coming from the same player.
+ *
+ *  <p>It lives in the Compose tree (not in a window overlay) so the app's own panels
+ *  keep drawing over it — a sibling view added above the Compose content floated over
+ *  the queue sheet. The picture is fitted inside whatever box the caller frames, and
+ *  the caller sizes that box from the source's aspect ratio. */
+@Composable
+private fun BiliVideoSurface(modifier: Modifier = Modifier) {
+    AndroidView(
+        modifier = modifier,
+        factory = { ctx ->
+            android.view.SurfaceView(ctx).apply {
+                holder.addCallback(object : android.view.SurfaceHolder.Callback {
+                    override fun surfaceCreated(holder: android.view.SurfaceHolder) {
+                        videoBackend?.attachVideoSurface(holder.surface)
+                    }
+                    override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, hh: Int) {
+                        videoBackend?.attachVideoSurface(h.surface)
+                    }
+                    override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
+                        videoBackend?.detachVideoSurface(holder.surface)
+                    }
+                })
+            }
+        }
+    )
 }
 
 @Composable
@@ -3475,6 +5502,13 @@ private fun ApkDetailCover(
     modifier: Modifier,
     onClick: () -> Unit
 ) {
+    if (state.biliPlaying) {
+        // B站视频：同一个 MediaPlayer 挂上这个 SurfaceView 就出画，音画同一时钟。
+        BiliVideoSurface(
+            modifier = modifier.clip(ShapeExtraLarge).clickable { onClick() }
+        )
+        return
+    }
     Surface(
         modifier = modifier
             .clip(ShapeExtraLarge)
@@ -3529,25 +5563,36 @@ private fun ApkLyricTab(
     openArtist: (Long) -> Unit,
     onShowDetail: () -> Unit
 ) {
-    // No lyric data must never block entering this tab.  The core marks the
-    // cover-only state while lyrics are loading; once the list arrives the
-    // same layout animates into the compact artwork + lyric column used by
-    // the original APK.
-    // The cover state is derived from the actual lyric payload. A stale manual
-    // mode flag must not hide lyrics after they have finished loading.
-    val coverOnly = state.lyrics.isEmpty()
+    // No lyric data must never block entering this tab. The artwork used to
+    // simply sit there while the asynchronous lyric fetch was still in flight;
+    // that wait is now the expressive loading animation. Once the list arrives
+    // the same layout animates into the compact artwork + lyric column used by
+    // the original APK. If nothing arrives within the grace period the song has
+    // no lyrics, and the artwork view becomes that final state — not a spinner
+    // that never ends.
+    // The core reports when the fetch for this track has finished — including
+    // the "this track has no lyrics at all" result — and it now retries a
+    // transient empty answer itself. So while it says loading, the page simply
+    // keeps showing the animation, however long that takes: no timeout, because
+    // a timer can only ever be wrong in both directions (it used to drop back to
+    // the artwork while the lyrics were still on their way).
+    val pane = when {
+        state.lyrics.isNotEmpty() -> LyricPane.LINES
+        state.lyricsLoading -> LyricPane.LOADING
+        else -> LyricPane.COVER
+    }
     Column(
         modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         AnimatedContent(
-            targetState = coverOnly,
+            targetState = pane,
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
             transitionSpec = {
-                if (targetState) {
+                if (targetState == LyricPane.COVER) {
                     (scaleIn(initialScale = 0.92f, animationSpec = tween(360)) + fadeIn(tween(260)))
                         .togetherWith(scaleOut(targetScale = 1.06f, animationSpec = tween(260)) + fadeOut(tween(180)))
                 } else {
@@ -3556,27 +5601,20 @@ private fun ApkLyricTab(
                 }
             },
             label = "lyrics_cover_layout"
-        ) { showCover ->
-            if (showCover) {
+        ) { visibleLyricPane ->
+            if (visibleLyricPane == LyricPane.LOADING) {
+                LoadingPlaceholder(Modifier.fillMaxSize(), "正在加载歌词…")
+            } else if (visibleLyricPane == LyricPane.COVER) {
                 Column(
                     modifier = Modifier.fillMaxSize(),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
-                    QmlLyricCover(
-                        state = state,
-                        coverBitmap = coverBitmap,
-                        modifier = Modifier
-                            .fillMaxWidth(0.82f)
-                            .aspectRatio(1f)
-                            .graphicsLayer {
-                                scaleX = coverScale
-                                scaleY = coverScale
-                            },
-                        onTap = {
-                            onShowDetail()
-                        }
-                    )
+                    // The artwork used to sit here whenever there was no lyric
+                    // list to show, which read as a stalled page. The MD loading
+                    // animation takes its place; the title below stays so the page
+                    // still says what is playing.
+                    ExpressiveLoadingIndicator(size = 96.dp, withContainer = true)
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -4379,6 +6417,21 @@ private fun QmlLyricLandscapeChrome(
 /** Horizontal inset kept on both sides of every lyric row. */
 private val ROW_H_PADDING = 8.dp
 
+/** Gap between the intro indicators and the first lyric line. */
+private val INTRO_BLOB_GAP = 22.dp
+
+/** Intro indicator container size, relative to the lyric font size. */
+private const val INTRO_BLOB_SIZE_SCALE = 1.6f
+
+/** Fraction of the lyric viewport the active line is anchored at (see centring). */
+private const val INTRO_LYRIC_ANCHOR = 0.35f
+
+/** Only fill the blank space when the intro is long enough to divide in three. */
+private const val INTRO_BLOB_MIN_MS = 2_000L
+
+/** The third intro beat always gets this much time, hence this much colour. */
+private const val INTRO_LAST_BEAT_MS = 2_000L
+
 /** Slight lift of the line that is currently being sung (弹簧动效). */
 private const val LYRIC_WORD_LIFT_DP = -2.5f
 
@@ -4518,6 +6571,106 @@ private fun QmlLyricColumnRestored(
                 }
             }
         }
+
+        // --- Intro blobs -----------------------------------------------------
+        // A long intro leaves the area above the first line blank. Three
+        // contained expressive indicators (the Widget.Material3.LoadingIndicator
+        // .Contained look) sit there, on the same left edge as the lyric text so
+        // they read as the line that is about to start, just above the first line
+        // with a small gap. The intro is split into three equal beats and they
+        // take turns: only the current beat animates, which is also what keeps
+        // them in step — running them together left their shapes out of phase.
+        // A beat that has finished freezes as a very light grey dot to show it is
+        // done, the next one starts, and everything holds still while playback is
+        // paused. Size follows the lyric font-size setting, colours come from the
+        // Monet scheme, and the row clears out once the first line arrives.
+        val firstLine = state.lyrics.firstOrNull()
+        val firstLineStartMs = firstLine?.startMs() ?: 0L
+        val introMs = firstLineStartMs.coerceAtLeast(0L)
+        val introActive = state.lyrics.isNotEmpty() &&
+            introMs >= INTRO_BLOB_MIN_MS &&
+            state.lyricPositionMs < firstLineStartMs
+        val introAlpha by animateFloatAsState(
+            targetValue = if (introActive) 1f else 0f,
+            animationSpec = tween(280),
+            label = "intro_blob_alpha"
+        )
+        if (introAlpha > 0.01f) {
+            val introScheme = MaterialTheme.colorScheme
+            val introColors = listOf(
+                introScheme.primary,
+                introScheme.tertiary,
+                introScheme.secondary
+            )
+            // Not-played beats are the faint grey; a beat that has played through
+            // takes its Monet colour. So the row fills up from grey to colour as
+            // the intro runs out.
+            val introIdleColor = introScheme.onSurface.copy(alpha = 0.12f)
+            // Which beat is being played. The last one is always given at least
+            // INTRO_LAST_BEAT_MS so it is properly lit before the lyrics start:
+            // splitting the intro into plain thirds left it with a fraction of a
+            // second on a short intro, and it never turned colour at all before
+            // the first line arrived. The two earlier beats share the rest.
+            val introThirdWindow = (introMs / 3).coerceAtLeast(INTRO_LAST_BEAT_MS)
+            val introThirdStart = (introMs - introThirdWindow).coerceAtLeast(0L)
+            val introSecondStart = introThirdStart / 2
+            val introBeat = when {
+                introMs <= 0L -> 0
+                state.lyricPositionMs >= introThirdStart -> 2
+                state.lyricPositionMs >= introSecondStart -> 1
+                else -> 0
+            }
+            val density = LocalDensity.current
+            // [size] is the container box, so this is a good deal larger than the
+            // lyric text; it still tracks the font-size setting.
+            val blobSize = with(density) {
+                (state.lyricFontSize.coerceIn(14, 40).toFloat() * INTRO_BLOB_SIZE_SCALE)
+                    .sp.toDp()
+            }
+            // Where the first line will be: the lyric column anchors the active
+            // row's centre at 35% of its height, so the first line's top is there
+            // minus half a row. Deriving it from the settings instead of the live
+            // layout keeps the gap stable even before the list has measured.
+            val firstRowHeight = run {
+                val textHeight = with(density) {
+                    (blobSize.value / INTRO_BLOB_SIZE_SCALE * 0.92f).sp.toDp()
+                }
+                var height = textHeight * state.lyricLineSpacing.coerceIn(100, 250) / 100f + 12.dp
+                if (!firstLine?.romaji.isNullOrBlank()) height += 15.dp
+                if (!firstLine?.translation.isNullOrBlank()) height += 15.dp
+                height
+            }
+            val blobTopPadding = (
+                maxHeight * INTRO_LYRIC_ANCHOR -
+                    firstRowHeight / 2 -
+                    INTRO_BLOB_GAP -
+                    blobSize
+                ).coerceAtLeast(0.dp)
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = ROW_H_PADDING, top = blobTopPadding)
+                    .graphicsLayer { alpha = introAlpha },
+                horizontalArrangement = Arrangement.spacedBy(blobSize * 0.25f),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                repeat(3) { index ->
+                    // All three are composed together, so their animations start
+                    // in the same frame and their shapes never drift apart. The
+                    // intro's thirds are marked by colour instead: a beat that has
+                    // not been played is the faint grey, one that has been played
+                    // through takes its own Monet colour.
+                    Box(Modifier.size(blobSize)) {
+                        ExpressiveLoadingIndicator(
+                            size = blobSize,
+                            color = if (index < introBeat) introColors[index] else introIdleColor,
+                            withContainer = true,
+                            running = state.playing
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -4532,17 +6685,19 @@ private fun LegacyQmlLyricRow(
 ) {
     val active = state.lyricIndex == index
     val distance = kotlin.math.abs(index - state.lyricIndex)
+    // A size emphasis always slides the glyphs sideways, because the text is
+    // left-aligned and therefore grows away from its own left edge. Keeping the
+    // range small and the transition short is what keeps that from reading as a
+    // tremble while the column scrolls; a slow spring left the whole visible
+    // block creeping sideways for a third of a second.
     val targetScale = when {
         !state.lyricScale -> 1f
-        active -> 1.12f
-        distance == 1 -> 0.91f
-        else -> 0.85f
+        active -> 1.10f
+        distance == 1 -> 0.94f
+        else -> 0.90f
     }
-    val rowAnimation: androidx.compose.animation.core.AnimationSpec<Float> = if (state.lyricSpring) {
-        spring<Float>(dampingRatio = 1f, stiffness = 400f)
-    } else {
-        tween<Float>(280)
-    }
+    val rowAnimation: androidx.compose.animation.core.AnimationSpec<Float> =
+        tween(200, easing = androidx.compose.animation.core.FastOutSlowInEasing)
     val scale by animateFloatAsState(
         targetValue = targetScale,
         animationSpec = rowAnimation,
@@ -4618,56 +6773,38 @@ private fun LegacyQmlLyricRow(
     val lineHeight = (
         fittedSize * state.lyricLineSpacing.coerceIn(100, 250) / 100f
     ).coerceAtLeast(fittedSize * 1.10f)
-    val wordProgress = ArrayList<Float>(line.syllables.size)
-    line.syllables.forEach { syllable ->
-        val end = (syllable.startMs + syllable.durationMs)
-            .coerceAtLeast(syllable.startMs + 1L)
-        val target = when {
-            state.lyricPositionMs >= end -> 1f
-            state.lyricPositionMs <= syllable.startMs -> 0f
-            else -> (state.lyricPositionMs - syllable.startMs).toFloat() /
-                (end - syllable.startMs).toFloat()
-        }.coerceIn(0f, 1f)
-        // Completed/upcoming rows are static. Keeping an Animatable for every
-        // syllable in every visible row caused hundreds of animation states to
-        // wake during lyric scrolling; only the active row needs interpolation.
-        val progress = if (active) {
-            val animated by animateFloatAsState(
-                targetValue = target,
-                animationSpec = tween(110, easing = LinearEasing),
-                label = "lyric_word_progress"
-            )
-            animated
-        } else {
-            target
-        }
-        wordProgress += progress
-    }
     val nextLineStart = state.lyrics.getOrNull(index + 1)?.startMs()
         ?: (line.startMs() + 960L)
-    val plainTarget = if (active && state.lyricLinearAnim) {
-        ((state.lyricPositionMs - line.startMs()).toFloat() /
-            (nextLineStart - line.startMs()).coerceAtLeast(1L).toFloat())
-            .coerceIn(0f, 1f)
-    } else 0f
-    val linearProgress = if (active) {
+    val units = remember(line, nextLineStart) { expandLyricUnits(line, nextLineStart) }
+    // One interpolation drives the whole line. Animating every character separately
+    // meant dozens of animation states waking per frame, each one rebuilding the
+    // annotated string and re-laying the text out — the visible stutter while a line
+    // is being sung. A single animated clock position is enough: each character's
+    // progress is then just arithmetic.
+    val lineWindowStart = units.firstOrNull()?.startMs ?: line.startMs()
+    val lineWindowEnd = units.lastOrNull()?.endMs ?: (lineWindowStart + 1L)
+    val animatedLyricPos = if (active) {
         val animated by animateFloatAsState(
-            targetValue = plainTarget,
+            targetValue = state.lyricPositionMs
+                .coerceIn(lineWindowStart, lineWindowEnd)
+                .toFloat(),
             animationSpec = tween(110, easing = LinearEasing),
-            label = "lyric_linear_progress"
+            label = "lyric_sweep"
         )
         animated
     } else {
-        plainTarget
+        state.lyricPositionMs.toFloat()
+    }
+    val wordProgress = ArrayList<Float>(units.size)
+    units.forEach { unit ->
+        val span = (unit.endMs - unit.startMs).coerceAtLeast(1L).toFloat()
+        wordProgress += ((animatedLyricPos - unit.startMs) / span).coerceIn(0f, 1f)
     }
     val text = LegacyQmlLyricAnnotatedText(
-        state = state,
-        line = line,
+        units = units,
+        progress = wordProgress,
         active = active,
-        wordProgress = wordProgress,
-        linearProgress = linearProgress,
         normalColor = normalColor,
-        activeColor = activeColor,
         sungColor = sungColor
     )
     val blurRadius = if (state.lyricEdgeBlur && distance > 0) {
@@ -4822,41 +6959,106 @@ private fun LyricParticleField(
     }
 }
 
+/**
+ * One highlightable character and the slice of the line's timing it owns. Lyric
+ * sources hand out units of different sizes — a Chinese character in one song, a
+ * whole English word in the next — and the sweep used to be as coarse as
+ * whatever the source provided, which is why some songs scrolled a letter at a
+ * time and others a word at a time.
+ */
+private class LyricUnit(val text: String, val startMs: Long, val endMs: Long)
+
+/**
+ * Flattens a line into per-character units so the highlight always sweeps
+ * character by character (letter by letter in Latin text) no matter how the
+ * source timed it. Each timed unit keeps its own window and divides it evenly
+ * between its characters; [nextLineStartMs] is the window for units that carry
+ * no duration of their own, which is how plain LRC lines are timed.
+ */
+private fun expandLyricUnits(line: LyricLine, nextLineStartMs: Long): List<LyricUnit> {
+    val lineStart = line.startMs()
+    val lineEnd = nextLineStartMs.coerceAtLeast(lineStart + 1L)
+    val syllables = line.syllables
+    if (syllables.isEmpty()) {
+        return spreadLyricUnits(line.text().trim(), lineStart, lineEnd)
+    }
+    val units = ArrayList<LyricUnit>(line.text().length + 4)
+    syllables.forEach { syllable ->
+        val text = syllable.text ?: return@forEach
+        if (text.isEmpty()) return@forEach
+        val timed = syllable.durationMs > 0L
+        units += spreadLyricUnits(
+            text = text,
+            startMs = if (timed) syllable.startMs else lineStart,
+            endMs = if (timed) syllable.startMs + syllable.durationMs else lineEnd
+        )
+    }
+    return units
+}
+
+/** One [LyricUnit] per character, sharing [startMs]..[endMs] evenly. */
+private fun spreadLyricUnits(text: String, startMs: Long, endMs: Long): List<LyricUnit> {
+    if (text.isEmpty()) return emptyList()
+    val span = (endMs - startMs).coerceAtLeast(1L)
+    val pieces = ArrayList<String>(text.length)
+    var index = 0
+    while (index < text.length) {
+        // Keep surrogate pairs (emoji) whole instead of tearing them in half.
+        val width = if (index + 1 < text.length &&
+            text[index].isHighSurrogate() && text[index + 1].isLowSurrogate()
+        ) 2 else 1
+        pieces += text.substring(index, index + width)
+        index += width
+    }
+    return pieces.mapIndexed { position, piece ->
+        LyricUnit(
+            text = piece,
+            startMs = startMs + span * position / pieces.size,
+            endMs = startMs + span * (position + 1) / pieces.size
+        )
+    }
+}
+
 @Composable
 private fun LegacyQmlLyricAnnotatedText(
-    state: PlayerUiState,
-    line: LyricLine,
+    units: List<LyricUnit>,
+    progress: List<Float>,
     active: Boolean,
-    wordProgress: List<Float>,
-    linearProgress: Float,
     normalColor: ComposeColor,
-    activeColor: ComposeColor,
     sungColor: ComposeColor
 ): androidx.compose.ui.text.AnnotatedString {
-    val source = line.text().trim()
     return buildAnnotatedString {
-        if (source.isEmpty()) return@buildAnnotatedString
-        if (line.syllables.size > 1) {
-            line.syllables.forEachIndexed { syllableIndex, syllable ->
-                val progress = wordProgress.getOrNull(syllableIndex) ?: 0f
-                val color = if (active) {
-                    lyricMixColor(normalColor, sungColor, progress)
-                } else normalColor
+        if (units.isEmpty()) return@buildAnnotatedString
+        if (!active) {
+            // Nothing on this row is changing, so one span is enough — and one span
+            // keeps Text's layout cache hit instead of re-laying the line out.
+            withStyle(SpanStyle(color = normalColor)) {
+                units.forEach { append(it.text) }
+            }
+            return@buildAnnotatedString
+        }
+        // Only the characters straddling the sweep are mid-colour; everything before
+        // them is sung and everything after is untouched, so those collapse into one
+        // span each: three spans per row instead of one per character, which is what
+        // was making the text re-lay-out every frame.
+        val bucketOf: (Float) -> Int = { p -> if (p >= 0.999f) 1 else if (p <= 0.001f) 0 else 2 }
+        var index = 0
+        while (index < units.size) {
+            val startProgress = progress.getOrNull(index) ?: 0f
+            val bucket = bucketOf(startProgress)
+            if (bucket == 2) {
+                withStyle(SpanStyle(color = lyricMixColor(normalColor, sungColor, startProgress))) {
+                    append(units[index].text)
+                }
+                index++
+            } else {
+                var end = index
+                while (end + 1 < units.size && bucketOf(progress.getOrNull(end + 1) ?: 0f) == bucket) end++
+                val color = if (bucket == 1) sungColor else normalColor
                 withStyle(SpanStyle(color = color)) {
-                    append(syllable.text)
+                    for (i in index..end) append(units[i].text)
                 }
-            }
-        } else if (active && state.lyricLinearAnim) {
-            val characterProgress = source.length * linearProgress
-            source.forEachIndexed { charIndex, character ->
-                val progress = (characterProgress - charIndex).coerceIn(0f, 1f)
-                withStyle(SpanStyle(color = lyricMixColor(activeColor, sungColor, progress))) {
-                    append(character)
-                }
-            }
-        } else {
-            withStyle(SpanStyle(color = if (active) activeColor else normalColor)) {
-                append(source)
+                index = end + 1
             }
         }
     }
@@ -5533,6 +7735,7 @@ private fun QmlLyricTransport(
     modifier: Modifier = Modifier,
     formatMs: (Long) -> String
 ) {
+    val haptic = LocalView.current
     Column(modifier = modifier) {
         Spacer(Modifier.height(18.dp))
         QmlLyricProgress(
@@ -5550,8 +7753,11 @@ private fun QmlLyricTransport(
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically
         ) {
+            IconButton(onClick = { haptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); controller.prev() }) {
+                Icon(Icons.Default.SkipPrevious, "上一首")
+            }
             FilledIconButton(
-                onClick = { controller.toggle() },
+                onClick = { haptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); controller.toggle() },
                 modifier = Modifier.size(40.dp),
                 colors = IconButtonDefaults.filledIconButtonColors(
                     containerColor = MaterialTheme.colorScheme.primary,
@@ -5563,6 +7769,9 @@ private fun QmlLyricTransport(
                     contentDescription = "播放/暂停",
                     modifier = Modifier.size(24.dp)
                 )
+            }
+            IconButton(onClick = { haptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); controller.next() }) {
+                Icon(Icons.Default.SkipNext, "下一首")
             }
         }
         Spacer(Modifier.height(14.dp))
@@ -5577,6 +7786,7 @@ private fun QmlLyricProgress(
     wavy: Boolean,
     onSeek: (Long) -> Unit,
     formatMs: (Long) -> String,
+    chapterMarks: List<Float> = emptyList(),
     modifier: Modifier = Modifier
 ) {
     val duration = durationMs.coerceAtLeast(1L)
@@ -5592,6 +7802,7 @@ private fun QmlLyricProgress(
     val trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
     val progressColor = MaterialTheme.colorScheme.primary
     val progressHandleColor = MaterialTheme.colorScheme.primary
+    val chapterMarkColor = MaterialTheme.colorScheme.onSurfaceVariant
 
     Column(modifier = modifier.widthIn(max = 600.dp)) {
         Box(
@@ -5695,6 +7906,24 @@ private fun QmlLyricProgress(
                         size = Size(handleWidth, handleHeight),
                         cornerRadius = CornerRadius(handleWidth / 2f, handleWidth / 2f)
                     )
+                }
+                // UP chapter starts as ticks on the track (fractions of the duration,
+                // empty unless the caller supplied them). Drawn last so they stay
+                // readable where the filled part or the thumb runs through them.
+                chapterMarks.forEach { mark ->
+                    if (mark > 0f && mark < 1f) {
+                        val tickWidth = 1.5.dp.toPx()
+                        val tickHeight = 14.dp.toPx()
+                        drawRoundRect(
+                            color = chapterMarkColor,
+                            topLeft = Offset(
+                                (size.width * mark).coerceIn(0f, size.width - tickWidth),
+                                centerY - tickHeight / 2f
+                            ),
+                            size = Size(tickWidth, tickHeight),
+                            cornerRadius = CornerRadius(tickWidth / 2f, tickWidth / 2f)
+                        )
+                    }
                 }
             }
         }
@@ -5884,12 +8113,67 @@ private fun LoginDialog(controller: PlayerController, state: PlayerUiState, clos
     )
 }
 
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
-private fun PlaylistCard(playlist: NeteasePlaylist, onClick: () -> Unit) {
+private fun PlaylistCard(
+    playlist: NeteasePlaylist,
+    sharedTransitionScope: SharedTransitionScope,
+    animatedVisibilityScope: AnimatedVisibilityScope,
+    onClick: () -> Unit,
+) {
+    val sharedMotion = tween<androidx.compose.ui.geometry.Rect>(
+        durationMillis = SHARED_MOTION_MS,
+        easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+    )
     val coverBitmap = rememberCoverBitmap(null, playlist.coverThumbPath ?: playlist.coverUrl)
-    Card(Modifier.width(164.dp).clickable { onClick() }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
-        Column {
-            Surface(Modifier.fillMaxWidth().height(164.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
+    // The card's text is not part of the shared element, so it disappears fast
+    // instead of lingering半透明 under the detail page's own text.
+    val listTextAlpha by animateFloatAsState(
+        targetValue = if (leavingCoverKey == "playlist_card_${playlist.id}") 0f else 1f,
+        animationSpec = tween(80),
+        label = "card_text_fade"
+    )
+    Card(
+        Modifier
+            .width(164.dp)
+            .clickable { onClick() }
+            .then(
+                with(sharedTransitionScope) {
+                    Modifier.sharedBounds(
+                        sharedContentState = rememberSharedContentState(
+                            "playlist_container_${playlist.id}"
+                        ),
+                        animatedVisibilityScope = animatedVisibilityScope,
+                        
+                        resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
+                        clipInOverlayDuringTransition = OverlayClip(RoundedCornerShape(16.dp))
+                    )
+                }
+            ),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = ComposeColor.Transparent)
+    ) {
+        Column(Modifier.graphicsLayer { alpha = listTextAlpha }) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(164.dp)
+                    .then(
+                        with(sharedTransitionScope) {
+                            Modifier.sharedBounds(
+                                sharedContentState = rememberSharedContentState(
+                                    "playlist_cover_${playlist.id}"
+                                ),
+                                animatedVisibilityScope = animatedVisibilityScope,
+                                
+                                clipInOverlayDuringTransition = OverlayClip(
+                                    RoundedCornerShape(rememberSharedCoverTransitionRadius("playlist_cover_${playlist.id}", COVER_OVERLAY_CLIP, animatedVisibilityScope))
+                                )
+                            )
+                        }
+                    ),
+                color = MaterialTheme.colorScheme.secondaryContainer
+            ) {
                 if (coverBitmap != null) {
                     Image(
                         bitmap = coverBitmap,
@@ -5908,10 +8192,71 @@ private fun PlaylistCard(playlist: NeteasePlaylist, onClick: () -> Unit) {
 }
 
 @Composable
-private fun PlaylistListRow(playlist: NeteasePlaylist, onClick: () -> Unit) {
+@OptIn(
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+    ExperimentalSharedTransitionApi::class,
+)
+private fun PlaylistListRow(
+    playlist: NeteasePlaylist,
+    sharedTransitionScope: SharedTransitionScope,
+    animatedVisibilityScope: AnimatedVisibilityScope,
+    onClick: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val sharedMotion = tween<androidx.compose.ui.geometry.Rect>(
+        durationMillis = SHARED_MOTION_MS,
+        easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+    )
+    var menu by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    // The card's own text is not part of the shared element: it has to be gone in
+    // 80ms so it can never ghost underneath the detail page's text.
+    val listTextAlpha by animateFloatAsState(
+        targetValue = if (leavingCoverKey == "playlist_row_${playlist.id}") 0f else 1f,
+        animationSpec = tween(80),
+        label = "list_text_fade"
+    )
+
     val coverBitmap = rememberCoverBitmap(null, playlist.coverThumbPath ?: playlist.coverUrl)
-    Row(Modifier.fillMaxWidth().clickable { onClick() }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Surface(Modifier.size(60.dp), shape = ShapeMedium, color = MaterialTheme.colorScheme.secondaryContainer) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .then(
+                with(sharedTransitionScope) {
+                    Modifier.sharedBounds(
+                        sharedContentState = rememberSharedContentState(
+                            "playlist_container_${playlist.id}"
+                        ),
+                        animatedVisibilityScope = animatedVisibilityScope,
+                        
+                        resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
+                        clipInOverlayDuringTransition = OverlayClip(RoundedCornerShape(16.dp))
+                    )
+                }
+            ),
+        shape = RoundedCornerShape(16.dp),
+        color = ComposeColor.Transparent
+    ) {
+    Box {
+    Row(Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = { if (playlist.owned) menu = true }).padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Surface(
+            modifier = Modifier
+                .size(60.dp)
+                .then(
+                    with(sharedTransitionScope) {
+                        Modifier.sharedBounds(
+                            sharedContentState = rememberSharedContentState(
+                                "playlist_cover_${playlist.id}"
+                            ),
+                            animatedVisibilityScope = animatedVisibilityScope,
+                            
+                        )
+                    }
+                ),
+            shape = ShapeMedium,
+            color = MaterialTheme.colorScheme.secondaryContainer
+        ) {
             if (coverBitmap != null) {
                 Image(
                     bitmap = coverBitmap,
@@ -5923,9 +8268,21 @@ private fun PlaylistListRow(playlist: NeteasePlaylist, onClick: () -> Unit) {
                 Icon(Icons.Default.Album, null, Modifier.padding(16.dp))
             }
         }
-        Column(Modifier.padding(start = 12.dp)) { Text(playlist.name ?: "未命名歌单", fontWeight = FontWeight.Medium); Text("${playlist.trackCount} 首歌曲", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        Column(Modifier.padding(start = 12.dp).graphicsLayer { alpha = listTextAlpha }) { Text(playlist.name ?: "未命名歌单", fontWeight = FontWeight.Medium); Text("${playlist.trackCount} 首歌曲", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+    }
+    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+        DropdownMenuItem(text = { Text("删除歌单") }, onClick = { menu = false; confirmDelete = true })
+    }
+    if (confirmDelete) AlertDialog(
+        onDismissRequest = { confirmDelete = false },
+        title = { Text("删除歌单？") },
+        text = { Text("将删除“${playlist.name ?: "未命名歌单"}”，此操作不可撤销。") },
+        confirmButton = { TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("删除") } },
+        dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("取消") } }
+    )
     }
 }
+    }
 
 @Composable
 private fun SongRow(
@@ -5933,17 +8290,33 @@ private fun SongRow(
     artist: String,
     coverBytes: ByteArray? = null,
     coverPath: String? = null,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLongPressQueue: (() -> Unit)? = null
 ) {
     val coverBitmap = rememberCoverBitmap(coverBytes, coverPath)
     val interactionSource = remember { MutableInteractionSource() }
-    Row(
+    var menu by remember { mutableStateOf(false) }
+    // No plate of its own: the row must not paint a rounded rectangle over the
+    // page. The only rectangle is the press highlight, and it is inset so the text
+    // keeps whitespace on both sides.
+    Box(
         Modifier
             .fillMaxWidth()
-            .clickable(interactionSource = interactionSource, indication = LocalIndication.current) { onClick() }
-            .padding(vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(horizontal = 12.dp)
     ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(ShapeMedium)
+                .combinedClickable(
+                    interactionSource = interactionSource,
+                    indication = androidx.compose.material3.ripple(),
+                    onClick = onClick,
+                    onLongClick = { if (onLongPressQueue != null) menu = true }
+                )
+                .padding(horizontal = 8.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
         Surface(Modifier.size(48.dp), shape = ShapeSmall, color = MaterialTheme.colorScheme.surfaceContainerHighest) {
             if (coverBitmap != null) {
                 Image(
@@ -5958,11 +8331,117 @@ private fun SongRow(
         }
         Column(Modifier.weight(1f).padding(start = 12.dp)) { Text(title, maxLines = 1); Text(artist, maxLines = 1, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         Icon(Icons.Default.ArrowForward, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            DropdownMenuItem(
+                text = { Text("添加到播放队列") },
+                onClick = { menu = false; onLongPressQueue?.invoke() }
+            )
+        }
     }
 }
 
 @Composable
 private fun SectionTitle(text: String) { Text(text, fontSize = 19.sp, fontWeight = FontWeight.SemiBold) }
+
+/**
+ * Which of the three states the lyric page body is showing. LOADING is driven by
+ * the core's `lyricsLoading` flag, not by a timer: it lasts exactly as long as
+ * the fetch does, and the core retries a transient empty answer itself.
+ */
+private enum class LyricPane { LOADING, COVER, LINES }
+
+/**
+ * Material 3 Expressive loading indicator — the framework's own
+ * `LoadingIndicator` / `ContainedLoadingIndicator` from material3, i.e. exactly
+ * what the `com.google.android.material.loadingindicator.LoadingIndicator` view
+ * tag with `Widget.Material3.LoadingIndicator.Contained` renders, including the
+ * official shape sequence. Both components draw themselves to fill whatever size
+ * they are handed, so [size] is the container box for the contained variant and
+ * the shape box for the plain one.
+ *
+ * [running] = false freezes the indicator on a plain blob instead of animating;
+ * [startDelayMs] holds that same blob before the animation begins.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun ExpressiveLoadingIndicator(
+    modifier: Modifier = Modifier,
+    size: Dp = 48.dp,
+    color: ComposeColor = MaterialTheme.colorScheme.primary,
+    containerColor: ComposeColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+    withContainer: Boolean = false,
+    running: Boolean = true,
+    startDelayMs: Long = 0L
+) {
+    if (!running) return
+    var started by remember(startDelayMs) { mutableStateOf(startDelayMs <= 0L) }
+    LaunchedEffect(startDelayMs) {
+        if (!started) {
+            delay(startDelayMs)
+            started = true
+        }
+    }
+    if (!started || !running) {
+        // Frozen. Used both before a delayed start and whenever [running] is
+        // false, so pausing playback stops the animation on a plain blob instead
+        // of leaving it spinning. The inner circle keeps the official contained
+        // ratio (the shape is ~0.79 of its container) so the freeze looks like a
+        // frame of the real animation.
+        Box(modifier.size(size), contentAlignment = Alignment.Center) {
+            if (withContainer) {
+                Box(Modifier.size(size).clip(CircleShape).background(containerColor))
+            }
+            Box(
+                Modifier
+                    .size(size * if (withContainer) 0.79f else 0.52f)
+                    .clip(CircleShape)
+                    .background(color)
+            )
+        }
+        return
+    }
+    if (withContainer) {
+        ContainedLoadingIndicator(
+            modifier = modifier.size(size),
+            containerColor = containerColor,
+            indicatorColor = color
+        )
+    } else {
+        LoadingIndicator(
+            modifier = modifier.size(size),
+            color = color
+        )
+    }
+}
+
+/**
+ * Centred [ExpressiveLoadingIndicator] for pages whose content has not arrived
+ * yet. Playlist/album/artist pages show this instead of an empty list, matching
+ * what the QML shell does with `player.playlistLoading` & friends.
+ */
+@Composable
+private fun LoadingPlaceholder(
+    modifier: Modifier = Modifier,
+    text: String = "",
+    size: Dp = 56.dp
+) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        ExpressiveLoadingIndicator(size = size, withContainer = true)
+        if (text.isNotBlank()) {
+            Spacer(Modifier.height(14.dp))
+            Text(
+                text = text,
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
 
 @Composable
 private fun EmptyState(title: String, subtitle: String, action: () -> Unit) {
@@ -5982,6 +8461,7 @@ private fun EmptyState(title: String, subtitle: String, action: () -> Unit) {
     widthDp = 412,
     heightDp = 892
 )
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 private fun QPlayerHomePreview() {
     val state = remember { previewPlayerState() }
@@ -6010,12 +8490,20 @@ private fun QPlayerHomePreview() {
             }
         ) { padding ->
             Box(Modifier.fillMaxSize().padding(padding)) {
-                HomeScreen(
-                    state = state,
-                    openPlaylist = {},
-                    playRecommendation = {},
-                    refresh = {}
-                )
+                // A preview hosts the same layout, so it needs the two scopes the
+                // page composables now take.
+                SharedTransitionLayout {
+                    AnimatedVisibility(visible = true) {
+                        HomeScreen(
+                            state = state,
+                            sharedTransitionScope = this@SharedTransitionLayout,
+                            animatedVisibilityScope = this,
+                            openPlaylist = { _, _ -> },
+                            playRecommendation = {},
+                            refresh = {}
+                        )
+                    }
+                }
                 Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)

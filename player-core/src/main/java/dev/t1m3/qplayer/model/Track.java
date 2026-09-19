@@ -7,7 +7,7 @@ package dev.t1m3.qplayer.model;
  */
 public class Track {
 
-    public enum Source { LOCAL, NETEASE, CUSTOM_API }
+    public enum Source { LOCAL, NETEASE, CUSTOM_API, BILI }
 
     public Source source = Source.LOCAL;
 
@@ -16,7 +16,11 @@ public class Track {
     /** Content URI (LOCAL source on Android 13+). Preferred over filePath because
      *  Scoped Storage blocks direct file-path access to /storage/emulated/0/. */
     public String contentUri;
-    /** Direct HTTP CDN url (NETEASE or CUSTOM_API source) — fetched lazily, may be null. */
+    /** Bilibili video id (BILI source), e.g. BV1xx411c7mD. */
+    public String biliBvid;
+    /** Bilibili page id (BILI source): identifies one part of the video/collection. */
+    public long biliCid;
+    /** Direct HTTP CDN url (NETEASE, CUSTOM_API or BILI source) — fetched lazily. */
     public String streamUrl;
     /** True when {@link #streamUrl} is only a trial/preview clip (not the full
      *  track) — such a clip must never be written to the audio disk cache. */
@@ -76,7 +80,9 @@ public class Track {
 
     /** The source string the audio backend should open: content URI, file path, or stream url. */
     public String playable() {
-        if (source == Source.NETEASE || source == Source.CUSTOM_API) return streamUrl;
+        if (source == Source.NETEASE || source == Source.CUSTOM_API || source == Source.BILI) {
+            return streamUrl;
+        }
         return contentUri != null ? contentUri : filePath;
     }
 

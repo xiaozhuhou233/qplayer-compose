@@ -31,9 +31,10 @@ public final class SettingsCatalog {
     public static final String LOCAL = "本地";
     public static final String ABOUT = "关于";
     public static final String AI = "AI";
+    public static final String PALETTE = "调色板";
 
     public static final List<String> CATEGORIES = Collections.unmodifiableList(
-            Arrays.asList(APPEARANCE, PLAYBACK, LYRIC, LOCAL, AI, ABOUT));
+            Arrays.asList(APPEARANCE, PLAYBACK, LYRIC, LOCAL, AI, PALETTE, ABOUT));
 
     /** Fluid-background mode, 0 dynamic / 1 static. Stored under a new key
      *  because the same setting used to be a boolean ("lyricBgStatic") and a
@@ -74,11 +75,6 @@ public final class SettingsCatalog {
         // ---- 外观 -----------------------------------------------------------
         out.add(SettingSpec.segmented("darkMode", APPEARANCE, "深色模式", MODE_SYSTEM,
                         "跟随系统", "浅色", "深色")
-                .build());
-        out.add(SettingSpec.dropdown(PAGE_TRANSITION_KEY, APPEARANCE, "页面切换动画",
-                        PAGE_TRANSITION_ZOOM,
-                        "Zoom In / Out", "淡入淡出", "水平滑动", "垂直滑动", "无动画")
-                .desc("应用于导航页面，修改后立即生效；歌词页使用独立展开动画")
                 .build());
         out.add(SettingSpec.toggle("monet", APPEARANCE, "莫奈取色", true)
                 .desc("随封面动态生成主题配色")
@@ -126,21 +122,21 @@ public final class SettingsCatalog {
         out.add(SettingSpec.dropdown("aiProvider", AI, "AI 服务商", 0,
                 "自定义 OpenAI 兼容", "DeepSeek", "OpenAI", "Gemini")
                 .build());
-        out.add(SettingSpec.text("aiBaseUrl", AI, "API 地址", "https://api.openai.com/v1")
+        out.add(SettingSpec.text("aiBaseUrl", AI, "API 地址 *", "https://api.openai.com/v1")
                 .desc("填写兼容 OpenAI /v1/chat/completions 的地址")
                 .build());
-        out.add(SettingSpec.text("aiApiKey", AI, "API Key", "")
+        out.add(SettingSpec.text("aiApiKey", AI, "API Key *", "")
                 .desc("仅保存在本机设置中，不会写入源码")
                 .build());
-        out.add(SettingSpec.text("aiModel", AI, "模型名称", "gpt-5.6-luna")
+        out.add(SettingSpec.text("aiModel", AI, "模型名称 *", "gpt-5.6-luna")
                 .build());
         out.add(SettingSpec.slider("aiTimeoutMs", AI, "请求超时", 60000, 10000, 180000, 5000)
                 .unit(" ms").build());
         out.add(SettingSpec.toggle("aiExcludeLiked", AI, "排除已收藏歌曲", false)
                 .desc("推荐时仍以收藏歌曲分析风格，但不重复推荐收藏歌曲")
                 .build());
-        out.add(SettingSpec.toggle("aiWebSearchEnabled", AI, "复杂问题自动联网搜索", true)
-                .desc("榜单、热门、实时等问题先搜索网页，再交给 AI 整理；需要填写搜索 API Key")
+        out.add(SettingSpec.toggle("aiGeminiKnowledgeOnly", AI, "Gemini 强制使用知识库", false)
+                .desc("Gemini 不使用联网工具，仅依据模型知识生成歌曲推荐")
                 .build());
         out.add(SettingSpec.text("aiWebSearchUrl", AI, "搜索 API 地址", "https://api.tavily.com/search")
                 .desc("默认使用 Tavily，也可填写兼容的自定义搜索接口")
@@ -151,7 +147,22 @@ public final class SettingsCatalog {
         out.add(SettingSpec.toggle("aiForceKnowledge", AI, "强制使用知识库", false)
                 .desc("联网搜索不可用时使用 AI 内置知识库继续生成，不因搜索失败直接拒绝")
                 .build());
+        out.add(SettingSpec.toggle("aiShowOutput", AI, "显示输出结果", false)
+                .desc("在 AI 对话框中显示模型原始输出，即使解析歌曲失败也可查看")
+                .build());
         addCustomApiFields(out);
+
+        // ---- 专辑封面调色板调试 -------------------------------------------
+        out.add(SettingSpec.toggle("paletteEnabled", PALETTE, "启用专辑封面调色板", true)
+                .desc("使用当前专辑封面生成 Material You / Monet 主题色")
+                .build());
+        out.add(SettingSpec.slider("paletteChroma", PALETTE, "调色板鲜艳度", 1, 0, 2, 1)
+                .desc("0=柔和，1=标准，2=增强；用于调试取色规则")
+                .build());
+        out.add(SettingSpec.segmented("paletteStyle", PALETTE, "调色板风格", 0,
+                "Tonal Spot", "Vibrant", "Expressive", "Fruit Salad")
+                .desc("基于封面主色生成不同的 Material 3 色彩方案")
+                .build());
 
         // ---- 歌词 -----------------------------------------------------------
         // One card per control, like every other tab: no group() here, so each

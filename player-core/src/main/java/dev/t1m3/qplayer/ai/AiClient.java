@@ -50,7 +50,9 @@ public final class AiClient {
         // Recommendations only need compact structured output. Keeping the
         // response budget small materially reduces latency and avoids verbose
         // hidden-style explanations from compatible gateways.
-        root.addProperty("max_tokens", 1400);
+        // One compact item is roughly 25-35 tokens.  A fixed 1400-token cap
+        // truncates larger requests and leaves an invalid JSON document.
+        root.addProperty("max_tokens", 8192);
         // Ask OpenAI-compatible providers to enforce a JSON object response.
         // Providers that do not support this field are handled by the caller's
         // Markdown fallback parser.
@@ -90,16 +92,21 @@ public final class AiClient {
     }
 
     public AiPlaylistResult generatePlaylist(String sampleSongs, String request, int count, String webContext) throws IOException {
-        String system = "你是快速音乐推荐助手。无论用户提出什么主题、榜单、语言或稀奇古怪的要求，都必须把它转换成歌曲推荐。" +
-                "如果用户只输入歌手名，推荐该歌手的代表歌曲，不要返回人物简介；如果用户询问榜单，优先提取回答中明确出现的歌名和歌手。" +
-                "不要回答问题本身，不要展示思考过程，不要写长篇分析。允许推荐样本之外的歌曲；优先选择网易云中真实存在、容易搜索的歌曲。" +
-                "你的整个回复必须是一个合法 JSON 对象，首字符必须是 {，末字符必须是 }。禁止 Markdown、标题、编号、解释文字和代码围栏。" +
-                "目标数量仅作参考，若无法满足就返回实际可推荐数量；summary 不超过 30 个字；每个 reason 不超过 20 个字。" +
-                "格式：{playlistName:string,summary:string,songs:[{title:string,artist:string,reason:string}]}";
-        String user = "只输出 JSON，不要输出任何其他字符。快速完成。用户要求：" + request + "\n目标数量：" + count +
+        String normalizedRequest = request == null ? "" : request
+                .replaceAll("(?i)r\\s*(?:and|&)\\s*b", "R&B")
+                .replaceAll("(?i)rhythm\\s*and\\s*blues", "R&B");
+        String system = "你是专业 DJ，负责根据用户要求推荐歌曲。把任何请求（包括中文、欧美、R&B、r and b、混合语言或模糊风格）直接转换为歌曲列表。" +
+                "中文 R&B 必须推荐华语歌手的真实 R&B 歌曲；欧美 R&B 必须推荐欧美歌手的真实 R&B 歌曲；如果同时要求中文和欧美，两类都要推荐。" +
+                "只返回一个合法 JSON 对象，不要 Markdown、解释、思考过程或代码围栏。歌手名请求也要返回歌曲，不要介绍人物。" +
+                "JSON 格式必须是：{\"playlistName\":\"歌单名\",\"summary\":\"简短说明\",\"songs\":[{\"title\":\"歌名\",\"artist\":\"歌手\",\"reason\":\"理由\"}]}。" +
+                "即使请求很短，也必须返回歌曲。songs 数组必须尽量返回目标数量，尤其是 15 首以上；不要因为输出较长而缩减为三四首。为节省输出，reason 可以为空字符串。";
+        if (webContext != null && webContext.contains("KNOWLEDGE_BASE_ONLY")) {
+            system += "当前已开启强制使用知识库：无论用户提出什么问题，都禁止联网、禁止调用搜索工具、禁止要求搜索资料，只能使用你已有的模型知识完成推荐。";
+        }
+        String user = "仅输出 JSON。先理解用户意图，再立即给出歌曲；不要因为描述简短、组合条件或语言混合而拒绝。songs 数组目标数量为 " + count + " 首，必须返回尽可能接近该数量的不同歌曲，不要只返回三四首；reason 统一填空字符串。用户要求：" + normalizedRequest + "\n推荐数量：" + count +
                 "\n收藏歌曲样本（仅用于判断风格）：\n" + sampleSongs;
         if (webContext != null && !webContext.trim().isEmpty()) {
-            if (webContext.contains("KNOWLEDGE_BASE_FALLBACK")) {
+            if (webContext.contains("KNOWLEDGE_BASE_FALLBACK") || webContext.contains("KNOWLEDGE_BASE_ONLY")) {
                 user += "\n\n联网搜索不可用。请直接使用你的音乐知识库完成任务，必须输出可搜索的真实歌名和歌手，不要返回人物介绍、道歉或拒绝。\n";
             } else {
                 user += "\n\n以下是联网搜索得到的参考资料。优先从其中提取真实歌名和歌手，不要把网页标题或说明当成歌曲；资料不完整时只返回能确认的歌曲：\n" + webContext;

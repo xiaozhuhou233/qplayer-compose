@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 // CI/sandbox builds may keep the default app/build intermediates locked. Allow
@@ -12,15 +13,13 @@ providers.gradleProperty("qplayerBuildDir").orNull?.let { requestedBuildDir ->
 
 android {
     namespace = "io.github.timer_err.qml4j.android"
-    compileSdk = 34
-    // Build-Tools 34 is installed and avoids the Windows file lock currently
-    // held on SDK 36's core-lambda-stubs.jar during Java compilation.
-    buildToolsVersion = "34.0.0"
+    compileSdk = 35
+    buildToolsVersion = "35.0.0"
 
     defaultConfig {
         applicationId = "dev.t1m3.qplayer"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 35
         versionCode = 67
         versionName = "1.3.0"
         manifestPlaceholders["appLabel"] = "QPlayer"
@@ -33,10 +32,6 @@ android {
 
     buildFeatures {
         compose = true
-    }
-
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.10"
     }
 
     kotlinOptions {
@@ -114,11 +109,14 @@ android {
 }
 
 dependencies {
-    implementation(platform("androidx.compose:compose-bom:2024.02.02"))
+    implementation(platform("androidx.compose:compose-bom:2025.05.00"))
     implementation("androidx.activity:activity-compose:1.8.2")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.compose.material3:material3")
+    // Material 3 Expressive APIs, including LoadingIndicator.
+    implementation("androidx.compose.material3:material3:1.4.0-alpha18")
+    implementation("androidx.graphics:graphics-shapes:1.0.1")
+    implementation("androidx.compose.material3:material3-adaptive-navigation-suite")
     implementation("androidx.compose.material:material-icons-extended")
     debugImplementation("androidx.compose.ui:ui-tooling")
 

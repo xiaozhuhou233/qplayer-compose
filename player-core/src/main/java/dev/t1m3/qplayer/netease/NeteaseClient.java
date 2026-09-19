@@ -1073,6 +1073,7 @@ public final class NeteaseClient {
         else if (a.has("img1v1Url") && !a.get("img1v1Url").isJsonNull())
             out.coverUrl = a.get("img1v1Url").getAsString();
         out.coverThumbPath = thumbUrl(out.coverUrl);
+        if (a.has("cover") && !a.get("cover").isJsonNull()) out.headerUrl = a.get("cover").getAsString();
         if (a.has("briefDesc") && !a.get("briefDesc").isJsonNull()) out.briefDesc = a.get("briefDesc").getAsString();
         if (a.has("albumSize") && !a.get("albumSize").isJsonNull()) out.albumSize = a.get("albumSize").getAsInt();
         if (a.has("musicSize") && !a.get("musicSize").isJsonNull()) out.musicSize = a.get("musicSize").getAsInt();
@@ -1113,6 +1114,52 @@ public final class NeteaseClient {
                 ? NeteaseApi.PLAYLIST_SUBSCRIBE
                 : NeteaseApi.PLAYLIST_UNSUBSCRIBE, body);
         return obj.has("code") && !obj.get("code").isJsonNull() && obj.get("code").getAsInt() == 200;
+    }
+
+    /**
+     * Follow or unfollow an artist. True when code == 200.
+     *
+     * <p>The artist counterpart of {@link #playlistSubscribe}: api-enhanced's
+     * {@code artist_sub}/{@code artist_unsub} use the same eapi transport with
+     * checkToken, and the follow direction carries the token value in the body.
+     * {@code artistIds} is the JSON-array form the endpoint expects alongside the
+     * single {@code artistId}.
+     */
+    public boolean artistFollow(long artistId, boolean follow) throws IOException {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("artistId", artistId);
+        body.put("artistIds", "[" + artistId + "]");
+        if (follow) body.put("checkToken", CHECK_TOKEN);
+        JsonObject obj = apiJson(follow
+                ? NeteaseApi.ARTIST_SUBSCRIBE
+                : NeteaseApi.ARTIST_UNSUBSCRIBE, body);
+        return obj.has("code") && !obj.get("code").isJsonNull() && obj.get("code").getAsInt() == 200;
+    }
+
+    /** Ids of the artists the signed-in user follows (first {@code limit}).
+     *  Returns an empty list when the account is not signed in or the API
+     *  refuses — callers treat that as "nothing known to be followed". */
+    public List<Long> followedArtistIds(int limit) throws IOException {
+        Map<String, Object> body = new HashMap<>();
+        body.put("limit", limit);
+        body.put("offset", 0);
+        JsonObject obj = apiJson(NeteaseApi.ARTIST_SUBLIST, body);
+        JsonArray artists = null;
+        if (obj.has("artists") && obj.get("artists").isJsonArray()) {
+            artists = obj.getAsJsonArray("artists");
+        } else if (obj.has("data") && obj.get("data").isJsonObject()
+                && obj.getAsJsonObject("data").has("artists")
+                && obj.getAsJsonObject("data").get("artists").isJsonArray()) {
+            artists = obj.getAsJsonObject("data").getAsJsonArray("artists");
+        }
+        List<Long> out = new ArrayList<>();
+        if (artists == null) return out;
+        for (JsonElement el : artists) {
+            if (!el.isJsonObject()) continue;
+            JsonObject a = el.getAsJsonObject();
+            if (a.has("id") && !a.get("id").isJsonNull()) out.add(a.get("id").getAsLong());
+        }
+        return out;
     }
 
     /**

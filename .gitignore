@@ -9,3 +9,11 @@ target/
 local.properties
 *.apk
 *.aab
+gradle-cache/
+backups/
+.android/
+.android-user-home/
+android-build-output/
+.tmp/
+.idea/caches/
+.idea/modules/
