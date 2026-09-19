@@ -28,20 +28,52 @@ public final class KeyProfile {
     /** Below this {@link #strength()} the estimate is reported and logged but
      *  never acted on: a wrong key acted on detunes a track against the music
      *  the listener knows, which is worse than the clash it was meant to fix.
+     *  {@link #trustworthy()} applies {@link #MIN_TRIAD} as well.
      *
-     *  <p>Calibrated by measurement rather than taste (see {@code KeyAnalysisTest}):
-     *  chord progressions in known keys score 0.37-1.0 at the scale
-     *  {@code KeyAnalysis} uses, while white noise scores 0.09 and a bare sine
-     *  0.00. 0.25 is that gap's lower edge — it refuses everything with no tonal
-     *  centre while still passing material whose key is real but whose margin is
-     *  small, because real recordings score lower than synthesised triads. It is
-     *  deliberately the *lower* edge for the same reason {@link #MIN_CONFIDENCE}
-     *  is: the cost of refusing a real key is that a pair is not transposed
-     *  (today's behaviour), while the cost of trusting a wrong one is a track
-     *  that sounds out of tune. The remaining protection against a wrong-but-
-     *  confident key is in the shift decision itself ({@code MixMatch}: the
-     *  improvement has to be real, and the whole-key relationship has to hold). */
+     *  <p>The number is unchanged from the calibration that produced it; what
+     *  changed is the measure behind it, which is now the margin over the best key
+     *  the winner could <em>not</em> be mixed with ({@link KeyAnalysis}), scaled so
+     *  that this reads directly as a correlation margin. Measured on 36 cached
+     *  windows of the app's own library: 0.012-1.54, median 0.44, and 24 of the 36
+     *  clear 0.25 — where the previous measure passed 8 of the same 36 and named 16
+     *  of them A minor. Material with no key stays below: white noise 0.09, a bare
+     *  sine 0.00, a pitchless drum loop 0.19. The one class of material the margin
+     *  alone does not refuse is noise with a fixed spectral envelope (0.47), which
+     *  is what {@link #MIN_TRIAD} is for.
+     *
+     *  <p>It is deliberately the *lower* edge — of what this measure can separate,
+     *  not of the whole spread — for the same reason {@link #MIN_CONFIDENCE} is:
+     *  the cost of refusing a real key is that a pair is not transposed (today's
+     *  behaviour), while the cost of trusting a wrong one is a track that sounds
+     *  out of tune. The remaining protection against a wrong-but-confident key is
+     *  in the shift decision itself ({@code MixMatch}: the improvement has to be
+     *  real, and the whole-key relationship has to hold). */
     public static final float MIN_STRENGTH = 0.25f;
+
+    /**
+     * The weight the winner's own tonic, third and fifth must carry between them
+     * for the estimate to be acted on. A profile spread evenly over the twelve
+     * pitch classes puts 0.25 there; a profile that really sits on a key puts
+     * much more.
+     *
+     * <p>This is the second, independent condition {@link #trustworthy()} applies,
+     * and it is here because the first one alone does not separate real music from
+     * material with no key at all. Measured on the app's own 36-track cache: the
+     * margin the first condition reads is 0.19-1.5 across real tracks but one
+     * constructed negative — noise with a fixed spectral envelope, which is what
+     * speech and applause look like to a pitch-class profile — scored 0.47, above
+     * much of the library. Its profile was flat: 0.270 on the winner's triad
+     * against a uniform 0.25, where the real tracks ran 0.26-0.41. Neither number
+     * separates on its own; together they do, and both negatives (that noise, and
+     * a pitchless drum loop at 0.192/0.272) fall outside the gate while 21 of the
+     * 36 real tracks stay inside it.
+     *
+     * <p>The threshold is the recorded gap's edge rather than its middle, for the
+     * same asymmetric reason as {@link #MIN_STRENGTH}: refusing a real key costs a
+     * pair its transposition (today's behaviour), while trusting a wrong one
+     * detunes a track the listener knows.
+     */
+    public static final float MIN_TRIAD = 0.28f;
 
     private final int tonic;
     private final boolean major;
@@ -75,9 +107,25 @@ public final class KeyProfile {
         return strength;
     }
 
-    /** Whether the key name may be used to sanction a shift at all. */
+    /** Whether the key name may be used to sanction a shift at all. Two independent
+     *  conditions, both of which the cache form carries: the margin over the keys
+     *  this one could not be mixed with ({@link #strength()}) and the weight the
+     *  winner's own triad carries ({@link #triadWeight()}). */
     public boolean trustworthy() {
-        return strength >= MIN_STRENGTH;
+        return strength >= MIN_STRENGTH && triadWeight() >= MIN_TRIAD;
+    }
+
+    /**
+     * How much of the profile sits on this key's own tonic, third and fifth —
+     * 0.25 when the profile says nothing (the twelve pitch classes equally
+     * weighted). Derived from {@link #chroma()} rather than stored, so it is exact
+     * for a fresh measurement and to within a byte's worth of 255 for one read back
+     * from disk ({@link #toBytes()} keeps the profile's shape, which is all this
+     * reads).
+     */
+    public double triadWeight() {
+        int third = major ? 4 : 3;
+        return chroma[tonic] + chroma[(tonic + third) % 12] + chroma[(tonic + 7) % 12];
     }
 
     /** The twelve-bin profile, summing to 1. Never null; a defensive copy. */
@@ -87,10 +135,14 @@ public final class KeyProfile {
         return copy;
     }
 
-    /** "C major/0.62" — one token for the boundary's log line. */
+    /** "C major/0.62 (triad 0.34)" — one token for the boundary's log line. The
+     *  triad is printed beside the strength because a gate that can refuse on it
+     *  has to be diagnosable from the same line, and the two are separate
+     *  conditions: "the margin says this is the key" and "the profile really sits
+     *  on it". */
     public String label() {
-        return String.format(java.util.Locale.US, "%s %s/%.2f", noteName(tonic),
-                major ? "major" : "minor", strength);
+        return String.format(java.util.Locale.US, "%s %s/%.2f (triad %.2f)", noteName(tonic),
+                major ? "major" : "minor", strength, triadWeight());
     }
 
     /** "C" / "C#" / "A" — the pitch class's name. */

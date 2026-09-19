@@ -23,6 +23,12 @@ android {
         versionCode = 67
         versionName = "1.3.0"
         manifestPlaceholders["appLabel"] = "QPlayer"
+        // onnxruntime-android ships .so for four ABIs (~135 MB together) and this
+        // is a phone-only player. Keep arm64-v8a and drop the 32-bit and emulator
+        // slices; add "armeabi-v7a" back here if an old 32-bit phone ever matters.
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
 
     compileOptions {
@@ -160,4 +166,15 @@ dependencies {
     // MediaSessionCompat + MediaStyle notification + media-button handling for
     // system media controls (lockscreen / notification / bluetooth).
     implementation("androidx.media:media:1.7.0")
+
+    // htdemucs stem separation for the AI DJ transition (see AI_HANDOFF.md §7).
+    // This is the ONE dependency added on top of the "no new dependencies" rule,
+    // and it is deliberate: the model's iSTFT sets DFT inverse+onesided together,
+    // which ORT 1.22/1.23 refuse to load at all. Maven Central is reachable; the
+    // Google Maven restriction that bans media3/Palette does not apply here.
+    // Measured on 2026-09-19: the debug APK went 64,902,780 -> 94,053,487 bytes,
+    // i.e. +29.1 MB, which is the arm64-v8a slice only (the aar itself is 53.0 MB
+    // and carries four ABIs; see the abiFilters in defaultConfig). Verified to load
+    // the sha256-checked model on a Redmi K20 Pro — see AI_HANDOFF.md §7.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.30.0")
 }

@@ -191,6 +191,65 @@ public class KeyAnalysisTest {
         assertEquals("the bass and the drums must not move the key off C", 0, key.tonic());
     }
 
+    /**
+     * The second condition the gate applies, and the case that forced it: noise with
+     * a fixed spectral envelope — a tilt and two formants, which is what speech,
+     * applause or a cymbal wash look like to a pitch-class profile. Its chroma still
+     * correlates with the templates well enough to name a key (it scored above half
+     * this app's real library on the margin alone), but the profile is flat: almost
+     * nothing on the winner's own triad.
+     *
+     * <p>Both halves are asserted, because the point is that neither number refuses
+     * it by itself: this material is the reason {@link KeyProfile#MIN_TRIAD} exists
+     * beside {@link KeyProfile#MIN_STRENGTH}.
+     */
+    @Test
+    public void materialWithNoTonalConcentrationIsRefusedEvenWhenTheMarginIsHigh() {
+        Random random = new Random(5);
+        double[] audio = new double[(int) (RATE * 12d)];
+        double lp1 = 0d;
+        double lp2 = 0d;
+        for (int i = 0; i < audio.length; i++) {
+            double white = random.nextGaussian() * 0.3d;
+            lp1 = lp1 * 0.7d + white * 0.3d;
+            lp2 = lp2 * 0.95d + lp1 * 0.05d;
+            double env = 0.5d + 0.5d * Math.sin(2d * Math.PI * 3.1d * i / RATE);
+            audio[i] = (lp1 * 0.6d + lp2 * 0.8d) * env;
+        }
+        KeyProfile key = KeyAnalysis.analyse(audio, RATE);
+        assertNotNull(key);
+        System.out.println(String.format(Locale.US,
+                "spectrally shaped noise -> %s  strength %.3f (gate %.2f), triad %.3f (gate %.2f)",
+                key.label(), key.strength(), KeyProfile.MIN_STRENGTH, key.triadWeight(),
+                KeyProfile.MIN_TRIAD));
+        assertTrue("the margin alone does not refuse this; the triad must: " + key.label(),
+                key.triadWeight() < KeyProfile.MIN_TRIAD);
+        assertTrue("and the gate must be closed: " + key.label(), !key.trustworthy());
+    }
+
+    /**
+     * The reason the strength is no longer the margin to the plain runner-up, stated
+     * as a measurement: a natural-minor loop is read as its relative major (the
+     * familiar honest ambiguity) and the strength must not care, because those two
+     * readings are the same Camelot number and {@code MixMatch} mixes them either
+     * way. Under the old measure this exact material scored in the same band as white
+     * noise.
+     */
+    @Test
+    public void theAmbiguityBetweenRelativeKeysDoesNotCostConfidence() {
+        double[] audio = progression(ROOT + 9, new int[]{0, 8, 3, 10, 0, 8, 3, 10},
+                new boolean[]{true, false, false, false, true, false, false, false}, true);
+        KeyProfile key = KeyAnalysis.analyse(audio, RATE);
+        assertNotNull(key);
+        System.out.println("natural minor loop -> " + key);
+        assertTrue("a real key must clear both gates: " + key.label(), key.trustworthy());
+        // The margin has to be over a key that is NOT in this neighbourhood, so the
+        // mode-ambiguous reading cannot be what it measures. Measured 0.54: the loop's
+        // own relative major is the plain runner-up and would have put this in the same
+        // band as white noise under the measure this replaced.
+        assertTrue("strength " + key.strength(), key.strength() > 0.45f);
+    }
+
     // --- signal construction --------------------------------------------------
 
     /** One cycle of the timbre every note is played with: a harmonic series to the

@@ -34,6 +34,16 @@ package dev.t1m3.qplayer.audio;
  *       that is a local correlation peak and explains the signal within
  *       {@link #BEAT_RATE_TOLERANCE} of the best one wins. It is why a 175 BPM
  *       track is reported at 175 and not at its half.</li>
+ *   <li><b>The harmonic-relation check on that choice.</b> Correlation alone has a
+ *       second blind spot besides the beat/double ambiguity: a lag that is
+ *       <em>three halves</em> of the beat (a 2:3 relation) can correlate higher than
+ *       the beat itself, and — measured on a real library — it does so on exactly the
+ *       tracks whose groove is dotted or compound (the accent pattern repeats every
+ *       one and a half beats). See {@link #finerBeat}: the chosen period is compared
+ *       with its finer harmonic relatives (2/3, 1/2, 1/3 of it) and the finest of
+ *       them that <em>the attacks support</em> is taken instead, which both undoes the
+ *       2:3 mis-lock and keeps a genuine half- or third-time reading (a coarser grid
+ *       is only kept when nothing is happening between its beats).</li>
  *   <li><b>Phase by pulse-train correlation.</b> The offset of a pulse train at the
  *       chosen period that collects the most onset energy, i.e. where the beats
  *       actually are in the file. The train uses the fractional period, so it keeps
@@ -187,6 +197,62 @@ public final class BeatAnalysis {
      *  the tallest bumps in a smooth envelope. */
     private static final double MIN_BEAT_CONTRAST = 0.5d;
 
+    /**
+     * How much of the chosen grid's per-pulse attack energy a finer harmonic relative
+     * has to carry before the finer grid is taken as the beat instead (see
+     * {@link #finerBeat}).
+     *
+     * <p>The reading is "the attacks the finer grid adds are not empty": on a click
+     * track the positions between the beats are silent, so halving the period halves
+     * the energy collected per pulse, while on material whose groove really moves at
+     * the finer level the extra pulses are attacked too and the per-pulse energy barely
+     * drops. 0.8 is the boundary between those two: a finer grid has to keep 80% of the
+     * chosen one's per-pulse energy, i.e. the between-beat positions have to carry
+     * roughly three fifths of a beat's energy (from 1.5·x − 1 = 0.8 at the 2:3
+     * relation, and 2·x − 1 = 0.8 when halving).
+     *
+     * <p>Measured, so the two sides can be told apart: synthetic material sits at
+     * 0.30-0.50 whatever is put between the beats (a click track with hats on every
+     * eighth, triplets at a third and two thirds, accents every third beat, all of the
+     * above with a bass line under it — the loudest is the triplet at 0.50), while the
+     * real tracks whose 2:3 mis-lock this exists for measure 0.80-1.27 at the true beat
+     * (double take 0.93, OWA OWA 1.02, HEARD OF US 1.23, ON MY WAY 1.27). 0.8 sits in
+     * that gap, at the end of it that promotes less: the two real cases nearest it
+     * measure 0.798 and 0.799, and the one that would be promoted by admitting them is
+     * a half-time grid the gate is happy with today (DAY1, 66.9 BPM) while the other
+     * (Better Now at the wrong 97.2) is refused by the gate either way.
+     */
+    private static final double FINER_GRID_SUPPORT = 0.8d;
+
+    /**
+     * How much of the best correlation a finer harmonic relative needs before it is
+     * allowed to replace the chosen period.
+     *
+     * <p>A guard on the other side of {@link #FINER_GRID_SUPPORT}, which on its own asks
+     * only about attack energy and would be happy to move a grid onto a lag where the
+     * envelope has no periodicity at all (a sustained passage has small rises
+     * everywhere, so its per-pulse energy is flat). Measured on the tracks the check is
+     * for: the true beat's own correlation sits at 0.5-0.6 of the best, so 0.45 admits
+     * them and still refuses a lag that carries attack energy but explains no period.
+     */
+    private static final double FINER_GRID_PERIODICITY = 0.45d;
+
+    /**
+     * How far around a candidate lag the pulse train is allowed to be re-tuned before two
+     * grids are compared, as a fraction of the lag.
+     *
+     * <p>A harmonic relation between two real tracks' periods is approximate — measured on
+     * one library, the periods that are 2:3 apart are 0.5% off the exact ratio, because the
+     * lag the correlation chose is itself a few tenths of a percent off the music — and the
+     * energy a pulse train collects falls off fast as it drifts off the beats: over a 30 s
+     * window, 0.5% of the period is 145 ms of accumulated drift and it costs 38% of the
+     * collected energy. Comparing the two grids at the exact 2/3 point instead of at each
+     * one's own optimum therefore measures the arithmetic rather than the music (measured:
+     * it left Better Now, a 145 BPM track read as 97.2, at 0.79 against a threshold of
+     * 0.8 — a wrong grid kept by half a percent).
+     */
+    private static final double FINER_GRID_TUNE = 0.01d;
+
     private BeatAnalysis() {}
 
     /**
@@ -286,15 +352,16 @@ public final class BeatAnalysis {
         //    answer is directly comparable with the window's.
         Search full = search(centred, 0, frames, hopMs);
         if (full == null) return null;
-        double bestLag = full.lag();
-        double periodMs = bestLag * hopMs;
+        // 3. The harmonic-relation check on that choice (see finerBeat).
+        int beatIndex = finerBeat(full, shaped, frames, hopMs);
+        double periodHops = full.minLag + beatIndex * LAG_STEP_HOPS;
+        double periodMs = periodHops * hopMs;
         double bpm = 60_000d / periodMs;
         if (bpm < MIN_BPM - 0.5d || bpm > MAX_BPM + 0.5d) return null;
 
         // 4. Phase: the pulse train at that (fractional) period that collects the
         //    most onset energy. Half a hop of resolution, which is a 5 ms
         //    quantisation of the phase — well inside the caller's shift cap.
-        double periodHops = periodMs / hopMs;
         Pulse windowPhase = phaseOf(shaped, 0, frames, periodHops);
         if (windowPhase == null) return null;
         double bestPhaseOffset = windowPhase.offsetFrames;
@@ -321,13 +388,133 @@ public final class BeatAnalysis {
         //    keeps the prominence reading rather than being refused outright.
         float prominence = (float) Math.max(0d, Math.min(1d, full.prominence()));
         double agreement = windowAgreement(centred, shaped, hopMs, periodHops, bestPhaseOffset,
-                full.chosen, frames, windowMs);
+                beatIndex, frames, windowMs);
         float confidence = agreement >= 0d ? (float) Math.max(0d, Math.min(1d, agreement))
                 : prominence;
 
         // The key is measured by the host from the same decode and attached afterwards
         // (see BeatProfile.withKey); the estimator itself never reads samples for it.
         return new BeatProfile(bpm, firstBeatMs, confidence, prominence, null);
+    }
+
+    /**
+     * The harmonic-relation check: is the period correlation picked really the beat,
+     * or a coarsening of it that correlation cannot see past?
+     *
+     * <p>Autocorrelation has a blind spot beyond the beat/double ambiguity the
+     * beat-rate rule handles, and it took real material to find it: a lag of
+     * <em>three halves</em> the beat — a 2:3 relation — correlates higher than the beat
+     * itself on tracks whose groove is dotted or compound, because that is the period
+     * the accent pattern actually repeats at. Measured on one library, a track that is
+     * 109 BPM (ground truth) came back as 72.7 and one that is 145 BPM as 97.2, both
+     * exactly 2/3, and the check below has to undo that: the grid is then not a coarse
+     * version of the beat, it is a grid whose every other beat falls <em>between</em>
+     * the music's beats, so aligning two tracks to it aligns them to the wrong place —
+     * and no other track can be matched to it either (the mix's tempo ratio comes out
+     * 1.5, outside the clamp that decides whether two tracks can be mixed at all).
+     *
+     * <p>What correlation cannot answer, the attacks can: the finer grid's extra pulses
+     * either have attacks on them or they do not. So the chosen period is compared with
+     * its finer harmonic relatives — 2/3 first (the dotted case above, and the one this
+     * exists for), then 1/2 and 1/3 (which are legitimate readings on their own) — and
+     * the finest relative that clears both of these is taken instead:
+     * <ul>
+     *   <li>its per-pulse attack energy, from the same half-hop phase search the caller
+     *       then uses, is at least {@link #FINER_GRID_SUPPORT} of the chosen grid's
+     *       (see that constant for why 0.8), and</li>
+     *   <li>it carries at least {@link #FINER_GRID_PERIODICITY} of the best
+     *       correlation itself, so a flat envelope cannot drag the grid onto a lag with
+     *       no period in it.</li>
+     * </ul>
+     *
+     * <p>One step only, from the correlation's own choice, never chained: a relative is
+     * measured against the grid that was chosen, not against another relative that was
+     * itself promoted. And the tempo range bounds the whole thing — a candidate below
+     * {@link #MIN_BPM} is not a faster beat, it is out of the range this estimator
+     * reports, so the search stops there (which is also what keeps a 128 BPM track with
+     * hats on every eighth from being reported at 256).
+     *
+     * <p>When nothing clears both tests the chosen period stands: a genuine half-time or
+     * third-time reading survives exactly as before, and a grid is never made
+     * <em>coarser</em> here (every promotion adds beats; losing them would only lose
+     * alignment resolution).
+     *
+     * @return the index into {@code full.strength} of the period to use — the same one
+     *         correlation chose when the check has nothing to say
+     */
+    private static int finerBeat(Search full, double[] shaped, int frames, double hopMs) {
+        double coarseLag = full.lag();
+        int coarseCentre = (int) Math.round((coarseLag - full.minLag) / LAG_STEP_HOPS);
+        int coarseSpan = tuneSpan(coarseLag);
+        double coarseMean = meanOnGrid(shaped, frames,
+                full.minLag + bestMeanIndex(shaped, frames, full.minLag, coarseCentre, coarseSpan)
+                        * LAG_STEP_HOPS);
+        if (!(coarseMean > 0d)) return full.chosen;
+        double[] ratios = {2d / 3d, 0.5d, 1d / 3d};
+        for (double ratio : ratios) {
+            double target = coarseLag * ratio;
+            int centre = (int) Math.round((target - full.minLag) / LAG_STEP_HOPS);
+            if (centre < 0) break;               // below MIN_BPM: not a beat, out of range
+            int span = tuneSpan(target);
+            if (peakStrength(full, centre, span) < full.bestStrength * FINER_GRID_PERIODICITY) {
+                continue;
+            }
+            int index = bestMeanIndex(shaped, frames, full.minLag, centre, span);
+            double mean = meanOnGrid(shaped, frames, full.minLag + index * LAG_STEP_HOPS);
+            if (mean >= coarseMean * FINER_GRID_SUPPORT) return index;
+        }
+        return full.chosen;
+    }
+
+    /** How many lag grid steps {@link #FINER_GRID_TUNE} of {@code lagHops} is — the width of
+     *  the neighbourhood a candidate and its attack reading are taken over. */
+    private static int tuneSpan(double lagHops) {
+        return Math.max(1, (int) Math.round(lagHops * FINER_GRID_TUNE / LAG_STEP_HOPS));
+    }
+
+    /** The index within {@code span} of {@code centre} whose pulse train collects the most
+     *  onset energy — where a grid's own attack reading is taken (see
+     *  {@link #FINER_GRID_TUNE}). */
+    private static int bestMeanIndex(double[] shaped, int frames, double minLag, int centre,
+                                     int span) {
+        int best = centre;
+        double bestMean = -1d;
+        for (int c = Math.max(0, centre - span); c <= centre + span; c++) {
+            double mean = meanOnGrid(shaped, frames, minLag + c * LAG_STEP_HOPS);
+            if (mean > bestMean) {
+                bestMean = mean;
+                best = c;
+            }
+        }
+        return best;
+    }
+
+    /** The strongest correlation within {@code span} of {@code centre} — whether that
+     *  neighbourhood holds a lag with a period in it at all (see
+     *  {@link #FINER_GRID_PERIODICITY}). Read over the neighbourhood rather than at one lag
+     *  because the relation between two periods is approximate: measured on a real library,
+     *  the true beat of a track whose grid sits 2:3 away fell <em>between</em> two correlation
+     *  peaks, so a check at the exact lag refused the grid the attacks all sit on. */
+    private static double peakStrength(Search full, int centre, int span) {
+        double best = 0d;
+        for (int c = Math.max(0, centre - span);
+             c <= Math.min(full.strength.length - 1, centre + span); c++) {
+            best = Math.max(best, full.strength[c]);
+        }
+        return best;
+    }
+
+    /**
+     * The onset energy a grid at {@code lagHops} collects per pulse, at the phase that
+     * collects the most — the reading {@link #finerBeat} compares two grids with, and the
+     * same one the caller's phase search then uses. The <em>sharp</em> envelope, so a
+     * pulse either lands on an attack or it does not.
+     *
+     * @return 0 when the window is too short to hold pulses at that lag
+     */
+    private static double meanOnGrid(double[] shaped, int frames, double lagHops) {
+        Pulse pulse = phaseOf(shaped, 0, frames, lagHops);
+        return pulse == null || pulse.beats <= 0 ? 0d : pulse.sum / pulse.beats;
     }
 
     /** Where one stretch of the envelope put its beats, and how much onset energy it
@@ -506,8 +693,7 @@ public final class BeatAnalysis {
                 // The window's own lag, read off this segment's strength curve: the
                 // lag grid is the same one in both searches (it depends only on the
                 // hop and the tempo range), so the window's candidate is an index.
-                double support = segment.bestStrength > 0d
-                        ? segment.strength[windowChosen] / segment.bestStrength : 0d;
+                double support = segmentSupport(segment, windowChosen);
                 worstSupport = Math.min(worstSupport, support);
                 answered++;
             }
@@ -532,6 +718,58 @@ public final class BeatAnalysis {
         // measurement that was not possible).
         double phaseFit = phaseAnswered > 0 ? phaseFitSum / phaseAnswered : 1d;
         return tempoFit * phaseFit;
+    }
+
+    /**
+     * How close a lag's ratio to the window's own lag has to be to count as the same music
+     * seen through the 2:3 blind spot, and so be excluded from the yardstick a segment is
+     * judged against (see {@link #segmentSupport}).
+     *
+     * <p>Three percent: the relations the check is about are exact arithmetic (three halves,
+     * two thirds), while two unrelated tempos in one window are a few tenths of a percent
+     * apart at best (measured: the 2:3 pairs on one library sit 0.0-0.5% off the exact ratio,
+     * because the correlation's own lag is a fraction of a percent off the music). Anything
+     * inside this band is a lag the corrected grid was chosen <em>over</em>, so it cannot also
+     * be the thing it is measured against.
+     */
+    private static final double HARMONIC_RELATION_TOLERANCE = 0.03d;
+
+    /**
+     * How well one segment of the window confirms the window's own grid: the correlation it
+     * has at that lag, against the best it has to offer — with the 2:3 relatives of that lag
+     * excluded from being the yardstick (see {@link #HARMONIC_RELATION_TOLERANCE}).
+     *
+     * <p>This is where the harmonic-relation check reaches the confidence gate. The window's
+     * period is no longer whatever correlation says (see {@link #finerBeat}), but a segment
+     * asked the same question separately answers what the whole window used to: on the tracks
+     * the check exists for, a third of the window correlates <em>higher</em> at three halves
+     * of the true beat than at the beat, because that is where the accent pattern repeats.
+     * Left as the yardstick, that one lag takes the support reading of a perfectly steady grid
+     * down to 0.18-0.22 — measured on a 109 BPM track whose three thirds agree with the
+     * corrected grid's phase to 0.05, 0.06 and 0.11 of a beat, i.e. the grid is more solid
+     * across the window than most of the library's, and the reading refused it anyway. Fixing
+     * the period and leaving this alone would trade one wrong answer for another.
+     *
+     * <p>Clamped to 1: with the relatives out of the way a segment can correlate higher at the
+     * window's lag than at anything else left, which is full support, not more than full.
+     *
+     * @return 0..1
+     */
+    private static double segmentSupport(Search segment, int windowChosen) {
+        double own = segment.strength[windowChosen];
+        if (!(own > 0d)) return 0d;
+        double windowLag = lagOf(windowChosen, segment.minLag);
+        double yardstick = 0d;
+        for (int c = 0; c < segment.strength.length; c++) {
+            double ratio = lagOf(c, segment.minLag) / windowLag;
+            if (Math.abs(ratio - 3d / 2d) < HARMONIC_RELATION_TOLERANCE) continue;
+            if (Math.abs(ratio - 2d / 3d) < HARMONIC_RELATION_TOLERANCE) continue;
+            yardstick = Math.max(yardstick, segment.strength[c]);
+        }
+        // Nothing unrelated left to compare with: the segment's periodicity is either this
+        // grid or nothing, and either way it is not evidence of another one.
+        if (!(yardstick > 0d)) return 1d;
+        return Math.min(1d, own / yardstick);
     }
 
     /**

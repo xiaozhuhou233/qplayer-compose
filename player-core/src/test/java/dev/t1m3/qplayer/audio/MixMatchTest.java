@@ -118,6 +118,29 @@ public class MixMatchTest {
     }
 
     @Test
+    public void aShiftThatIsAllowedButNotWorthMakingLeavesTheTrackAlone() {
+        // The profiles are measurements from this app's own library — White Iverson
+        // (66.1BPM, G major) and The Other Side Of Paradise (64.0BPM, B minor) — and
+        // the case they make is the one the shift decision used to get wrong: the
+        // tempo is 1.033x, inside the clamp; the profiles are 0.18 apart, well under
+        // MAX_KEY_DISTANCE; and the only shift the wheel allows between them (-2)
+        // moves them to 0.17. Refusing here says "these keys clash", which is false —
+        // 0.18 is this class's own statement that they can be heard together. The
+        // answer is to apply nothing.
+        KeyProfile postMalone = new KeyProfile(7, true, 0.94f, new double[]{
+                0.0778, 0.0489, 0.1167, 0.0353, 0.0923, 0.0378, 0.0543, 0.1431, 0.0627, 0.1536, 0.0541, 0.1236});
+        KeyProfile glassAnimals = new KeyProfile(11, false, 1.0f, new double[]{
+                0.0759, 0.0702, 0.1157, 0.0504, 0.0703, 0.0483, 0.1197, 0.0705, 0.0428, 0.0870, 0.0987, 0.1504});
+        MixMatch match = MixMatch.between(
+                new BeatProfile(66.1d, 639L, 0.43f, postMalone),
+                new BeatProfile(64.0d, 294L, 0.75f, glassAnimals), OVERLAP);
+        System.out.println("White Iverson -> The Other Side Of Paradise: " + match.note());
+        assertTrue(match.note(), match.suitable());
+        assertEquals("a shift that does not help must not be applied", 0, match.semitones());
+        assertTrue(match.note(), match.note().contains("nothing is applied"));
+    }
+
+    @Test
     public void keysThatCannotBeBroughtTogetherAreRefused() {
         // Two keys a tritone apart, each fully confident: no shift inside ±2 helps, and
         // the improvement is nowhere near the threshold either.

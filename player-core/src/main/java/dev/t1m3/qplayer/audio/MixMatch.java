@@ -167,26 +167,49 @@ public final class MixMatch {
                 }
             }
         }
+        // A shift is applied when it is both allowed (a whole-key relationship, or an
+        // improvement too large to be about the two arrangements) and worth making
+        // (a real move of the profiles). A shift that was allowed but does not clear
+        // the second bar is NOT a clash — the profiles are already closer than
+        // MAX_KEY_DISTANCE, which is this class's own statement that the two keys can
+        // be heard together — so the answer is the one the no-shift branch gives:
+        // leave the incoming track alone. Refusing there would turn "a shift would
+        // not help" into "these keys clash", a different and often false claim; it
+        // was measured refusing a pair 0.18 apart whose tempo was inside the clamp,
+        // i.e. a pair every threshold in here calls suitable.
+        int allowedShift = bestShift;
+        double allowedDistance = bestDistance;
+        boolean worthShifting = bestShift != 0
+                && atZero - bestDistance >= MIN_KEY_IMPROVEMENT
+                && bestDistance <= MAX_KEY_DISTANCE
+                && sanctionedByImprovement(bestDistance, atZero);
         String keyNote;
-        if (bestShift == 0) {
+        if (!worthShifting) {
             if (atZero > MAX_KEY_DISTANCE) {
-                return refused(String.format(Locale.US,
-                        "keys clash (chroma distance %.2f, no shift within ±%d helps)",
-                        atZero, MAX_SEMITONES));
+                return refused(allowedShift == 0
+                        ? String.format(Locale.US,
+                                "keys clash (chroma distance %.2f, no shift within ±%d helps)",
+                                atZero, MAX_SEMITONES)
+                        : String.format(Locale.US,
+                                "keys clash (chroma distance %.2f; the best shift, %+d, only reaches %.2f)",
+                                atZero, allowedShift, allowedDistance));
             }
+            // The shift the returned answer carries is none, so the object and the line
+            // agree: a caller reads semitones()/pitch() and applies nothing.
+            bestShift = 0;
+            bestDistance = atZero;
             // Same reasoning as the tempo above: the shift that is applied is named
-            // even when it is none.
+            // even when it is none. When one was allowed but would not have moved the
+            // profiles, the line says so, because that is the difference between "no
+            // shift was ever available" and "the shift was not worth making".
             keyNote = "pitch x1.0000 on B (0 semitones: keys already sit together, "
                     + ka.label() + " / " + kb.label()
-                    + ", chroma distance " + String.format(Locale.US, "%.2f", atZero) + ")";
+                    + ", chroma distance " + String.format(Locale.US, "%.2f", atZero)
+                    + (allowedShift == 0 ? "" : String.format(Locale.US,
+                            "; %+d was allowed but only reaches %.2f, so nothing is applied",
+                            allowedShift, allowedDistance))
+                    + ")";
         } else {
-            if (atZero - bestDistance < MIN_KEY_IMPROVEMENT
-                    || bestDistance > MAX_KEY_DISTANCE
-                    || !sanctionedByImprovement(bestDistance, atZero)) {
-                return refused(String.format(Locale.US,
-                        "keys clash (chroma distance %.2f; the best shift, %+d, only reaches %.2f)",
-                        atZero, bestShift, bestDistance));
-            }
             KeyProfile moved = kb.shifted(bestShift);
             keyNote = String.format(Locale.US,
                     "pitch x%.4f on B (%+d semitone%s: %s (%s) -> %s (%s), chroma distance %.2f->%.2f)",

@@ -245,14 +245,21 @@ public final class BeatProfile {
     /** Version byte of {@link #toBytes()}: bump it when the layout changes, so an
      *  older cache file is ignored instead of misread. Version 2 appended the key
      *  to the grid; version 3 appended the prominence reading next to the gating
-     *  confidence. Versions 1 and 2 are deliberately NOT read any more: their single
-     *  confidence number is the prominence, and reading it as the gating value would
-     *  hand the new gate a number that means something else — a grid trusted or
-     *  refused for the wrong reason, which is exactly the failure this gate exists to
-     *  prevent. A cache file is a decode's worth of work per track; the cost of
-     *  discarding the old ones once is one re-measure per track, and the first play
-     *  of that track pays it off the playback path. */
-    private static final byte VERSION = 3;
+     *  confidence; version 4 is the same layout written by the estimator that checks
+     *  the chosen period against its finer harmonic relatives (a 2:3 mis-lock is no
+     *  longer reported); version 5 is again the same layout, written by the key
+     *  estimator that folds raw magnitudes instead of log-compressed ones and gates
+     *  on the margin over the keys a track could not be mixed with. Versions 1-4 are
+     *  deliberately NOT read any more: 1 and 2 carry something else in the gating
+     *  field, 3 is the <em>same</em> field holding an older answer — a grid that is a
+     *  2:3 coarsening of the track's real beat, i.e. beats between the music's beats,
+     *  which no alignment may be built on — and 4 carries a pitch-class profile folded
+     *  from log-compressed magnitudes, which sits at 0.066-0.097 per bin against a
+     *  uniform 0.083 and on this library's 36 cached tracks named the wrong key on 16
+     *  of them. A cache file is a decode's worth of work per track; the cost of
+     *  discarding the old ones once is one re-measure per track, and the first play of
+     *  that track pays it off the playback path. */
+    private static final byte VERSION = 5;
 
     /** Twelve bytes plus the key when there is one and the prominence when it was
      *  measured (two bytes): version, a reserved byte, the gating confidence in

@@ -50,11 +50,18 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
 
 1. **不能新增依赖**（这台机器 **Google Maven 不通**）：没有 media3/ExoPlayer、没有 Palette/Coil。
    图片一律 `rememberCoverBitmap(...)`；取色用文件里已有的色彩数学。
-   **Maven Central 是通的**（ONNX Runtime 之类理论上可加，但需实测 + 评估 APK 体积）。
+   **Maven Central 是通的**。
+   **唯一的例外是 `com.microsoft.onnxruntime:onnxruntime-android:1.30.0`**（2026-09-19 经用户同意加入，
+   为 htdemucs 人声分离；它给 APK 加 +29.1MB，且**目前还没有任何功能代码用它** —— 见第七节第六轮）。
+   除它之外仍然不许加。
 2. 视频播放只能走 `android.media.MediaPlayer`（+ 我们的常驻 SurfaceView 图层）。
 3. 编辑那个 7700 行文件时**不要手工数括号**：历史教训是多次因多/少一个 `}` 导致整文件
    解析失败（165 个报错）。改结构后立刻编译。
 4. 队列存档按 `Track.Source` 名字读写；BILI 的 `biliBvid`/`biliCid` 必须一起存取。
+5. **磁盘（2026-09-19 起）：C: 只剩 ~6.2GB（98% 满，仓库自己也占了 6.5GB 的构建产物）。
+   一切大文件 —— 模型、harness、下载物、日志、python 依赖、参考实现源码 —— 一律放
+   `D:\qplayer-dev\...`（432GB 空闲）。不要往 C: 拷仓库、不要留 APK 副本。
+   动手前后都 `df -h /c` 看一眼。**
 
 ## 四、已完成（可用，已实测）
 
@@ -106,6 +113,12 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
    **P6（AI 选择器 + 重叠长度 + 内容起点，2026-09-19 落地并装机验证）**、
    **P4（节拍分析 + 重叠对齐，2026-09-19 落地并装机验证，含"探针太晚"的两个修复）**、
    **P5 的替代（第四轮：变速对拍 + 改调 + 低频互换，代码+纯 Java 测试落地，未装机）**与
+   **第八轮（2026-09-19：周期选择的"和声关系检查"，把 2:3 错格修掉；门里的段内 support 也要和声感知；
+   装机验证 `mix:` 第一次写成"做了什么"、低频互换第一次真的换了低音）** ——
+   但仍**卡在调性强度阈值**（36 首里 31 首低于 0.25，见第七节第八轮"下一道约束"），
+   另：**第七轮（2026-09-19）已把 stem 顺序验证（结论：声明顺序成立）、Folia 的 stem 手势移植成纯 Java
+   （`audio/StemGesture`，18 个单测全绿）、以及第一个预渲染混音跑了出来（只有日志，播放路径没碰）** ——
+   见第七节第七轮；**下一步仍是听感，然后才是接线**。
    **第五轮（2026-09-19：每个边界一行说明混音结果、无 AI 答案改用 8 秒交叉淡化、置信度换成"窗口自洽"、
    下一首音频预缓存 —— 四项都已装机验证；期间发现**真正的瓶颈是周期选择**，见第七节⑤）**都已实现，
    见第七节（含未验证项与风险清单）—— **下一步第一件事是听感**（第四轮与第五轮都没让任何一次
@@ -157,6 +170,13 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
 - 每路音量：`MediaPlayer.setVolume`；EQ/低频：`Equalizer`/`BassBoost`/`LoudnessEnhancer`
   （按 `getAudioSessionId()` 挂）。
 - **保音高变速**：`MediaPlayer.setPlaybackParams(speed, pitch)` —— 小幅 BPM 对齐够用。
+- ⚠️ **采样率不是恒定的**：用户库里同一批歌既有 48kHz 也有 44.1kHz（`MediaFormat.KEY_SAMPLE_RATE` 实测）。
+  htdemucs 只吃 44.1kHz —— 把 48k 样本直接喂进去 = 同一段音乐慢 8.8%、低一个纯五度，而且所有"秒"都错位。
+  **任何分离/分析路径都必须先重采样**（harness 里是 `BlendBench.toRate`）。
+- ⚠️ **dex 工具链**：`android-sdk/build-tools/34.0.0/d8.bat` 是 **R8 8.2**，遇到带**嵌套类**的 class
+  （= 任何 Java-11 语言的 `NestMembers`）会 `NullPointerException: Cannot invoke "String.length()"`；
+  用 gradle 缓存里的 **`com.android.tools:r8:8.13.17`**（`java -cp r8-8.13.17.jar com.android.tools.r8.D8`）
+  就正常 —— 那也正是 AGP 自己用的那个。另外 `javac --release 8` 能避免 nest 属性。
 - ❌ **平台没有任何 BPM/节拍/调性/结构分析 API**，这部分必须自己写 DSP。
 - `Visualizer` 能拿实时 FFT，但需要 `RECORD_AUDIO` **且只能拿输出混音** → 不推荐，优先解码文件。
 
@@ -791,17 +811,441 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
        `songUrlInfo`+unblock 往返；没有做共享 memo（两条路各自都要在另一种关闭时仍然能工作）。
     6. `precacheWorker` 没有单独测试；缓存到预算时的"不下"分支、bad-download 删除分支
        **在真机上都没被走到过**。
+- **2026-09-19 第六轮：htdemucs 人声分离「可行性闸门」（只有测量；App 代码只加了依赖与 abiFilters）** ——
+  目的是回答"手机上跑得动吗、吃多少内存、怎么配"，**结论是可行，而且找到了比 Folia 更省的配置**。
+  参考实现在 `D:\qplayer-dev\folia-src\folia-major-main`（zip 在 `C:\Users\xiaoz\Downloads\`）；
+  **权威文档是它的 `src/services/automix/MODELS.md` 与 `shared/modelManifest.json`，别只看任务描述**。
+  - **磁盘规则（硬约束，见第三节）**：**C: 只剩 ~6.2GB（98% 满）**，大文件一律放 **`D:\qplayer-dev\...`**。
+    本轮落盘：`D:\qplayer-dev\htdemucs\`（两个模型）、`D:\qplayer-dev\harness\`（harness 源码 + dex +
+    拉下来的音频 + python 脚本）、`D:\qplayer-dev\ort\`（aar 与 classes.jar）、`D:\qplayer-dev\pylibs\`
+    （`onnx` 1.23.0，**只用于改图**；**inference 永远不在 PC 上跑**）。
+  - **模型（字节数与哈希已核实）**：**108,644,650 字节**，
+    **sha256 `099b5be76c1f6922124d07f850250f39d1f33f254a0b8cc90f4ec0dfd0912329`（实测匹配）**。
+    ⚠️ **"上游 URL"这个提法是错的，必须修正**：这个文件**不在** `itamiArika/htdemucs-int8-memory` 里 ——
+    那个仓库只有 `htdemucs-dft-fp16-transparent{,-portable}.onnx`（129,977,189 / 129,981,572）与
+    `htdemucs-dft-int8-fp16-{final,portable,chunked}.onnx`（98,461,394 / 98,474,789 / 98,511,195），
+    它的 `SHA256SUMS` 里**没有** `099b5be...`。**108,644,650 这个字节流是 Folia 自己改出来的产物**，
+    由 Folia 的发布通道分发：**`https://hf-mirror.com/HUAI4236/folia-models/resolve/main/htdemucs.onnx`**
+    （`HUAI4236/folia-models` 里那个文件的 LFS oid 就是上面这个 sha256）或
+    `https://github.com/AZURE-HUAI/folia-models/releases/download/weights-v1/htdemucs.onnx`。
+    **huggingface.co 在这台机器上连不上**（curl 60s 超时），**hf-mirror.com 通**，本轮的模型是从后者拿的。
+    来历（Folia `MODELS.md` §2）：Meta 原版 → ① 第三方单文件四轨 ONNX → ② fp16 权重（130.0MB）→
+    ③ "transparent" 重导出（STFT 从展开的循环换成真 DFT 算子，节点 24917→1556，图优化峰值 4594MB→353MB）→
+    ④ **Folia 把段长砍半**（343980→172032，130.0→108.6MB）。**所以"从上游下载并核对哈希"这件事，
+    只有走 Folia 的通道才成立**；要自己复现 ③④，脚本 `build/htdemucs_halve_segment.py` 在 Folia 源码里。
+  - **ORT**：`com.microsoft.onnxruntime:onnxruntime-android:1.30.0`（**Maven Central 通**，已解析/编译/装机）。
+    **这是全仓库唯一一个越过"不能新增依赖"的依赖**（用户已同意），加在 `android-shell/app/build.gradle.kts`。
+    - **APK 体积实测**：debug APK **64,902,780 → 94,053,487 字节（+29.1MB）**。aar 本体 53.0MB，
+      内含**四个 ABI**（arm64-v8a 33.0 / armeabi-v7a 23.3 / x86 39.3 / x86_64 39.5 MB，**全带上就是 +135MB**），
+      所以 `defaultConfig` 里加了 **`ndk { abiFilters += "arm64-v8a" }`**；要 32 位或模拟器就把
+      `"armeabi-v7a"` 加回去（**这是本轮唯一改了打包行为的改动，可一行还原**）。
+    - ⚠️ **gradle 缓存里原本躺着 `onnxruntime-android-1.23.2`**（更早的会话试过）。**1.23.2 < 1.25，
+      加载这个模型会直接失败**（iSTFT 把 DFT 的 `inverse`+`onesided` 一起设了）。**不要图省事用缓存里那个。**
+  - **怎么测的（可复现）**：`D:\qplayer-dev\harness\HtdemucsBench.java` —— **独立进程**的 harness
+    （`app_process` + `d8` 出的 `classes.dex` + aar 里的 arm64 `.so`），所以它
+    **`/proc/self/status` 的 `VmHWM` 就是这次推理自己的 OS 高水位**，不是进程内采样器、也没被 Compose 污染
+    （Folia 的教训：进程内采样漏掉了 4GB 的瞬时峰值）。跑法**实测可用**：
+    ```
+    adb shell "cd /data/local/tmp/hb && LD_LIBRARY_PATH=/data/local/tmp/hb \
+      CLASSPATH=/data/local/tmp/hb/classes.dex app_process /system/bin HtdemucsBench \
+      /data/local/tmp/hb/htdemucs-quarter.onnx /data/local/tmp/hb/audio1.bin 30 120000 \
+      --threads=4 --arena=off --mempool=off"
+    ```
+    输出全以 `HB|` 开头（`MEM` 行 = VmHWM/VmRSS/VmPeak，`RUN` 行 = 墙钟与四轨相加的误差）。
+    `/data/local/tmp/hb/` 里**已经 staged 了** dex、两个 `.so`、两个模型、一段真实音乐（约 200MB），
+    下一轮可以直接复用；重建 dex 的法子在 `harness/` 里（javac → `jar` → `d8`，
+    **注意 d8 吃 jar 不吃目录**）。音频取自 App 的音频缓存
+    （`adb exec-out run-as dev.t1m3.qplayer.debug cat files/cache/audio/18969210.cache`，**FLAC**，548.2s）。
+    - ⚠️ **两个 adb 坑（已踩，别再浪费一轮）**：① `adb push <local> <dir>/`（**目标带斜杠**）
+      **会把文件名的最后一个字符吃掉**（`audio1.bin` → `audio1.bi`）→ **总是给完整目标文件名**再 `md5sum` 核。
+      ② 这台机器 push 大文件**有时只有 0.8MB/s**（108MB 用了 127s），有时 32MB/s，**不要拿一次测速估算**。
+  - **实测数字（Redmi K20 Pro `efaa83b2`，Android 16，arm64，5.6GB RAM；CPU；VmHWM = OS 峰值）**：
+
+    | 模型 | 段长 | 窗口 | 墙钟 | 倍速 | **VmHWM** | 四轨相加 vs mix |
+    |---|---|---|---|---|---|---|
+    | htdemucs.onnx，arena **on**（默认） | 3.901s | 8s | 9.57s | 1.20x | **2146MB** | −33.3dB |
+    | htdemucs.onnx，arena **off** | 3.901s | 8s | 10.23s | 1.28x | **1225MB** | −33.3dB |
+    | htdemucs.onnx，arena off | 3.901s | 15s | 18.11s | 1.21x | 1266MB | −33.0dB |
+    | htdemucs.onnx，arena off | 3.901s | **30s** | **36.83s** | 1.23x | **1329MB** | −32.7dB |
+    | **quarter（本轮生成）** | **1.950s** | 15s | 15.65s | 1.04x | **800MB** | −32.7dB |
+    | **quarter** | **1.950s** | **30s** | **32.20s** | **1.07x** | **860MB** | −32.2dB |
+    | quarter，同进程第二次 | 1.950s | 30s | 35.16s | 1.17x | 880MB | −32.6dB |
+    | htdemucs.onnx + **NNAPI** | 3.901s | 15s | **153.28s** | **10.22x** | 1308MB | **+15.9dB（垃圾）** |
+
+    - **I/O 契约（设备上读出来的，不是抄的）**：输入名 **`mix`**、`[1,2,172032]` float32（quarter `[1,2,86016]`）；
+      输出名 `stems`、`[1,4,2,172032]`、**取 index 0**；**段长向模型查询**（`get_inputs()[0].shape[2]`）。
+      **会话创建 0.62–0.78s**，那一步的 VmHWM **430–442MB**（= Folia 的"图优化 353MB/0.65s"，**对得上** →
+      **这个 export 的图优化不是问题**）。MediaCodec 解码 FLAC：15s→1.34s，30s→2.70s。
+      分块几何与参考实现一致：stride = 段长 − 段长/4、三角窗、按权重和归一（`HtdemucsBench.buildWindow`）。
+    - **四轨相加 ≈ mix**：**模型原生的四轨**相加与 mix 的 RMS 误差 **−32~−33dB**（≈2% RMS）；
+      把 `other` 按 `mix − drums − bass − vocals` 重算后是 **−149dB（纯 float 舍入）** —— 这正是
+      "四轨在 unity 下精确还原 master"那条要求。stem 顺序 `drums/bass/other/vocals` 与 Folia 一致，
+      能量也合理（bass 最响、other 最轻）。
+    - **四个开关的实测结论**：
+      1. **`setCPUArenaAllocator(false)` 是 Java 侧唯一真正的大杠杆**：同一窗口、输出**逐位相同**，
+         峰值 **2146MB → 1225MB**，且跑完 RSS 掉回 376MB（开着 arena 就一直占着）。
+         这就是 Folia 那个**只能在 Python 设**的 `enable_mem_reuse=False`（2543→790MB）的**Java 可及替代**
+         （mem_reuse 在 C API 里没有，但 arena 这个开关 C/Java 都有）。
+      2. **线程数**：1→46.14s / 2→26.82s / **4→18.11s** / 8→23.10s（**8 反而比 4 慢**：8 核大小核被小核拖）。
+         **内存与线程数无关**（1/2/4/8 都是 1266–1268MB）→ 峰值是"单段激活值"的一次性分配，不是每线程一份。
+      3. **`setMemoryPatternOptimization` 与 `memory.enable_memory_arena_shrinkage=cpu:0` 对峰值毫无影响**
+         （1267–1306MB，全在噪声里）。不用折腾。
+      4. **NNAPI 直接判死**：会话创建 12.67s、**每段 25.5s（CPU 2.99s，慢 8.5 倍）**，而且**输出是垃圾**
+         —— 四轨相加比 mix **高 15.9dB**、stem 电平冲到 **+9.1dBFS（超过满刻度）**。
+         **它会"加载成功"然后自信地给出错误音频**，正是任务警告的那一类；我们的相加自检把它抓出来了。
+         设备报的可用 EP 是 `[CPU, NNAPI, XNNPACK, WEBGPU]`，**CPU 是唯一验证可用的**
+         （XNNPACK/WEBGPU 本轮没测）。**按墙钟与相加自检判断，不要按"加载成功"判断。**
+  - **段长这个杠杆（Phase 2b）**：**我们拿到的模型本来就是"砍半"那一版**（段长 **172032 = 3.901s**，
+    未改的上游 transparent 版是 343980 = 7.8s）—— 已用 `get_inputs()[0].shape[2]` 在设备上确认。
+    既然"更短的段"是唯一还能压峰值的杠杆，本轮**又砍一刀**：用 Folia 脚本的等价物
+    （`D:\qplayer-dev\harness\quarter.py`，**只改图、不跑模型**）生成 **`htdemucs-quarter.onnx`**：
+    172032 → **86016（1.951s）**，`97,978,156` 字节，
+    sha256 `e4481383bee7c9f2e0998b514f11e6ebb73bf6b8994c7591b963d5c875ca41f0`。
+    **每一栏都更好**：30s 窗口 峰值 **1329 → 860MB（−35%）**、墙钟 **36.83 → 32.20s（−13%）**、
+    相加自检 **仍是 −32.2dB**、stem 电平与砍半版相差 ≤0.5dB。同进程第二次：峰值 880MB（**不涨、无泄漏**），
+    输出逐位相同，第二次慢 8%（**热**）。
+    - ⚠️ **改图的坑（真踩到了，必须记住）**：`strict_mode` 的 shape inference **会通过，但图是错的** ——
+      我漏了两个"帧数的倍数"常量 `344 = 2×(frames+4)` 与 `1376 = 8×(frames+4)`
+      （`/dft_stft/flat_*` 与 `/dft_istft/iv_*` 的 reshape 目标），设备上直接报
+      `Reshape ... Input shape:{2,88,4096}, requested shape:{344,4096,1}`。
+      **改图必须把"所有长度常量"清点一遍**（清点脚本 `harness/inv.py`；完整清单 = 时间链
+      172032/43008/10752/2688/672 及其 +2 的 trim、STFT 的 173568/175104/177152/179200、
+      帧数族 168/170/172/173/174/175 及其倍数 344/1376/1344、3 张位置表 + iSTFT 归一化表的**拼接**
+      （拼接：保留头 86 个 hop、尾 1 个 hop，接点落在恒定段内）），**并且一定要在真机上用"四轨相加"验货**。
+    - ⚠️ **听感没人验过**：Folia 只做过 7.8s→3.9s 的盲听（"听不出区别"）；**3.9s→1.95s 没有任何盲听证据**。
+      若采纳 quarter，这是第一件要听的事。
+  - **结论：对手机「可行」，但不免费** ——
+    - 推荐配置：**CPU + `setCPUArenaAllocator(false)` + `setIntraOpNumThreads(4)` + quarter 段长**，
+      30s 窗口 = **860MB OS 峰值、32.2s 墙钟（1.07x 实时）**。860MB/1.3GB 在 5.6GB（可用 ~2.3GB）的机器上
+      **能活**，但**建议放独立进程**（harness 本身就是证明：`app_process` + dex + `.so` 完全可行）——
+      被系统杀掉只是"这次没有 pre-render"，不连累播放进程。
+    - **必须提前起跑**：32s 算力 vs `TRANSITION_DECIDE_LEAD_MS` = 24.25s → **"决策那一刻"才动手一定来不及**。
+      要挂在**下一首的预缓存/preload 那条 lane** 上（起播时就有几分钟余量，见第五轮 ④），或改用 15s 窗口（15.65s）。
+    - **三个开关都要显式设**，**不要用默认**（默认 arena=on 是 2146MB）。
+  - **本轮明确没做的事**：
+    1. **Phase 3（预渲染混音文件）一行代码都没写。** 理由：它要动的正是
+       `PlayerController`/`AndroidAudioBackend` 那条**被 P0 咬过一次的状态机**，而 §5/§7 里那条
+       "**没有任何一次过渡真的播给人听过**"至今没做；在没被听过的过渡系统上再叠一层没人听过的预渲染混合，
+       是本仓库明确反对的推进方式（第三轮/第四轮的教训都是"先听，再叠"）。
+    2. **没有任何听感**：四轨本身、quarter 段的音质、30s 窗口的接缝，谁也没听过。本轮唯一的客观质量证据
+       就是"四轨相加 = mix 到 −32dB"（**与 Folia 同一判据**：他们 7.8s 版 26.5dB、3.9s 版 26.9dB，
+       **口径一致、我们这个数更好**）。
+    3. 只在**一台设备**上测过（Redmi K20 Pro，骁龙 855）；三星那台没碰。**XNNPACK / WEBGPU 未测**。
+       音频只有一段真实音乐（18969210.cache，FLAC），没有跨风格/跨码率的样本量。
+  - **下一轮的入口（按顺序）**：
+    1. 决定段长（quarter 还是砍半版）→ 决定后就"先听"（这是唯一能判 quarter 的依据）。
+    2. **Phase 3 的最小可测切片**：把 harness 里已经跑通的三件事（MediaCodec 解码 → ORT 分离 → 写文件）
+       搬进 Android 侧，**只做"能生成一个预渲染文件"**，**先不接播放路径**；用 `DiskCache` 的
+       `TRANSITION` 式子目录存，跑在 preload 那条 lane 上。**验收标准是日志**（文件多大、耗时、
+       四轨相加误差），**播放路径一个字都不改**。
+    3. 等"听感"那一轮做完（§5 里那 6 条），再把 `PlayerController` 接上：incoming 播预渲染文件、
+       缺了/晚了就回落到今天的交叉淡化。
+
+- **2026-09-19 第七轮：stem 顺序定论 + Folia 手势移植 + 第一个预渲染混音（纯日志验收）** ——
+  只加了两个**纯 Java** 类（`audio/StemGesture`、`audio/StemBlendRenderer`）与 `DiskCache` 的 `BLEND` 子目录，
+  **播放路径一个字都没改**。设备：**Redmi K20 Pro `efaa83b2`**（8 Elite 全程未插上，`adb devices` 只有这台；
+  下面所有耗时都是这台 855 的）。
+  - **Phase A：stem 顺序 = 确认（drums/bass/other/vocals），rows 2/3 不再只靠 Folia 的常数**。
+    做法：给 `HtdemucsBench` 加了 `--metrics`（整窗每行 RMS/峰值/ZCR/<100Hz/100–4k/>4k/静音帧占比）、
+    `--series=dir`（每窗 25ms 逐帧包络 CSV）与 `--scan=from,to,hop`（一次会话扫多窗）；
+    两首带"无人声段落"的歌各扫多窗（坏女孩 5 窗共 110s、In My Head 2 窗共 50s，全部按 25ms 帧统计）。
+    - **判据一（决定性）**：行 2（声明 `other`）在**两首歌的每一窗里都有 0 个**低于 -50dBFS 的 25ms 帧
+      （4400 + 2028 帧，静音占比 0.000），行 3（声明 `vocals`）时有时无：
+      坏女孩无歌词段（78.4–111.2s，LRC 无任何行）**中位 -43.5dBFS、44.1% 的帧 <-50dBFS**，
+      而同一段行 2 的中位是 **-24.4dBFS、0% 静音**；出了这段（111.2–150s）行 3 变成 **-20.2dBFS、1.0% 静音**，
+      行 2 只动了 **0.3dB**（-24.4 → -26.0）。In My Head 的 7.2–24.4s 前奏同理：
+      行 3 中位 **-69.8dBFS（数字静音）、72.1% 的帧 <-50dBFS**，行 2 中位 **-23.0dBFS、0% 静音**；
+      人声进来后（24.9–54.4s）行 3 变 **-19.9dBFS、26.3% 静音**，行 2 只动了 0.5dB。
+      **若两行标签互换，就意味着"残差 stem（=所有非鼓非贝斯非人声的东西）在人声段几乎全在、在人声消失的
+      33 秒里归零，而人声 stem 一直在响"** —— htdemucs 里没有这种机制；四轨相加 = mix（-33dB）也把
+      {2,3} 钉死为 {other, vocals}。**结论：声明顺序成立，不要改。**
+    - **判据二（任务要求的逐行数字）**：ZCR 与频带。行 3（vocals）在每一窗都是 <100Hz 能量占比最低且
+      ZCR 最高的行（<100Hz 0.15–3.1%、ZCR 2.2–4.4k/s），行 2（other）带更多低频
+      （<100Hz 1.2–11.5%、ZCR 1.0–1.3k/s）。⚠️ 频带是用**两级一阶低通**劈的（故意粗糙），
+      所以 `>4k` 那一栏被高估（vocals 12–20%、other 3.4–5%），只能当趋势看。
+    - ⚠️ **必须记下的反例（它会误导下一轮）**：**LRC 的"没有歌词行"不等于"没有唱"**。
+      坏女孩那 33 秒里行 3 的中位是 -43.5dBFS 但 **p90 = -17.7dBFS**、峰值 -0.4dBFS —— 里面确实有
+      sustained 内容（run-length 显示"响"的部分主要在 ≥0.2s 的连续段里，不是一帧的毛刺），即那段要么有
+      人声 ad-lib、要么 htdemucs 把某个持续音色塞进了 vocals 轨；In My Head 的前奏同理。
+      所以**逐行数字比"某一段该是静音"的假设可靠**；下一轮若再验证，请用"行间对比"（行 2 是否恒定、
+      行 3 是否随歌词线起伏）而不是"某段该静音"。歌词线起始处的对齐检验（42/60 条线，行 3 比行 2 高
+      2–5.4dB，符号对但幅度小）单独不足以定论，只作旁证。
+  - **Phase B：Folia 的 `stemGesture.ts` 已移植为纯 Java（`player-core/.../audio/StemGesture.java`）+ 22 个纯 JVM 测试全绿**。
+    移植的是**算术**：常量（含每个常量"为什么是这个值"的原文理由）、`envelopeOf`、`median`、
+    `findSustain`、`planVocalExit`、`lastVocalMoment`、`singsInWindow`、`planStemHandover`、
+    `rise`/`fall`/`curveOf`、`outgoingCurves`/`incomingCurves`、`OTHER_SWEEP_*`、`SWAP_EDGE_SEC`；
+    另外 `StemBlendRenderer`（`crossfadeGraph.ts` 的那一半）：`softLimit`（knee 0.95 / range 4）、
+    每 stem 峰值除数（`peakOf`，**存储**用，读写相消所以不改电平）、outgoing `other` 的 25→2200Hz 高通扫频
+    （块式 RBJ 重算，64 样本一块 —— 离线等价物，写在注释里）。
+    六条"必须在移植后仍然成立"的规则都有断言（`StemGestureTest` 18 个用例，数字全部打印）：
+    - **鼓 6ms 切换、不淡入淡出**（`SWAP_EDGE_SEC=0.006`）：断言 `rise(swap, swap+6ms, swap)=0`、末端 =1；
+      并且发现 **200 点/秒的采样曲线 → 6ms 边沿只有 1 个采样宽**，所以"实际播放的边沿"被量化到 5ms
+      （Folia 的 `setValueCurveAtTime` 同样线性插值，这条值得记住）。
+    - **bass 晚一小节**（`bassAt - swap == bar`）、**incoming `other` 比自己的鼓早 1.2s**
+      （`curveAt(other, swap)=1`、`curveAt(drums, swap)<0.2`、`+20ms=1`）。
+    - **鼓切换落在真实小节线上**：用 `downbeatOffset + beatsPerBar` 造小节线（`barLines`），
+      断言 swap ∈ 小节线集合、且**不是**把 beat 相位当 downbeat 用（同一条节拍网格按 beat 相位造线会落在
+      0.1/2.1/4.1…，差整整一拍）；没有 downbeat offset → 不加小节线、swap 落回 0.42 的分数位（"说实话而不是猜线"）。
+    - **MAX_TAIL_BARS=2**：30s 窗口、120BPM（bar 2s）时分数位 12.6s 会让切换后留 3 小节 → 目标改成
+      `30 - 3*2 = 24s`（**手势整体后移，而不是缩短重叠**），bass 26s、incoming voice 28s。
+    - **人声退场是自由搜索（不吸附节拍）**：两个 rest（2.0s 处 -60dB、5.5s 处 -30.5dB）→ 取**后**那个
+      （5.60s，且切割时长按深度分级 = 1.18s，而 -60dB 的孤立 rest 只给 0.5s）；rest 在 4.35s（不在任何
+      0.4s 拍格线上）时 `exit.from` 精确 = 4.35s。
+    - **recede 从 swap 起**（不是窗口起点）：无 rest 时 `exit.from == swap`；窗口太短则 `from = min(swap,
+      to - 1s)`（**末端是钉死的**，起点往前挪而不是缩短淡出）。
+    - **两条人声不叠 + 不留洞**：`vocalGap = vocalIn - exit.to = -0.457s`（目标 ≈ -0.5s），且
+      **两个人声推子之和最大 = 1.000**（线性交叉淡化是 1.0，两边都 unity 是 2.0）。
+    - **8ms 交接的前提 = 所有 outgoing 曲线从 unity 开始**：断言四条 outgoing 曲线在 t=0 都是 1.0000、
+      四条 incoming 曲线在窗口末端（-0.4s 处）都是 1.0000、且 outgoing 四条在窗口末端都到 0。
+    - **release 分支**（最后一个 hold 跨过 deadline 且能在窗内放开）：`exit.from = held.to = 12.0s`，
+      incoming 的入口后移到 `exit.from - 1 bar`（`vocalIn = 9.119s`，> dueAt）；已知调性冲突
+      （`keysClash=true`）时**不 ride**，回落到 rest/recede。
+    - **`sings=false` 时 deadline 整体溶解**：`vocalIn = window`、exit 到窗口末端（Folia 那条"为一个
+      根本不来的人声压掉自己的歌手"的教训）。
+    - **小节线的相位问题（任务点名要回答的那条）**：我们的 `BeatProfile` 暴露的是**节拍网格的相位**
+      （`firstBeatMs`，原文注释："every beat is `firstBeatMs + k * periodMs`"），**不是 downbeat offset**。
+      所以移植后的 `barLines(bpm, downbeatOffsetSec, beatsPerBar, windowStart, window)` **把 downbeat offset
+      当独立入参**，null 就没有小节线。因为本平台没有结构分析，本轮加了一个**明确标注为"扩展、非移植"**的
+      估计器 `StemGesture.downbeatOffsetSec(...)`：在 beat 网格的 `beatsPerBar` 个候选相位里，选**低频最强**
+      的那个（`--phaseA/--phaseB` 传的是**节拍相位**，从不直接当小节线用）。单测用"kick 只在第 3 拍上"的
+      合成包络验证它找到 1.13s（bar 2.0s）。
+  - **Phase C：跑出第一个预渲染混音（只写日志 + 落一个文件，播放路径没碰）**。
+    对子：**A = Obsessed With You（n1876325947）→ B = OWA OWA（n2710036557）**（两首都在当前队列里、音频都在
+    设备上；A 的尾段一直唱到 106.7s/108.7s，这是验收要的"混音前有人声"；两首的拍格都是**本机测过且过 0.35 门**的：
+    A 71.60BPM/0.661、B 83.80BPM/0.444 —— B 那条是**本轮从设备 `beat/` 缓存里解出来核过的**，
+    `n2710036557 → 1385817802.bpm` 这套 `abs(trackKey.hashCode())` 命名也验证过了）。
+    窗口 15s（= 我们的 `OVERLAP_LONG`）。工具：`D:\qplayer-dev\harness\BlendBench.java`（`app_process` + dex，
+    quarter 模型 + arena off + 4 线程），输出全以 `BL|` 开头，日志 `D:\qplayer-dev\harness\blend2.log`，
+    渲染文件 `D:\qplayer-dev\harness\render\blend_obsessed_owa.wav`（设备上 `/data/local/tmp/hb/render/`）。
+    - **顺手抓到一个真 bug（否则所有时间错位 8.8%）**：这两首都是 **48kHz**，而模型与时间轴都是 44.1kHz。
+      第一次跑就是拿 48k 样本当 44.1k 喂模型（同一段音乐变成慢 8.8%、低一个纯五度），并且 plan 的"秒"落在
+      错误的位置。已修：`BlendBench.toRate()` 线性重采样到 44.1kHz 并打印。**库里有两种采样率，别假设。**
+    - **计划（15s 窗）**：`swap=7.746s`（落在小节线上，A bar=3.352s）、`bassAt=11.098s`、
+      `vocalIn=10.610s`、`dueAt=10.610s`、**`gap=-0.500s`**；退场分支 **RECEDE 7.75–11.11s**
+      （"最安静的半秒" = -1dB → 全程都在唱，正确走 recede），`held 8.80–10.25s`（1dB over the mix）。
+    - **人声抑制（逐 25ms 实测，不是假设）**：`voice` 列 = **只渲染 vocal stem 的那一路**
+      （另做一次 render 得到），所以数字就是人声本身：
+      **混音前（0–7.75s）平均 -17.2dBFS；混音中 -21.8dBFS（outgoing -24.0 / incoming -25.9）；窗口末端 -24.4dBFS**。
+      逐帧更清楚：0–10.4s 只有 outgoing（-12…-40dBFS），10.6–11.0s 两个推子交叉（10.795s 处
+      outgoing -53.7 / incoming -29.4），11.2s 之后只剩 incoming（-15.9…-51dBFS）。
+      **不叠**：整窗**最大只比"更响的那一路"高 1.76dB**（10.62s 处），而**两路都 unity 会高 3.01dB**；
+      渲染比"两路相加"低 **5.05dB**。CSV：`D:\qplayer-dev\harness\render\voice2.csv`。
+    - **接缝无台阶（all-unity 不变式）**：渲染第 1 个采样 vs outgoing 的四轨之和（=master）
+      **-52.0dB**（差值**全部**来自 outgoing `other` 的 25Hz 高通 —— 这是 Folia 故意的；第一次跑把 sweep 关掉时
+      是 -240dB，即逐位相等）；最后一个采样 vs incoming 的 master **-152.7dB**。
+      各交接点 ±5ms 内的**最大 |x[n]-x[n-1]|**：7.75s→0.0525、11.10s→0.0693、10.61s→0.2610、11.11s→0.3806，
+      而**源音频自己的 p99.9 台阶是 0.5443、最大 1.0675** —— **渲染在每个交接点的台阶都比音乐本身的
+      99.9 百分位台阶还小**，接缝没有新产生台阶。
+    - **削波/峰值**：总线前峰值 **+2.9dBFS**（3407 个采样越过满刻度 = 0.26%）；限幅器（knee 0.95/range 4）
+      碰到 14685 / 1,323,000 个采样（1.1%），最多压 **-2.93dB**，**渲染峰值 0.0dBFS**（恰好满刻度，
+      因为 `softLimit` 渐近到 1.0 而不是停在前一点）。写文件用 **每文件峰值除数 max(1, peak) = 1.0**
+      （16-bit，2,646,044 字节），**没有回绕/硬削**。
+      **要说清楚**：Folia 的"每 stem 峰值除数"是**存储**用的（进去除、出来乘，相消，不改电平），
+      真正防止两路相加越界的是**总线上的 `softLimit`**；本轮**两个都实现了**，渲染本身走 float。
+    - **成本（K20 Pro，quarter + arena off + 4 线程）**：解码 3.23s + 分离 15.31s(A) + 16.06s(B) + 混音 0.33s
+      = **整跑 36.14s**，即 **2.41× 实时**（15s 窗口）；VmHWM **872MB**、跑完 RSS 415MB。
+    - **落盘方式**：`DiskCache` 新增 `BLEND` 子目录（`files/cache/blend/`，键 = `pairKey`，
+      文件名 `abs(key.hashCode()) + ".blend"`，计数上限 20，**并且计入 `totalSize()`** —— 它是这里唯一
+      以 MB 计的派生文件）。本条就是用 `run-as … cat >` 写进去的，md5 与 D: 上的副本逐位一致：
+      `files/cache/blend/788630542.blend`（2,646,044 字节，= `abs("n1876325947>n2710036557".hashCode())`）。
+      **播放路径仍然没有任何东西读它。**
+    - ⚠️ **第六轮记的 quarter 模型 sha256 是错的**：设备上和 `D:\qplayer-dev\htdemucs\` 上的
+      `htdemucs-quarter.onnx`（97,978,156 字节，两边逐位相同）实际是
+      **`427b9588287d85d78f212d9f6f4acbc42b626e28ef9d2d948fed78311f4aec20`**，
+      不是原文写的 `e4481383…5ca41f0`（大小对得上、哈希对不上 → 21:23 那次重新生成之后没更新文档）。
+      **交付路径必须用 427b9588…，否则 App 会拒绝自己刚下载的模型。**（`htdemucs.onnx` 的
+      `099b5be7…d0912329` 已在设备上 `sha256sum` 复核一致。）
+  - **交付路径（模型 98–108MB，不能进 APK）—— 决定**：
+    1. **首次使用时下载 + sha256 校验**，不打包、不做 APK 资源、不做 obb：APK 已经 94–98MB，再加 98MB 是两倍；
+       而且这个功能是"锦上添花"，缺了它必须完全等于今天的行为。
+    2. **地址**只能走 Folia 的通道（`https://hf-mirror.com/HUAI4236/folia-models/resolve/main/htdemucs.onnx`，
+       302 → CDN；**本轮在设备上实测可达**：`curl -sI` 返回 302 + `Accept-Ranges: bytes`；github release 那条也通）。
+       落到 app 私有目录（`files/models/`），**sha256 用 427b9588…（quarter）或 099b5be7…（砍半版）**，
+       校验失败就删除并**功能保持关闭**。
+    3. **inert 门**：`智能过渡` 开 **且** 模型存在 **且** 校验过 → 才允许进 stem 路径；否则**一行分支都不进**，
+       完全走今天的交叉淡化/硬切。开关默认**关**（下载 100MB 不能默认发生）。
+    4. **不让用户等**：下载走 preload 那条 lane、带进度、可中断；只在 Wi-Fi 下默认允许（`SettingsCatalog`
+       里目前**没有**这类 key，要加）。
+    5. **本轮没有为交付写任何代码**（不往仓库塞没人调用的死代码，§5 第 2 条正是在清这个）；只**验证了两个前提**：
+       设备能到达镜像站（302 可达）与设备侧 sha256 校验可用（`toybox sha256sum` 与文档值一致）。
+       ⚠️ **实测下行只有 ~0.24MB/s（108MB ≈ 7.5 分钟）**，一次下载要按分钟计，别设计成"点一下立刻开唱"。
+  - **本轮没做的事 / 没人听过**：
+    1. **混音文件没有任何人听过**（照旧）。本轮的"验收"全部是**客观数字**：文件时长/交接时刻、人声抑制、
+       接缝台阶、峰值与限幅量、墙钟。四轨本身、扫频、recede 的手感、quarter 段长的音质 —— **全部没听过**。
+    2. **没有接播放路径**（明确要求）。没有任何代码读 `files/cache/blend/`；`PlayerController`/`AndroidAudioBackend`
+       一行没改；所有 15s 重叠、AI 计划、拍格对齐的老路径照旧。
+    3. 只跑了**一个对子、一次**（15s 窗）。REST 分支（真的找到 rest）在真实素材上**没跑到** ——
+       这个对子全程在唱，走的是 RECEDE；release 分支只在单测里出现。
+    4. 拍格用的是**本机历史测量值**（A 71.60/0.661、B 83.80/0.444 都来自设备 beat 缓存），不是本轮现算的；
+       `downbeatOffsetSec` 这个**扩展**（低频最强相位）**是本轮新写的、只在合成信号上单测过**，
+       真实音乐上的小节线正确性**没有验证**（要验证得有人听"鼓是不是在小节上换的手"）。
+    5. 两首网格在 15s 里滑了两秒多（71.6 vs 83.8BPM 本来就不该对拍）—— 本轮手势**不要求对拍**，
+       但"对不对得上"仍然只有耳朵能判。
+    6. 8 Elite **没插上**（`adb devices` 全程只有 K20 Pro）→ 目标机器的真实耗时/内存**仍然没有数据**。
+    7. APK 现在 **98,294,148 字节**（ORT 的 arm64 `.so` 33.0MB 是主要新增）；与第六轮记的 94,053,487 差
+      +4.2MB，**不是本轮代码造成的**（3 个新类 ≈ 50KB dex），疑似一次全量重新 dex vs 增量 dex，未细查。
+  - **下一轮建议（按顺序）**：
+    1. **听**。把 `D:\qplayer-dev\harness\render\blend_obsessed_owa.wav`（以及 §5 里那 6 条）放给人听。
+       这是唯一能判 quarter 段长、扫频、recede 手感的依据；在那之前不要再叠功能。
+    2. **接线的最小切片**（等 1 之后）：`PlayerController` 在边界前把渲染文件交给 incoming 播放
+       （缺了/晚了/校验失败就回落到今天的交叉淡化），`DiskCache.BLEND` 的键是现成的。必须先定**谁触发渲染**
+       （preload lane）与**渲染失败时的超时**：本文档的 24.25s 决策提前量**不够 36s 的渲染**，所以只能挂在
+       起播时的 preload 上。
+    3. 交付：把"下载 + sha256 + inert 门"写进 `SettingsCore` + 一个下载器（用现有 `HttpURLConnection` 路径，
+       不新增依赖），并用 **427b9588…** 这个真实哈希。
+
+- **2026-09-19 第八轮：周期选择的和声关系检查（2:3 错格）—— 装机验证，`mix:` 第一次真的写成了"做了什么"**
+  上一轮遗留的那件事（见本节末尾的"第五轮之后的第一件事"）：测得 72.7 的歌真值 109、测得 97.2 的真值 145，
+  门只能在"拒掉错的/放行对的"之间选。本轮把它做了，并且**先造了能反复跑的测量工具**。
+  - **工具（全在 `D:\qplayer-dev\harness\`，PC 与设备两侧）**：
+    · `BeatDump.java` + `build_beat.sh`：**设备侧** harness（`app_process` + dex，dex 里编的是仓库那份
+      `BeatAnalysis`/`BeatProfile`/`KeyProfile`/`KeyAnalysis`）。逐首把**30s 窗口按 `AndroidBeatProfiler`
+      同一套循环**（同一个 window/整数抽取/按帧声道平均）解出来 → 打印 profile（含 key）→ **同时把
+      这窗口写成 float32 的 `.f32`**（24 字节/帧的 int16 会丢精度，而门是一个 0.35 的阈值，"差不多"不是
+      校准里该有的东西）。跑法同 `BlendBench`（`CLASSPATH=/data/local/tmp/bd/classes.dex app_process
+      /system/bin BeatDump /data/local/tmp/bd/out <id>=<path>...`）。
+      **设备上已 staged（可直接复用）**：`/data/local/tmp/bd/classes.dex`（只有 25KB）、
+      `bd/audio/*.cache`（36 首，从 app 的 `files/cache/audio/` 用 `run-as … cat >` 抄出来的）、
+      `bd/out/*.f32`。
+    · `BeatPc.java`（表 + gate）/`Candidates.java`（每个候选 lag 当选中时的 confidence）/`Grids.java`
+      （每个候选网格的**脉冲串收集到的 onset 能量**：总/每拍/拍数）/`Harmonics.java`（raw r(L)、r(2L)、r(3L)
+      与两种加权）/`Diag.java`（逐段 support/相位）/`Phases.java`（逐段相位，给定周期）/`Synth.java`
+      （合成信号前后对照）/`Ratio.java`/`Keys.java`：**PC 侧**，直接编仓库源码跑那些 `.f32`。
+      `Copy.java` 是**老选择的副本**（只用于打印 before/after，不参与任何决定）。
+      **PC 与设备逐位一致**（见下表：设备 `beat profile for …` 与 PC 表的数字最后一位相同），
+      所以"改一行、2 秒看 18 首"是成立的。
+  - **实测到的机制（这是本轮全部改动的依据，别再重新猜）**：错的那一格不是"置信度没测准"，是
+    **自相关选错了周期**。`double take`（真值 109）里，**最强峰在 825.8ms = 72.66BPM**，而真拍
+    550.4ms 的强度只有它的 0.512；`OWA OWA`（真值 126）同理（最强 83.8 vs 真 125.8）。反查 raw 相关：
+    72.66 的 `r(L)=0.361 / r(2L)=0.298 / r(3L)=0.397` 全部高于 109 的 `0.174 / 0.111 / 0.298` ——
+    **这类歌的 onset 包络真的以"1.5 拍"为周期重复**（切分/复合律动的重音模式），所以
+    **任何只看相关的判据都救不了它**。救它的是**攻击能量**：109 的网格上 30s 里收集到
+    **7.535**（每拍 0.1395），72.66 只有 **5.416**（每拍 0.1504）—— 109 的网格**多收了 39% 的攻击**，
+    只是每拍低 7%。也就是说：**真拍上"攻击更多"，错格上"相关更高"**。
+  - **① 改动一：`BeatAnalysis.finerBeat`（周期选择里的和声关系检查）** —— 相关选完之后，拿它选中的周期
+    的**更细和声亲属**（`2/3` 先（就是上面的错格）、然后 `1/2`、`1/3`）比对，取**第一个同时满足**
+    下面两条的作为最终周期：
+    · **攻击支持** `FINER_GRID_SUPPORT = 0.8`：更细网格的**每拍攻击能量 ≥ 粗网格的 80%**
+      （= 拍与拍之间那 1/3 的位置不是空的）。合成材料实测 **0.30–0.50**（128 click 0.349、
+      128+反拍 hat 0.343、dense 128 0.369、120+等响八分 0.365、120+三连音 0.502、120+每三拍重音 0.358、
+      60 click 的 1/2 是 0.458）；真材料里**要救的那几首是 0.80–1.27**（double take 0.93、
+      OWA OWA 1.02、HEARD OF US 1.23、ON MY WAY 1.27）。阈值 0.8 落在这条空档里，
+      **最近的两个实测是 0.798 与 0.799**（都留在"不改"那一侧：0.798 是 DAY1 的半拍格、今天在过门；
+      0.799 是 Better Now，它改成 145 也照样被门拒）。
+    · **自身周期性** `FINER_GRID_PERIODICITY = 0.45`：该亲属附近**邻域内**的相关强度 ≥ 最优的 0.45
+      （"邻域"是必须的：真拍的 lag 常常落在**两个峰之间**，卡在一个 lag 上会把它判死 —— 这是
+      Better Now 的第一版死因）。合成材料：所有 click 类**一个都没被搬动**（55–200BPM 全中、
+      反拍 hat/等响八分/三连音/每三拍重音/dense 128 全部**数字完全不变**）。
+    · **近似关系要重新调谐**（`FINER_GRID_TUNE = 0.01`）：两个真实周期的 2:3 关系**不是精确算术**
+      （实测差 0.5%），而脉冲串一旦漂开能量掉得极快 —— 30s 窗口里 0.5% = 145ms 漂移 = **38% 的能量**。
+      所以候选周期在 ±1% 内**各取自己的最优**再比（不加这一步，Better Now 停在 0.799/0.8）。
+    · 只从相关的选择出发**搬一次**（不链式），**只会更细、永不变粗**（变粗只会丢对齐分辨率），
+      且受 `MIN_BPM/MAX_BPM` 兜住；**不满足就完全等于今天**（genuine 半拍/三分之一拍读数照旧保留）。
+  - **② 改动二：`BeatAnalysis.segmentSupport`（置信度的"段内标尺"也要和声感知）** —— 只改周期的话，
+    **通过率反而从 12/18 掉到 10/18**：门的 tempo 那一半还是"这一段在窗口 lag 上的相关 ÷ 它自己的最好"，
+    而**段自己也会犯同一个 2:3 错**（10 秒的第三段同样在 1.5× 处相关更高）——`double take` 改正到 109
+    之后 support 只有 **0.220**（它的三个第三段相位反而**更一致**：0.055/0.055/0.109 拍）。
+    所以**2:3（及 3:2）的亲属不再允许当"标尺"**（`HARMONIC_RELATION_TOLERANCE = 0.03`），
+    留下的最大值才作分母，并 clamp 到 1。效果：**double take 的相位半 0.826 终于在 support 上也不再被反咬**，
+    Violet 0.271→**0.458（过门）**、HEARD OF US 0.104→**0.507（过门）**、Moonlight 0.415→0.618、
+    Lalala 0.369→0.887、Ice Cream Man 0.599→0.653（负例全部保持不动：白噪/纯音/pad 无网格、
+    变速窗口拒绝、120/170 拒绝、三段相位互斥拒绝、半拍跳变 0.61 < 稳定 0.91）。
+  - **③ 磁盘格式 VERSION 3 → 4**（布局不变，只是**写的人变了**）：旧文件里的 BPM 是**旧估计器的答案**
+    （很多是对的，但错的那些正是 2:3 错格 —— 那是不该被对齐的网格），所以一律不读、重测一次。
+    真机日志确认：`disk cache written: … .bpm (29 B)` → `beat profile loaded for n1388960663: BeatProfile{127.8BPM/0.62 …}`
+    （旧文件是 V3，直接重测）。
+  - **校准（18 首用户队列的真实音频，PC 与设备数字逐位一致；"真值"来自外部 BPM 库/卡拉OK 伴奏页，逐条查过）**：
+
+    | 歌 | 真值 | 旧：测得/置信 | 新：测得/置信 | 结论 |
+    |---|---|---|---|---|
+    | double take | **109** | 72.7 / 0.25 ❌门 | **109.0** / 0.00 | **2:3 错格被修好**（仍被门拒） |
+    | OWA OWA | **126** | 83.8 / 0.44 ✅门 | **126.1** / 0.06 | **2:3 错格被修好**（相位半 0.09 拒之） |
+    | Better Now | **145** | 97.2 / 0.30 ❌ | 97.2 / 0.30 ❌ | **仍是 2:3 错格**（0.799 vs 0.8，见上） |
+    | Violet | **119–120** | 119.9 / 0.27 ❌门 | 119.9 / **0.46** ✅ | **正解，本来被门误拒 → 现在过门** |
+    | Moonlight | 128 | 127.8 / 0.42 ✅ | 127.8 / **0.62** ✅ | 本来就是对的 |
+    | Ice Cream Man | 144 | 144.0 / 0.60 ✅ | 144.0 / 0.65 ✅ | 不变 |
+    | Portland | 136 | 135.8 / 0.51 ✅ | 135.8 / 0.51 ✅ | 不变 |
+    | Life's A Mess | 143 | 143.2 / 0.48 ✅ | 143.2 / 0.48 ✅ | 不变 |
+    | Edamame | 106 | 105.9 / 0.80 ✅ | 105.9 / 0.80 ✅ | 不变 |
+    | One Right Now | 97 | 97.0 / 0.31 ❌门 | 97.0 / 0.31 ❌ | 正解，仍被门拒 |
+    | Obsessed With You | 143 | 71.6 / 0.66 ✅ | 71.6 / 0.66 ✅ | 半拍（同一网格，可用）|
+    | The Other Side… | 128 | 64.0 / 0.75 ✅ | 64.0 / 0.75 ✅ | 半拍，不变 |
+    | White Iverson | 130 | 66.1 / 0.43 ✅ | 66.1 / 0.43 ✅ | 半拍（≈132），不变 |
+    | Lalala(赛马娘版) | ? | 83.3 / 0.37 ✅ | **125.1 / 0.89** ✅ | 网格改了 1.5×（同一族） |
+    | HEARD OF US | ? | 83.3 / 0.71 ✅ | **125.0 / 0.51** ✅ | 网格改了 1.5×（同一族） |
+    | ON MY WAY | ? | 96.6 / 0.01 ❌ | **145.0** / 0.20 ❌ | 网格改了 1.5×，仍拒 |
+    | DAY1 | ? | 66.9 / 0.35 ✅ | 66.9 / 0.35 ✅ | 不变（0.798 那条被挡住） |
+    | 08 | ? | 170.0 / 0.26 ❌ | 170.0 / 0.26 ❌ | 不变 |
+    · **通过率 12/18 → 12/18**（看起来没变，但**成分变了**）：13 首有真值的里，**正确的网格过门的
+      8 → 9**（Violet 进来）、**错误的网格过门的 1 → 0**（OWA OWA 的 83.8 以前在过门）、
+      **2:3 错格 3 → 1**（double take/OWA OWA 修成真值；Better Now 停在 0.799，且它无论改不改都被拒）。
+      没有一首"本来对的变成错的"（合成 55–200BPM 一个数字都没动）。
+  - **装机验证（真机 efaa83b2）—— `mix:` 第一次写出"做了什么"**：
+    · 队列 `[Moonlight, Moonlight]`（**同一首两遍**：自动模式下同专辑 → CROSSFADE，但它也正好是
+      "网格相同 + 调性相同"的极端对子），把「过渡方式」临时强制成**交叉淡化**（避免 AI 挑 CUT；
+      测完已还原成 0=自动）。决策行（原样）：
+      `transition: slot 0 -> 1: CROSSFADE 重叠=long 9801ms, curve=EQUAL_POWER (mix: overlap 8000->9801ms
+      at A's tempo and key); …; beat: A=127.8BPM/0.62 (prom 0.38) B=127.8BPM/0.62 (prom 0.38),
+      align=on (mix: speed x1.0000 on B (tempo already holds: 0ms of drift over 10000ms);
+      pitch x1.0000 on B (0 semitones: keys already sit together, A minor/0.70 / A minor/0.70, chroma
+      distance 0.00); overlap 9801ms = 21 beats of A at A's tempo, drift 0ms by construction;
+      entry 40->19ms; bass swap at 4700ms)`
+      之后：`incoming setDataSource + prepareAsync (startMuted=false, IncomingMix{x1.0000, pitch x1.0000,
+      bassSwap=4700ms})` → `incoming mix applied … platform reports speed x1.0000 pitch x1.0000` →
+      `bass swap armed: … 1 band(s) below 200Hz …` → `crossfade begin over 9746ms` →
+      `ramping 9746ms` → **`bass swap done: the incoming track owns the low end now`**。
+      **这是低频互换第一次在真实音频上真的换了低音**（EQ 按 sessionId 挂上并生效）。
+    · 队列 `[Moonlight, Lalala]`（两首**不同的歌**、同一速度家族、网格兼容）：
+      `… beat: A=127.8BPM/0.62 B=125.1BPM/0.89, align=on (overlap 8000->7921ms = 17 beats of A,
+      drift 168ms of 240ms; entry 0->119ms); mix: off (key not trustworthy (A minor/0.05))` →
+      arm → `ramping 7887ms` → `promoted queue slot 1 (Lalala)`。
+      **`align=on` 用的是改正后的 B 网格（125.1，旧读数是 83.3）**：旧读数下这一对"节奏差 53%"，
+      只会写 `align=off (tempos incompatible…)` + `mix: off (tempos too far apart…)`；现在**对齐真的发生了**，
+      唯一的拒绝理由变成**调性**。`beat profile for n2608072275: BeatProfile{125.1BPM/0.89 …}` 就是
+      设备自己现算的那一行。
+    · 日志存了一份：`D:\qplayer-dev\harness\round8-device.log`。
+  - **下一道约束（有数字，不是猜）—— 变速/移调真正跑不起来了，卡在"调性"。**
+    把 36 首缓存全测了一遍（`BeatDump` 带 key）：**只有 5 首的 key 强度 ≥ `MIN_STRENGTH = 0.25`**
+    （Obsessed 0.43、Moonlight 0.70、The Other Side 0.37、1410815174 0.32、1969845253 0.33），
+    其余 **31 首都在 0.02–0.24**；而 `MixMatch` 要求**两侧 key 都可信**，于是：
+    ① 这 5 首里**没有任何两首的速度差在 ±8% 以内**（最近的 71.6 vs 64.0 = 11.9%），
+    ② 差一点就成的两对：**Ice Cream Man 0.24 vs 1410815174 0.32（速度完全相同 143.976，同 A minor）**
+    与 **Violet 0.10 / Lalala 0.05 那类**，都被 0.25 这一刀挡在门外（Ice Cream Man 差 **0.01**）。
+    也就是说：**修好拍格之后，`合拍改调` 的下一道门是调性估计器的强度阈值**（合成材料上它测出
+    0.37–1.0、负例 ≤0.09，所以 0.25 在当时是合理的；真实密编曲整体低一大截 —— 与第五轮
+    "置信度门"是同一个故事）。**这一轮没有动它**（没有真值材料来重新校准，动了就是盲目放宽）。
+    另一条同类的：**95–100 家族**（One Right Now 0.312、Better Now 0.304、ON MY WAY 0.196）
+    的正解仍然过不了 0.35，需要的是下一轮那件事（真值材料上重校 tempo 门/段长），不是再调周期。
+  - **本轮没做的事 / 风险**：
+    1. **变速（`setPlaybackParams` 真正拉伸）这一轮仍然没有被真机走到**：能跑的只有
+       "网格相同/兼容 → x1.0000" 这条（上面两对都是 x1.0000）。原因是调性门（见上），
+       不是代码。**EQ 低频互换这一轮走了**（bass swap armed → done）。
+    2. **仍然没有任何人听过**：这一轮的所有验收都是日志与数字（`align=on` 的参数、`mix:` 的比例、
+       bass swap 的两个时刻、promoted 之后位置继续前进）。10 秒重叠 + 两首歌的听感、
+       低频那一刀的手感、6 秒还原 —— **全部没听过**。
+    3. `FINER_GRID_SUPPORT = 0.8` 是从**一个库的 18 首**里选的，其中 13 首有真值；
+       **风格样本量不足**（古典/现场/freestyle 没有样本）。两个最近的实测值是 0.798/0.799，
+       阈值就压在那条边上 —— 换库要重新看这两个数。
+    4. `HARMONIC_RELATION_TOLERANCE = 0.03` 的副作用是"一个第三段整体在 2:3 速度上"也会被当成
+       同一个网格（现有测试里 120/180 那种 2:3 混合窗口本来就是"可接受"的，见
+       `twoTemposWithNoCommonGridAreRefused` 的注释），**有意如此**但没有真机样本。
+    5. 设备侧的 `MiX` 那次是**同一首歌两遍**（极端对子）：它证明了这条链在真实音频上能走完
+       （网格→MixMatch→plan→后端→EQ），**不能**证明"两首不同的歌混在一起好听"。
+    6. `MIN_BPM/MAX_BPM` 会挡住"整首歌都在 2:3 上、真拍低于 55"的极端情况（本轮没遇到）。
+
 **顺序**：P1 → P3 → P5 → P4 → P6。不要先做 P6。（P1/P2/P3/P7、**P6** 与 **P4 的分析+对齐**都已落地；
 剩下的仍是**听觉验证**（P4 现在有装机证据了：能 align=on，但**听感**仍未验证），然后才是 P5 低频互换
 与 P4 的下一步"变速对拍"（`setPlaybackParams` 把 B 拉到 A 的 BPM —— 本轮只对齐了网格，没有拉速度，
 所以两首速度差得多时对齐会被兼容门直接跳过）。）
-**第五轮之后的第一件事（有数据支撑）**：⑤ 里那张 18 首的表说明**瓶颈是周期选择，不是置信度门** ——
-测得 72.7 的歌真值 109、测得 97.2 的真值 145（都是 2:3 错位），而门只能在"拒掉错的/放行对的"之间选。
-建议的下一步（小、可测）：`BeatAnalysis` 在窗口周期与各段自己选出的周期之间加**和声关系**检查
-（1/2/3 倍或 1/2、1/3 视为同一网格，2:3/3:4 不算），它能把"段落只是选了自己的倍数"的正解放行，
-同时把 2:3 判死；有了它才值得再动 `MIN_SEGMENT_SUPPORT`。
-之后才是第五轮没做的两件事：**听感**（第五轮完全没让 8000ms 兜底真的播给人听过）与预缓存的两个
-未走分支。
+**第五轮之后的第一件事（有数据支撑）—— ✅ 第八轮已做（见第七节末尾）**：⑤ 里那张 18 首的表说明
+**瓶颈是周期选择，不是置信度门** —— 测得 72.7 的歌真值 109、测得 97.2 的真值 145（都是 2:3 错位），
+而门只能在"拒掉错的/放行对的"之间选。第八轮的结论与当时的设想**不完全一样，记在这里免得重走**：
+`BeatAnalysis` 里加的是**"选出的周期 vs 它自己的更细和声亲属（2/3、1/2、1/3）"**的检查（不是"窗口 vs
+各段自己选的周期"）：**赢的判据是攻击能量，不是相关**（错格的相关确实更高，见第八轮）；而且
+**只改周期会把通过率从 12/18 拉到 10/18** —— 门里"段内 support"那一半会犯**同样的 2:3 错**，
+所以它也得跟着和声感知（`segmentSupport`）；两件事一起做才回到 12/18，且**错的网格从 1 首过门变成 0 首**。
+**下一件事**：调性估计器的强度阈值（36 首里 31 首低于 `MIN_STRENGTH = 0.25`，5 首过门的又两两速度不相近
+→ `合拍改调` 的变速/移调在真实库上仍然跑不起来）；然后是**听感**（第五轮/第八轮都没让任何人听过）。
 
 ## 八、工作方式（为了省上下文，请遵守）
 

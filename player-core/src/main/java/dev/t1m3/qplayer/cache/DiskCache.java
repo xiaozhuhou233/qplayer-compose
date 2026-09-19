@@ -71,6 +71,15 @@ public final class DiskCache {
      *  ({@link #BEAT_MAX_COUNT}), like the pair decisions: twelve bytes never
      *  approach the byte budget, so the only thing that can grow is the count. */
     public static final String BEAT = "beat";
+    /** One pre-rendered blend WINDOW per pair — the Folia stem gesture applied to both
+     *  tracks' separated stems and mixed down to a single audio file (sixteen-bit stereo,
+     *  2.6 MB for a fifteen-second window). Derived media rather than a measurement, so it
+     *  is the one sub-cache here that both costs real bytes and saves real work: making it
+     *  is two separations (a minute of CPU and 860 MB of peak memory on the target device),
+     *  and playing it back is a plain file. Capped by file count
+     *  ({@link #BLEND_MAX_COUNT}) AND counted in {@link #totalSize()}, because unlike the
+     *  twelve-byte entries next door this one can actually fill a disk. */
+    public static final String BLEND = "blend";
 
     /** Oldest files (by lastModified) are deleted once the count exceeds this,
      *  every time a new one is cached — see {@link #cacheThumb64}. */
@@ -84,6 +93,11 @@ public final class DiskCache {
 
     /** Same idea for {@link #BEAT}: one grid per track, twelve bytes each. */
     private static final int BEAT_MAX_COUNT = 2_000;
+
+    /** {@link #BLEND}: a render is ~2.6 MB, so twenty of them is ~53 MB — the count is
+     *  what keeps the sub-cache from growing without bound, and the byte budget the media
+     *  sub-caches share is what keeps it from evicting the audio out from under a queue. */
+    private static final int BLEND_MAX_COUNT = 20;
 
     private volatile long maxSizeBytes;
 
@@ -152,6 +166,13 @@ public final class DiskCache {
     public String beatPath(String key) {
         if (key == null || key.isEmpty()) return null;
         return baseDir + "/" + BEAT + "/" + Math.abs(key.hashCode()) + ".bpm";
+    }
+
+    /** Resolve cache file for one pair's pre-rendered blend window (see {@link #BLEND}),
+     *  keyed by the same pair key the transition decision uses. */
+    public String blendPath(String key) {
+        if (key == null || key.isEmpty()) return null;
+        return baseDir + "/" + BLEND + "/" + Math.abs(key.hashCode()) + ".blend";
     }
 
     /** Resolve cache file for a track's silence measurement, keyed by the
@@ -333,12 +354,20 @@ public final class DiskCache {
         evictCountCapped(TRANSITION, TRANSITION_MAX_COUNT, "transition");
     }
 
+    /** Write one pair's pre-rendered blend window (see {@link #BLEND}), then evict the
+     *  oldest renders past {@link #BLEND_MAX_COUNT}. Bytes, not just a count: a render is
+     *  three orders of magnitude bigger than the other derived entries. */
+    public void cacheBlend(String key, byte[] data) {
+        writeBytes(data, blendPath(key));
+        evictCountCapped(BLEND, BLEND_MAX_COUNT, "blend");
+    }
+
     // ---- size & cleanup ---------------------------------------------------
 
-    /** Total bytes used by all seven cache sub-directories. */
+    /** Total bytes used by all eight cache sub-directories. */
     public long totalSize() {
         long total = 0;
-        for (String sub : new String[]{AUDIO, LYRIC, IMAGE, THUMB64, SILENCE, TRANSITION, BEAT}) {
+        for (String sub : new String[]{AUDIO, LYRIC, IMAGE, THUMB64, SILENCE, TRANSITION, BEAT, BLEND}) {
             total += dirSize(new File(baseDir, sub));
         }
         return total;
@@ -346,7 +375,7 @@ public final class DiskCache {
 
     /** Delete all cached files. */
     public void clearAll() {
-        for (String sub : new String[]{AUDIO, LYRIC, IMAGE, THUMB64, SILENCE, TRANSITION, BEAT}) {
+        for (String sub : new String[]{AUDIO, LYRIC, IMAGE, THUMB64, SILENCE, TRANSITION, BEAT, BLEND}) {
             deleteRecursive(new File(baseDir, sub));
         }
     }
@@ -430,7 +459,8 @@ public final class DiskCache {
         // below deletes every other file and still never reaches the limit.
         File[] dirs = {new File(baseDir, AUDIO), new File(baseDir, LYRIC),
                 new File(baseDir, IMAGE), new File(baseDir, SILENCE),
-                new File(baseDir, TRANSITION), new File(baseDir, BEAT)};
+                new File(baseDir, TRANSITION), new File(baseDir, BEAT),
+                new File(baseDir, BLEND)};
         java.util.List<File> files = new java.util.ArrayList<>();
         for (File dir : dirs) {
             if (dir.isDirectory()) {

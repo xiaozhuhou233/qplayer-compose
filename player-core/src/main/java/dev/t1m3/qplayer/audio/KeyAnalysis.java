@@ -30,12 +30,17 @@ package dev.t1m3.qplayer.audio;
  *       major, one minor — {@link #MAJOR_TEMPLATE}) and the best rotation wins.
  *       Those profiles are what listeners actually rate notes as, so this is the
  *       classical key-finding method and not a home-made rule.</li>
- *   <li><b>Confidence, from the margin.</b> A recording with a real tonal centre
- *       correlates clearly better with one key than with any other; one without
- *       (noise, speech, a drum loop) has several keys within noise of each other.
- *       The strength is that margin, scaled so that the estimator's own
- *       measured separation lands in 0..1 — see {@code KeyAnalysisTest} for the
- *       numbers.</li>
+ *   <li><b>Confidence, from the margin over the keys it could not be mixed
+ *       with.</b> A recording with a real tonal centre correlates clearly better
+ *       with one key than with a key a DJ would never put next to it; one without
+ *       (noise, speech, a drum loop) has every key within noise of every other. The
+ *       strength is that margin, scaled so that the estimator's own measured
+ *       separation lands in 0..1 — see {@code KeyAnalysisTest} for the numbers. The
+ *       runner-up that is <em>not</em> counted is the relative major/minor and the
+ *       two fifths: those are the same harmonic neighbourhood and
+ *       {@link KeyProfile#camelotCompatible} mixes them anyway, so a profile that
+ *       cannot tell A minor from C major is not a profile that cannot tell one key
+ *       from another.</li>
  * </ol>
  *
  * <p>The key <em>name</em> is deliberately only half of the answer: real music is
@@ -69,17 +74,22 @@ public final class KeyAnalysis {
     public static final double MIN_WINDOW_MS = 3_000.0;
 
     /** The correlation margin that counts as full confidence, so that
-     *  {@link KeyProfile#strength()} lands in 0..1.
+     *  {@link KeyProfile#strength()} lands in 0..1. Unchanged from the previous
+     *  calibration, which is what keeps {@link KeyProfile#MIN_STRENGTH} — the number
+     *  every log line and every comment quotes — meaning the same thing: on this
+     *  measure a strength of 0.25 is a margin of 0.0875 over the best key the winner
+     *  could not be mixed with, and everything above 0.35 (the median real track) is
+     *  reported as 1.0.
      *
-     *  <p>Calibrated by measuring the margin on material whose key is known (see
-     *  {@code KeyAnalysisTest}, which prints every number it computes): a I-V-vi-IV
-     *  progression with a full harmonic series scores 0.13-0.28, the same loop in a
-     *  minor key with its leading tone 0.24-0.38, and a natural-minor loop — which
-     *  really is its relative major — 0.15-0.30. Material with no key at all is an
-     *  order of magnitude below: white noise 0.03, a bare 440 Hz sine 0.00. This
-     *  constant is that gap's upper edge rather than its middle, because the gate it
-     *  feeds ({@link KeyProfile#MIN_STRENGTH}) has to refuse noise without refusing
-     *  real music — and a real recording scores lower than synthesised triads. */
+     *  <p>The measure behind the constant was recalibrated against real music rather
+     *  than synthesised triads, because the synth-only calibration is what broke the
+     *  previous version: on 36 cached windows of the app's own library the margin over
+     *  the best <em>unrelated</em> key runs 0.012-1.54 with a median of 0.44, and 24 of
+     *  the 36 clear 0.25 — where the previous measure passed 8 of the same 36 and
+     *  named 16 of them A minor. Material with no key stays below: white noise 0.09, a
+     *  bare sine 0.00, a pitchless drum loop 0.19. The one class the margin alone does
+     *  not refuse is noise with a fixed spectral envelope (0.47), which is what
+     *  {@link KeyProfile#MIN_TRIAD} is for. */
     private static final double MARGIN_FOR_FULL_CONFIDENCE = 0.35d;
 
     /** Krumhansl-Kessler probe-tone profiles, rotated to C. What listeners rate
@@ -127,11 +137,17 @@ public final class KeyAnalysis {
                 if (hz < MIN_HZ || hz > MAX_HZ) continue;
                 double mag = Math.hypot(real[bin], imag[bin]);
                 if (!(mag > 0d)) continue;
-                // Log compression: a profile built from raw magnitudes is one loud
-                // bass note with some fuzz on top. The logarithm is what makes every
-                // *partial* count, which is the difference between finding the root
-                // of a bassline and finding its loudest note.
-                double level = Math.log1p(mag) * weight(hz);
+                // No compression: the bins are *added*, and adding a compressed
+                // magnitude over the ~400 bins of a five-octave band piles a nearly
+                // constant contribution onto every pitch class — which is what a flat
+                // profile is. Measured on the app's own cache: the profile that came
+                // out of `log1p` sat at 0.066-0.097 per bin against a uniform 0.083,
+                // i.e. it carried almost no key at all (a C major triad scored 0.42
+                // per *synthesised* triad and 0.26 on real music, and 16 of 36 real
+                // tracks were reported as A minor). The loudness bias the logarithm
+                // was there to remove is handled where it belongs, by the taper below
+                // and by the normalisation.
+                double level = mag * weight(hz);
                 // Which pitch class this bin is. The nearest semitone, not the
                 // nearest template frequency: a bin that sits between two notes
                 // belongs to whichever is closer, and the window's own leakage has
@@ -162,33 +178,36 @@ public final class KeyAnalysis {
         }
         if (!(norm > 0d)) return null;
 
-        double best = Double.NEGATIVE_INFINITY;
-        double second = Double.NEGATIVE_INFINITY;
-        int bestTonic = 0;
-        boolean bestMajor = true;
+        double[] correlation = new double[24];
         for (int tonic = 0; tonic < 12; tonic++) {
-            double cmaj = correlation(centred, centeredTemplate(MAJOR_TEMPLATE, tonic), norm);
-            double cmin = correlation(centred, centeredTemplate(MINOR_TEMPLATE, tonic), norm);
-            if (cmaj > best) {
-                second = best;
-                best = cmaj;
-                bestTonic = tonic;
-                bestMajor = true;
-            } else if (cmaj > second) {
-                second = cmaj;
-            }
-            if (cmin > best) {
-                second = best;
-                best = cmin;
-                bestTonic = tonic;
-                bestMajor = false;
-            } else if (cmin > second) {
-                second = cmin;
-            }
+            correlation[2 * tonic] = correlation(centred, centeredTemplate(MAJOR_TEMPLATE, tonic), norm);
+            correlation[2 * tonic + 1] = correlation(centred, centeredTemplate(MINOR_TEMPLATE, tonic), norm);
         }
-        if (best == Double.NEGATIVE_INFINITY) return null;
-        if (second == Double.NEGATIVE_INFINITY) second = 0d;
-        double margin = Math.max(0d, best - second);
+        int best = 0;
+        for (int i = 1; i < 24; i++) {
+            if (correlation[i] > correlation[best]) best = i;
+        }
+        int bestTonic = best / 2;
+        boolean bestMajor = best % 2 == 0;
+
+        // The strength is the margin over the best key this one could NOT be mixed
+        // with. Counting the plain runner-up instead — which is what this used to do —
+        // measures how well the profile separates a key from its own relative
+        // major/minor and its two fifths, and those are exactly the readings that mean
+        // the same thing to a mix: measured on 36 real tracks the plain runner-up was
+        // one of those neighbours 24 times, so the old number was mostly a reading of
+        // mode ambiguity and was 0.02-0.24 on material whose key was plain. A profile
+        // that cannot decide between A minor and C major can still be certain the track
+        // is not in F# major, and it is F# major that would sanction a wrong shift.
+        int wheel = KeyProfile.camelotNumber(bestTonic, bestMajor);
+        double bestFar = Double.NEGATIVE_INFINITY;
+        for (int i = 0; i < 24; i++) {
+            int step = Math.abs(wheel - KeyProfile.camelotNumber(i / 2, i % 2 == 0));
+            if (step == 0 || step == 1 || step == 11) continue;
+            if (correlation[i] > bestFar) bestFar = correlation[i];
+        }
+        if (bestFar == Double.NEGATIVE_INFINITY) bestFar = 0d;
+        double margin = Math.max(0d, correlation[best] - bestFar);
         float strength = (float) Math.min(1d, margin / MARGIN_FOR_FULL_CONFIDENCE);
         return new KeyProfile(bestTonic, bestMajor, strength, chroma);
     }

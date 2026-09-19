@@ -82,6 +82,24 @@ public class BeatProfileDiskFormTest {
         v2.putInt(20);
         v2.put(new KeyProfile(0, true, 0.9f, chroma()).toBytes());
         assertNull(BeatProfile.fromBytes(v2.array()));
+
+        // Version 3 has the same layout as the current one, so its numbers still mean
+        // what they say — and that is exactly why it has to be refused too: the tempo
+        // in it was chosen by the estimator without the harmonic-relation check, so on
+        // a track whose accent pattern repeats every one and a half beats it holds a
+        // 2:3 coarsening of the real grid — a beat between the music's beats, which no
+        // alignment may be built on. Measured on one library: 72.7 written for a 109 BPM
+        // track and 83.8 for a 126 BPM one, and both were read back and aligned to. A
+        // cache file is one decode, off the playback path.
+        java.nio.ByteBuffer v3 = java.nio.ByteBuffer.allocate(29);
+        v3.put((byte) 3);
+        v3.put((byte) 0);
+        v3.putShort((short) 250);
+        v3.putInt(7270);
+        v3.putInt(7);
+        v3.putShort((short) 380);
+        v3.put(new KeyProfile(0, true, 0.9f, chroma()).toBytes());
+        assertNull(BeatProfile.fromBytes(v3.array()));
     }
 
     @Test
