@@ -334,6 +334,20 @@ class ComposeQPlayerActivity : ComponentActivity() {
             sharedController = it
         }
         controller.setColorExtractor(dev.t1m3.qplayer.android.graphics.AndroidColorExtractor())
+        // Silence measurement for the 智能过渡 feature (silence trimming): the
+        // controller only ever uses it through the SilenceProfiler seam, and without
+        // one SILENCE_TRIM is simply never performed — every other transition kind
+        // works without it.
+        controller.setSilenceProfiler(
+            dev.t1m3.qplayer.android.playback.AndroidSilenceProfiler(this)
+        )
+        // Beat measurement for the same feature (P4): a bounded decode window per
+        // track, tempo and phase estimated off it, so an overlap can put the two
+        // tracks' beats on top of each other. Without it every transition behaves as
+        // it did before — nothing else reads it.
+        controller.setBeatProfiler(
+            dev.t1m3.qplayer.android.playback.AndroidBeatProfiler(this)
+        )
         controller.setClipboard { value ->
             runOnUiThread {
                 val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager

@@ -70,6 +70,141 @@ public interface AudioBackend {
      */
     default void setOnError(Runnable callback) { }
 
+    // --- Transitions between two tracks -------------------------------------
+    // Optional: a backend that can run a second player lets the controller end a
+    // track by overlapping it with the next one (or by holding it parked until a
+    // seam) instead of hard-cutting to it. Every method below defaults to "not
+    // supported", which is exactly the signal the controller needs to keep using
+    // its ordinary switch — so a backend with no second player (desktop) needs no
+    // change and can never end up half-ramped.
+
+    /**
+     * Prepare {@code source} on a second player as the next track: seeked to
+     * {@code startMs}, prepared and already playing at volume 0, so
+     * {@link #beginCrossfade} fades in something that is already rolling. Must not
+     * disturb the audible player, its surface, or the audio focus.
+     *
+     * @return false when the source cannot be opened; the caller then has no
+     *         incoming track and must switch tracks the ordinary way.
+     */
+    default boolean prepareIncoming(String source, long startMs) { return false; }
+
+    /**
+     * Same, with a say in whether the prepared player starts rolling immediately.
+     *
+     * <p>{@code startMuted} true is the overlap case above. False parks it: seeked
+     * to {@code startMs} and silent, but not running, so its play head stays
+     * exactly where it was put until {@link #beginCrossfade} starts it. A trim
+     * needs that — a player that has been rolling for the eight seconds spent
+     * waiting is eight seconds into the song by the time the seam arrives, which
+     * is the one thing the trim is trying to place exactly.
+     *
+     * @return false when the source cannot be opened or the backend has no second
+     *         player.
+     */
+    default boolean prepareIncoming(String source, long startMs, boolean startMuted) {
+        return prepareIncoming(source, startMs);
+    }
+
+    /**
+     * Same, with the mix the incoming player should be prepared for: the tempo and
+     * pitch it runs at, and when the low end hands over (see {@link IncomingMix}).
+     *
+     * <p>The mix travels with the prepare rather than with the ramp because the
+     * player is prepared asynchronously: the only moment it is known to be in a
+     * state that accepts playback parameters is when it has actually prepared, which
+     * is inside this call's own callback. A backend applies what it can and reports
+     * what it applied through {@link #incomingMix()}, so the caller learns the
+     * answer from the backend rather than from an optimistically returned flag.
+     *
+     * @return false when the source cannot be opened or the backend has no second
+     *         player — never because of the mix, which is best-effort by definition.
+     */
+    default boolean prepareIncoming(String source, long startMs, boolean startMuted,
+                                    IncomingMix mix) {
+        return prepareIncoming(source, startMs, startMuted);
+    }
+
+    /**
+     * The mix the incoming player is ACTUALLY running at, or {@link IncomingMix#IDENTITY}
+     * when it is prepared and nothing (or nothing of what was requested) could be
+     * applied — or <b>null</b> while that is not yet known, i.e. no incoming player or
+     * one that has not finished preparing.
+     *
+     * <p>Null is a third answer on purpose. Preparing is asynchronous, so a caller that
+     * asks at the moment it armed would otherwise read "nothing was applied" from a
+     * player that was simply not open yet and plan an un-mixed boundary around a mix
+     * that is about to arrive. A backend with no second player (the desktop) answers
+     * null for ever, which the caller reads as "keep waiting" and then reaches through
+     * its own guards — never as a refusal it has to act on.
+     */
+    default IncomingMix incomingMix() {
+        return null;
+    }
+
+    /**
+     * Ramp the audible player down and the incoming one up over {@code ms}, then
+     * promote the incoming player to be the audible one and release the outgoing
+     * one. The crossfade-complete callback fires once that swap has happened.
+     *
+     * @return false when there is nothing prepared to promote, or the audible
+     *         player cannot be swapped out. Playback is then left untouched: the
+     *         caller must fall back to its ordinary switch rather than advance.
+     */
+    default boolean beginCrossfade(long ms) { return false; }
+
+    /**
+     * Same, along a chosen gain curve. {@code LINEAR} is what P1 shipped;
+     * {@code EQUAL_POWER} holds the summed power flat, which is the fix for a mid
+     * overlap dip. A backend that only knows the plain ramp may implement
+     * {@link #beginCrossfade(long)} instead — this default then defers to it and
+     * the curve is simply ignored.
+     */
+    default boolean beginCrossfade(long ms, FadeCurve curve) { return beginCrossfade(ms); }
+
+    /**
+     * Drop a prepared incoming player and restore the audible player's normal
+     * volume. Called when a transition is abandoned, and safe when none exists.
+     */
+    default void cancelIncoming() { }
+
+    /**
+     * How far the prepared incoming track has already played, or -1 when there is
+     * no incoming player or it never started rolling.
+     *
+     * <p>This is the amount of the NEXT track a listener has already heard: the
+     * incoming player is started (silently, then up the ramp) for the whole
+     * overlap, so this is the position that track has to be resumed from whenever
+     * the transition is given up and the ordinary switch takes the boundary
+     * instead. Resuming from 0 there replays the part that was already audible.
+     */
+    default long incomingPosition() { return -1L; }
+
+    /**
+     * The {@link #incomingPosition()} of the incoming player the backend last
+     * DROPPED while it was rolling, or -1 if that never happened.
+     *
+     * <p>Needed because a backend-driven abort (an incoming error, a focus loss, a
+     * pause, a seek) releases its player before the controller is told, so by then
+     * {@link #incomingPosition()} has nothing left to read.
+     */
+    default long droppedIncomingPosition() { return -1L; }
+
+    /**
+     * Called (possibly on the audio thread) once the promoted track is the audible
+     * one, so the controller can republish title/artist/cover/queue slot as if it
+     * had started that track. Default no-op.
+     */
+    default void setOnCrossfadeComplete(Runnable callback) { }
+
+    /**
+     * Called when a transition the controller armed could not continue — the
+     * incoming player errored, or playback was paused, seeked or focus-lost
+     * mid-overlap. The audible player is back to normal and the caller must take
+     * its ordinary path. Default no-op.
+     */
+    default void setOnCrossfadeAbandoned(Runnable callback) { }
+
     /** Stop playback and free native resources. */
     void release();
 }

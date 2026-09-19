@@ -43,6 +43,20 @@ public final class AiClient {
         }
     }
 
+    /**
+     * One turn with no {@code response_format} hint at all, for prompts whose
+     * answer is not a JSON document — a single word or line, say. Worth its own
+     * entry point rather than a call to {@link #chat}: several providers (DeepSeek
+     * among them) reject {@code response_format: json_object} outright unless the
+     * prompt happens to contain the word "json", which {@link #chat} can only
+     * discover by paying for the rejected request first. Nothing about the rest of
+     * the request differs — same model, same temperature, same timeout, same
+     * endpoint and key.
+     */
+    public String chatPlain(String system, String user) throws IOException {
+        return chatOnce(system, user, false);
+    }
+
     private String chatOnce(String system, String user, boolean requestJson) throws IOException {
         JsonObject root = new JsonObject();
         root.addProperty("model", model);

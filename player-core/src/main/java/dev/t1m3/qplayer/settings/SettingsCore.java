@@ -446,6 +446,26 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
                 case "unblock": controller.setUnblockEnabled(bool("unblock")); break;
                 case "mirror": controller.setUpdateMirror(bool("mirror")); break;
                 case "fade": controller.setFadeEnabled(bool("fade")); break;
+                case SettingsCatalog.SMART_TRANSITION_KEY:
+                case SettingsCatalog.TRANSITION_KIND_KEY:
+                case SettingsCatalog.TRANSITION_CURVE_KEY:
+                // 节拍对齐/合拍改调/低频互换 take effect on the next boundary, but they
+                // still have to reach the controller when they are toggled — the whole
+                // block is re-pushed, so a row that is switched mid-song is not a
+                // setting that only applies after a restart.
+                case SettingsCatalog.BEAT_ALIGN_KEY:
+                case SettingsCatalog.HARMONIZE_KEY:
+                case SettingsCatalog.BASS_SWAP_KEY:
+                // The AI transition chooser is configured by the same rows the AI DJ
+                // is: changing any of them re-pushes the whole 智能过渡 block, which
+                // re-installs the chooser (or removes it) and leaves every other
+                // transition setting exactly as the user left it.
+                case "aiBaseUrl":
+                case "aiApiKey":
+                case "aiModel":
+                case "aiTimeoutMs":
+                    pushTransition();
+                    break;
                 case "highQuality": controller.setHighQualityEnabled(bool("highQuality")); break;
                 case "maxCacheSizeMB": controller.setCacheMaxSizeMB(intOf("maxCacheSizeMB")); break;
                 default: break;
@@ -469,6 +489,43 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         controller.setHighQualityEnabled(bool("highQuality"));
         controller.setCacheMaxSizeMB(intOf("maxCacheSizeMB"));
         pushCustomApi();
+        pushTransition();
+    }
+
+    /** The whole 「智能过渡」 block, in one place: the switch, the forced kind, the
+     *  ramp curve, and the AI chooser's provider. Settings are the single source of
+     *  truth — the controller keeps no copy, so this runs on load and on every
+     *  change of any of these rows, and toggling the switch takes effect at the very
+     *  next track boundary.
+     *
+     *  <p>The kind row's index 0 is 自动 (ask the chooser), so index n maps to
+     *  {@code TransitionKind.CHOICES.get(n - 1)} and null restores the chooser.
+     *
+     *  <p>The AI chooser is wired from the same three values the 「AI DJ」 dialog
+     *  hands to {@code generateAiPlaylist} — address, key, model — so configuring
+     *  the AI once configures both, and there is no second place to enter a key, no
+     *  second model name, and no second enable path. With no provider configured the
+     *  controller keeps the local rules; with 「智能过渡」 off it never asks anything
+     *  at all, whichever chooser is installed. */
+    private void pushTransition() {
+        if (controller == null) return;
+        controller.setTransitionEnabled(bool(SettingsCatalog.SMART_TRANSITION_KEY));
+        int kindIndex = intOf(SettingsCatalog.TRANSITION_KIND_KEY);
+        java.util.List<dev.t1m3.qplayer.audio.TransitionKind> kinds =
+                dev.t1m3.qplayer.audio.TransitionKind.CHOICES;
+        dev.t1m3.qplayer.audio.TransitionKind kind = null;
+        if (kindIndex > 0) {
+            kind = kinds.get(Math.min(kindIndex, kinds.size()) - 1);
+        }
+        controller.setTransitionKindOverride(kind);
+        controller.setFadeCurve(intOf(SettingsCatalog.TRANSITION_CURVE_KEY) == 1
+                ? dev.t1m3.qplayer.audio.FadeCurve.EQUAL_POWER
+                : dev.t1m3.qplayer.audio.FadeCurve.LINEAR);
+        controller.setBeatAlignmentEnabled(bool(SettingsCatalog.BEAT_ALIGN_KEY));
+        controller.setHarmonizeEnabled(bool(SettingsCatalog.HARMONIZE_KEY));
+        controller.setBassSwapEnabled(bool(SettingsCatalog.BASS_SWAP_KEY));
+        controller.setAiTransitionConfig(str("aiBaseUrl"), str("aiApiKey"), str("aiModel"),
+                intOf("aiTimeoutMs"));
     }
 
     private void pushCustomApi() {

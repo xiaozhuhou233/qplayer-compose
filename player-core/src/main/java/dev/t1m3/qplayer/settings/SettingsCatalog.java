@@ -67,6 +67,52 @@ public final class SettingsCatalog {
     public static final int PAGE_TRANSITION_SLIDE_VERTICAL = 3;
     public static final int PAGE_TRANSITION_NONE = 4;
 
+    // ---- Track-to-track transitions (「智能过渡」) -------------------------
+    // Three rows, one feature. The switch is the single source of truth for
+    // whether any transition happens at all; the other two only say which one,
+    // and are hidden while it is off (dependsOn below).
+
+    /** Whether one track gives way to the next through a transition instead of
+     *  the historical hard cut. Persisted as a bool and pushed straight into
+     *  PlayerController.setTransitionEnabled, which is the only thing that reads
+     *  it — so toggling it takes effect on the next boundary and survives a
+     *  restart through the ordinary settings store. */
+    public static final String SMART_TRANSITION_KEY = "smartTransition";
+    /** Which transition every boundary gets: 0 = 自动 (PlayerController's
+     *  TransitionChooser decides, the local heuristic by default), otherwise
+     *  index+1 into {@link dev.t1m3.qplayer.audio.TransitionKind#CHOICES}. */
+    public static final String TRANSITION_KIND_KEY = "transitionKind";
+    /** The gain curve the overlapping kinds ramp along: 0 = 线性 (FadeCurve.LINEAR,
+     *  what P1 shipped), 1 = 等功率 (FadeCurve.EQUAL_POWER). A separate row rather
+     *  than a fourth kind because it applies to two kinds at once. */
+    public static final String TRANSITION_CURVE_KEY = "transitionCurve";
+    /** Whether an overlapping transition is snapped onto the two tracks' beat grids
+     *  (P4): the outgoing ramp starts on a beat of the outgoing track and the
+     *  incoming track starts on a beat of its own, instead of wherever the file
+     *  boundaries are. Only ever acts when both grids are measured and compatible —
+     *  a wrong grid must not move a boundary — so leaving it on cannot make a
+     *  boundary worse than not having it, only better. Persisted as a bool and
+     *  pushed into PlayerController.setBeatAlignmentEnabled. */
+    public static final String BEAT_ALIGN_KEY = "beatAlign";
+    /** Whether a pair that suits each other is MIXED rather than merely aligned
+     *  (「合拍改调」): the next track is played at the current one's tempo
+     *  (pitch-preserving) and transposed into its key, and the two overlap for ten
+     *  seconds instead of the length a plain fade would use. Both are recomputed
+     *  from audio measured on the device and both are bounded (±8% speed, ±2
+     *  semitones), and neither is applied unless both grids are trustworthy AND the
+     *  tempos are within that clamp AND the keys can be brought together — so
+     *  turning this on cannot make a boundary worse than the fade it replaces, only
+     *  better. Persisted as a bool and pushed into
+     *  PlayerController.setHarmonizeEnabled. */
+    public static final String HARMONIZE_KEY = "harmonize";
+    /** Whether the low end changes hands in the middle of a mix (「低频互换」): the
+     *  incoming track's bass is cut while the outgoing one still owns it, and the two
+     *  swap on a beat. This is the one part of a mix that needs a platform audio
+     *  effect to work, so it has its own switch: a device whose effect framework
+     *  misbehaves keeps the tempo and the key and loses only this. Persisted as a
+     *  bool and pushed into PlayerController.setBassSwapEnabled. */
+    public static final String BASS_SWAP_KEY = "bassSwap";
+
     private SettingsCatalog() {}
 
     public static List<SettingSpec> specs() {
@@ -107,6 +153,50 @@ public final class SettingsCatalog {
                 .build());
         out.add(SettingSpec.toggle("fade", PLAYBACK, "淡入淡出", false)
                 .desc("切歌/播放结束时音量渐变，而不是直接切断")
+                .build());
+        // 「智能过渡」 and the two rows that refine it. Default ON: the borders are
+        // what this feature is for, and every kind falls back to the historical
+        // hard cut on its own whenever it cannot be carried out.
+        out.add(SettingSpec.toggle(SMART_TRANSITION_KEY, PLAYBACK, "智能过渡", true)
+                .desc("切歌时按歌曲信息选择合适的过渡方式；无法完成时自动回退为硬切。"
+                        + "已在「AI 音乐助手」里配置服务商时，由 AI 依据歌曲信息挑选（含重叠长度），"
+                        + "同样只是建议：无网络/超时/回答无法解析时用本地规则；AI 听不到音频")
+                .build());
+        out.add(SettingSpec.segmented(TRANSITION_KIND_KEY, PLAYBACK, "过渡方式", 0,
+                        "自动",
+                        dev.t1m3.qplayer.audio.TransitionKind.CUT.label(),
+                        dev.t1m3.qplayer.audio.TransitionKind.CROSSFADE.label(),
+                        dev.t1m3.qplayer.audio.TransitionKind.QUICK_FADE.label(),
+                        dev.t1m3.qplayer.audio.TransitionKind.FADE_OUT_IN.label(),
+                        dev.t1m3.qplayer.audio.TransitionKind.SILENCE_TRIM.label())
+                .desc("自动：本地规则按专辑/时长/静音挑选（AI 已配置时由 AI 挑选）；其余为强制使用某一种")
+                .dependsOn(SMART_TRANSITION_KEY)
+                .build());
+        out.add(SettingSpec.segmented(TRANSITION_CURVE_KEY, PLAYBACK, "淡化曲线", 0,
+                        dev.t1m3.qplayer.audio.FadeCurve.LINEAR.label(),
+                        dev.t1m3.qplayer.audio.FadeCurve.EQUAL_POWER.label())
+                .desc("交叉/快速淡化使用；线性在中点约低 3dB，等功率更平。"
+                        + "AI 或本地规则选了 15 秒长重叠时自动改用等功率")
+                .dependsOn(SMART_TRANSITION_KEY)
+                .build());
+        out.add(SettingSpec.toggle(BEAT_ALIGN_KEY, PLAYBACK, "节拍对齐", true)
+                .desc("交叉/快速淡化时把重叠长度对到整拍，并让下一首从自己的拍点进入，"
+                        + "两首的节拍才能真正对上（需要两侧都测得可信的节拍，"
+                        + "测不到或速度差太多时自动不参与，等于没有这个功能）")
+                .dependsOn(SMART_TRANSITION_KEY)
+                .build());
+        out.add(SettingSpec.toggle(HARMONIZE_KEY, PLAYBACK, "合拍改调", true)
+                .desc("两首的速度与调性都合适时，不满足于淡入淡出：把下一首的拍速拉到当前这首的"
+                        + "拍速上（保音高，±8%以内），并把调性移到和谐的位置（±2 半音以内），"
+                        + "重叠延长到 10 秒，中间交换低频；提升后几秒内平滑还原成原速原调。"
+                        + "超出范围、调性对不上或测不到时完全不参与（等于没有这个功能）")
+                .dependsOn(SMART_TRANSITION_KEY)
+                .build());
+        out.add(SettingSpec.toggle(BASS_SWAP_KEY, PLAYBACK, "低频互换", true)
+                .desc("混音时在拍点上把低频从当前这首交给下一首（系统均衡器），"
+                        + "避免两条低频线打架。设备不支持音频效果器时自动不参与，"
+                        + "只少了低频互换，变速与改调照常")
+                .dependsOn(SMART_TRANSITION_KEY)
                 .build());
         out.add(SettingSpec.toggle("highQuality", PLAYBACK, "高音质播放", true)
                 .desc("关闭后使用低音质播放以节省流量")

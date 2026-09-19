@@ -1,13 +1,27 @@
 package dev.t1m3.qplayer.bridge;
 
+import java.io.File;
 import java.io.IOException;
 
+import dev.t1m3.qplayer.audio.AiTransitionChooser;
 import dev.t1m3.qplayer.audio.AudioBackend;
 import dev.t1m3.qplayer.ai.AiClient;
 import dev.t1m3.qplayer.bili.BiliClient;
 import dev.t1m3.qplayer.ai.AiPlaylistResult;
 import dev.t1m3.qplayer.ai.WebSearchClient;
+import dev.t1m3.qplayer.audio.BeatProfile;
+import dev.t1m3.qplayer.audio.BeatProfiler;
+import dev.t1m3.qplayer.audio.FadeCurve;
+import dev.t1m3.qplayer.audio.HeuristicTransitionChooser;
+import dev.t1m3.qplayer.audio.IncomingMix;
 import dev.t1m3.qplayer.audio.MetadataReader;
+import dev.t1m3.qplayer.audio.MixMatch;
+import dev.t1m3.qplayer.audio.SilenceProfile;
+import dev.t1m3.qplayer.audio.SilenceProfiler;
+import dev.t1m3.qplayer.audio.TransitionChooser;
+import dev.t1m3.qplayer.audio.TransitionContext;
+import dev.t1m3.qplayer.audio.TransitionKind;
+import dev.t1m3.qplayer.audio.TransitionPlan;
 import dev.t1m3.qplayer.cache.DiskCache;
 import dev.t1m3.qplayer.cache.PlaylistCacheIndex;
 import dev.t1m3.qplayer.cache.SongMetaIndex;
@@ -173,6 +187,64 @@ public final class PlayerController {
         t.setDaemon(true);
         return t;
     });
+    // Silence measurement for transitions (SilenceProfiler): a decode window per
+    // track, bounded but far too slow to share a lane with anything the user is
+    // waiting on. Two threads because the two ends of one boundary are measured at
+    // the same time — the outgoing track's tail and the incoming track's head have
+    // the same deadline, and running them one after the other halves what each can
+    // read. Nothing here is ever waited on: a boundary that gets no measurement in
+    // time falls back to the hard cut.
+    private final ExecutorService probeWorker = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "qplayer-silence");
+        t.setDaemon(true);
+        return t;
+    });
+    // Beat grids (BeatProfiler) for the overlap alignment: its own single thread,
+    // deliberately not sharing the silence probes'. A grid is a longer read than a
+    // silence window (30 s against 10 s), and both ends of a trim have to land
+    // inside the nine-second lead or that kind falls back to the hard cut — a beat
+    // probe that got in front of them would cost a transition. One thread, because
+    // a grid is never urgent: whatever is ready when the boundary is decided is
+    // what the boundary uses, and the next play of the same track finds it cached.
+    private final ExecutorService beatWorker = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "qplayer-beat");
+        t.setDaemon(true);
+        return t;
+    });
+    // The NEXT track's audio, fetched while the current one plays (see
+    // precacheNextAudio): the transition needs the incoming track's source inside its
+    // decision window, and on a library that plays through the unblock sources
+    // resolving one takes seconds (measured 1-9s), so an uncached next track routinely
+    // arrives too late and the boundary falls back to the hard cut. Its own lane, like
+    // every other probe, for two reasons at once: a whole track's download must not
+    // sit in front of anything the user is waiting on (cacheWorker carries the
+    // current track's own cache and every playlist's thumbnails, resolveWorker is the
+    // lane a finger on the screen is waiting for), and it must not sit *behind* them
+    // either — being finished before the boundary is the entire point. One thread:
+    // there is only ever one next track.
+    private final ExecutorService precacheWorker = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "qplayer-precache");
+        t.setDaemon(true);
+        return t;
+    });
+    // Which pre-cache is still wanted. Bumped on every track start, so a pre-cache
+    // that was queued for a track that is no longer the next one returns without
+    // fetching anything (see precacheNextAudio).
+    private final AtomicLong precacheGeneration = new AtomicLong();
+    // The one delayed job in this class: asking for the PLAYING track's own
+    // measurements a few seconds after it starts. Every other probe is fired the
+    // moment its source becomes known; this one must NOT be early, because the first
+    // seconds of a track are the busiest there are (the URL resolve, the cover, the
+    // lyrics, the queue save) and neither a grid nor a silence measurement is ever
+    // waited on — an earlier probe would buy nothing but contention with playback
+    // start. One thread holding a handful of sleeping one-shot tasks; a task itself
+    // does no work beyond handing the probe to the beat/silence workers.
+    private final ScheduledExecutorService profileWarmWorker =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "qplayer-profile-warm");
+                t.setDaemon(true);
+                return t;
+            });
     // offlinePlaylistFallback's background retry (Thread.sleep-and-retry-online)
     // needs its own queue for the same reason as the three above: it deliberately
     // blocks its own thread for the whole retry interval, and doing that on
@@ -215,6 +287,33 @@ public final class PlayerController {
      *  something to show when the live network call fails (offline, or the API
      *  is just down) — DiskCache itself only knows bare ids, no display text. */
     private final SongMetaIndex songMetaIndex = new SongMetaIndex();
+    /** Silence measurements by {@link #silenceKey}, in front of the disk cache: a
+     *  boundary asks for one at most a few seconds before it needs it, and the
+     *  measurement is a decode, so the memory copy is what keeps a replay of the
+     *  same track from measuring it twice. */
+    private final Map<String, SilenceProfile> silenceProfiles =
+            java.util.Collections.synchronizedMap(new HashMap<String, SilenceProfile>());
+    /** Keys with a measurement in flight, so a boundary that re-decides does not
+     *  queue the same decode twice (the probe worker has two threads and both ends
+     *  of a boundary need them). */
+    private final Set<String> probingSilence =
+            java.util.Collections.synchronizedSet(new HashSet<String>());
+    /** Beat grids by {@link #silenceKey}, same two layers as the silence
+     *  measurements (memory in front of the disk cache) and for the same reason: a
+     *  boundary asks at most a few seconds before it needs one, and a grid costs a
+     *  decode. */
+    private final Map<String, BeatProfile> beatProfiles =
+            java.util.Collections.synchronizedMap(new HashMap<String, BeatProfile>());
+    /** Keys with a grid in flight, so a boundary that re-decides does not queue the
+     *  same decode twice. */
+    private final Set<String> probingBeats =
+            java.util.Collections.synchronizedSet(new HashSet<String>());
+    /** Which play this session's delayed profile warm belongs to. Every playback
+     *  start takes a new number and the task captured the one from its own start, so
+     *  a track change makes an older warm a no-op instead of measuring a track that
+     *  is no longer playing (the warm is delayed by design, so this is the normal
+     *  case for anyone skipping through a queue). */
+    private final AtomicLong profileWarmGeneration = new AtomicLong();
     /** playlistId -> summary + song-list snapshot, so 我的歌单 and a
      *  previously-opened playlist still render with no network. */
     private final PlaylistCacheIndex playlistCacheIndex = new PlaylistCacheIndex();
@@ -433,6 +532,279 @@ public final class PlayerController {
     // URL resolves, but the incoming one starts at full gain — another fade-in would
     // only add a second delay after however long the new track already took to load.
     private volatile boolean suppressNextFadeIn = false;
+
+    // --- Transitions between two tracks -------------------------------------
+    // A track boundary does not have to be a hard cut. The backend can run a
+    // second player (AudioBackend.prepareIncoming), and the CPU can measure how
+    // much silence a track starts and ends with (SilenceProfiler), so a boundary
+    // can be handed over in several ways — see TransitionKind for the catalog and
+    // TransitionChooser for what picks one. Everything here is best-effort:
+    // whenever the chosen kind cannot be resolved, prepared or started in time,
+    // the transition is abandoned and playAt()'s ordinary path runs unchanged — a
+    // transition that cannot be carried out must never cost playback. The worst
+    // case is therefore exactly the behaviour before any of this existed.
+    //
+    // This class only decides WHEN a kind applies; the catalog, the choosers and
+    // the measurements all live in dev.t1m3.qplayer.audio.
+    private volatile boolean transitionEnabled = true;
+    /** What picks the kind for each boundary. Never null: the local heuristic is
+     *  the default, so a host that never touches this still gets transitions that
+     *  were chosen rather than hard coded. */
+    private volatile TransitionChooser transitionChooser = new HeuristicTransitionChooser();
+    /** The AI chooser while one is installed (see {@link #setAiTransitionConfig}),
+     *  or null. The controller keeps the concrete type as well as the
+     *  {@link TransitionChooser} seam because the prefetch — asking about a pair
+     *  while there are still minutes of the current track left — is not part of the
+     *  chooser interface: deciding (on the pump) and asking (off it) are deliberately
+     *  separate, and only the AI implementation has anything to ask. */
+    private volatile AiTransitionChooser aiTransitionChooser;
+    /** Forces one kind for every boundary (the settings row, and manual testing);
+     *  null means "ask the chooser". */
+    private volatile TransitionKind transitionKindOverride;
+    /** The gain shape the overlapping kinds ramp along. LINEAR is what P1 shipped
+     *  and is what a mid-overlap dip comes from; EQUAL_POWER is the fix. */
+    private volatile FadeCurve fadeCurve = FadeCurve.LINEAR;
+    /** The host's silence measurement, or null where there is none (desktop).
+     *  Without one SILENCE_TRIM is never performed; every other kind is
+     *  unaffected. */
+    private volatile SilenceProfiler silenceProfiler;
+    /** The host's beat measurement (Android decodes a bounded window and estimates
+     *  the tempo), or null where there is none (desktop). Without one no overlap is
+     *  beat-aligned; every kind still works exactly as it did before. */
+    private volatile BeatProfiler beatProfiler;
+    /** Whether an overlap may be snapped onto the two tracks' beat grids (the
+     *  「节拍对齐」 settings row). Off means every boundary behaves as it did before
+     *  this existed, whichever grids happen to be cached. */
+    private volatile boolean beatAlignmentEnabled = true;
+    /** Whether a pair that suits each other is MIXED rather than merely aligned
+     *  (the 「合拍改调」 settings row): the incoming track pulled onto the outgoing
+     *  track's tempo, transposed into its key, and overlapped for
+     *  {@link TransitionPlan#OVERLAP_MATCHED_MS}. Off means no tempo is ever
+     *  stretched and no key is ever shifted, and an overlap is exactly what the
+     *  chooser asked for — the P4 behaviour, and the fallback this whole phase
+     *  degrades to. */
+    private volatile boolean harmonizeEnabled = true;
+    /** Whether the low end may change hands in the middle of a mix (the
+     *  「低频互换」 settings row). Separate from {@link #harmonizeEnabled} because it
+     *  is the one part of a mix that depends on a platform effect actually working:
+     *  a device whose {@code Equalizer} misbehaves keeps the tempo and the key and
+     *  only loses the bass swap. */
+    private volatile boolean bassSwapEnabled = true;
+    /** End the ramp this early, so the promotion lands just BEFORE the outgoing
+     *  track's own end instead of racing its completion callback. */
+    private static final long CROSSFADE_TAIL_MS = 250L;
+    /** Start resolving the next track this far before the end. The resolve is the
+     *  slow part (a netease songUrlInfo round trip); by this point
+     *  preloadAdjacent() has already warmed that track's cover and lyrics. It is
+     *  also the window a SILENCE_TRIM measurement has to land in.
+     *
+     *  <p>Read as the resolve budget, not as "the decision lead": the lead of an
+     *  overlapping boundary is this plus the overlap the plan asked for plus the
+     *  tail the ramp ends early by ({@link #transitionArmLeadMs}), and the decision
+     *  itself is taken as early as the longest of those
+     *  ({@link #TRANSITION_DECIDE_LEAD_MS}). A 15 s overlap decided inside a 9 s
+     *  window would arm too late and every long pick would silently become a short
+     *  one. */
+    private static final long CROSSFADE_LEAD_MS = 9000L;
+    /** Below this there is no room left to overlap: drop it and let the track end
+     *  the ordinary way rather than ramp two songs in under two seconds. */
+    private static final long CROSSFADE_MIN_MS = 1500L;
+    /** How long the ordinary switch waits for a running ramp to promote the track the
+     *  listener can already hear, when the outgoing track's own completion arrives
+     *  first (see {@link #autoAdvance}). The ramp's remaining time is at most
+     *  {@link #CROSSFADE_TAIL_MS} plus its tick interval, so this is pure slack: a
+     *  ramp that reports nothing back within it is abandoned rather than waited on. */
+    private static final long ADVANCE_DEFERRAL_MS = 700L;
+    /** When the chooser is asked about a boundary: the longest lead any plan can
+     *  need (a LONG overlap, plus the tail, plus the resolve budget above). The
+     *  question is cheap — a cached answer or the local rules — and the arming it
+     *  may lead to is what actually waits for the plan's own
+     *  {@link #transitionArmLeadMs}. */
+    private static final long TRANSITION_DECIDE_LEAD_MS =
+            TransitionPlan.OVERLAP_LONG_MS + CROSSFADE_TAIL_MS + CROSSFADE_LEAD_MS;
+    /** The most an overlap skips into the incoming track to reach its first audible
+     *  sample. Same bound as a trim's, and for the same reason: a measurement
+     *  claiming more than this is far more likely to describe a quiet intro (or a
+     *  different recording of the same song — the unblocked source) than three
+     *  seconds of real silence, and starting the next track that deep into its own
+     *  music is worse than starting it on a breath. */
+    private static final long MAX_OVERLAP_HEAD_SKIP_MS = 3000L;
+    /** The most a beat-aligned entry may move the incoming track from where its own
+     *  content starts. A grid is one period and one phase for a whole track, and the
+     *  phase is the least certain part of it: past a few hundred milliseconds the
+     *  shift is the measurement talking rather than the music, and skipping a beat's
+     *  worth of the incoming track to land on a beat nobody is sure about is worse
+     *  than starting it where the music starts. */
+    private static final long MAX_BEAT_ENTRY_SHIFT_MS = 400L;
+    /** How long after a track becomes audible its own measurements are asked for
+     *  (see the profileWarmWorker / warmCurrentTrackProfilesSoon). Long enough that
+     *  the resolve, the cover and the lyrics of the very track being measured have
+     *  settled, short enough that anything that will need the answer — a boundary,
+     *  which is minutes away — asks long after it has landed. */
+    private static final long PROFILE_WARM_DELAY_MS = 4000L;
+    /** FADE_OUT_IN: ramp the outgoing track down over at most this long before its
+     *  own end, so the boundary is reached in silence and the next track fades up
+     *  from silence. Long enough to be heard as a fade, short enough to finish
+     *  before a track that ends on a hard note. */
+    private static final long FADE_OUT_IN_MS = 1200L;
+    /** SILENCE_TRIM's seam: the ramp it uses once the two ends have been measured.
+     *  A trim is not an overlap — a couple of hundred ms is enough to stop the
+     *  seam clicking, and anything longer would start fading the outgoing track's
+     *  own last note for a transition that is supposed to be inaudible. */
+    private static final long SILENCE_TRIM_RAMP_MS = 250L;
+    /** How much of its own leading silence the incoming track keeps before the
+     *  seam, so its first note is never clipped by the seek that places it. */
+    private static final long SILENCE_TRIM_HEAD_ALLOWANCE_MS = 120L;
+    /** Stop waiting for the silence measurements this far before the track ends:
+     *  whatever has not arrived by then cannot be used, and the boundary has to be
+     *  handed back to the hard cut while there is still time to do it cleanly. */
+    private static final long SILENCE_TRIM_DECIDE_MS = 3000L;
+    /** The most a trim will skip from either end of a track. The measurement
+     *  window is ten seconds, but a claim of more than this is far more likely to
+     *  describe a quiet intro, a different recording of the same song (the
+     *  unblocked source), or a decode that stopped early, than a genuinely
+     *  three-second silent outro — and a wrong trim of ten seconds cuts music off
+     *  the front or the back of a track. Bounding the skip bounds the damage: three
+     *  seconds is a deliberate-sounding skip, ten is a broken song. */
+    private static final long MAX_TRIM_SKIP_MS = 3000L;
+    /** The shortest trim seam worth performing: below this the ramp is a click, and
+     *  the hard cut it falls back to is the same seam without pretending. */
+    private static final long MIN_SEAM_MS = 100L;
+    private final Object crossfadeLock = new Object();
+    // Guarded by crossfadeLock. tickCrossfade() runs on the render pump while the
+    // backend's callbacks arrive on the main thread, so none of this can be a plain
+    // field — same reasoning as the fade clock above.
+    /** Queue slot the in-flight transition is for; -1 when there is none. */
+    private int crossfadeTargetIndex = -1;
+    /** The outgoing slot, so a promotion that arrives after the user changed tracks
+     *  is recognised as stale instead of republished as now-playing. */
+    private int crossfadeFromIndex = -1;
+    /** The backend accepted the incoming source (it may still be preparing). */
+    private boolean crossfadeArmed;
+    /** The gain ramp is in flight; the backend owns the volume until it promotes. */
+    private boolean crossfadeRunning;
+    /** Bumped whenever a transition is dropped, so a resolve that lands after the
+     *  user moved on cannot arm a player nobody will ever fade in. */
+    private long crossfadeGeneration;
+    /** The outgoing track's length, captured when the transition was armed: by the
+     *  time the scrobble for it runs, the live backend clock already describes the
+     *  incoming track. */
+    private long crossfadeOutgoingMs;
+    /** Where the incoming track was started for the boundary in flight (ms into the
+     *  file) and how long the ramp runs, both captured when the ramp starts. Their
+     *  sum is how much of the incoming track the overlap has already played — the
+     *  position the promoted track has to continue from, and the floor the published
+     *  position may never fall below once the overlap is over. Main thread. */
+    private volatile long crossfadeIncomingStartMs;
+    private volatile long crossfadeRampMs;
+    /** How much of a transition's incoming track the listener had already heard when
+     *  that transition was given up, and the queue slot it belongs to (-1 = none).
+     *
+     *  <p>An overlap makes the next track audible well before the boundary (the
+     *  incoming player is started and ramped up for the whole overlap), so a
+     *  transition that is dropped at the last moment leaves the ordinary switch a
+     *  track the listener is already several seconds into. Opening it at 0 there —
+     *  which is what the ordinary path does for a fresh track — plays that part a
+     *  second time; this is the resume point that keeps it from doing so. One-shot:
+     *  consumed by the playAt() that opens the slot it names, and only ever set
+     *  while a transition was armed for exactly that slot. */
+    private long droppedIncomingMs = -1L;
+    private int droppedIncomingIndex = -1;
+    /** The slot the ordinary end-of-track switch is opening ({@link
+     *  #performAutoAdvance}), so {@link #droppedIncomingMs} is only ever applied to a
+     *  boundary the transition machinery was handling. A track the listener selects
+     *  by hand always starts where it says it does. One-shot, like the reading it
+     *  qualifies. */
+    private int autoAdvanceTarget = -1;
+    /** The outgoing track ended while an overlap was still ramping, and the ordinary
+     *  switch is waiting for that ramp to promote the incoming track instead of
+     *  cutting in (see {@link #autoAdvance}). If the ramp comes back as abandoned
+     *  instead, the wait is over and the ordinary advance runs then. Main thread. */
+    private boolean outgoingEndedDuringRamp;
+    /** When the wait above gives up, so a ramp that never reports back cannot strand
+     *  the queue (0 = not waiting). Render pump + main thread. */
+    private volatile long deferredAdvanceDeadlineMs;
+    /** The kind chosen for the boundary the current track is heading into, or null
+     *  while nothing has been decided. Written by the render pump and read by the
+     *  main thread (armIncoming needs to know whether to park the incoming
+     *  player), hence volatile. Always equal to {@code transitionPlan.kind()} when
+     *  a plan exists; kept as its own field because that is what the many callers
+     *  here switch on. */
+    private volatile TransitionKind transitionKind;
+    /** The whole decision for this boundary: the kind above plus the overlap it
+     *  should be performed at and the curve it asked for (see {@link TransitionPlan}),
+     *  and who answered. Same lifetime as {@link #transitionKind}; read on the pump
+     *  when the ramp is armed and when the boundary is logged. */
+    private volatile TransitionPlan transitionPlan;
+    /** The queue slots the decision belongs to. A skip, a shuffle or a queue edit
+     *  moves the boundary, and a choice made for the old one must not be applied
+     *  to the new one. */
+    private int transitionKindFrom = -1;
+    private int transitionKindTo = -1;
+    /** The queue slot an "this boundary is not transitioned because ..." line has
+     *  already been written for, so that reason is reported once per track rather
+     *  than on every frame the pump runs. */
+    private int transitionBlockLoggedFor = -1;
+    /** FADE_OUT_IN was chosen for this boundary: the outgoing track fades to
+     *  silence before it ends and the next one fades up after it. Read by tickFade
+     *  (which starts the ramp) and by tickCrossfade (which owns the boundary) —
+     *  volatile because startFadeIn/playBackend read the companion flag below from
+     *  the main thread. */
+    private volatile boolean fadeOutInArmed;
+    /** The next track must start silent and ramp up even when the separate
+     *  「淡入淡出」 setting is off: one-shot, set by FADE_OUT_IN's fade-out and
+     *  consumed by startFadeIn(). */
+    private volatile boolean transitionFadeIn;
+    /** The trim plan for the boundary in flight, or null while its measurements
+     *  are still missing. */
+    private volatile SilenceTrimPlan trimPlan;
+    /** The resolved source of the incoming track, kept so the trim's second phase
+     *  (prepare it parked, once the measurements are in) does not have to resolve
+     *  it twice. Main thread. */
+    private volatile String incomingSrc;
+    /** Where an overlapping transition should start the incoming track when its own
+     *  beat grid says so (ms into the file), or -1 for "wherever its content
+     *  starts". Decided with the rest of the plan (see {@link #alignToBeatGrid}) and
+     *  read when the incoming player is armed, which is up to the decision lead
+     *  later — hence its own field rather than a local. */
+    private volatile long beatEntryMs = -1L;
+    /** What the incoming player has to be configured with for a mix (tempo, key, and
+     *  when the low end hands over), or null when this boundary is not a mix. Decided
+     *  with the plan and applied the moment the ramp starts — "deciding" and
+     *  "applying" are different moments because the decision is taken up to
+     *  {@link #TRANSITION_DECIDE_LEAD_MS} earlier. */
+    private volatile IncomingMix incomingMix;
+    /** The overlap the chooser asked for, when {@link #incomingMix} raised it: what the
+     *  ramp falls back to if the backend cannot apply the mix (a plan computed for a
+     *  stretched track must not be performed on one that is not stretched). -1 = no
+     *  mix was planned for this boundary. */
+    private volatile long matchedFallbackOverlapMs = -1L;
+    /** Whether the backend has been asked to apply {@link #incomingMix} for the
+     *  boundary in flight, and whether it refused. One attempt per boundary: a
+     *  platform that refused the stretch will refuse it on the next frame too, and
+     *  the refusal is what the ramp length then has to respect. */
+    private boolean mixTried;
+    private boolean mixRefused;
+    /** The speed the incoming player is actually running at, for the arithmetic that
+     *  turns the ramp's wall-clock length into the incoming track's own milliseconds
+     *  (see the handoff in {@link #playAt(int, boolean)}). 1.0 unless a mix was
+     *  applied. */
+    private volatile double incomingPlaySpeed = 1d;
+    /** What the incoming player is being prepared for. */
+    private enum IncomingMode {
+        /** Overlapping kinds: prepare it on the target offset and let it roll
+         *  silently, so the ramp fades in a stream that is already moving. */
+        ROLLING,
+        /** SILENCE_TRIM, measurements in: prepare it on the trim's offset and
+         *  leave it parked until the seam starts it. */
+        PARKED,
+        /** SILENCE_TRIM, measurements missing: only measure the source, prepare
+         *  nothing yet. */
+        MEASURE
+    }
+    /** Seconds to report for the outgoing track in place of the live backend clock,
+     *  or -1 for "ask the backend". One-shot, consumed by scrobbleOutgoingTrack(). */
+    private volatile long outgoingScrobbleSecondsOverride = -1L;
     private volatile long uid;
     // neteaseId of the track we last re-resolved after a playback error; cleared
     // when a track actually starts. Stops a persistently-failing track from looping
@@ -912,6 +1284,13 @@ public final class PlayerController {
         // (expired VIP link, region lock, etc.). Non-netease or already-retried
         // tracks fall through to autoAdvance.
         backend.setOnError(() -> onMain(this::onPlaybackError));
+        // Two-player overlap: the swap happens inside the backend, so the now-playing
+        // state has to be republished from here once it has. The abandon callback is
+        // the safety net for everything that can go wrong after arming (incoming
+        // player error, pause, seek, focus loss): the transition is forgotten and the
+        // ordinary end-of-track path takes over at once.
+        backend.setOnCrossfadeComplete(() -> onMain(this::onCrossfadeComplete));
+        backend.setOnCrossfadeAbandoned(() -> onMain(this::onCrossfadeAbandoned));
         worker.submit(this::loadSearchHistory);
         loadLyricOffsets();
         songMetaIndex.load();
@@ -1075,12 +1454,17 @@ public final class PlayerController {
      *  the source took. */
     private void startFadeIn() {
         fadeOutDoneForTrack = false;
+        // A transition that chose FADE_OUT_IN asked for this ramp explicitly, so it
+        // applies even with the separate 「淡入淡出」 setting off. One-shot: any later
+        // track start is the ordinary case again.
+        boolean chainedFromTransition = transitionFadeIn;
+        transitionFadeIn = false;
         if (suppressNextFadeIn) {
             suppressNextFadeIn = false;
             cancelFadeAtGain(1f);
             return;
         }
-        if (!fadeEnabled) {
+        if (!fadeEnabled && !chainedFromTransition) {
             cancelFadeAtGain(1f);
             return;
         }
@@ -1173,9 +1557,22 @@ public final class PlayerController {
      *  source is armed at silence for a real fade-in, or at full gain when a manual
      *  next/previous explicitly suppresses that fade. */
     private void playBackend(String source, long startMs) {
-        float initialGain = fadeEnabled && !suppressNextFadeIn ? 0f : 1f;
-        cancelFadeAtGain(initialGain);
+        // FADE_OUT_IN owns both halves of its seam: the outgoing track was ramped to
+        // silence by tickSequentialTransition, so the incoming one has to start
+        // silent too even when the user's own 「淡入淡出」 setting is off.
+        boolean startSilent = transitionFadeIn || (fadeEnabled && !suppressNextFadeIn);
+        cancelFadeAtGain(startSilent ? 0f : 1f);
         backend.play(source, startMs);
+        // Every route into the playing track passes through here with its source in
+        // hand, including the ones resolveAndPlayNetease runs asynchronously after
+        // playAt() has already returned — which is exactly why the warm cannot be
+        // asked for from playAt(): a restored track's (or any streamed track's) url
+        // does not exist yet at that point, so the track that is playing would never
+        // be measured at all (see warmCurrentTrackProfilesSoon). The track and its
+        // queue slot are both captured here, and the delayed task re-checks the slot:
+        // that is what keeps a re-resolve after an error, or a track change during
+        // the delay, from measuring a track that is no longer the one playing.
+        warmCurrentTrackProfilesSoon(currentTrack(), source, playIndex);
     }
 
     private void applyEffectiveVolume(float gain) {
@@ -1206,6 +1603,28 @@ public final class PlayerController {
      *  only detects this boundary; once started, the independent fade clock above
      *  always carries the ramp to its exact target. */
     private void tickFade() {
+        // The one way the wait autoAdvance started can fail: the ramp's tick never
+        // reports back (neither a promotion nor an abandon). Nothing else would move
+        // the queue off a track that has already ended, so the wait is bounded and
+        // the ordinary advance runs here.
+        long deadline = deferredAdvanceDeadlineMs;
+        if (deadline != 0L && System.currentTimeMillis() > deadline) {
+            deferredAdvanceDeadlineMs = 0L;
+            if (outgoingEndedDuringRamp) {
+                outgoingEndedDuringRamp = false;
+                Logger.warn("transition: the overlap did not report back after the outgoing"
+                        + " track ended; advancing the ordinary way");
+                onMain(this::performAutoAdvance);
+            }
+        }
+        // The transition gets first refusal on the end of the track. Both ramps
+        // write the SAME backend volume, and a fade-out also writes a target of 0 —
+        // which the promotion would then hand to the incoming (audible) track.
+        tickCrossfade();
+        if (crossfadeOwnsBoundary()) return;
+        // FADE_OUT_IN has no overlap, so it never owns the boundary — it is one
+        // ordinary ramp started a little earlier than the fade below would.
+        tickSequentialTransition();
         if (!fadeEnabled) return;
         if (isFadeRunning()) return;
         if (fadeOutDoneForTrack || !backend.isPlaying()) return;
@@ -1216,6 +1635,1638 @@ public final class PlayerController {
             fadeOutDoneForTrack = true;
             startVolumeFade(currentFadeGain(), 0f, Math.max(1L, remaining), null);
         }
+    }
+
+    /** FADE_OUT_IN: ramp the outgoing track down to silence before its own end, so
+     *  the boundary is reached in silence and playAt()'s ordinary switch — which is
+     *  still the thing that changes tracks — starts the next one from nothing. No
+     *  second player, no overlap, nothing to abandon: the only way this can fail is
+     *  a backend that reports no duration, in which case the ordinary path is
+     *  exactly what happens.
+     *
+     *  <p>With the separate 「淡入淡出」 setting on this is the same ramp that setting
+     *  would have run; the difference is that a transition asked for it, so the
+     *  matching fade-in of the next track is armed too (see {@link #transitionFadeIn}). */
+    private void tickSequentialTransition() {
+        if (!fadeOutInArmed || fadeOutDoneForTrack) return;
+        if (!backend.isPlaying() || isFadeRunning()) return;
+        long dur = backend.duration();
+        if (dur <= 0L) return;
+        long remaining = dur - backend.position();
+        if (remaining < 0L || remaining > FADE_OUT_IN_MS) return;
+        fadeOutDoneForTrack = true;
+        // Ends exactly when the track does: the ramp's last sample is silence at
+        // the boundary, never a cut with the gain still part way up.
+        startVolumeFade(currentFadeGain(), 0f, Math.max(1L, remaining), null);
+        transitionFadeIn = true;
+        Logger.info("transition: FADE_OUT_IN fading the tail out ({}ms left)", remaining);
+    }
+
+    // --- Transitions between two tracks --------------------------------------
+
+    /** The feature-wide switch. Off means every boundary is playAt()'s hard cut.
+     *  Public so a host (the settings UI) can turn the whole catalog off without
+     *  another build — the point of the flag is that the feature can be dropped at
+     *  runtime the moment it misbehaves on a real device. */
+    public void setTransitionEnabled(boolean enabled) {
+        this.transitionEnabled = enabled;
+        if (!enabled) {
+            // Releasing a prepared player is cheap, and leaving one parked would
+            // keep a second decoder plus its stream alive for nothing.
+            resetTransitionDecision();
+            clearCrossfade();
+        }
+    }
+
+    public boolean isTransitionEnabled() {
+        return transitionEnabled;
+    }
+
+    /** The name this switch had while the catalog was a single crossfade. Kept so
+     *  a host written against P1 keeps working; it toggles every kind, not just the
+     *  overlapping ones. */
+    public void setCrossfadeEnabled(boolean enabled) {
+        setTransitionEnabled(enabled);
+    }
+
+    public boolean isCrossfadeEnabled() {
+        return isTransitionEnabled();
+    }
+
+    /** Plug in whatever picks the transition for each boundary: the local
+     *  {@link HeuristicTransitionChooser} by default, the AI chooser when one is
+     *  configured (see {@link #setAiTransitionConfig}), anything else a host wants.
+     *  The chooser only ever sees metadata (see {@link TransitionContext}) and its
+     *  answer is still checked against what the boundary can actually perform
+     *  before anything is armed, so a chooser cannot break playback — the worst it
+     *  can do is return a kind that gets downgraded to the hard cut. */
+    public void setTransitionChooser(TransitionChooser chooser) {
+        TransitionChooser next = chooser != null ? chooser : new HeuristicTransitionChooser();
+        this.transitionChooser = next;
+        this.aiTransitionChooser =
+                next instanceof AiTransitionChooser ? (AiTransitionChooser) next : null;
+    }
+
+    public TransitionChooser transitionChooser() {
+        return transitionChooser;
+    }
+
+    /**
+     * Point the AI transition chooser at a provider — the same address/key/model
+     * triplet the 「AI DJ」 dialog passes to {@code generateAiPlaylist}, so this is
+     * the existing AI configuration and not a second one. Passing an empty address
+     * or model removes the chooser again and leaves the local heuristic in charge:
+     * an unconfigured app behaves exactly as it did before any of this existed, and
+     * so does one whose owner turns 「智能过渡」 off (the switch is checked
+     * separately, in {@code transitionBlockReason}).
+     *
+     * <p>Installing a chooser never asks anything. The asking happens in
+     * {@code prefetchAiTransition}, when the next track becomes known — never on the
+     * playback path, and never in a way that playback waits for.
+     */
+    public void setAiTransitionConfig(String baseUrl, String apiKey, String model, int timeoutMs) {
+        AiTransitionChooser current = aiTransitionChooser;
+        String url = baseUrl == null ? "" : baseUrl.trim();
+        String name = model == null ? "" : model.trim();
+        if (url.isEmpty() || name.isEmpty()) {
+            if (current != null) {
+                Logger.info("transition: AI 过渡决策 off (AI 未配置)");
+                setTransitionChooser(null);
+            }
+            return;
+        }
+        if (current != null && current.matches(url, apiKey, name, timeoutMs)) return;
+        AiTransitionChooser chooser = new AiTransitionChooser(url, apiKey, name, timeoutMs,
+                new HeuristicTransitionChooser(),
+                new AiTransitionChooser.Memory() {
+                    @Override public byte[] read(String key) {
+                        String path = diskCache.getTransition(key);
+                        return path == null ? null : readBytesFromFile(path);
+                    }
+
+                    @Override public void write(String key, byte[] data) {
+                        diskCache.cacheTransition(key, data);
+                    }
+                },
+                null);
+        Logger.info("transition: AI 过渡决策 on ({}, model={})", url, name);
+        setTransitionChooser(chooser);
+    }
+
+    /** Force one kind for every boundary instead of asking the chooser — the
+     *  settings row, and manual testing. Null restores the chooser. */
+    public void setTransitionKindOverride(TransitionKind kind) {
+        this.transitionKindOverride = kind;
+        // A decision already made belongs to the old setting: drop it so the new
+        // one applies from the very next boundary.
+        resetTransitionDecision();
+    }
+
+    public TransitionKind transitionKindOverride() {
+        return transitionKindOverride;
+    }
+
+    /** The gain curve the overlapping kinds ramp along. LINEAR is what P1 shipped;
+     *  switch to EQUAL_POWER when a long overlap's middle sounds like it drops. */
+    public void setFadeCurve(FadeCurve curve) {
+        this.fadeCurve = curve != null ? curve : FadeCurve.LINEAR;
+    }
+
+    public FadeCurve fadeCurve() {
+        return fadeCurve;
+    }
+
+    /** The host's silence measurement (Android decodes a bounded window of PCM).
+     *  Without one SILENCE_TRIM is never performed — no other kind is affected. */
+    public void setSilenceProfiler(SilenceProfiler profiler) {
+        this.silenceProfiler = profiler;
+    }
+
+    /** The host's beat measurement (Android decodes a bounded window of PCM and
+     *  estimates tempo and phase). Without one no overlap is beat-aligned — no kind
+     *  is affected in any other way. */
+    public void setBeatProfiler(BeatProfiler profiler) {
+        this.beatProfiler = profiler;
+    }
+
+    /** Whether an overlap may be snapped onto the two tracks' beat grids, so the
+     *  ramp starts on one of the outgoing track's beats and the incoming one starts
+     *  on one of its own. Off is the pre-P4 behaviour: the overlap is whatever the
+     *  chooser asked for, from wherever each file starts. */
+    public void setBeatAlignmentEnabled(boolean enabled) {
+        this.beatAlignmentEnabled = enabled;
+    }
+
+    public boolean isBeatAlignmentEnabled() {
+        return beatAlignmentEnabled;
+    }
+
+    /** Whether a pair that suits each other may be mixed rather than merely aligned:
+     *  the incoming track pulled onto the outgoing track's tempo (pitch-preserving),
+     *  transposed into its key, over the longer overlap a mix is heard at. Off is the
+     *  P4 behaviour — nothing is stretched, nothing is transposed, and an overlap is
+     *  the length the chooser asked for. */
+    public void setHarmonizeEnabled(boolean enabled) {
+        this.harmonizeEnabled = enabled;
+    }
+
+    public boolean isHarmonizeEnabled() {
+        return harmonizeEnabled;
+    }
+
+    /** Whether the low end may change hands in the middle of a mix. Separate from
+     *  {@link #setHarmonizeEnabled} because it is the one part of a mix that needs a
+     *  platform effect: a device whose audio effects misbehave keeps the tempo and
+     *  the key and only loses the bass swap. */
+    public void setBassSwapEnabled(boolean enabled) {
+        this.bassSwapEnabled = enabled;
+    }
+
+    public boolean isBassSwapEnabled() {
+        return bassSwapEnabled;
+    }
+
+    /** True while the backend is ramping the two tracks against each other, or
+     *  holding a prepared one for a transition. The ordinary end-of-track fade must
+     *  stand down for that whole window. */
+    private boolean crossfadeOwnsBoundary() {
+        synchronized (crossfadeLock) {
+            return crossfadeRunning || crossfadeArmed;
+        }
+    }
+
+    /** True only while the two players are actually being ramped against each other.
+     *  Unlike {@link #crossfadeOwnsBoundary()} this excludes a merely prepared
+     *  (parked, still silent) incoming: only a running ramp has something to promote
+     *  and a track the listener can already hear. */
+    private boolean crossfadeRampRunning() {
+        synchronized (crossfadeLock) {
+            return crossfadeRunning;
+        }
+    }
+
+    /** Why this boundary gets no transition at all, or null when the tick may go
+     *  on and decide a kind. Every one of these is a gate {@link #tickCrossfade}
+     *  returns from, in the same order it always checked them; the only thing that
+     *  changed is that the first one hit is now named in the log. */
+    private String transitionBlockReason() {
+        if (!transitionEnabled) return "智能过渡 is off (settings / setTransitionEnabled)";
+        Track cur = currentTrack();
+        // A boundary the transition machinery cannot even describe: a BILI link's
+        // picture belongs to the active player and a local file would need a second
+        // decoder for no gain. Video stays out of transitions entirely.
+        if (!crossfadeStreamable(cur)) {
+            return "source " + (cur == null ? "none" : cur.source) + " cannot be overlapped";
+        }
+        int n = queue.size();
+        if (n <= 1) return "the queue has " + n + " item(s)";
+        // Repeat-one replays this very track, and a listen-together follower does not
+        // choose the next song at all: neither has a second track to overlap with.
+        Integer mode = playMode.peek();
+        if (mode != null && mode == 2) return "repeat-one replays this track";
+        if (privateFmMode) return "private FM chooses the next track itself";
+        if (shouldWaitForTogetherLeader(togetherActive, togetherUserId, togetherLeaderUserId)) {
+            return "listen-together follower does not choose the next track";
+        }
+        if (!backend.isPlaying()) return "the player is not playing";
+        if (backend.duration() <= 0L) return "the backend reports no duration";
+        return null;
+    }
+
+    /** Drives one transition, called once per frame from {@link #tickFade}. The
+     *  kind for a boundary is decided once, inside the lead window, and every kind
+     *  from then on is dispatched to its own performer. Any early return means "the
+     *  ordinary path still owns this boundary". */
+    private void tickCrossfade() {
+        int target;
+        int from;
+        boolean armed;
+        boolean running;
+        synchronized (crossfadeLock) {
+            target = crossfadeTargetIndex;
+            from = crossfadeFromIndex;
+            armed = crossfadeArmed;
+            running = crossfadeRunning;
+        }
+        if (running) return;
+        // A boundary this tick will not even look at. Reported once per track
+        // instead of returning silently: "no transition ever happens" has to be
+        // distinguishable from "the tick never ran" (no line at all) and from
+        // "every kind was tried and fell back to the cut" (the lines below).
+        String blocked = transitionBlockReason();
+        if (blocked != null) {
+            if (transitionBlockLoggedFor != playIndex) {
+                transitionBlockLoggedFor = playIndex;
+                Logger.info("transition: tick running, slot {} is not transitioned: {}",
+                        playIndex, blocked);
+            }
+            return;
+        }
+        Track cur = currentTrack();
+        int n = queue.size();
+        long dur = backend.duration();
+        long remaining = dur - backend.position();
+        // Bound-checked like currentTrack(), so a queue that is being rebuilt on
+        // the main thread cannot index past the end of this snapshot.
+        int nextIndex = (playIndex + 1) % n;
+        if (nextIndex >= queue.size()) return;
+        Track next = queue.get(nextIndex);
+        if (target >= 0 && (target != nextIndex || from != playIndex)) {
+            // The queue moved under the transition (a skip, a shuffle, an insert):
+            // whatever was prepared belongs to a boundary that no longer exists.
+            clearCrossfade();
+            target = -1;
+            armed = false;
+            resetTransitionDecision();
+        }
+        if (transitionKind == null || transitionKindFrom != playIndex
+                || transitionKindTo != nextIndex) {
+            // Before this window the queue may still be edited, and a decision is a
+            // promise about which two tracks are about to meet. The window is the
+            // longest lead any plan can need, not the shortest: a 15 s overlap
+            // decided inside a 9 s window could never be armed in time, and every
+            // long pick would silently come out as a short one.
+            if (remaining > TRANSITION_DECIDE_LEAD_MS) return;
+            decideTransition(cur, next, nextIndex, remaining, dur);
+            return;   // act on the decision next frame; arming is not a per-frame job
+        }
+        switch (transitionKind) {
+            case CUT:
+                // Nothing to do: playAt() at the boundary IS this transition.
+                return;
+            case FADE_OUT_IN:
+                // tickSequentialTransition() owns it; it needs no second player.
+                return;
+            case SILENCE_TRIM:
+                tickSilenceTrim(nextIndex, remaining);
+                return;
+            default:
+                break;
+        }
+        TransitionPlan plan = transitionPlan;
+        long overlap = plan != null ? plan.overlapMs() : transitionKind.overlapMs();
+        if (target < 0) {
+            // Decided, but the resolve has not started yet: the decision can be
+            // taken much earlier than this boundary needs to be armed, and arming
+            // early buys nothing — it pins a second decoder and its stream for the
+            // whole extra window. Wait for the plan's own lead.
+            if (remaining > transitionArmLeadMs(plan)) return;
+            // The beat-aligned entry when the decision produced one, otherwise the
+            // incoming track's own content start — which is what every overlap did
+            // before P4 (and what it still does without a grid, with a low
+            // confidence, or when the two grids disagree).
+            long entry = beatEntryMs >= 0L ? beatEntryMs : contentStartMs(next);
+            // How much of the incoming track the overlap will have played once its
+            // ramp is over: this offset plus the ramp below (see playAt's handoff).
+            crossfadeIncomingStartMs = entry;
+            crossfadeRampMs = 0L;
+            armCrossfade(nextIndex, dur, null, entry, IncomingMode.PARKED);
+            return;
+        }
+        if (remaining < CROSSFADE_MIN_MS) {
+            // The prepare lost the race: there is no room left to overlap, so drop
+            // the incoming player and let the track end the ordinary way rather than
+            // ramming two songs together inside the last second.
+            abandonTransition("no room left to " + transitionKind + ", using the hard cut");
+            return;
+        }
+        if (!armed) return;                       // still resolving or preparing
+        // What the backend managed to apply of the mix this boundary was planned
+        // around. Read here rather than assumed: the plan's overlap was computed for
+        // a track that runs at A's tempo (that is what made a whole number of A's
+        // beats fit, and what the incoming's entry offset was chosen for), so a
+        // platform that refused the stretch has to be answered with an un-stretched
+        // plan — not with a ten-second overlap of two grids that do not hold
+        // together, which is the "two songs at once" case this phase exists to avoid.
+        if (incomingMix != null && !mixTried) {
+            IncomingMix applied = backend.incomingMix();
+            // Null means the incoming player has not finished preparing, so nothing is
+            // known yet: the parked wait below is exactly this state, and the answer
+            // arrives inside it (beginCrossfade would refuse to start an unprepared
+            // player anyway).
+            if (applied == null) return;
+            mixTried = true;
+            if (!incomingMix.sameTempoAndPitch(applied)) {
+                mixRefused = true;
+                Logger.info("transition: the backend did not apply the mix (asked {}, got {});"
+                                + " this boundary runs un-stretched, at the {}ms the plan asked for"
+                                + " — its beats are not on A's grid",
+                        incomingMix, applied,
+                        matchedFallbackOverlapMs > 0L ? matchedFallbackOverlapMs : overlap);
+            }
+        }
+        if (mixRefused && matchedFallbackOverlapMs > 0L) {
+            overlap = Math.min(overlap, matchedFallbackOverlapMs);
+        }
+        // Start the ramp with the whole overlap plus the tail still to come: the
+        // ramp ends CROSSFADE_TAIL_MS before the track does (so the promotion lands
+        // just before the outgoing track's own completion instead of racing it), and
+        // starting it at `overlap` as well would have silently made every ramp a
+        // quarter second shorter than the plan asked for.
+        if (remaining > overlap + CROSSFADE_TAIL_MS) return;   // parked, waiting
+        long rampMs = Math.min(overlap, remaining - CROSSFADE_TAIL_MS);
+        // The curve: the plan's own when it named one, otherwise the configured
+        // one — except over a long overlap, where LINEAR's mid-ramp 3 dB dip is
+        // precisely what the length was chosen to show off (see TransitionPlan).
+        FadeCurve curve = plan != null ? plan.curveOr(fadeCurve) : fadeCurve;
+        // Settle any controller-side fade before handing the volume to the backend:
+        // both write the same gain, and the fade's last target is silence.
+        cancelFadeAtGain(1f);
+        if (!backend.beginCrossfade(rampMs, curve)) {
+            // Usually prepareAsync still being in flight: retry on the next frame,
+            // and give up for good once the guard above is what fires instead.
+            return;
+        }
+        crossfadeRampMs = rampMs;
+        // The speed the incoming track is really running at, recorded where the ramp
+        // starts: with crossfadeRampMs it is how the handoff turns the ramp's
+        // wall-clock length into that track's own milliseconds. 1.0 whenever the mix
+        // was refused (or never planned), which is exactly the un-stretched case.
+        incomingPlaySpeed = mixTried && !mixRefused && incomingMix != null
+                ? incomingMix.speed() : 1d;
+        synchronized (crossfadeLock) {
+            if (crossfadeTargetIndex != nextIndex) {
+                // Lost the race against a track change between reading the state and
+                // starting the ramp: stop it rather than fade in a stale track.
+                backend.cancelIncoming();
+                return;
+            }
+            crossfadeRunning = true;
+        }
+        Logger.info("transition: {} ramping {}ms into queue slot {} ({}{})",
+                transitionKind, rampMs, nextIndex, curve,
+                plan != null && plan.curveOverrides(fadeCurve)
+                        ? "; 长重叠改用等功率，覆盖设置的" + fadeCurve : "");
+    }
+
+    /** Decide the kind (and its overlap, and its curve) for one boundary, once.
+     *  The chooser only sees metadata; everything it answers is checked here
+     *  against what this boundary can actually do. */
+    private void decideTransition(Track cur, Track next, int nextIndex, long remaining, long dur) {
+        transitionKindFrom = playIndex;
+        transitionKindTo = nextIndex;
+        trimPlan = null;
+        fadeOutInArmed = false;
+        if (remaining <= CROSSFADE_MIN_MS) {
+            // Nothing fits any more. Remembered as CUT (rather than left undecided)
+            // so the next frame does not start the whole resolve over again. This is
+            // the "too late" guard, and the only reason it fires is a boundary that
+            // arrived inside the decision lead — an app started near the end of a
+            // track. A long plan is never cut down here: the decision window above
+            // is sized for the longest plan there is.
+            transitionKind = TransitionKind.CUT;
+            transitionPlan = TransitionPlan.of(TransitionKind.CUT);
+            logTransitionDecision(transitionPlan, cur, next, nextIndex, remaining, dur,
+                    "too late: less than " + CROSSFADE_MIN_MS + "ms left",
+                    new BeatAlignment(transitionPlan, -1L,
+                            "mix: off (too late: " + remaining + "ms left)"));
+            return;
+        }
+        TransitionPlan plan;
+        String why;
+        if (transitionKindOverride != null) {
+            plan = TransitionPlan.of(transitionKindOverride);
+            why = "forced by 过渡方式";
+        } else {
+            plan = transitionChooser.plan(
+                    new TransitionContext(cur, next, remaining, dur,
+                            crossfadeStreamable(cur), crossfadeStreamable(next)));
+            if (plan == null) plan = TransitionPlan.of(TransitionKind.CUT);
+            // The chooser labels the branch it took ("AI cached", "rule: ..."),
+            // which is the one thing a decision needs to be auditable from the log.
+            why = plan.decidedBy() != null ? plan.decidedBy() : "自动 rule";
+        }
+        TransitionKind kind = plan.kind();
+        if (kind.needsSecondPlayer() && !crossfadeStreamable(next)) {
+            // The chooser may not have known (or asked), but a second player cannot
+            // open this source: downgrade rather than arm something that cannot be
+            // performed. FADE_OUT_IN and CUT need nothing from the incoming track,
+            // so they are never downgraded.
+            why = kind + " cannot be performed into " + next.source;
+            kind = TransitionKind.CUT;
+            plan = TransitionPlan.of(kind, 0L, null, why);
+        } else if (kind.overlapping() && plan.overlapMs() > remaining - CROSSFADE_TAIL_MS) {
+            // The boundary is closer than the overlap the chooser asked for: cut the
+            // ramp down to what is left rather than arming something that cannot
+            // finish. Labelled, so a shorter ramp than the plan named is explained
+            // in the log instead of looking like the plan itself.
+            plan = plan.withOverlap(remaining - CROSSFADE_TAIL_MS,
+                    "capped to what is left (" + remaining + "ms)");
+        }
+        // P4: the grids. An overlapping boundary is the only one that can be
+        // aligned (a trim ends A and starts B, so a shift there is a hole in the
+        // music rather than an alignment; the sequential kinds do not overlap at
+        // all), and the alignment may re-time the overlap — so it runs after the
+        // caps above, and its own cap check is inside it.
+        beatEntryMs = -1L;
+        incomingMix = null;
+        matchedFallbackOverlapMs = -1L;
+        mixTried = false;
+        mixRefused = false;
+        incomingPlaySpeed = 1d;
+        BeatAlignment align = null;
+        if (kind.overlapping()) {
+            align = alignToBeatGrid(plan, cur, next, remaining, dur);
+            plan = align.plan;
+            if (align.entryMs >= 0L) beatEntryMs = align.entryMs;
+            incomingMix = align.mix;
+            matchedFallbackOverlapMs = align.fallbackOverlapMs;
+        } else {
+            // A kind that does not overlap never has both tracks audible at once, so
+            // there is no tempo to pull onto the other's grid and no key to bring into
+            // line: the mix is not applicable rather than refused. Said out loud all
+            // the same — the one line per boundary has to state what happened about
+            // the mix on EVERY boundary, or "the mix did not run" cannot be told from
+            // "this build has no mix in it" in the log.
+            align = new BeatAlignment(plan, -1L,
+                    "mix: off (" + kind + " never has both tracks audible)");
+        }
+        transitionKind = kind;
+        transitionPlan = plan;
+        // The plan's own label is the authority on why THIS boundary got what it
+        // got: a chooser names the branch it took ("AI cached"), and a cap applied
+        // above appended its reason to that same label. Taking it after the caps
+        // rather than before them is what keeps a shortened ramp from being logged
+        // as if the chooser had asked for it.
+        if (plan.decidedBy() != null) why = plan.decidedBy();
+        logTransitionDecision(plan, cur, next, nextIndex, remaining, dur, why, align);
+        if (kind == TransitionKind.FADE_OUT_IN) {
+            // No second player and no resolve: the only thing this kind needs is for
+            // the ordinary end-of-track fade to start early enough (see
+            // tickSequentialTransition).
+            fadeOutInArmed = true;
+            return;
+        }
+        if (kind == TransitionKind.SILENCE_TRIM) {
+            // Its own two-phase arming: measure, then prepare parked on the seam.
+            armSilenceTrim(cur, nextIndex, dur);
+            return;
+        }
+        // An overlapping kind: the resolve is started by the tick, when the plan's
+        // own lead window opens (see tickCrossfade) — deciding may well have
+        // happened earlier than that.
+    }
+
+    // --- Beat alignment (P4) -------------------------------------------------
+
+    /** What {@link #alignToBeatGrid} answers: the plan (its overlap possibly
+     *  re-timed onto a beat, and raised when the pair is one to mix properly),
+     *  where the incoming track should start when its own grid gets to move it
+     *  (-1 = leave it at its content start), what the mix has to do to the incoming
+     *  player (null when this pair is not mixed at all), the length to fall back to
+     *  when the backend cannot do it, and the one fragment the boundary's log line
+     *  needs. Immutable, built once per boundary.
+     *
+     *  <p>{@link #log} always ends with the boundary's "mix:" fragment — what was done
+     *  to the incoming track, or why nothing was — on every boundary a mix could
+     *  apply to, whether the answer came from here ({@link #withMixNote}) or from the
+     *  kinds that never overlap at all. {@link #alignToBeatGrid} carries the grids and
+     *  the alignment; the mix has its own vocabulary. */
+    private static final class BeatAlignment {
+        final TransitionPlan plan;
+        final long entryMs;
+        final String log;
+        /** The tempo/pitch/bass configuration for the incoming player, or null. */
+        final IncomingMix mix;
+        /** The overlap the chooser asked for, to be used instead of the plan's when
+         *  the backend refuses {@link #mix} — a plan computed for a stretched track
+         *  must not be performed on one that is not stretched. -1 = not applicable. */
+        final long fallbackOverlapMs;
+
+        BeatAlignment(TransitionPlan plan, long entryMs, String log) {
+            this(plan, entryMs, log, null, -1L);
+        }
+
+        BeatAlignment(TransitionPlan plan, long entryMs, String log, IncomingMix mix,
+                      long fallbackOverlapMs) {
+            this.plan = plan;
+            this.entryMs = entryMs;
+            this.log = log;
+            this.mix = mix;
+            this.fallbackOverlapMs = fallbackOverlapMs;
+        }
+
+        /** The same answer with one more fragment on the log line — how the mix half
+         *  of this decision went, when the alignment half is what was returned. */
+        BeatAlignment withMixNote(String note) {
+            if (note == null || note.isEmpty()) return this;
+            return new BeatAlignment(plan, entryMs, log + "; " + note, mix, fallbackOverlapMs);
+        }
+    }
+
+    /**
+     * Put this boundary on the two tracks' own beat grids: the outgoing track's ramp
+     * starts on one of its beats and the incoming track starts on one of its own.
+     * That is the whole point of P4 — an overlap is where two musical grids either
+     * meet or fight, and until they meet, a 15 s overlap really is just two songs
+     * playing at once (which is why a long overlap could sound worse than a 4 s
+     * seam).
+     *
+     * <p>Two answers are possible, and which one this is comes first:
+     * <ul>
+     *   <li><b>A pair that suits each other is MIXED, not merely aligned</b> (see
+     *       {@link MixMatch}): the incoming track is played at the outgoing track's
+     *       tempo (pitch-preserving, so its notes do not move), transposed into its
+     *       key, and the two are overlapped for a length worth hearing that way
+     *       ({@link TransitionPlan#OVERLAP_MATCHED_MS}) with the low end changing
+     *       hands once in the middle. This is the only case where the two grids are
+     *       guaranteed to hold together rather than merely start together, which is
+     *       what makes a long overlap worth having.</li>
+     *   <li><b>Everything else is aligned exactly as P4 always did it</b> — which is
+     *       also what happens when the pair is not suitable, when the host has no key
+     *       estimator, or when the settings say not to.</li>
+     * </ul>
+     *
+     * <p>The gates both paths share come first: both grids must exist and be
+     * trustworthy. Material with no beat (ambient, classical, speech) has none — the
+     * estimator refuses it or answers with a confidence below
+     * {@link BeatProfile#MIN_CONFIDENCE} — and then the boundary behaves exactly as
+     * it did before any of this existed.
+     */
+    private BeatAlignment alignToBeatGrid(TransitionPlan plan, Track cur, Track next,
+                                          long remaining, long dur) {
+        BeatProfile a = beatProfileOf(cur);
+        BeatProfile b = beatProfileOf(next);
+        String head = "beat: A=" + beatLabel(a) + " B=" + beatLabel(b) + ", align=";
+        // Every return below owes the boundary's single line a "mix:" fragment, and so
+        // does every path that never gets here (see decideTransition). A boundary that
+        // says nothing about the mix is indistinguishable in the log from one whose
+        // build has no mix in it at all — which is exactly what the first device run of
+        // this phase looked like: the pair was refused upstream of any mix judgement,
+        // and the line named only the beat half.
+        if (beatProfiler == null) {
+            return new BeatAlignment(plan, -1L, head + "off (no profiler)")
+                    .withMixNote("mix: off (no beat profiler on this device)");
+        }
+        if (!beatAlignmentEnabled) {
+            return new BeatAlignment(plan, -1L, head + "off (settings off)")
+                    .withMixNote("mix: off (节拍对齐 is off: a mix is performed on the two grids)");
+        }
+        if (a == null || b == null) {
+            String which = a == null ? "A" : "B";
+            return new BeatAlignment(plan, -1L, head + "off (no grid for " + which + ")")
+                    .withMixNote("mix: off (no credible grid for " + which
+                            + ": the probe found no beat in its audio)");
+        }
+        if (!a.trustworthy() || !b.trustworthy()) {
+            BeatProfile weak = !a.trustworthy() ? a : b;
+            String which = !a.trustworthy() ? "A" : "B";
+            String reading = weak.confidenceText() + " < " + BeatProfile.MIN_CONFIDENCE
+                    + (weak.prominenceText() != null ? ", " + weak.prominenceText() : "");
+            return new BeatAlignment(plan, -1L, head + "off (confidence " + reading + ")")
+                    .withMixNote("mix: off (no credible grid for " + which + ", confidence "
+                            + reading + ")");
+        }
+        // Both grids are real, so this pair can be judged: is it one whose tempos and
+        // keys go together? The judgement is made over the overlap the mix would
+        // really be performed at (not the one the chooser asked for), because two
+        // tempos that hold together for four seconds may not for ten.
+        long maxOverlap = remaining - CROSSFADE_TAIL_MS;
+        long mixOverlap = Math.min(Math.max(plan.overlapMs(), TransitionPlan.OVERLAP_MATCHED_MS),
+                Math.max(0L, maxOverlap));
+        MixMatch match = harmonizeEnabled
+                ? MixMatch.between(a, b, mixOverlap)
+                : MixMatch.refused("合拍改调 is off (settings)");
+        if (match.suitable() && maxOverlap >= TransitionPlan.OVERLAP_MATCHED_MS) {
+            return matchAlignment(plan, a, b, next, remaining, dur, head, match);
+        }
+        if (match.suitable()) {
+            return alignGrids(plan, a, b, next, remaining, dur, head).withMixNote(
+                    "mix: off (only " + maxOverlap + "ms of the track is left, a mix wants "
+                            + TransitionPlan.OVERLAP_MATCHED_MS + "ms)");
+        }
+        return alignGrids(plan, a, b, next, remaining, dur, head).withMixNote(match.note());
+    }
+
+    /**
+     * The overlap of a pair that suits each other: the incoming track is pulled onto
+     * the outgoing track's grid (see {@link MixMatch}), so the two grids hold
+     * together for the whole overlap instead of only starting together — which is
+     * what makes the longer overlap below more than two songs at once.
+     *
+     * <p>Everything about the timing is still the OUTGOING track's: its grid decides
+     * which beat the ramp starts on and the overlap is a whole number of its beats,
+     * exactly as in the plain path. The incoming track's offset is only ever an
+     * offset into its own file.
+     *
+     * <p>Refuses (and hands the boundary back to the plain path) when the incoming
+     * track's own first beat is too far past its content start: the phase of the mix
+     * comes from starting the incoming ON one of its beats, and a mix whose two grids
+     * do not even share a beat has no claim to the length this path asks for.
+     */
+    private BeatAlignment matchAlignment(TransitionPlan plan, BeatProfile a, BeatProfile b,
+                                         Track next, long remaining, long dur, String head,
+                                         MixMatch match) {
+        long periodA = Math.max(1L, Math.round(a.periodMs()));
+        long maxOverlap = remaining - CROSSFADE_TAIL_MS;
+        // The length the mix is performed over: what the chooser asked for, raised to
+        // the length a mix is heard at (the ask: "start ten seconds early"), and never
+        // more than what is left.
+        long wanted = Math.min(Math.max(plan.overlapMs(), TransitionPlan.OVERLAP_MATCHED_MS),
+                maxOverlap);
+        long overlap = a.snapOverlapMs(wanted, dur, CROSSFADE_TAIL_MS);
+        if (overlap > maxOverlap) overlap -= periodA;              // step one beat back in
+        if (overlap < periodA) overlap = wanted;                    // no whole beat fits: keep the length
+        TransitionPlan mixed = plan.mixed(overlap, "mix: overlap " + plan.overlapMs()
+                + "->" + overlap + "ms at A's tempo and key");
+        // The incoming track's entry: one of ITS beats, as close to its own content
+        // start as the shift cap allows — the nearest rather than always the next,
+        // because half a beat backwards is inside the head silence the content start
+        // was measured past, while half a beat forwards is that much of the first
+        // phrase skipped. Starting on a beat is what puts the two grids in phase for
+        // the whole overlap, so a pair with no beat within the cap is not mixed at all.
+        long base = contentStartMs(next);
+        long nextBeat = b.beatAtOrAfter(base);
+        long entryMs = -1L;
+        long shift = Long.MAX_VALUE;
+        if (nextBeat <= MAX_OVERLAP_HEAD_SKIP_MS && nextBeat - base <= MAX_BEAT_ENTRY_SHIFT_MS) {
+            entryMs = nextBeat;
+            shift = nextBeat - base;
+        }
+        long prevBeat = nextBeat - Math.max(1L, Math.round(b.periodMs()));
+        if (prevBeat >= 0L && base - prevBeat <= MAX_BEAT_ENTRY_SHIFT_MS
+                && (entryMs < 0L || base - prevBeat < shift)) {
+            entryMs = prevBeat;
+            shift = prevBeat - base;                   // negative: into the head silence
+        }
+        if (entryMs < 0L) {
+            return alignGrids(plan, a, b, next, remaining, dur, head).withMixNote(
+                    "mix: off (the incoming track's nearest beat is "
+                            + (nextBeat - base) + "ms past its content start, past the "
+                            + MAX_BEAT_ENTRY_SHIFT_MS + "ms a mix will skip)");
+        }
+        // The low end changes hands once, at the first beat of the outgoing track at
+        // or after the middle of the overlap: a musical instant in the middle of the
+        // mix, where the incoming track's own foundation takes over. It is a beat of
+        // both tracks (the incoming is running at the outgoing's tempo by then).
+        long swapAtMs = matchSwapMs(overlap, periodA);
+        // The instruction for the platform: the incoming player's tempo, its pitch,
+        // and when the low end hands over. A settings row can take the bass swap out
+        // on its own — a device whose effect framework misbehaves keeps the tempo and
+        // the key, which is the larger part of the mix.
+        IncomingMix mix = IncomingMix.of(match.speed(), match.pitch(),
+                bassSwapEnabled ? swapAtMs : -1L);
+        String note = head + "on (" + match.note()
+                + "; overlap " + overlap + "ms = "
+                + Math.max(1L, Math.round((double) overlap / periodA))
+                + " beats of A at A's tempo, drift 0ms by construction; entry "
+                + base + "->" + entryMs + "ms"
+                + (bassSwapEnabled ? (swapAtMs >= 0L
+                        ? "; bass swap at " + swapAtMs + "ms" : "; no bass swap (shorter than a beat)")
+                        : "; bass swap off (settings)")
+                + ")";
+        return new BeatAlignment(mixed, entryMs, note, mix, plan.overlapMs());
+    }
+
+    /** The first beat of the outgoing track at or after the middle of the overlap —
+     *  where the low end hands over, so the change lands on a beat rather than in the
+     *  middle of one. {@code -1} when the overlap is shorter than a beat, which is
+     *  the caller's cue to leave the low end alone. */
+    private static long matchSwapMs(long overlapMs, long periodMs) {
+        if (overlapMs < periodMs) return -1L;
+        long beats = Math.max(1L, Math.round((double) overlapMs / 2d / periodMs));
+        long at = beats * periodMs;
+        return at < overlapMs ? at : overlapMs - periodMs;
+    }
+
+    /**
+     * The beat alignment, exactly as P4 shipped it: the overlap becomes a whole
+     * number of the outgoing track's beats and the incoming track starts on one of
+     * its own, but neither track's tempo or key is touched. Both grids must be
+     * <em>compatible</em> ({@link BeatProfile#gridsCompatible}: the phase between
+     * them must not slip more than half a beat across the whole overlap) — otherwise
+     * the alignment is skipped, not forced, because two different tempos cannot be
+     * held together for ten seconds by aligning them once.
+     *
+     * <p>Reached whenever the pair is not one to mix (see {@link #alignToBeatGrid}),
+     * so a boundary that this phase cannot improve on behaves as it always did.
+     */
+    private BeatAlignment alignGrids(TransitionPlan plan, BeatProfile a, BeatProfile b, Track next,
+                                     long remaining, long dur, String head) {
+        long periodA = Math.max(1L, Math.round(a.periodMs()));
+        long maxOverlap = remaining - CROSSFADE_TAIL_MS;
+        long wanted = Math.min(plan.overlapMs(), maxOverlap);
+        long quantized = a.snapOverlapMs(wanted, dur, CROSSFADE_TAIL_MS);
+        if (quantized < 0L) {
+            return new BeatAlignment(plan, -1L, head + "off (nothing left to land a whole beat "
+                    + "of " + periodA + "ms in: overlap " + wanted + "ms of " + maxOverlap + "ms)");
+        }
+        if (quantized > maxOverlap) quantized -= periodA;      // step one beat back in
+        if (!BeatProfile.gridsCompatible(a, b, quantized)) {
+            return new BeatAlignment(plan, -1L, head + "off (tempos incompatible: the grids "
+                    + "slide " + BeatProfile.gridDriftMs(a, b, quantized) + "ms apart over "
+                    + quantized + "ms, more than half a beat of "
+                    + String.format(java.util.Locale.US, "%.1f", b.bpm()) + "BPM)");
+        }
+        TransitionPlan snapped = plan;
+        if (quantized != plan.overlapMs()) {
+            // Labelled like every other change to what the chooser asked for, so a
+            // ramp that is not the length the AI named is explained in the log.
+            snapped = plan.withOverlap(quantized, "beat-aligned to a whole number of A's beats");
+        }
+        // The entry: the first beat of the incoming track at or after its own content
+        // start, which is what puts its downbeat on a beat instead of mid-phrase.
+        long base = contentStartMs(next);
+        long beatEntry = b.beatAtOrAfter(base);
+        long shift = beatEntry - base;
+        String tailNote;
+        long entryMs = -1L;
+        if (shift > MAX_BEAT_ENTRY_SHIFT_MS || beatEntry > MAX_OVERLAP_HEAD_SKIP_MS) {
+            tailNote = "; entry left at " + base + "ms (its next beat is " + shift + "ms away)";
+        } else {
+            entryMs = beatEntry;
+            tailNote = "; entry " + base + "->" + beatEntry + "ms";
+        }
+        // Re-read the beat count from the length that survived the cap above, so a
+        // ramp that had to step back a beat is logged with the beats it actually has.
+        long beatsInOverlap = Math.max(1L, Math.round((double) quantized / periodA));
+        return new BeatAlignment(snapped, entryMs, head + "on (overlap "
+                + plan.overlapMs() + "->" + quantized + "ms = " + beatsInOverlap
+                + " beats of A, drift " + BeatProfile.gridDriftMs(a, b, quantized)
+                + "ms of " + Math.round(b.periodMs() / 2d) + "ms" + tailNote + ")");
+    }
+
+    /** The lead one plan needs before its boundary: the overlap itself, the tail the
+     *  ramp ends early by, and the resolve budget. Everything shorter than this and
+     *  the prepare would land after the overlap should already have started, which is
+     *  exactly how a long plan silently turns into a short one. Non-overlapping
+     *  kinds need only the resolve budget. */
+    private static long transitionArmLeadMs(TransitionPlan plan) {
+        long overlap = plan != null && plan.kind().overlapping() ? plan.overlapMs() : 0L;
+        return overlap + CROSSFADE_TAIL_MS + CROSSFADE_LEAD_MS;
+    }
+
+    /** Where the incoming player should start: the first audible sample of its own
+     *  audio, so an overlap mixes music instead of one track's intro silence.
+     *
+     *  <p>The measurement is the silence profiler's, already made for the tracks a
+     *  trim cares about and cached per track — this never measures anything and
+     *  never waits: without a measurement (a track nobody has profiled yet, a host
+     *  with no profiler at all) the overlap simply starts at the file's own start,
+     *  which is what it did before this existed. */
+    private long contentStartMs(Track t) {
+        SilenceProfile p = silenceProfileOf(t);
+        if (p == null) return 0L;
+        return Math.min(p.headMs(), MAX_OVERLAP_HEAD_SKIP_MS);
+    }
+
+    /** The one line that says how a boundary was decided: the kind and its overlap,
+     *  who chose it (the local rules, or the AI — cached or fresh), why a CUT was
+     *  answered, and every fact that answer was based on — the two sources, how much
+     *  of the outgoing track is left, both lengths (a negative one is "unknown",
+     *  which alone forces CUT) and whether the feature is on. Written once per
+     *  boundary, never per tick: a listener's whole session costs one line per song,
+     *  but "自动 does nothing" now has a line that names the branch instead of having
+     *  to be reasoned about.
+     *
+     * <p>Every boundary's line also carries a "<b>mix:</b>" fragment, whichever of
+     * the two answers it is: what the incoming track was pulled to (its tempo ratio,
+     * its key shift, when the low end hands over) or why nothing was (no credible
+     * grid for one side and what its reading was, the tempos too far apart, the keys
+     * clashing, the settings, a kind that never overlaps). That is deliberate: the
+     * first device run of this phase logged nothing at all about the mix — neither an
+     * action nor a refusal — because the pair was refused upstream of any mix
+     * judgement, which left "the mix had no effect" indistinguishable from "this
+     * build has no mix in it". */
+    private void logTransitionDecision(TransitionPlan plan, Track cur, Track next, int nextIndex,
+                                       long remaining, long dur, String why, BeatAlignment align) {
+        TransitionKind kind = plan != null ? plan.kind() : TransitionKind.CUT;
+        long overlap = plan != null ? plan.overlapMs() : 0L;
+        Logger.info("transition: slot {} -> {}: {}{}{} ({}); remaining={}ms, length={}/{}ms,"
+                        + " streamable={}/{}, 智能过渡={}{}",
+                playIndex, nextIndex, kind,
+                overlap > 0L ? " 重叠=" + TransitionPlan.overlapText(overlap) : "",
+                kind.overlapping() ? ", curve=" + plan.curveOr(fadeCurve) : "",
+                why, remaining, dur,
+                next != null && next.durationMs > 0L ? next.durationMs : -1L,
+                crossfadeStreamable(cur) ? "yes" : "no",
+                crossfadeStreamable(next) ? "yes" : "no",
+                transitionEnabled ? "on" : "off",
+                // The P4 half of the one line per boundary — both grids, whether they
+                // were used, the overlap that came out of it and where the incoming
+                // track will start — followed by the mix's own outcome on every
+                // boundary that has an overlap, and standing alone (as the mix
+                // fragment) for the kinds that never have both tracks audible.
+                align != null ? "; " + align.log : "");
+    }
+
+    /** Give this boundary up for good: drop anything prepared and remember the
+     *  plain cut for it. This is the single fallback every kind shares, and it
+     *  always ends at the behaviour the app had before transitions existed.
+     *
+     *  <p>The reason is logged and the decision is KEPT (as CUT, with its queue
+     *  indexes intact) rather than cleared: every caller here has already
+     *  established that this boundary cannot be transitioned (nothing playable, the
+     *  backend refused the source, no measurement in time, no room left), so
+     *  re-deciding on the next frame would only repeat the same resolve and fail
+     *  the same way for the rest of the lead window. */
+    private void abandonTransition(String reason) {
+        Logger.info("transition: {}", reason);
+        clearCrossfade();
+        transitionKind = TransitionKind.CUT;
+        transitionPlan = TransitionPlan.of(TransitionKind.CUT);
+        trimPlan = null;
+        fadeOutInArmed = false;
+        incomingSrc = null;
+    }
+
+    /** Forget the kind chosen for the boundary in flight. Called whenever that
+     *  boundary stops being the one that is coming (a track change, a queue edit,
+     *  a settings change). */
+    private void resetTransitionDecision() {
+        transitionKind = null;
+        transitionPlan = null;
+        transitionKindFrom = -1;
+        transitionKindTo = -1;
+        transitionBlockLoggedFor = -1;
+        trimPlan = null;
+        fadeOutInArmed = false;
+        incomingSrc = null;
+        beatEntryMs = -1L;
+        // The mix belongs to the plan it was decided with: nothing about a tempo, a
+        // key or an overlap that was chosen for one pair says anything about the next.
+        incomingMix = null;
+        matchedFallbackOverlapMs = -1L;
+        mixTried = false;
+        mixRefused = false;
+        // incomingPlaySpeed is deliberately NOT cleared here: the handoff in playAt()
+        // calls this first and then reads it (with crossfadeRampMs) to work out how
+        // much of the incoming track the overlap already played. It is set when a ramp
+        // actually starts, which is the only moment it means anything.
+        // transitionFadeIn is deliberately NOT cleared here: it is set at the
+        // outgoing track's fade-out and has to survive the async resolve of the
+        // NEXT track, which is exactly the playAt() that calls this.
+    }
+
+    /** Start resolving the next track's source. Nothing about the current playback
+     *  changes until something is actually prepared from it. */
+    private void armCrossfade(int nextIndex, long outgoingMs, String knownSrc,
+                              long incomingStartMs, IncomingMode incomingMode) {
+        long generation;
+        synchronized (crossfadeLock) {
+            generation = ++crossfadeGeneration;
+            crossfadeTargetIndex = nextIndex;
+            crossfadeFromIndex = playIndex;
+            crossfadeArmed = false;
+            crossfadeRunning = false;
+            crossfadeOutgoingMs = outgoingMs;
+        }
+        Logger.info("transition: arming slot {} behind slot {} (incoming starts at {}ms{})",
+                nextIndex, playIndex, incomingStartMs,
+                incomingStartMs > 0L ? ", its own content start" : "");
+        if (knownSrc != null && !knownSrc.isEmpty()) {
+            // Already resolved (the trim's second phase): nothing to look up.
+            onMain(() -> armIncoming(generation, nextIndex, knownSrc, incomingStartMs, incomingMode));
+            return;
+        }
+        resolveIncomingSource(generation, nextIndex, incomingStartMs, incomingMode);
+    }
+
+    /** The source the incoming player should open for queue slot {@code nextIndex}:
+     *  the disk-cached file or the url this session already resolved when one
+     *  exists, otherwise a fresh resolve off the main thread. Everything answers
+     *  through {@link #armIncoming} with null when there is nothing playable, which
+     *  abandons the transition before any player is created. */
+    private void resolveIncomingSource(final long generation, final int nextIndex,
+                                       final long incomingStartMs, final IncomingMode incomingMode) {
+        if (nextIndex < 0 || nextIndex >= queue.size()) return;
+        final Track t = queue.get(nextIndex);
+        if (!crossfadeStreamable(t)) return;
+        if (t.source == Track.Source.NETEASE && t.neteaseId != 0L) {
+            String cached = diskCache.getAudio(t.neteaseId);
+            if (cached != null) {
+                // Where the incoming's audio came from decides whether the boundary was
+                // on time, so it is said out loud: this line is how "the pre-cache
+                // worked" is told from "the resolve won the race anyway".
+                Logger.info("transition: incoming slot {} ({}) served from the audio cache,"
+                        + " nothing to resolve", nextIndex, t.title);
+                onMain(() -> armIncoming(generation, nextIndex, cached, incomingStartMs, incomingMode));
+                return;
+            }
+        }
+        if (t.streamUrl != null && !t.streamUrl.isEmpty()) {
+            // Resolved earlier in this session; the ordinary path would use the very
+            // same url, and a stale one fails through the same retry it always did.
+            final String url = t.streamUrl;
+            onMain(() -> armIncoming(generation, nextIndex, url, incomingStartMs, incomingMode));
+            return;
+        }
+        if (t.source == Track.Source.NETEASE) {
+            final long songId = t.neteaseId;
+            resolveWorker.submit(() -> {
+                String url = null;
+                boolean official = false;
+                try {
+                    NeteaseClient.UrlInfo info = netease.songUrlInfo(songId, playLevel);
+                    // A trial clip is not what a transition should fade into; the
+                    // ordinary path can still fall back to previewing it.
+                    if (info != null && !info.trial) {
+                        url = info.url;
+                        official = true;
+                    }
+                } catch (Throwable e) {
+                    Logger.warn("transition: url resolve failed for {}: {}", songId, e.getMessage());
+                }
+                // The ordinary switch resolves through the unblock sources as well
+                // (resolveAndPlayNetease's fallback), and for a song the official
+                // endpoint refuses — grey, VIP, region locked — that is the only
+                // source the app can play at all. Without the same fallback the
+                // incoming player is handed nothing for exactly those songs, so
+                // EVERY boundary abandons and every kind degrades to the hard cut:
+                // a library that always plays through unblock had no transition at
+                // all, whichever kind was chosen. Same order, same sources.
+                if (url == null && unblockEnabled) {
+                    try {
+                        url = SongUnblocker.resolve(songId, t.title, t.artist);
+                    } catch (Throwable e) {
+                        Logger.warn("transition: unblock failed for {}: {}", songId, e.getMessage());
+                    }
+                }
+                Logger.info("transition: incoming slot {} source: official={}, unblock={}, {}"
+                                + " (not cached: resolved inside the boundary's window)",
+                        nextIndex, official ? "ok" : "-",
+                        url != null && !official ? "ok" : "-",
+                        url != null ? "playable" : "nothing playable");
+                final String src = url;
+                onMain(() -> armIncoming(generation, nextIndex, src, incomingStartMs, incomingMode));
+            });
+        } else {
+            final String customId = t.customId;
+            final CustomApiConfig cfg = customApiConfig;
+            customWorker.submit(() -> {
+                String url = null;
+                try {
+                    url = CustomApiClient.resolveUrl(cfg, customId);
+                } catch (Throwable e) {
+                    Logger.warn("transition: custom url resolve failed for {}: {}",
+                            customId, e.getMessage());
+                }
+                final String src = url;
+                onMain(() -> armIncoming(generation, nextIndex, src, incomingStartMs, incomingMode));
+            });
+        }
+    }
+
+    /** Hand the resolved source to the backend's second player. Runs on the main
+     *  thread. Any failure here is a plain abandon: no player, no ramp, and the
+     *  end of the track stays with the ordinary path. */
+    private void armIncoming(long generation, int nextIndex, String src,
+                             long incomingStartMs, IncomingMode incomingMode) {
+        synchronized (crossfadeLock) {
+            if (generation != crossfadeGeneration || crossfadeTargetIndex != nextIndex) return;
+        }
+        if (src == null || src.isEmpty()) {
+            abandonTransition("no playable source for slot " + nextIndex
+                    + " (neither the official url nor a fallback source resolved), using the hard cut");
+            return;
+        }
+        if (incomingMode == IncomingMode.MEASURE) {
+            // SILENCE_TRIM's first phase: the source is only needed to measure how
+            // much silence the incoming track starts with. Nothing is prepared
+            // until the measurement says where the seam goes.
+            incomingSrc = src;
+            requestSilenceProfile(queue.size() > nextIndex ? queue.get(nextIndex) : null, src);
+            requestSilenceProfile(currentTrack(), measureSourceOf(currentTrack()));
+            return;
+        }
+        boolean startMuted = incomingMode != IncomingMode.PARKED;
+        // An overlap starts the incoming player at its first audible sample
+        // (contentStartMs), which it can only do when that sample has been measured.
+        // This is where the source first exists for a track that has never been
+        // played, so this is where the measurement can be asked for — off the
+        // playback path, cached per track, and used from the next play of this pair
+        // on. Nothing waits for it: today's overlap starts at the file's own start.
+        if (incomingMode == IncomingMode.PARKED) {
+            Track incoming = queue.size() > nextIndex ? queue.get(nextIndex) : null;
+            if (silenceProfileOf(incoming) == null) requestSilenceProfile(incoming, src);
+            // Same reasoning as the silence measurement above: this is the first
+            // moment the incoming track's source exists, so it is where a track
+            // nobody has heard yet can be measured. Off the playback path, cached per
+            // track, and never waited for — today's overlap starts where it starts.
+            if (beatProfileOf(incoming) == null) requestBeatProfile(incoming, src);
+        }
+        if (!backend.prepareIncoming(src, incomingStartMs, startMuted,
+                incomingMix != null ? incomingMix : IncomingMix.IDENTITY)) {
+            abandonTransition("backend refused the incoming source, using the hard cut");
+            return;
+        }
+        synchronized (crossfadeLock) {
+            if (generation != crossfadeGeneration || crossfadeTargetIndex != nextIndex) {
+                backend.cancelIncoming();   // lost the race; do not leave it parked
+                return;
+            }
+            crossfadeArmed = true;
+        }
+    }
+
+    // --- SILENCE_TRIM -------------------------------------------------------
+
+    /** First phase of a trim: make sure both ends of this boundary have been
+     *  measured, and get the incoming source resolved (in measure-only mode — it is
+     *  needed to measure the incoming head, and again later to prepare the parked
+     *  player). Whichever of the two answers is already cached is used as it is. */
+    private void armSilenceTrim(Track cur, int nextIndex, long dur) {
+        requestSilenceProfile(cur, measureSourceOf(cur));
+        armCrossfade(nextIndex, dur, null, 0L, IncomingMode.MEASURE);
+    }
+
+    /** Second phase: both ends are measured, so the seam can be placed. */
+    private void planSilenceTrim(int nextIndex, long dur, SilenceProfile outgoing,
+                                 SilenceProfile incoming, String knownSrc) {
+        String src = knownSrc != null ? knownSrc : incomingSrc;
+        if (src == null || src.isEmpty()) return;   // still resolving; the tick waits
+        long ramp = SILENCE_TRIM_RAMP_MS;
+        // How much of each end the seam is allowed to skip. See MAX_TRIM_SKIP_MS:
+        // the measurement is only as trustworthy as the source it was taken from.
+        long tail = Math.min(outgoing.tailMs(), MAX_TRIM_SKIP_MS);
+        long head = Math.min(incoming.headMs(), MAX_TRIM_SKIP_MS);
+        // Where the incoming player starts: far enough into its own head silence
+        // that the seam's ramp brings its first audible sample in right at the
+        // outgoing track's content end.
+        long startMs = Math.max(0L, head - SILENCE_TRIM_HEAD_ALLOWANCE_MS);
+        // The outgoing track's content ends `tail` before its file does, so the seam
+        // has to be over by then — that is the whole trim: everything after it is
+        // silence nobody has to listen to.
+        long rampAtRemaining = tail + ramp;
+        trimPlan = new SilenceTrimPlan(rampAtRemaining, startMs, tail, head);
+        Logger.info("transition: SILENCE_TRIM seam {}ms at {}ms left (tail {}ms, head {}ms)",
+                ramp, rampAtRemaining, tail, head);
+        armCrossfade(nextIndex, dur, src, startMs, IncomingMode.PARKED);
+    }
+
+    /** SILENCE_TRIM's per-frame half: wait for the measurements (and hand the
+     *  boundary back to the hard cut if they never arrive), then start the seam
+     *  once the outgoing track reaches the point the trim measured. */
+    private void tickSilenceTrim(int nextIndex, long remaining) {
+        SilenceTrimPlan plan = trimPlan;
+        if (plan == null) {
+            if (remaining <= SILENCE_TRIM_DECIDE_MS) {
+                // No measurement in time. This kind's whole point is to NOT mix the
+                // two tracks, so falling back to a crossfade would contradict the
+                // reason it was chosen: the boundary goes back to the hard cut.
+                abandonTransition("SILENCE_TRIM: no measurement in time, using the hard cut");
+                return;
+            }
+            Track cur = currentTrack();
+            Track next = queue.size() > nextIndex ? queue.get(nextIndex) : null;
+            SilenceProfile outP = silenceProfileOf(cur);
+            SilenceProfile inP = silenceProfileOf(next);
+            if (outP != null && inP != null) {
+                planSilenceTrim(nextIndex, backend.duration(), outP, inP, null);
+            }
+            return;
+        }
+        boolean armed;
+        synchronized (crossfadeLock) {
+            armed = crossfadeArmed;
+        }
+        if (!armed) return;                          // still preparing the parked player
+        if (remaining > plan.rampAtRemainingMs) return;
+        // A track with no trailing silence at all puts the seam exactly at its own
+        // end, so the ramp may have no room left by the time this line runs (the
+        // render pump is coarse). A shorter seam is still a seam: only a bound this
+        // close to zero would be a click rather than a fade, and that is where the
+        // hard cut belongs.
+        if (remaining < MIN_SEAM_MS) {
+            abandonTransition("SILENCE_TRIM: the seam arrived too late, using the hard cut");
+            return;
+        }
+        long seamMs = Math.min(SILENCE_TRIM_RAMP_MS, remaining);
+        cancelFadeAtGain(1f);
+        // The parked player starts when the ramp starts, so the trim's offset is
+        // still exactly where it was put. Both numbers are what the overlap will have
+        // played once the seam is over (see playAt's handoff).
+        crossfadeIncomingStartMs = plan.incomingStartMs;
+        crossfadeRampMs = seamMs;
+        incomingPlaySpeed = 1d;                 // a trim never stretches anything
+        if (!backend.beginCrossfade(seamMs, fadeCurve)) return;
+        synchronized (crossfadeLock) {
+            if (crossfadeTargetIndex != nextIndex) {
+                backend.cancelIncoming();
+                return;
+            }
+            crossfadeRunning = true;
+        }
+        Logger.info("transition: SILENCE_TRIM seam of {}ms into queue slot {}", seamMs, nextIndex);
+    }
+
+    /** The seam a trim places, in one place so both halves agree about it. */
+    private static final class SilenceTrimPlan {
+        /** Start the seam when the outgoing track has this much left. */
+        final long rampAtRemainingMs;
+        /** Where the parked incoming player is seeked to. */
+        final long incomingStartMs;
+        /** The two measurements, for the log line. */
+        final long tailMs;
+        final long headMs;
+
+        SilenceTrimPlan(long rampAtRemainingMs, long incomingStartMs, long tailMs, long headMs) {
+            this.rampAtRemainingMs = rampAtRemainingMs;
+            this.incomingStartMs = incomingStartMs;
+            this.tailMs = tailMs;
+            this.headMs = headMs;
+        }
+    }
+
+    // --- Silence measurement (plumbing) -------------------------------------
+
+    /** Cache key for a track's measurement. Song id where there is one, the
+     *  custom source's string id next, and the source string otherwise — the key
+     *  only has to be stable for the same audio, since a measurement is only as
+     *  good as the file it was taken from. Delegates to
+     *  {@link TransitionPlan#trackKey}, which is the same convention the AI
+     *  chooser's per-pair decision cache keys its two halves with: a measurement
+     *  and a decision about one track name it the same way, so they can never
+     *  disagree about which track they belong to. */
+    private static String silenceKey(Track t) {
+        return TransitionPlan.trackKey(t);
+    }
+
+    /** A source an already-known track can be measured from without a network
+     *  round trip: its cached file when there is one, otherwise the url this
+     *  session already resolved. Null when neither is known — then a trim simply
+     *  cannot be planned for this boundary. */
+    private String measureSourceOf(Track t) {
+        if (t == null) return null;
+        if (t.source == Track.Source.NETEASE && t.neteaseId != 0L) {
+            String cached = diskCache.getAudio(t.neteaseId);
+            if (cached != null) return cached;
+        }
+        return (t.streamUrl != null && !t.streamUrl.isEmpty()) ? t.streamUrl : null;
+    }
+
+    /** A track's measurement, from memory or the disk cache. Never blocks and
+     *  never measures: the caller only ever asks whether the answer is already
+     *  there. */
+    private SilenceProfile silenceProfileOf(Track t) {
+        String key = silenceKey(t);
+        if (key == null) return null;
+        SilenceProfile p = silenceProfiles.get(key);
+        if (p != null) return p;
+        String path = diskCache.getSilence(key);
+        if (path == null) return null;
+        p = SilenceProfile.fromBytes(readBytesFromFile(path));
+        if (p != null) {
+            silenceProfiles.put(key, p);
+            Logger.info("silence profile loaded for {}: {}", key, p);
+        }
+        return p;
+    }
+
+    /** Measure a track's leading/trailing silence on the probe worker. Fire and
+     *  forget by design: the result lands in the caches and whichever boundary
+     *  asks next picks it up, so a boundary that never gets its answer simply
+     *  does not trim instead of waiting for one. */
+    private void requestSilenceProfile(Track t, String src) {
+        SilenceProfiler profiler = silenceProfiler;
+        if (profiler == null || t == null || src == null || src.isEmpty()) return;
+        final String key = silenceKey(t);
+        if (key == null) return;
+        if (silenceProfiles.containsKey(key) || !probingSilence.add(key)) return;
+        final long durationMs = t.durationMs;
+        probeWorker.submit(() -> {
+            SilenceProfile p = null;
+            try {
+                p = profiler.probe(src, durationMs);
+            } catch (Throwable e) {
+                Logger.warn("silence probe failed for {}: {}", key, e.toString());
+            } finally {
+                probingSilence.remove(key);
+            }
+            if (p == null) {
+                Logger.info("silence probe gave up for {}", key);
+                return;
+            }
+            silenceProfiles.put(key, p);
+            diskCache.cacheSilence(key, p.toBytes());
+            Logger.info("silence profile for {}: {}", key, p);
+        });
+    }
+
+    // --- Beat grid (P4 plumbing) --------------------------------------------
+
+    /** A track's beat grid, from memory or the disk cache. Never blocks and never
+     *  measures: the caller only ever asks whether the answer is already there, and
+     *  a boundary without one is simply not beat-aligned (exactly today's
+     *  behaviour). */
+    private BeatProfile beatProfileOf(Track t) {
+        String key = silenceKey(t);
+        if (key == null) return null;
+        BeatProfile p = beatProfiles.get(key);
+        if (p != null) return p;
+        String path = diskCache.getBeat(key);
+        if (path == null) return null;
+        p = BeatProfile.fromBytes(readBytesFromFile(path));
+        if (p != null) {
+            beatProfiles.put(key, p);
+            Logger.info("beat profile loaded for {}: {}", key, p);
+        }
+        return p;
+    }
+
+    /** Measure a track's beat grid on the beat worker. Fire and forget by design,
+     *  like the silence probe: the result lands in the caches and whichever boundary
+     *  asks next picks it up, so a boundary that never gets its grid is not aligned
+     *  instead of waiting for one. Runs once per track, ever — the disk cache
+     *  answers every later play. */
+    private void requestBeatProfile(Track t, String src) {
+        if (src == null || src.isEmpty()) return;
+        probeBeatProfile(t, () -> src);
+    }
+
+    /**
+     * The next track's grid, asked for at the PRELOAD moment instead of at the
+     * boundary — including when its audio is not on disk at all.
+     *
+     * <p>A track whose file is already cached is measured by {@code preloadTrack};
+     * a streamed one used to be measured only by the transition's own arm, which
+     * resolves its source roughly seventeen seconds before the boundary. That is
+     * minutes too late, but not because the decode is slow: the boundary's KIND and
+     * whether its overlap is beat-aligned are decided {@link #TRANSITION_DECIDE_LEAD_MS}
+     * (24 s) before the boundary, from the grids that exist at that instant. A grid
+     * that arrives afterwards cannot be used by that decision at all — the line
+     * reports {@code no grid for B} and the overlap runs unaligned, even though the
+     * very same probe would have produced a perfectly good grid if it had been asked
+     * for earlier. The preload is the first and only moment early enough, and the
+     * next track's identity is what makes asking there possible.
+     *
+     * <p>Bounded, and off the playback path: the resolve is one round trip per track
+     * per session and runs on the beat worker, which is never waited on; the probe
+     * has the same 30 s window and 8 s deadline as every other one. Nothing is
+     * written back to the track, so the ordinary play path still resolves its own URL
+     * exactly as it did (a URL parked in {@code streamUrl} would send the next play
+     * down the cached-URL fast path, which skips the metadata enrichment that path
+     * leaves out). Every failure — no source, no beat, a decode that gives up — is
+     * today's behaviour: a boundary with no grid is simply not aligned.
+     */
+    private void requestEarlyBeatProfile(Track t) {
+        if (!transitionEnabled || !beatAlignmentEnabled) return;
+        if (!crossfadeStreamable(t)) return;    // a transition can never overlap BILI/LOCAL
+        // The per-key bookkeeping (already known / already in flight) belongs to
+        // probeBeatProfile alone: claiming the key here as well made the shared tail
+        // see its own claim and drop the probe, which is exactly the silent
+        // "no grid for B" this was written to remove (measured on the device).
+        probeBeatProfile(t, () -> resolveProbeSource(t));
+    }
+
+    /**
+     * Fetch the NEXT track's audio now, while the current one plays, so the boundary
+     * that will need it does not have to resolve a source inside its decision window.
+     *
+     * <p>Why this exists: a transition needs the incoming track's source <em>before</em>
+     * the boundary — a SILENCE_TRIM wants its measurement inside a nine-second lead,
+     * an overlap wants the player parked seventeen seconds early, and the kind and its
+     * alignment are decided 24 s out. A track that is already on disk is answered by
+     * the disk cache instantly ({@code resolveIncomingSource}); one that is not has to
+     * go through the official endpoint and then the unblock sources, measured on a
+     * real device at 1-9 s. So on a library that plays through unblock sources, an
+     * uncached next track routinely arrives too late and the boundary hard-cuts — the
+     * transition machinery was left choosing between a late fade and no fade at all.
+     *
+     * <p>This is the existing audio disk cache, not a second downloader: the same
+     * {@code DiskCache.cacheAudio} the ordinary play path fills, keyed the same way
+     * (by netease id), so the ordinary play path is unchanged and a pre-cached track
+     * is simply one that path already had ("play netease (audio cache)"). The resolved
+     * url is deliberately NOT written back onto the Track: a url parked in
+     * {@code streamUrl} would send the next ordinary play down the cached-url fast
+     * path, which skips the metadata enrichment that path leaves out.
+     *
+     * <p>Bounded on every other side too:
+     * <ul>
+     *   <li>only with the transition feature on, and only for a track that could be
+     *       transitioned into at all — a netease track ({@code DiskCache}'s audio
+     *       sub-cache is keyed by netease id, so a custom-API source has nothing to
+     *       cache under), never a trial clip and never BILI/LOCAL;</li>
+     *   <li>nothing is fetched when the file is already there;</li>
+     *   <li>nothing is fetched when the shared cache is already at its size budget:
+     *       the file would evict something the moment it landed (LRU, oldest first)
+     *       and buy a download nobody keeps. The existing eviction is the bound — the
+     *       user accepts that a pre-cache may be evicted later — this only refuses to
+     *       churn;</li>
+     *   <li>one at a time, and cancelled when the queue moves on: the generation is
+     *       bumped by every track start, and a task that is no longer the current next
+     *       track returns before it resolves or downloads anything. A download already
+     *       in flight is not interruptible through this cache (it is a plain stream
+     *       copy); it finishes, and the file it leaves is a valid cache entry for a
+     *       track the listener may still reach.</li>
+     * </ul>
+     */
+    private void precacheNextAudio(Track t) {
+        if (!transitionEnabled || t == null) return;
+        if (t.source != Track.Source.NETEASE || t.neteaseId == 0L || t.trial) return;
+        final long songId = t.neteaseId;
+        if (diskCache.getAudio(songId) != null) return;      // already local: nothing to fetch
+        long limitMb = diskCache.getMaxSizeMB();
+        if (limitMb > 0L && diskCache.totalSize() >= limitMb * 1024L * 1024L) {
+            Logger.info("transition: not pre-caching {}: the audio cache is at its {}MB budget",
+                    t.title, limitMb);
+            return;
+        }
+        final long generation = precacheGeneration.incrementAndGet();
+        final long durationMs = t.durationMs;
+        precacheWorker.submit(() -> {
+            if (generation != precacheGeneration.get()) return;   // the queue moved on
+            String url;
+            try {
+                url = resolveProbeSource(t);
+            } catch (Throwable e) {
+                Logger.warn("transition: pre-cache resolve failed for {}: {}", songId, e.toString());
+                return;
+            }
+            if (url == null || url.isEmpty()) {
+                // Normal: the official endpoint refused it and no unblock source had
+                // it. The boundary then resolves (and fails) the same way it always
+                // did — this is not a new failure mode.
+                Logger.info("transition: pre-cache found no source for {} ({})", songId, t.title);
+                return;
+            }
+            if (generation != precacheGeneration.get()) return;   // still the next track?
+            Logger.info("transition: pre-caching the next track ({}), {}s of it to fetch"
+                    + " before the boundary", t.title, durationMs > 0L ? durationMs / 1000L : -1L);
+            diskCache.cacheAudio(url, songId);
+            long bytes = new File(diskCache.audioPath(songId)).length();
+            if (bytes < plausibleAudioBytes(durationMs)) {
+                // What arrived is not this song: an unblock source that answers 200
+                // with an error page, or a truncated stream. Caching it would be worse
+                // than not caching at all — the ordinary play path prefers a cached
+                // file, so every later play of this track would open the bad file
+                // instead of streaming, which is playback damage the transition bought
+                // nothing for. Dropped, and the boundary streams as it did before.
+                diskCache.deleteAudio(songId);
+                Logger.warn("transition: pre-cache for {} ({}) kept only {} bytes, which is not"
+                        + " the song; dropped it so the play path streams instead", songId,
+                        t.title, bytes);
+                return;
+            }
+            Logger.info("transition: pre-cached the next track ({}): {}KB on disk, the boundary"
+                    + " will not have to resolve it", t.title, bytes / 1024L);
+        });
+    }
+
+    /** The least a real recording of {@code durationMs} can plausibly be: a floor in
+     *  absolute bytes for very short tracks, and otherwise a 64kbps-equivalent size —
+     *  the lowest bitrate any of the sources this app plays serves, well under what a
+     *  real file of that length weighs and far above an error page. */
+    private static long plausibleAudioBytes(long durationMs) {
+        long byDuration = durationMs > 0L ? durationMs / 1000L * 8_000L : 0L;
+        return Math.max(200_000L, byDuration);
+    }
+
+    /** A source to measure this track from, resolved the way the ordinary play path
+     *  resolves one — the official endpoint first, then the unblock sources, a trial
+     *  clip never — so that the grid describes the audio a transition will actually
+     *  meet. Blocking, so it is only ever called on a worker (the beat worker for a
+     *  grid, the pre-cache lane for a download); see {@link #requestEarlyBeatProfile}
+     *  for why it is resolved here rather than reusing the arm's own resolve. */
+    private String resolveProbeSource(Track t) {
+        if (t == null) return null;
+        if (t.source == Track.Source.NETEASE && t.neteaseId != 0L) {
+            try {
+                NeteaseClient.UrlInfo info = netease.songUrlInfo(t.neteaseId, playLevel);
+                if (info != null && !info.trial && info.url != null && !info.url.isEmpty()) {
+                    return info.url;
+                }
+            } catch (Throwable e) {
+                Logger.warn("beat probe: url resolve failed for {}: {}", t.neteaseId, e.getMessage());
+            }
+            if (!unblockEnabled) return null;
+            try {
+                return SongUnblocker.resolve(t.neteaseId, t.title, t.artist);
+            } catch (Throwable e) {
+                Logger.warn("beat probe: unblock failed for {}: {}", t.neteaseId, e.getMessage());
+                return null;
+            }
+        }
+        if (t.source == Track.Source.CUSTOM_API && t.customId != null && !t.customId.isEmpty()) {
+            try {
+                return CustomApiClient.resolveUrl(customApiConfig, t.customId);
+            } catch (Throwable e) {
+                Logger.warn("beat probe: custom url resolve failed for {}: {}", t.customId, e.getMessage());
+            }
+        }
+        return null;
+    }
+
+    /** The one beat probe: at most one per track key at a time, on the beat worker,
+     *  its result into the memory map and the disk cache, every failure silent.
+     *  {@code source} is asked for ON the worker, so the caller whose source has to
+     *  be resolved first does not do that resolve anywhere near the main thread. */
+    private void probeBeatProfile(Track t, java.util.function.Supplier<String> source) {
+        BeatProfiler profiler = beatProfiler;
+        if (profiler == null || t == null) return;
+        final String key = silenceKey(t);
+        if (key == null) return;
+        if (beatProfiles.containsKey(key) || !probingBeats.add(key)) return;
+        final long durationMs = t.durationMs;
+        beatWorker.submit(() -> {
+            BeatProfile p = null;
+            try {
+                if (beatProfileOf(t) != null) return;    // the disk cache already answered
+                String src = source.get();
+                if (src == null || src.isEmpty()) {
+                    Logger.info("beat probe: no source for {} yet", key);
+                    return;
+                }
+                p = profiler.probe(src, durationMs);
+            } catch (Throwable e) {
+                Logger.warn("beat probe failed for {}: {}", key, e.toString());
+            } finally {
+                probingBeats.remove(key);
+            }
+            if (p == null) {
+                // Normal, not an error: ambient, classical and speech have no beat
+                // to find, and every consumer treats a missing grid as "do what you
+                // did before". Logged so "no alignment ever happens" is explainable.
+                Logger.info("beat probe gave up for {}", key);
+                return;
+            }
+            beatProfiles.put(key, p);
+            diskCache.cacheBeat(key, p.toBytes());
+            Logger.info("beat profile for {}: {}", key, p);
+        });
+    }
+
+    /** A grid's BPM and confidence for a log line, or "none". */
+    private static String beatLabel(BeatProfile p) {
+        return p == null ? "none" : p.label();
+    }
+
+    /** The backend swapped players: the incoming track is audible from its own
+     *  start, so publish it exactly as playAt() would have — without reopening the
+     *  source it is already playing. Runs on the main thread. */
+    private void onCrossfadeComplete() {
+        int idx;
+        int from;
+        synchronized (crossfadeLock) {
+            if (!crossfadeRunning) return;
+            idx = crossfadeTargetIndex;
+            from = crossfadeFromIndex;
+            crossfadeRunning = false;
+            crossfadeArmed = false;
+            crossfadeTargetIndex = -1;
+            crossfadeFromIndex = -1;
+            crossfadeGeneration++;
+        }
+        // A promotion that lands after the user changed tracks is stale: the backend
+        // is playing something the queue no longer points at, so nothing is
+        // republished for it (a real selection has already called playAt()).
+        if (idx < 0 || idx >= queue.size() || from != playIndex) return;
+        // The ramp won its boundary, so any wait the outgoing track's own completion
+        // started is over (see autoAdvance).
+        outgoingEndedDuringRamp = false;
+        deferredAdvanceDeadlineMs = 0L;
+        Track t = queue.get(idx);
+        if (!crossfadeStreamable(t)) return;
+        // The outgoing track did play to the end of its ramp, so its scrobble is a
+        // natural end — and its length has to come from the capture at arm time,
+        // because the live clock already belongs to the incoming track.
+        pendingNaturalEnd = true;
+        long playedMs = outGoingPlayedMs();
+        outgoingScrobbleSecondsOverride = Math.max(0L, playedMs) / 1000L;
+        // The live position of the player this promotion just made audible: the
+        // incoming track was rolling (silently, then up the ramp) for the whole
+        // overlap, so this is how far into it the listener already is — and the
+        // position the progress bar, the lyric clock and playAt()'s handoff all have
+        // to carry on from. Logged because a value near 0 here is exactly the
+        // "the second song plays its intro twice" defect, and nothing else in the
+        // log would show it.
+        Logger.info("transition: promoted queue slot {} ({}) at {}ms", idx, t.title,
+                Math.max(0L, backend.position()));
+        playAt(idx, true);
+    }
+
+    /** How much of the outgoing track a completed transition let it play: its
+     *  length minus the tail the seam deliberately skipped when there is one (a
+     *  trim starts the seam at the measured content end, so the scrobble has to
+     *  report the music, not the silence after it). */
+    private long outGoingPlayedMs() {
+        SilenceTrimPlan plan = trimPlan;
+        long skipped = 0L;
+        if (transitionKind == TransitionKind.SILENCE_TRIM && plan != null) {
+            skipped = plan.tailMs;
+        } else {
+            skipped = CROSSFADE_TAIL_MS;
+        }
+        return crossfadeOutgoingMs - skipped;
+    }
+
+    /** The backend could not carry the transition through. The audible player is
+     *  back at its normal level and still playing the outgoing track, so all this
+     *  has to do is forget the transition: the ordinary end-of-track path (the
+     *  fade-out and, at the boundary, autoAdvance) is still intact. */
+    private void onCrossfadeAbandoned() {
+        int target;
+        synchronized (crossfadeLock) {
+            if (crossfadeTargetIndex < 0 && !crossfadeArmed && !crossfadeRunning) return;
+            target = crossfadeTargetIndex;
+            crossfadeGeneration++;
+            crossfadeTargetIndex = -1;
+            crossfadeFromIndex = -1;
+            crossfadeArmed = false;
+            crossfadeRunning = false;
+        }
+        // The backend released the incoming player itself (that is what an abort
+        // does), so the only record of how far it got is the one the backend took on
+        // its way out. An abandon after an overlap has already faded the next track
+        // up is the same "do not replay what was already heard" case as a promotion
+        // that lost its race.
+        rememberIncomingHeard(target, backend.droppedIncomingPosition());
+        Logger.info("transition: abandoned, falling back to the ordinary track switch");
+        // The ramp is not coming back, so a boundary whose outgoing track has already
+        // ENDED must be advanced here — nothing else is left to do it, and waiting
+        // would leave the queue silent at the end of the track. The advance runs
+        // through the ordinary path, which resumes the incoming slot at whatever the
+        // overlap had already played of it (see rememberIncomingHeard).
+        if (outgoingEndedDuringRamp) {
+            outgoingEndedDuringRamp = false;
+            deferredAdvanceDeadlineMs = 0L;
+            Logger.info("transition: the outgoing track had already ended; advancing now");
+            performAutoAdvance();
+        }
+    }
+
+    /** Drop any prepared/ramping incoming player and forget the transition. Safe to
+     *  call when there is none (the usual case: it runs on every playAt). */
+    private void clearCrossfade() {
+        boolean had;
+        int target;
+        synchronized (crossfadeLock) {
+            had = crossfadeTargetIndex >= 0 || crossfadeArmed || crossfadeRunning;
+            target = crossfadeTargetIndex;
+            crossfadeGeneration++;
+            crossfadeTargetIndex = -1;
+            crossfadeFromIndex = -1;
+            crossfadeArmed = false;
+            crossfadeRunning = false;
+        }
+        if (had) {
+            // Read before the player is gone: if the incoming was already rolling,
+            // the listener has heard that much of the next track, and the ordinary
+            // switch has to resume it there rather than at its beginning.
+            rememberIncomingHeard(target, backend.incomingPosition());
+            backend.cancelIncoming();
+        }
+    }
+
+    /** Record how much of a transition's incoming track the listener has already
+     *  heard, so the ordinary path can resume the slot at that point instead of
+     *  replaying its beginning (see {@link #droppedIncomingMs}). A parked incoming
+     *  that never rolled contributes nothing — the ordinary switch then behaves
+     *  exactly as it always has. */
+    private void rememberIncomingHeard(int nextIndex, long heardMs) {
+        if (nextIndex < 0 || heardMs <= 0L) return;
+        droppedIncomingIndex = nextIndex;
+        droppedIncomingMs = heardMs;
+        Logger.info("transition: slot {} had already been audible for {}ms; the ordinary"
+                + " switch resumes it there", nextIndex, heardMs);
+    }
+
+    /** Both ends of an overlapping transition have to be ordinary streams. A BILI
+     *  link is short lived and its picture belongs to the active player; a local
+     *  file would need a second decoder on the filesystem for no real gain. */
+    private static boolean crossfadeStreamable(Track t) {
+        return t != null
+                && (t.source == Track.Source.NETEASE || t.source == Track.Source.CUSTOM_API);
     }
 
     // --- Frame pump (render thread) --------------------------------------
@@ -2556,10 +4607,12 @@ public final class PlayerController {
      *  pump() and can be stale right at a transition) — same reasoning as
      *  {@link #saveQueue()}'s position capture. */
     private void scrobbleOutgoingTrack(boolean naturalEnd) {
+        long override = outgoingScrobbleSecondsOverride;
+        outgoingScrobbleSecondsOverride = -1L;
         if (playIndex < 0 || playIndex >= queue.size()) return;
         Track t = queue.get(playIndex);
         if (t.source != Track.Source.NETEASE || t.neteaseId == 0) return;
-        long seconds = Math.max(0L, backend.position()) / 1000L;
+        long seconds = override >= 0L ? override : Math.max(0L, backend.position()) / 1000L;
         if (seconds < 3) return;
         long songId = t.neteaseId;
         String end = naturalEnd ? "playend" : "ui";
@@ -2567,10 +4620,28 @@ public final class PlayerController {
     }
 
     private void playAt(int i) {
+        playAt(i, false);
+    }
+
+    /** {@code crossfadeHandoff} marks the one caller that is NOT opening a new
+     *  stream: the backend already ramped the next track in and it is audible from
+     *  its own start, so everything below that would reopen, pause or fade the
+     *  source is skipped and only the published state is refreshed. Every other
+     *  caller passes false and gets exactly the behaviour this method always had. */
+    private void playAt(int i, boolean crossfadeHandoff) {
         if (i < 0 || i >= queue.size()) return;
         // Any real local/remote selection supersedes a follower's delayed takeover.
         // The generation also makes an already-queued timeout callback harmless.
         cancelPendingTogetherAutoAdvance();
+        // Same for a transition: a prepared (or already ramping) incoming player
+        // belongs to a track boundary this call is moving away from, and the kind
+        // chosen for that boundary says nothing about the new one.
+        clearCrossfade();
+        resetTransitionDecision();
+        // A switch of its own supersedes any wait for a ramp to finish the boundary
+        // (see autoAdvance): the track this call opens is the one that plays now.
+        outgoingEndedDuringRamp = false;
+        deferredAdvanceDeadlineMs = 0L;
         // loadQueue() sets needsReplay because its restored track exists only as
         // metadata until the user resumes it. Any successful route into playAt(),
         // including clicking a different song first, is now taking responsibility
@@ -2586,7 +4657,54 @@ public final class PlayerController {
         // Consumed unconditionally on every call (see field comment), so a saved
         // session position only ever gets one shot at applying, and only to the
         // exact slot it was saved for.
-        long resumeMs = (i == pendingResumeIndex) ? Math.max(0L, pendingResumeMs) : 0L;
+        //
+        // A crossfade handoff instead uses the position the promoted player has
+        // already reached: it has been rolling (silently) since the ramp began, so
+        // the incoming track is that far in — the lyric clock, the progress bar and
+        // the saved queue position all have to start there rather than at 0. The
+        // overlap's own count of what it has already played (the incoming's start
+        // offset plus the ramp, which only ever ends at its full length) is a floor
+        // under that: a promoted player whose own clock comes back smaller — a
+        // stream that stalled during the ramp, a seek that never really landed — must
+        // not make the app hand the listener seconds it has already given it.
+        final long liveMs = Math.max(0L, backend.position());
+        // The ramp's length is wall clock; the incoming track's own timeline advances
+        // at the speed the mix put it on. A track the mix slowed to 95% has played 95%
+        // of the ramp's length of its own audio, and one it sped up has played more —
+        // so the floor under the promoted position is the entry plus the ramp scaled
+        // by that speed. Getting this wrong is not cosmetic: the floor is what stops
+        // the handoff from replaying the part of the next track the overlap already
+        // made audible, and a floor that is too high skips music.
+        final long overlapPlayedMs = crossfadeIncomingStartMs
+                + Math.round(crossfadeRampMs * Math.max(0d, incomingPlaySpeed));
+        long resume;
+        if (crossfadeHandoff) {
+            resume = Math.max(liveMs, overlapPlayedMs);
+            if (overlapPlayedMs > liveMs + 200L) {
+                Logger.warn("transition: the promoted player reports {}ms but the overlap"
+                        + " already played {}ms; resuming at the overlap's position so the"
+                        + " part already heard is not played twice", liveMs, overlapPlayedMs);
+            }
+        } else {
+            resume = (i == pendingResumeIndex) ? Math.max(0L, pendingResumeMs) : 0L;
+            // See droppedIncomingMs: a transition that was given up instead of
+            // promoted leaves this switch to open a track the overlap has already
+            // made audible, and it has to resume where that got to. Only for the
+            // automatic advance — a track picked by hand starts at its beginning.
+            if (i == autoAdvanceTarget && droppedIncomingIndex == i && droppedIncomingMs > 0L) {
+                long heard = droppedIncomingMs;
+                long withHeard = Math.max(resume, heard);
+                Logger.info("playAt: slot {} starts at {}ms, not {}ms — the dropped overlap"
+                        + " had already played {}ms of it", i, withHeard, resume, heard);
+                resume = withHeard;
+            }
+        }
+        final long resumeMs = resume;
+        // One-shot, whichever branch consumed them: a reading taken for one boundary
+        // must never leak into the next track's own switch.
+        droppedIncomingMs = -1L;
+        droppedIncomingIndex = -1;
+        autoAdvanceTarget = -1;
         pendingResumeMs = 0L;
         pendingResumeIndex = -1;
         beginLyricClockLoad(resumeMs);
@@ -2601,7 +4719,14 @@ public final class PlayerController {
         // so this never adds perceptible wait on top of that; backend.pause() only
         // runs once the ramp reaches silence. Nothing to fade when already silent
         // (fresh start, already paused) — pause immediately as before.
-        if (fadeEnabled && backend.isPlaying()) {
+        if (crossfadeHandoff) {
+            // Nothing to fade out: the backend released the outgoing player when it
+            // promoted this one. Settle the controller's own gain so its next fade
+            // tick cannot inherit anything the overlap left behind, and so the
+            // shared backend volume describes the audible track again.
+            cancelFadeAtGain(1f);
+            fadeOutDoneForTrack = false;
+        } else if (fadeEnabled && backend.isPlaying()) {
             startFadeOut(FADE_OUT_MS, () -> backend.pause());
         } else {
             backend.pause();
@@ -2660,7 +4785,22 @@ public final class PlayerController {
         });
         updateCover(t, i, currentCoverRevision);
 
-        if (t.source == Track.Source.LOCAL) {
+        if (crossfadeHandoff) {
+            // What backend.onStarted() normally does for a freshly opened source.
+            // The promoted player never re-prepares, so no such callback is coming:
+            // without this the loading sweep would spin on for ever and a retry
+            // counter (or a stale lyric-clock baseline) belonging to the outgoing
+            // track would survive into this one.
+            errorRetryId = -1;
+            biliErrorRetryBvid = null;
+            consecutivePlaybackFailures = 0;
+            stoppedLyricPositionMs = Math.max(0L, backend.position());
+            playbackStarted = true;
+            post(() -> loading.set(false));
+            playingIntent = true;
+            post(() -> playing.set(true));
+            notifyPlayback();
+        } else if (t.source == Track.Source.LOCAL) {
             String src = t.playable();
             if (src == null || src.isEmpty()) return;
             loadLocalLyrics(t);
@@ -2956,6 +5096,109 @@ public final class PlayerController {
         Track prev = queue.get((cur - 1 + n) % n);
         preloadTrack(next);
         if (prev != next) preloadTrack(prev);
+        warmCurrentSilenceProfile();
+        // ... and the NEXT track's grid even when its audio is not on disk. The
+        // cached case above has already been asked for by preloadTrack; this is the
+        // streamed case (see requestEarlyBeatProfile for why the preload is the last
+        // moment early enough), and it is deliberately the next track only — a
+        // transition only ever overlaps into the slot that follows this one, so a grid
+        // for prev would be a resolve and a decode nobody ever asks for.
+        requestEarlyBeatProfile(next);
+        prefetchAiTransition(cur, next);
+        // ... and its audio, long before the boundary needs it (see precacheNextAudio):
+        // a library that plays through the unblock sources spends 1-9s resolving one,
+        // which is later than the boundary can wait for it.
+        precacheNextAudio(next);
+    }
+
+    /**
+     * The moment a pair becomes known, and therefore the moment to ask the AI about
+     * it: minutes before the boundary, off the playback path, so the answer is
+     * waiting instead of being awaited. This is where the "never on the playback
+     * path" promise is kept — {@code tickCrossfade} only ever reads what this has
+     * already stored.
+     *
+     * <p>Runs on the main thread but does no work itself: the chooser decides
+     * whether the pair is worth asking about (an AI configured at all, both sides
+     * streamable, both lengths known, not already known or in flight) and the
+     * request itself is handed to the chooser's own worker.
+     */
+    private void prefetchAiTransition(int cur, Track next) {
+        AiTransitionChooser chooser = aiTransitionChooser;
+        if (chooser == null || !transitionEnabled || next == null) return;
+        Track current = currentTrack();
+        // How much of the current track is left, for the prompt: the live clock when
+        // there is one, the metadata otherwise (this runs right after a track
+        // started, when an async prepare may not have reported its duration yet).
+        long dur = backend.duration();
+        if (dur <= 0L) dur = current != null ? current.durationMs : 0L;
+        long remaining = dur > 0L ? Math.max(0L, dur - Math.max(0L, backend.position())) : 0L;
+        chooser.prefetch(new TransitionContext(current, next, remaining, dur,
+                crossfadeStreamable(current), crossfadeStreamable(next)), "preload");
+    }
+
+    /** Measure the playing track's own ends now that its source is known, so a
+     *  boundary that wants to trim the silence only has the INCOMING end left to
+     *  measure inside its lead window. The same moment is when its beat grid is
+     *  asked for (P4: a boundary that will overlap needs both tracks' grids, and one
+     *  of them is always the track that is already playing). Silent no-op without a
+     *  profiler, with the feature off, or when the source is not known yet (the
+     *  netease url arrives asynchronously, after this runs). */
+    private void warmCurrentSilenceProfile() {
+        warmTrackProfiles(currentTrack(), null);
+    }
+
+    /** Ask for both of a track's measurements, from the source it is standing on
+     *  when that is known (the cached file, or the url this session resolved) and
+     *  from {@code knownSrc} otherwise — the one caller that has the source in hand
+     *  but not yet on the track. Fire and forget on the same workers as every other
+     *  probe: the answers land in the caches and the next boundary that asks picks
+     *  them up. BILI and LOCAL are never measured: a transition can neither overlap
+     *  them nor trim against them, so a grid or a silence window for one is pure
+     *  cost. */
+    private void warmTrackProfiles(Track t, String knownSrc) {
+        if (!transitionEnabled || t == null) return;
+        if (!crossfadeStreamable(t)) return;
+        String src = measureSourceOf(t);
+        if ((src == null || src.isEmpty()) && knownSrc != null && !knownSrc.isEmpty()) src = knownSrc;
+        if (src == null || src.isEmpty()) return;
+        requestSilenceProfile(t, src);
+        if (beatAlignmentEnabled) requestBeatProfile(t, src);
+    }
+
+    /**
+     * The playing track's own measurements, a few seconds after it starts.
+     *
+     * <p>This is the one place the CURRENT track is asked for anything, and without
+     * it a track that never arrived as some other track's "next" is never measured at
+     * all: {@link #warmCurrentSilenceProfile} runs at the end of playAt(), which is
+     * also the moment its own url is still being resolved, so it finds no source and
+     * asks for nothing. A restored queue is the clearest case — the app starts on a
+     * track no preload ever touched (the preload runs for the track after it), so
+     * both sides of its first boundary answer "no grid" and the overlap runs
+     * unaligned — but the same hole exists for the first track of any queue.
+     *
+     * <p>Called with the source playBackend() is actually opening, which is the first
+     * moment this track has one; the work is deferred by
+     * {@link #PROFILE_WARM_DELAY_MS} so app start and the track change itself are not
+     * loaded with a decode. A newer playback start takes the warm over (the generation
+     * check), and the probe's own per-key bookkeeping keeps it once per track.
+     */
+    private void warmCurrentTrackProfilesSoon(final Track t, final String src, final int index) {
+        if (!transitionEnabled || t == null || !crossfadeStreamable(t)) return;
+        final long generation = profileWarmGeneration.incrementAndGet();
+        try {
+            profileWarmWorker.schedule(() -> {
+                // A warm belongs to the playback start that asked for it: after a
+                // track change (the normal case for anyone skipping) the track it
+                // would measure is not the one playing any more.
+                if (generation != profileWarmGeneration.get()) return;
+                if (playIndex != index) return;
+                warmTrackProfiles(t, src);
+            }, PROFILE_WARM_DELAY_MS, TimeUnit.MILLISECONDS);
+        } catch (Throwable e) {
+            Logger.warn("profile warm could not be scheduled: {}", e.toString());
+        }
     }
 
     private void preloadTrack(Track t) {
@@ -2971,6 +5214,22 @@ public final class PlayerController {
                 byte[] data = loadCoverBytes(tr);
                 if (data != null) tr.coverBytes = data;
             });
+        }
+        // Warm this track's silence measurement when its audio is already on disk:
+        // a transition that wants to trim the seam can then plan it the moment the
+        // boundary is decided, instead of measuring inside the nine-second lead.
+        // A streamed track has no url yet at this point, so it is measured later (or
+        // not at all) — see armSilenceTrim.
+        if (t.source == Track.Source.NETEASE && t.neteaseId != 0L) {
+            String cached = diskCache.getAudio(t.neteaseId);
+            if (cached != null) {
+                requestSilenceProfile(t, cached);
+                // ... and its beat grid (P4), on the same reasoning: a transition
+                // that wants to align the two grids needs the incoming track's as
+                // well, and a track whose audio is already on disk costs nothing to
+                // measure now rather than inside a boundary's lead window.
+                requestBeatProfile(t, cached);
+            }
         }
     }
 
@@ -3235,18 +5494,45 @@ public final class PlayerController {
             scheduleTogetherAutoAdvanceFallback();
             return;
         }
+        // A ramp that is already RUNNING owns this boundary: it is at most
+        // CROSSFADE_TAIL_MS from promoting the incoming track, which the listener can
+        // already hear (the overlap faded it up). Letting the ordinary switch cut in
+        // here is exactly how a track that was already audible used to be thrown away
+        // and reopened from its beginning — the outgoing player's own completion
+        // must not steal a boundary the transition is in the middle of.
+        //
+        // Only a running ramp qualifies: an incoming that is merely prepared (parked,
+        // silent) has nothing to promote yet, and deferring to it would leave the
+        // queue waiting on a track that has already ended. A watchdog in tickFade
+        // covers the one way a running ramp can fail to report back (its tick never
+        // arrives), so the queue can never be stranded here.
+        if (crossfadeRampRunning()) {
+            outgoingEndedDuringRamp = true;
+            deferredAdvanceDeadlineMs = System.currentTimeMillis() + ADVANCE_DEFERRAL_MS;
+            Logger.info("transition: the outgoing track ended while the overlap was still"
+                    + " ramping; letting the ramp finish instead of cutting to slot {}",
+                    (playIndex + 1) % queue.size());
+            return;
+        }
         performAutoAdvance();
     }
 
     private void performAutoAdvance() {
+        // The boundary is being taken by the ordinary switch, and (if it was armed for
+        // this exact slot) that switch has to resume the incoming track where the
+        // overlap left it off — see droppedIncomingMs. Marked as automatic so a track
+        // the listener picks by hand still starts at its beginning.
         switch (playMode.peek()) {
             case 2:
+                autoAdvanceTarget = playIndex;
                 playAt(playIndex);
                 break;
             default:
                 // Shuffle and list-loop walk the fixed queue order; shuffle's
                 // randomness was already baked in by applyShuffleMode.
-                playAt((playIndex + 1) % queue.size());
+                int next = (playIndex + 1) % queue.size();
+                autoAdvanceTarget = next;
+                playAt(next);
                 break;
         }
     }
@@ -5448,6 +7734,11 @@ public final class PlayerController {
      *  is blocked makes at most one full pass instead of spinning forever. */
     private void skipUnplayable(int expectedIndex, String reason) {
         if (playIndex != expectedIndex) return;
+        // Logged (never was): a skipped track used to leave nothing but a toast, so
+        // "the song changed by itself / it started from the beginning again" had no
+        // line to look at.
+        Logger.warn("playback: giving up on slot {} ({}), failure {}", expectedIndex, reason,
+                consecutivePlaybackFailures + 1);
         consecutivePlaybackFailures++;
         int failures = consecutivePlaybackFailures;
         if (queue.size() <= 1 || failures >= queue.size()) {
@@ -7516,6 +9807,7 @@ public final class PlayerController {
         customWorker.shutdownNow();
         customSearchWorker.shutdownNow();
         cacheWorker.shutdownNow();
+        precacheWorker.shutdownNow();
         lyricWorker.shutdownNow();
         retryWorker.shutdownNow();
         monetFetchWorker.shutdownNow();

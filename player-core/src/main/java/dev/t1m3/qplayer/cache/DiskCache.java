@@ -17,8 +17,9 @@ import java.util.Arrays;
 /**
  * Unified disk cache for audio files, lyrics and cover images.
  * <p>
- * Four sub-directories under {@code AppDirs.cacheBase()/cache/}:
- * {@code audio/}, {@code lyric/}, {@code image/}, {@code thumb64/}.
+ * Seven sub-directories under {@code AppDirs.cacheBase()/cache/}:
+ * {@code audio/}, {@code lyric/}, {@code image/}, {@code thumb64/},
+ * {@code silence/}, {@code transition/}, {@code beat/}.
  * <p>
  * LRU eviction by last-modified time: after every write the total size is
  * checked against {@link #maxSizeBytes} and oldest files are deleted until
@@ -43,10 +44,46 @@ public final class DiskCache {
      *  sub-caches share, since a meaningful byte budget for images this tiny
      *  would be a near-unlimited file count anyway. */
     public static final String THUMB64 = "thumb64";
+    /** Per-track silence measurements (two ints: leading and trailing silence in
+     *  ms) for {@code TransitionKind.SILENCE_TRIM}. Its own sub-directory because
+     *  it is not media at all — a few bytes describing a decoded window — and
+     *  because a measurement outlives every other entry for the same track: it
+     *  stays valid as long as the audio itself does, while the audio file may be
+     *  evicted and re-downloaded underneath it. */
+    public static final String SILENCE = "silence";
+    /** Per-<em>pair</em> transition decisions (kind + overlap + curve, eight bytes)
+     *  for the AI-backed {@code TransitionChooser}: the same two tracks are asked
+     *  about once, and every later play of that pair — this session or the next,
+     *  online or offline — is answered from here instead of from a network round
+     *  trip. A decision is only as good as the metadata it was made from, which is
+     *  why the key is the pair's identity rather than the tracks' contents.
+     *  Capped by file *count* ({@link #TRANSITION_MAX_COUNT}): the entries are a
+     *  handful of bytes each, so the byte budget the media sub-caches share would
+     *  never evict them before the directory itself became a problem. */
+    public static final String TRANSITION = "transition";
+    /** Per-track beat grids (tempo, phase, confidence — twelve bytes) for the
+     *  overlap alignment: the incoming track starts on one of its own beats and the
+     *  outgoing track's ramp starts on one of its, so the two grids meet instead of
+     *  overlapping arbitrarily. Same reasoning as {@link #SILENCE} — a measurement
+     *  outlives the audio file it was taken from, and it costs a decode to make — but
+     *  its own sub-directory because it is a different measurement of the same track
+     *  and nothing may confuse the two. Capped by file count
+     *  ({@link #BEAT_MAX_COUNT}), like the pair decisions: twelve bytes never
+     *  approach the byte budget, so the only thing that can grow is the count. */
+    public static final String BEAT = "beat";
 
     /** Oldest files (by lastModified) are deleted once the count exceeds this,
      *  every time a new one is cached — see {@link #cacheThumb64}. */
     private static final int THUMB64_MAX_COUNT = 128;
+
+    /** Same idea for {@link #TRANSITION}: a pair decision is eight bytes, so the
+     *  only thing that can grow unboundedly is the number of them. Two thousand
+     *  pairs is far more than any queue walks through, and deleting the oldest
+     *  costs nothing but one more question to the model. */
+    private static final int TRANSITION_MAX_COUNT = 2_000;
+
+    /** Same idea for {@link #BEAT}: one grid per track, twelve bytes each. */
+    private static final int BEAT_MAX_COUNT = 2_000;
 
     private volatile long maxSizeBytes;
 
@@ -109,6 +146,32 @@ public final class DiskCache {
         return baseDir + "/" + THUMB64 + "/" + Math.abs(url.hashCode()) + ".img";
     }
 
+    /** Resolve cache file for a track's beat grid, keyed by the same track key the
+     *  silence measurement and the pair decisions use (song id / custom id / source
+     *  string) — one track, one name, in every cache that describes it. */
+    public String beatPath(String key) {
+        if (key == null || key.isEmpty()) return null;
+        return baseDir + "/" + BEAT + "/" + Math.abs(key.hashCode()) + ".bpm";
+    }
+
+    /** Resolve cache file for a track's silence measurement, keyed by the
+     *  track's own cache key (song id / custom id / source string — the caller
+     *  builds it, see PlayerController's silenceKey). Hashed like
+     *  {@link #imagePath}, since a local file path is a legal key too. */
+    public String silencePath(String key) {
+        if (key == null || key.isEmpty()) return null;
+        return baseDir + "/" + SILENCE + "/" + Math.abs(key.hashCode()) + ".sil";
+    }
+
+    /** Resolve cache file for one pair's transition decision, keyed by the pair's
+     *  own key ({@code outgoingKey + ">" + incomingKey} — see
+     *  {@code TransitionPlan.pairKey}). Hashed like {@link #silencePath}, for the
+     *  same reason: a local file path is a legal half of a key. */
+    public String transitionPath(String key) {
+        if (key == null || key.isEmpty()) return null;
+        return baseDir + "/" + TRANSITION + "/" + Math.abs(key.hashCode()) + ".trn";
+    }
+
     // ---- existence check -------------------------------------------------
 
     public boolean hasAudio(long neteaseId) {
@@ -136,6 +199,21 @@ public final class DiskCache {
 
     public boolean hasThumb64(String url) {
         String p = thumb64Path(url);
+        return p != null && new File(p).exists();
+    }
+
+    public boolean hasBeat(String key) {
+        String p = beatPath(key);
+        return p != null && new File(p).exists();
+    }
+
+    public boolean hasSilence(String key) {
+        String p = silencePath(key);
+        return p != null && new File(p).exists();
+    }
+
+    public boolean hasTransition(String key) {
+        String p = transitionPath(key);
         return p != null && new File(p).exists();
     }
 
@@ -171,6 +249,24 @@ public final class DiskCache {
     /** Return the cached 64x64 thumbnail file path, or null. */
     public String getThumb64(String url) {
         String p = thumb64Path(url);
+        return touch(p);
+    }
+
+    /** Return the cached beat-grid file path, or null. */
+    public String getBeat(String key) {
+        String p = beatPath(key);
+        return touch(p);
+    }
+
+    /** Return the cached silence-measurement file path, or null. */
+    public String getSilence(String key) {
+        String p = silencePath(key);
+        return touch(p);
+    }
+
+    /** Return the cached pair-decision file path, or null. */
+    public String getTransition(String key) {
+        String p = transitionPath(key);
         return touch(p);
     }
 
@@ -213,12 +309,36 @@ public final class DiskCache {
         evictThumb64IfOverCount();
     }
 
+    /** Write a track's beat grid (see {@link #BEAT}), then evict the oldest grids
+     *  past {@link #BEAT_MAX_COUNT} — a count cap, like the pair decisions', for the
+     *  same reason. */
+    public void cacheBeat(String key, byte[] data) {
+        writeBytes(data, beatPath(key));
+        evictCountCapped(BEAT, BEAT_MAX_COUNT, "beat");
+    }
+
+    /** Write a track's silence measurement (see {@link #SILENCE}). Tiny, but it
+     *  saves a decode window per boundary, and the same measurement is read back
+     *  for as long as the audio exists. */
+    public void cacheSilence(String key, byte[] data) {
+        writeBytes(data, silencePath(key));
+    }
+
+    /** Write one pair's transition decision (see {@link #TRANSITION}), then evict
+     *  the oldest decisions past {@link #TRANSITION_MAX_COUNT} — a count cap, like
+     *  the thumbnails': eight bytes per entry never approaches the byte budget, so
+     *  the file count is the only thing worth bounding. */
+    public void cacheTransition(String key, byte[] data) {
+        writeBytes(data, transitionPath(key));
+        evictCountCapped(TRANSITION, TRANSITION_MAX_COUNT, "transition");
+    }
+
     // ---- size & cleanup ---------------------------------------------------
 
-    /** Total bytes used by all four cache sub-directories. */
+    /** Total bytes used by all seven cache sub-directories. */
     public long totalSize() {
         long total = 0;
-        for (String sub : new String[]{AUDIO, LYRIC, IMAGE, THUMB64}) {
+        for (String sub : new String[]{AUDIO, LYRIC, IMAGE, THUMB64, SILENCE, TRANSITION, BEAT}) {
             total += dirSize(new File(baseDir, sub));
         }
         return total;
@@ -226,7 +346,7 @@ public final class DiskCache {
 
     /** Delete all cached files. */
     public void clearAll() {
-        for (String sub : new String[]{AUDIO, LYRIC, IMAGE, THUMB64}) {
+        for (String sub : new String[]{AUDIO, LYRIC, IMAGE, THUMB64, SILENCE, TRANSITION, BEAT}) {
             deleteRecursive(new File(baseDir, sub));
         }
     }
@@ -304,8 +424,13 @@ public final class DiskCache {
         long total = totalSize();
         if (total <= limit) return;
 
-        // Collect all cache files across all sub-dirs.
-        File[] dirs = {new File(baseDir, AUDIO), new File(baseDir, LYRIC), new File(baseDir, IMAGE)};
+        // Collect all cache files across all sub-dirs. SILENCE (and its tiny
+        // relatives TRANSITION and BEAT) is in the list even though it can never make
+        // eviction work: leaving an undeletable sub-cache counted would mean the loop
+        // below deletes every other file and still never reaches the limit.
+        File[] dirs = {new File(baseDir, AUDIO), new File(baseDir, LYRIC),
+                new File(baseDir, IMAGE), new File(baseDir, SILENCE),
+                new File(baseDir, TRANSITION), new File(baseDir, BEAT)};
         java.util.List<File> files = new java.util.ArrayList<>();
         for (File dir : dirs) {
             if (dir.isDirectory()) {
@@ -338,6 +463,21 @@ public final class DiskCache {
         // its cap it fires on each one -- a line here is pure noise, not a signal.
         for (int i = 0; i < overBy; i++) {
             files[i].delete();
+        }
+    }
+
+    /** Count (not byte-size) cap on a sub-cache whose entries are a handful of
+     *  bytes: delete the oldest files once there are more than {@code maxCount}.
+     *  Logged, unlike the thumbnail trim: these entries are written once per track
+     *  or pair rather than once per playlist row, so a line here is information. */
+    private void evictCountCapped(String subDir, int maxCount, String label) {
+        File dir = new File(baseDir, subDir);
+        File[] files = dir.listFiles();
+        if (files == null || files.length <= maxCount) return;
+        Arrays.sort(files, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+        int overBy = files.length - maxCount;
+        for (int i = 0; i < overBy; i++) {
+            if (files[i].delete()) Logger.info("disk cache evicted ({}): {}", label, files[i].getName());
         }
     }
 
