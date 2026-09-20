@@ -279,6 +279,18 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         return v instanceof String ? (String) v : "";
     }
 
+    /**
+     * The curve a 「淡化曲线」 index names: the row's options are, in order,
+     * {@code FadeCurve.LINEAR}, {@code EQUAL_POWER} and {@code DJ_BLEND} — taken from
+     * the enum rather than hard-coded per index, so a fourth shape added to the enum
+     * cannot silently become "linear" here.
+     */
+    static dev.t1m3.qplayer.audio.FadeCurve curveOf(int index) {
+        dev.t1m3.qplayer.audio.FadeCurve[] curves = dev.t1m3.qplayer.audio.FadeCurve.values();
+        if (index < 0 || index >= curves.length) return dev.t1m3.qplayer.audio.FadeCurve.DJ_BLEND;
+        return curves[index];
+    }
+
     /** Host-side write (not from QML) — same path, so effects still run. */
     public void put(String key, Object value) {
         setValue(key, value);
@@ -517,17 +529,16 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
             kind = kinds.get(Math.min(kindIndex, kinds.size()) - 1);
         }
         controller.setTransitionKindOverride(kind);
-        controller.setFadeCurve(intOf(SettingsCatalog.TRANSITION_CURVE_KEY) == 1
-                ? dev.t1m3.qplayer.audio.FadeCurve.EQUAL_POWER
-                : dev.t1m3.qplayer.audio.FadeCurve.LINEAR);
+        controller.setFadeCurve(curveOf(intOf(SettingsCatalog.TRANSITION_CURVE_KEY)));
         controller.setBeatAlignmentEnabled(bool(SettingsCatalog.BEAT_ALIGN_KEY));
-        // ⚠️ No 合拍改调 row any more: nothing stretches a tempo or shifts a pitch
-        // (see PlayerController.bassSwapEnabled / IncomingMix), so the rows that
-        // refine 「智能过渡」 are 节拍对齐 and 低频互换 and nothing else.
+        // The rows that refine 「智能过渡」 are 节拍对齐, 低频互换 and the curve. Tempo and
+        // key are not settings any more than they are gates: the controller measures
+        // them per pair and applies whatever is small enough to be inaudible (see
+        // MixNaturaliser), on the incoming track only, and a pair it cannot measure is
+        // simply overlapped untouched.
         controller.setBassSwapEnabled(bool(SettingsCatalog.BASS_SWAP_KEY));
         controller.setAiTransitionConfig(str("aiBaseUrl"), str("aiApiKey"), str("aiModel"),
-                intOf("aiTimeoutMs"));
-    }
+                intOf("aiTimeoutMs"));    }
 
     private void pushCustomApi() {
         if (controller == null) return;

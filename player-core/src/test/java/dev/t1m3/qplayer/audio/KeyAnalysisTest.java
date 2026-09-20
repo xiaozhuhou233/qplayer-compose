@@ -231,8 +231,8 @@ public class KeyAnalysisTest {
      * The reason the strength is no longer the margin to the plain runner-up, stated
      * as a measurement: a natural-minor loop is read as its relative major (the
      * familiar honest ambiguity) and the strength must not care, because those two
-     * readings are the same Camelot number and {@code MixMatch} mixes them either
-     * way. Under the old measure this exact material scored in the same band as white
+     * readings are the same Camelot number and {@code MixNaturaliser} mixes them
+     * either way. Under the old measure this exact material scored in the same band as white
      * noise.
      */
     @Test

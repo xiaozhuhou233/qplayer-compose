@@ -103,8 +103,8 @@ public final class HeuristicTransitionChooser implements TransitionChooser {
         //    the kind's default (fifteen seconds, the ordinary target — raised
         //    further by the controller when the outgoing track's own ending is
         //    measured to be plain) and the curve is named with it (see plan()): a
-        //    long ramp whose two sides only add up to half power in the middle is the
-        //    audible dip the 等功率 curve exists for.
+        //    symmetric ramp over a window this long spends most of itself with one
+        //    track alone, which is heard as a fade rather than as a mix.
         return TransitionKind.CROSSFADE;
     }
 
@@ -113,24 +113,27 @@ public final class HeuristicTransitionChooser implements TransitionChooser {
      * pair got what it got (the chooser labels the branch it took, which is the one
      * thing a decision needs to be auditable from the log).
      *
-     * <p>A CROSSFADE over its default (long, 15 s) overlap is long enough that the
-     * linear pair's ~3 dB dip at the middle of the ramp is heard as the music
-     * dropping, so that branch names {@link FadeCurve#EQUAL_POWER} — which is the one
-     * thing the plan layer already does for every long overlap. The 「淡化曲线」
-     * setting is not overridden by accident: the plan carries the choice and the
-     * boundary's log line prints it, and a forced kind or an AI answer that names its
-     * own curve still goes through untouched.
+     * <p>A CROSSFADE over its default (long, 15 s) overlap is long enough that a
+     * symmetric pair — linear or equal power — is heard as a fade: the two levels are
+     * only comparable near the middle of the window, so about two fifths of it has
+     * both tracks audible and the rest is one track rising or the other one falling.
+     * That branch therefore names {@link FadeCurve#DJ_BLEND}, the staged shape whose
+     * measured both-audible share is about two thirds of the window (see
+     * {@link FadeCurve#bothAudibleMs(long)}). A forced kind or an AI answer that names
+     * its own curve still goes through untouched, and the plan carries whichever was
+     * chosen so the boundary's log line prints it.
      */
     @Override
     public TransitionPlan plan(TransitionContext ctx) {
         TransitionKind kind = choose(ctx);
         if (kind == TransitionKind.CROSSFADE) {
             return TransitionPlan.of(kind, TransitionPlan.defaultOverlapMs(kind),
-                    FadeCurve.EQUAL_POWER,
+                    FadeCurve.DJ_BLEND,
                     "rule: two ordinary streams with room ahead, so the ordinary "
                             + (TransitionPlan.OVERLAP_LONG_MS / 1000L) + "s overlap"
-                            + " (equal power: a ramp this long with a linear pair dips"
-                            + " about 3dB in the middle)");
+                            + " (DJ 式: a symmetric ramp this long is heard as a fade — both"
+                            + " tracks are only within 6dB of each other for about two fifths"
+                            + " of it)");
         }
         if (kind == TransitionKind.SILENCE_TRIM) {
             return TransitionPlan.of(kind, TransitionPlan.defaultOverlapMs(kind), null,

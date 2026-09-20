@@ -107,8 +107,9 @@ public interface AudioBackend {
     }
 
     /**
-     * Same, with the mix the incoming player should be prepared for — now a single
-     * instruction (when the low end hands over, see {@link IncomingMix}).
+     * Same, with the mix the incoming player should be prepared for: the tempo it is
+     * pulled to, the semitones it is transposed by, and when the low end hands over
+     * (see {@link IncomingMix}, {@link MixNaturaliser}).
      *
      * <p>It travels with the prepare rather than with the ramp because the player is
      * prepared asynchronously and the instruction is attached to it, not to the gain
@@ -116,11 +117,14 @@ public interface AudioBackend {
      * {@link #incomingMix()}, so the caller learns the answer from the backend rather
      * than from an optimistically returned flag.
      *
-     * <p>⚠️ No implementation may start a player prepared this way: the caller parks it
-     * at an offset that its overlap is supposed to make audible <em>first</em>, and a
-     * player that rolls from the moment it prepares silently eats that much of the next
-     * track. Note also that a mix can never ask for a different tempo or pitch — the
-     * app does not stretch or transpose anything.
+     * <p>⚠️ A player prepared this way must not be left rolling: the caller parks it at
+     * an offset its overlap is supposed to make audible <em>first</em>, and a player
+     * that rolls from the moment it prepares silently eats that much of the next track.
+     * A backend whose platform starts a player as a side effect of applying the mix
+     * (Android's {@code setPlaybackParams} does) is responsible for putting it back
+     * before the prepare callback returns. The mix is a set of corrections applied to
+     * the incoming track for the length of the overlap — never a condition on the blend
+     * happening, and never anything the audible track hears.
      *
      * @return false when the source cannot be opened or the backend has no second
      *         player — never because of the mix, which is best-effort by definition.

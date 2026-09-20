@@ -125,21 +125,21 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
    `KeyAnalysis` 去掉 log 压缩、强度改成"与不可能混的调"的余量、新增 `KeyProfile.MIN_TRIAD` 第二把门、
    `MixMatch` 不再把"移调没意义"当成"调打架"、磁盘格式 VERSION 5；过门 9/36 → 21/36，
    **第一次在两首不同的歌上跑出变速+移调+低频互换（已装机验证）** —— 见第七节第九轮。**
-   **下一步第一件事仍然是**听感**（第四/五/八/九轮都没让任何一次
-   过渡真的播给人听过；第五轮只证明了 8000ms 兜底"进了状态机并开始 ramp"），优先确认：
-   (a) **合适的对子到底能不能跑出变速/改调**（日志里找 `incoming mix applied ... platform reports
-   speed x...`；若每条合适的边界都是 `the backend did not apply the mix`，说明这台设备在 parked
-   状态下不接受 `setPlaybackParams`，按第七节第四轮风险 1 处理）；
-   (b) 10 秒重叠 + 双份鼓组听起来是否真的比 4 秒好（这是整轮的核心假设，只有耳朵能判）；
-   (c) 晋升后 6 秒的速度/音高还原能不能听出来；
-   (d) 低频互换那一刀是不是太狠（`BASS_SWAP_HZ` / 增益上限都可调）；
-   (e) 线性曲线的中点凹陷（设置里「淡化曲线」可直接切等功率对比）；
-   (f) 自动规则把"不同专辑的长歌"判成 静音裁切 是否正确（若听着别扭，
+   **第十一轮（2026-09-20：变速/改调以自然化器回归、曲线换成 DJ 式分阶段、`align=on` 5/7、
+   两首同响 41%→67%，已装机验证）见第七节末尾。**
+   **下一步第一件事仍然是**听感**（第四/五/八/九/十/十一轮都没让任何一次过渡真的播给人听过），
+   第十一轮末尾列了"没人听过"的具体清单，优先确认：
+   (a) **DJ 式曲线 + 16.5s 重叠**听起来是不是真的不只是"淡入淡出"（先听
+   `Life's A Mess → death bed` 这条：日志里 `both tracks audible … (67%)`）；
+   (b) 中段约 +2dB 的抬升是否显得"音量跳"，以及低频互换那一刀是不是太狠
+   （`BASS_SWAP_HZ` / `FadeCurve.DJ_BLEND` 的两个指数 / 增益上限都可调）；
+   (c) 晋升后 6 秒的速度/音高还原能不能听出来（`easing the promoted track back …`）；
+   (d) 自动规则把"收尾有实测静音的长歌"判成 静音裁切 是否正确（若听着别扭，
    `HeuristicTransitionChooser` 的规则可整段替换）。
    ⚠️ 真机（efaa83b2）的 `transitionKind` 一度从 2（强制交叉淡化）改成 **0（自动）**，
    否则 AI 选择器永远不会被问到；要回到强制模式在设置里改回「过渡方式」即可。
-   ⚠️ 想快速试到"混音"这条路，挑两首 BPM 接近（±8% 以内）、调性相近的歌，
-   并把「过渡方式」先留「自动」——强制某个 kind 会跳过 chooser，但**不会**跳过 `MixMatch`
+   ⚠️ 想快速试到"混音"这条路，挑两首**收尾没有 ≥1.2s 实测静音**、BPM 差在 ±8% 以内的歌，
+   「过渡方式」留**自动**——强制某个 kind 会跳过 chooser，但**不会**跳过 `MixNaturaliser`
    （变速/改调/低频是按对子判断的，与 kind 无关）。
 2. 可选清理：**已废弃的窗口覆盖层死代码**（`videoOverlay` / `videoSurfaceView` / `videoOverlayParent` /
    `videoOverlayOutline` 四个字段 + `installVideoOverlay` / `positionVideoOverlay` / `hideVideoOverlay`），
@@ -1449,6 +1449,98 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
     直链 `https://github.com/xiaozhuhou233/qplayer-compose/releases/download/ai-dj-transition-2026-09-20/app-debug.apk`。
   - **下一件事**：① 听（15s + 提前开始的听感，这是唯一还没有人做的事）；② AI 那条链（给它配一个
     baseUrl 再跑同样的 8 个边界）；③ 若"15s 好听但没人对得上"，回头处理对齐的兼容门（见未验证 4）。
+
+- **2026-09-20 第十一轮：变速/改调以"自然化器"身份回归 + DJ 式分阶段曲线（装机验证，10 个边界）**
+  用户反馈：「听感可能还是不到十五秒但是还是比以前强了」+「你可以想办法降调/变速啥的让过渡更加自然，优化吧」。
+  **第十轮删掉的那条 lane 整体回归，但角色反过来了：它们是"让两首更融合"的手段，永远不是"能不能混"的条件。**
+  - **① 诊断（先看数据再改）**：第十轮的斜坡是**对称等功率**，两首"都清楚听得到"的区间只有中间约 **41%**
+    （`FadeCurve.bothAudibleMs`：两路增益相差 ≤6dB 的时间），两端各有一段只有一首在响 = 听感就是淡入淡出；
+    而且真机 **8/8 个边界 `align=off`** —— 15s 的兼容门只容忍约 1.6% 速度差，这个库的对子普遍飘 2% 以上，
+    所以**完全没有节奏锁**，这正是"像淡化不像混音"的原因。所以这一轮做了两件事：把速度拉齐（让长重叠真的能对齐）、
+    换曲线形状（让中间大部分时间两首都听得到）。
+  - **② 变速/移调回归为自然化器（新增 `audio/MixNaturaliser`，纯 Java；`IncomingMix` 重新带上 speed/pitch）**：
+    - **变速**：`speed = periodB/periodA`（把 B 拉到 A 的拍上），**只作用在 incoming 那一路**、保音高
+      （`setPlaybackParams`，平台 Sonic）。**clamp 仍是施加在 B 上的 ±8%**（`IncomingMix.MAX_SPEED_STEP`），
+      超出**不伸缩**——但**绝不因此取消过渡**（旧版会退化成短斜坡，这一轮明确反过来）。
+      本来就合得上（`gridsCompatible`）也**不伸缩**（0.3% 的拉伸只有 artefact）。
+    - **改调**：候选 n ∈ {-2..+2}，用 `KeyProfile.distance` + Camelot 相邻/大幅改善两条许可 + "值得做"
+      （改善 ≥0.05 且 ≤原距离 75%）三层；**不满足就是 0 半音，不是拒绝**。`IncomingMix.MAX_SEMITONES = 2`。
+    - **晋升后 6 秒平滑还原**（`AndroidAudioBackend.startTempoRestore`，10Hz 步进；暂停/seek/换歌/释放
+      **立即**还原到位），第四轮那套回来。
+    - **读回**：`applyTempo` 之后 `getPlaybackParams()` 回读并打日志，控制器在 ramp 开始前读
+      `backend.incomingMix()`，**只有平台真的吃下去了才把 `crossfadeIncomingSpeed` 记成那个比例**
+      （`playAt` 的 handoff 因此用 `start + round(ramp × speed)`）。**为什么必须读回**：文件时间轴被拉伸后
+      "重叠已经放过多少毫秒"不再是 rampMs。
+    - **对齐的兼容门改成问"听众会听到的那个网格"**（`MixNaturaliser.asHeard(b, speed)`）：拉过速度之后
+      B 的拍周期**就是** A 的，drift 0ms，"两格滑开"这条不再拒掉长重叠 —— 这就是 `align=on` 从 0/8 变成
+      5/7 的原因。
+    - **⚠️ 一个平台副作用必须有对策**：`setPlaybackParams` **会把只 prepare 过的 player 启起来**
+      （第九轮就观察到了）。`onIncomingPrepared` 现在在应用 mix **之后**调 `parkIncoming()`：pause + 回到
+      自己的偏移，并写一行 warn 说明是 mix 把它启起来的、这一步把它放回去了。真机每个拉伸边界都能看到这行，
+      晋升那行的"重叠听过 start..start+ramp"仍然连续（**"第二首不从头播/不被跳过"这条不变量仍然成立**）。
+  - **③ 曲线换成 `FadeCurve.DJ_BLEND`（"DJ 式"，新增第三个枚举常量，排在末尾所以磁盘格式不变）**：
+    - 形状：outgoing `cos(t^1.8 · π/2)`（前 55% 基本压在自己电平上，最后约四分之一才退出去）；
+      incoming `sin(t^0.55 · π/2)`（第一个七分之一就到 bed 电平，此后一直在下面铺着）。
+      中段两路都接近满——这正是"像串烧"的地方——代价是**中段功率约 +2.0dB**（`FadeCurveTest` 量了上界
+      2.5dB）；低频那一刀保证最相关的低频段永远不会两份叠起来。
+    - **谁来选**：`TransitionPlan.curveOr` 现在对 **≥8s 的重叠**强制 DJ 式（原来这里是强制等功率，理由从
+      "别凹 3dB"换成"对称形状只有约 41% 的时间两首都听得到"）；不足 8s（快速淡化/AI 自己选的 short）
+      仍然听设置的曲线。`HeuristicTransitionChooser` 给 CROSSFADE 的标签直接写 `FadeCurve.DJ_BLEND`。
+      设置「淡化曲线」加第三个选项（默认改成 2=DJ 式，但**已装的机器里旧值 1 会保留**，只影响 <8s 的边界）。
+    - **可量化代理**：每个重叠边界那行现在写
+      `both tracks audible for 10039ms of the 15039ms ramp (67%) — the symmetric EQUAL_POWER-style ramp gives 6166ms of the same 15039ms`，
+      即"两首互相在 6dB 之内的时长"，新形状 **≈67%** 对对称形状的 **41%**。
+  - **④ 真机验证（Redmi K20 Pro `efaa83b2`，10 个边界；`transitionKind=0`(自动)、curve=1、`aiBaseUrl` 空
+    → 全走本地规则；日志在 `D:\qplayer-dev\harness\round11\`）**：
+
+    | 边界（A → B） | kind | 要求 → 实际 | 两首同响 | 速度 | 半音 | align | 低频互换 |
+    |---|---|---|---|---|---|---|---|
+    | 90210 → I'm Waiting | CROSSFADE | 15137 → **15039** | 10039ms(67%) / 对称 6166ms | **x1.0752**（回读一致） | 0 | **on** | 7440ms ✓ |
+    | Lalala → I'm Waiting | CROSSFADE | 15050 → **14967** | 9990ms(67%) / 6136ms | **x1.0416**（回读一致） | 0 | **on** | 7680ms ✓ |
+    | Lalala → HEARD OF US | CROSSFADE | 15050 → **15044** | 10042ms(67%) / 6168ms | x1.0000（本来合得上） | 0 | **on** | 7680ms ✓ |
+    | The Other Side Of Paradise → White Iverson | CROSSFADE | 15271 → **15181** | 10133ms(67%) / 6224ms | **x0.9681**（回读一致） | 0 | **on** | 7504ms ✓ |
+    | Life's A Mess → death bed | CROSSFADE | 16525（平淡收尾抬升）→ **16508** | 11019ms(67%) / 6768ms | x1.0000 | **+2**（`pitch x1.1225`，回读一致） | **on** | 8380ms ✓ |
+    | 90210 → Life's A Mess | CROSSFADE | 15000 → **14954** | 9982ms(67%) / 6131ms | x1.0000（**超出 clamp，不伸缩**） | **+1**（回读一致） | off（两格滑 1486ms） | 7440ms ✓ |
+    | Ice Cream Man → In My Head | CROSSFADE | 15000 → **14922** | 9960ms(67%) / 6118ms | x1.0000（**超出 clamp**） | 0（A 的调不可信） | off（两格滑 5281ms） | 7506ms ✓ |
+    | I'm Waiting → Moonlight | SILENCE_TRIM | 250 → 250 | – | – | – | – | – |
+    | death bed → Life's A Mess | SILENCE_TRIM | 250 → 250 | – | – | – | – | – |
+    | Moonlight → I'm Waiting（剩 800ms 起播） | **CUT** | – | – | – | – | – | – |
+    | Moonlight → I'm Waiting（剩 2000ms 起播） | **CUT**（SILENCE_TRIM 来不及测量→硬切） | – | – | – | – | – | – |
+
+    · **`align=on` 5/7 个重叠边界**（第十轮 0/8；另外 2 个 off 都是"超出 clamp"——**那是测量结果，不是拒绝**）。
+      两条 on 的完整行（原样）：
+      `align=on (overlap 15000->15137ms = 33 beats of A, drift 0ms of 232ms; entry 200->519ms); mix: speed x1.0752 on B + bass swap at 7440ms + aligned to A's beats (speed x1.0752 on B (120.1->129.1BPM, +7.5%); pitch x1.0000 on B (0 semitones: keys already sit together, B minor/0.29 (triad 0.34) / B major/1.00 (triad 0.32), chroma distance 0.25; -2 was allowed but only reaches 0.24, so nothing is applied); …)`、
+      `…; mix: +2 semitones on B + bass swap at 8380ms + aligned to A's beats (speed x1.0000 on B (tempo already holds: 89ms of drift over 16520ms); pitch x1.1225 on B (+2 semitones: E minor/0.75 (triad 0.30) (9A) -> F# minor/0.75 (triad 0.30) (11A), chroma distance 0.28->0.20); …)`。
+    · **平台回读**（"真的吃下去了"的唯一证据）每个拉伸/移调边界都有：
+      `MediaPlayer: incoming mix applied to the INCOMING player (speed x1.0752 pitch x1.0000 asked; platform reports speed x1.0752 pitch x1.0000; the audible track is untouched; it is parked, and it was started by the call — the park below puts it back)`。
+    · **连续性/P0**：晋升行 `the overlap heard 519..16689ms`（= 起点 + 整个 ramp，**连续、不跳不重**）、
+      handoff `resume=16864ms`（≥ 重叠已放过的量）、6 秒还原跑完
+      (`the promoted track is back at its own tempo and pitch`)；`dumpsys audio` 全程只有**一路**
+      `state:started`；**全部 10 个边界都没有出现 `playAt: slot N starts at 0ms`**（没有一次从 0 重放）。
+    · **覆盖**：blend 7（全部 CROSSFADE），trim 2，CUT 2（1 个"太晚"、1 个 trim 来不及）；
+      7 个重叠边界的低频互换**全部 armed 且全部 `bass swap done`**。
+  - **本轮没做/未验证**：
+    1. **仍然没有任何人听过**（第五/八/九/十/十一轮都一样）。这一轮同时改了曲线形状、变了速度（最大 +7.5%）
+       与音高（±2 半音），所以"听感"这条比任何时候都更该先做。**没人听过的具体清单**：DJ 式曲线的听感、
+       2dB 中段抬升会不会显得"音量跳"、6% 拉伸的 artefact、+2 半音（`pitch x1.1225`）是否听得出来、
+       6 秒还原是否听得出"速度在爬"、以及低频互换在 15s 重叠中间那一刀。
+    2. **AI 那条链本轮没走到**（设备 `aiBaseUrl` 仍为空）；AI 现在能选 DJ 式曲线（提示词已加），但没有样本。
+    3. **调性门仍然常拒**：本库实测 7 个重叠边界里只有 2 个真的移了调（`+2` / `+1`），其余是
+       "A 的调强度 <0.25 / 三和弦 <0.28"或"允许的移调只把距离从 0.25 拉到 0.24（不值得做）"。**换风格要重看**。
+    4. **速度锁的相位**：拍点在斜坡起点对齐是"入口落在 B 的一拍 + 斜坡起点落在 A 的一拍"两条合起来的
+       推论，**残余误差是 MediaPlayer 的启动延迟**（本轮实测 123–822ms，`its own clock is Nms behind the
+       ramp's wall clock`），所以两首的鼓组并不总是精确重合（差最多约半拍）。真机日志里 `drift 0ms` 说的是
+       **两格不再相对滑移**，不是"绝对相位零误差"。
+    5. 15s 重叠的听感本来就没有人验证过（第十轮遗留），这一轮把它换成了 DJ 式，**两个变量一起动了**。
+    6. `pause/seek/焦点丢失` 会 `finishRestoreNow()`（立即还原到 1.0），这条路径本轮没有真机样本。
+    7. `promoted` 的 `resume` 用重叠计数做下限（设计如此），本轮实测播放器自报位置最多**落后 822ms**，
+       也就是**发布的进度/歌词位置最多比音频快 0.8 秒**（不是回归，第八轮就存在；但这次速度拉伸会把
+       "已经放过的文件毫秒"算得更准，所以差别更明显）。
+  - **交付**：debug APK；分支 `feat/ai-dj-transition`；tag `ai-dj-transition-2026-09-20b`；页面/直链见下。
+  - **下一件事**：① **听**（唯一还没人做的事，建议先听 `Life's A Mess → death bed`：16.5s + DJ 式 + 6dB
+    中段抬升 + 一个 `+2` 半音的移调，信息量最大）；② 把 AI 那条链接上再跑同样几个边界；
+    ③ 若"15s 好听但两首鼓组还是错开"，下一步是把入口偏移从"自己的拍点"改成"与 A 的拍点对齐"
+    （现在受 `MAX_BEAT_ENTRY_SHIFT_MS = 400ms` 与启动延迟限制）。
 
 **顺序**：P1 → P3 → P5 → P4 → P6。不要先做 P6。（P1/P2/P3/P7、**P6** 与 **P4 的分析+对齐**都已落地；
 剩下的仍是**听觉验证**（P4 现在有装机证据了：能 align=on，但**听感**仍未验证），然后才是 P5 低频互换

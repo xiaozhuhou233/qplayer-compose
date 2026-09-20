@@ -140,15 +140,19 @@ public final class TransitionPlan {
      * The curve to actually ramp along, given the curve the user configured.
      *
      * <p>A plan that named one wins. A plan that did not gets the configured curve
-     * — except over a long overlap, where LINEAR is not a taste difference: the
-     * straight-line pair leaves the summed power at half in the middle of the ramp,
-     * an audible ~3 dB dip over the fifteen seconds this overlap was chosen for.
-     * Answering "long" is therefore answered with {@link FadeCurve#EQUAL_POWER}
-     * unless the decider explicitly asked for something else.
+     * — except over an overlap long enough to be heard as a mix, where the curve is
+     * not a taste difference: a symmetric ramp (LINEAR, or EQUAL_POWER) leaves the
+     * two tracks within 6 dB of each other for only about two fifths of the window,
+     * one track alone at each end, which is what a listener hears as a fade. So a
+     * blend of {@link #OVERLAP_MEDIUM_MS} or more is answered with
+     * {@link FadeCurve#DJ_BLEND} — the staged shape that keeps both tracks audible
+     * through most of the overlap — unless the decider explicitly asked for
+     * something else. Shorter overlaps (a quick fade, an AI's own short pick) keep
+     * what the settings say: at one second there is no middle to hold.
      */
     public FadeCurve curveOr(FadeCurve configured) {
         if (curve != null) return curve;
-        if (overlapMs >= OVERLAP_LONG_MS) return FadeCurve.EQUAL_POWER;
+        if (overlapMs >= OVERLAP_MEDIUM_MS) return FadeCurve.DJ_BLEND;
         return configured != null ? configured : FadeCurve.LINEAR;
     }
 
@@ -157,7 +161,7 @@ public final class TransitionPlan {
     public boolean curveOverrides(FadeCurve configured) {
         FadeCurve effective = curveOr(configured);
         FadeCurve requested = configured != null ? configured : FadeCurve.LINEAR;
-        return curve == null && overlapMs >= OVERLAP_LONG_MS && effective != requested;
+        return curve == null && effective != requested;
     }
 
     // --- the pair identity the cache is keyed by ----------------------------

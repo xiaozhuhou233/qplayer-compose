@@ -150,7 +150,9 @@ public final class SettingsCatalog {
                 .desc("切歌时按歌曲信息选择合适的过渡方式；无法完成时自动回退为硬切。"
                         + "已在「AI 音乐助手」里配置服务商时，由 AI 依据歌曲信息挑选（含重叠长度），"
                         + "同样只是建议：无网络/超时/回答无法解析时用本地规则；AI 听不到音频。"
-                        + "过渡只做节拍对齐与低频互换，不放慢/加快、不升调降调")
+                        + "过渡会做节拍对齐、低频互换，并按两首测得的拍速/调性做小幅变速与升降调"
+                        + "（只动下一首、幅度很小、晋升后 6 秒内还原）；测不到就完全不做，"
+                        + "任何情况下都不会因此取消过渡")
                 .build());
         out.add(SettingSpec.segmented(TRANSITION_KIND_KEY, PLAYBACK, "过渡方式", 0,
                         "自动",
@@ -160,27 +162,30 @@ public final class SettingsCatalog {
                         dev.t1m3.qplayer.audio.TransitionKind.FADE_OUT_IN.label(),
                         dev.t1m3.qplayer.audio.TransitionKind.SILENCE_TRIM.label())
                 .desc("自动：本地规则按时长与静音测量挑选（AI 已配置时由 AI 挑选）；其余为强制使用某一种。"
-                        + "普通的可流式歌曲之间默认是约 8 秒的等功率交叉淡化")
+                        + "普通的可流式歌曲之间默认是约 15 秒的交叉淡化")
                 .dependsOn(SMART_TRANSITION_KEY)
                 .build());
-        out.add(SettingSpec.segmented(TRANSITION_CURVE_KEY, PLAYBACK, "淡化曲线", 0,
+        out.add(SettingSpec.segmented(TRANSITION_CURVE_KEY, PLAYBACK, "淡化曲线", 2,
                         dev.t1m3.qplayer.audio.FadeCurve.LINEAR.label(),
-                        dev.t1m3.qplayer.audio.FadeCurve.EQUAL_POWER.label())
-                .desc("交叉/快速淡化使用；线性在中点约低 3dB，等功率更平。"
-                        + "AI 或本地规则选了 15 秒长重叠时自动改用等功率")
+                        dev.t1m3.qplayer.audio.FadeCurve.EQUAL_POWER.label(),
+                        dev.t1m3.qplayer.audio.FadeCurve.DJ_BLEND.label())
+                .desc("DJ 式：下一首早早低声铺进来，当前这首压住到结尾才用一小段退出去，"
+                        + "整段里大部分时间两首都听得到（像串烧）；等功率/线性是对称的，"
+                        + "只有中点附近两首差不多响，听感更像淡入淡出。"
+                        + "AI 或本地规则选了 8 秒以上的重叠时自动用 DJ 式")
                 .dependsOn(SMART_TRANSITION_KEY)
                 .build());
         out.add(SettingSpec.toggle(BEAT_ALIGN_KEY, PLAYBACK, "节拍对齐", true)
                 .desc("交叉/快速淡化时把重叠长度对到整拍，并让下一首从自己的拍点进入，"
                         + "两首的节拍才能真正对上（需要两侧都测得可信的节拍，"
-                        + "测不到或速度差太多时自动不参与，等于没有这个功能）")
+                        + "测不到时自动不参与，等于没有这个功能；拍速差得多时会先把下一首"
+                        + "小幅变速对上，再对齐）")
                 .dependsOn(SMART_TRANSITION_KEY)
                 .build());
         out.add(SettingSpec.toggle(BASS_SWAP_KEY, PLAYBACK, "低频互换", true)
                 .desc("交叉/快速淡化时，在拍点上把低频从当前这首交给下一首（系统均衡器），"
                         + "避免两条低频线打架。设备不支持音频效果器时自动不参与，"
-                        + "只少了低频互换，过渡照常。"
-                        + "本版本不再变速、不再改调：过渡只做对齐与低频互换")
+                        + "只少了低频互换，过渡照常")
                 .dependsOn(SMART_TRANSITION_KEY)
                 .build());
         out.add(SettingSpec.toggle("highQuality", PLAYBACK, "高音质播放", true)

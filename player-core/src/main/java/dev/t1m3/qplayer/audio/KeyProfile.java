@@ -46,8 +46,8 @@ public final class KeyProfile {
      *  the cost of refusing a real key is that a pair is not transposed (today's
      *  behaviour), while the cost of trusting a wrong one is a track that sounds
      *  out of tune. The remaining protection against a wrong-but-confident key is
-     *  in the shift decision itself ({@code MixMatch}: the improvement has to be
-     *  real, and the whole-key relationship has to hold). */
+     *  in the shift decision itself ({@code MixNaturaliser}: the improvement has to
+     *  be real, and the whole-key relationship has to hold). */
     public static final float MIN_STRENGTH = 0.25f;
 
     /**

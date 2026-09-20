@@ -38,11 +38,10 @@ public class BeatProfileDiskFormTest {
         for (int i = 0; i < 12; i++) worst = Math.max(worst, Math.abs(before[i] - after[i]));
         System.out.println("chroma round-trip worst error: " + worst);
         assertTrue("profile drifted by " + worst, worst < 0.01d);
-        // ... and the shift the profile would choose is the same one. (The decision
-        // that used to consume this — MixMatch's tempo/key judgement — is gone; what
-        // is still worth asserting is that the profile survives the byte quantisation
-        // well enough to give the same answer about the same two keys, which is what
-        // any future consumer of it will be deciding from.)
+        // ... and the shift the profile would choose is the same one. The consumer of
+        // it is MixNaturaliser, whose tempo/key judgement is a naturaliser rather than
+        // a gate now — so what is worth asserting is that the profile survives the byte
+        // quantisation well enough to give the same answer about the same two keys.
         assertEquals(bestShift(key.chroma(), key.chroma()),
                 bestShift(read.key().chroma(), read.key().chroma()));
         assertEquals(29, original.toBytes().length);

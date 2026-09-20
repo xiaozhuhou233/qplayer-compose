@@ -89,9 +89,10 @@ public final class AiTransitionChooser implements TransitionChooser {
             + "SILENCE_TRIM：静音裁切，按静音测量把两首的内容直接接在一起\n"
             + "重叠长度（OVERLAP，仅 CROSSFADE 有意义）：SHORT=约4秒，MEDIUM=约8秒，"
             + "LONG=约15秒（同专辑、同风格、电子/说唱等适合长时间混音、你又比较有把握时用）\n"
-            + "淡化曲线（CURVE）：LINEAR（线性，长重叠中段会低约3dB），EQUAL_POWER（等功率，长重叠更平）\n"
+            + "淡化曲线（CURVE）：DJ_BLEND（DJ 式，默认，长重叠就用它：下一首早早低声铺进来、上一首压住到结尾才退，"
+            + "中间大部分时间两首都听得到），EQUAL_POWER（等功率，对称），LINEAR（线性，只适合很短的交叉）\n"
             + "只输出一行，不要解释、不要 Markdown、不要代码围栏，格式严格为：KIND OVERLAP CURVE\n"
-            + "示例：CROSSFADE LONG EQUAL_POWER\n"
+            + "示例：CROSSFADE LONG DJ_BLEND\n"
             + "没有把握时只输出：NONE";
 
     /** How long the reply may be for a usable parse to be attempted. A reply that
