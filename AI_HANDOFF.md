@@ -1349,6 +1349,107 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
     直链 `https://github.com/xiaozhuhou233/qplayer-compose/releases/download/ai-dj-transition-2026-09-19/app-debug.apk`
     （实测 200，重定向到 CDN）。
 
+- **2026-09-20 第十轮：15 秒是默认长度、收尾平淡就再早一点、彻底丢掉变速/改调（装机验证，8 个边界）**
+  - **用户原话**（本次任务）：「两首歌融合的时间太短了，尝试在十五秒（如果歌曲较为平淡，没有人声，只是收尾）
+    就开始融合背景鼓点音调啥的，这样更丝滑，不然像淡入淡出」+「先不管调速变调」。**第八/九轮那套
+    `MixMatch`（变速 ±8% / 移调 ±2 半音 / key 门）整体下线** —— 不是关掉开关，是**删掉**：`MixMatch`
+    与其 11 个单测、`IncomingMix` 的 speed/pitch、`AndroidAudioBackend` 的 `setPlaybackParams` 与
+    6 秒还原（`applyTempo`/`startTempoRestore`/`finishRestoreNow`/`PROMOTION_RESTORE_MS`）、
+    `TransitionPlan.OVERLAP_MATCHED_MS`/`mixed()`、`KeyProfile.MIN_TRIAD` 的第二把门（**只作为门删掉**：
+    `KeyAnalysis`/`KeyProfile` 仍在，仍随拍格测量与落盘，只是**没有任何东西再拿它拒绝一次过渡**）。
+    **全仓库再无 `MixMatch` 引用，也没有一处 `setPlaybackParams`。**（那一段代码在本地 git 历史里，
+    想恢复就 `git show 65976c5:player-core/.../MixMatch.java`。）
+  - **① 15 秒成为普通对子的默认**：`TransitionPlan.defaultOverlapMs(CROSSFADE)` 从 medium(8s) 改成
+    **long(15s)**，`TransitionKind.CROSSFADE` 声明的窗口跟着改成 long；`HeuristicTransitionChooser.plan()`
+    给 CROSSFADE 的标签是「两个普通流、前面有时间，所以走普通 `15s` 重叠（等功率：这么长的线性斜坡
+    中点会凹 3dB）」+ `FadeCurve.EQUAL_POWER`。
+    **长度是下限不是上限**：`PlayerController.widenForOrdinaryPair`（`decideTransition` 里、在"裁到还剩多少"
+    之前）对**两侧都 ≥90s 的 CROSSFADE** 先抬到 15s（chooser 报了更短就写进 label：`raised to the
+    ordinary 15s blend (the chooser asked for Nms)`），再按下面的"平淡收尾"往上抬。**AI 答案不能取消它**：
+    `AiTransitionChooser.plan` 现在对**不重叠的 kind**（CUT/FADE_OUT_IN/SILENCE_TRIM）在本地规则会给重叠
+    时**推翻它**并写一行 `AI answered X, but this pair is two streamable tracks with time to spare ... a blend
+    given up, so the local rules' answer (CROSSFADE) is used instead`；`SHORT_TRACK_MS` 以下的短歌、
+    以及强制「过渡方式」时仍然照旧。
+  - **② "平淡收尾" = 用已有的静音测量多算一个数，不新增分析**：`SilenceProfile` 新增
+    **`plainTailMs`（收尾有多"平"）与 `tailAttacks`**，由**同一次尾部解码**的 20ms 块包络算出
+    （`AndroidSilenceProfiler.TailSink` 多存一个 20s 的包络数组 + 一个 250Hz–3.5kHz 一带的占比，
+    窗口从 10s 提到 **20s**（`TAIL_WINDOW_MS`），`tailMs` 仍封顶 10s、`DEADLINE_MS` 4→6s）。
+    判据（`SilenceProfile.plainTailMsOf`，纯 Java，11 个单测）：从文件末尾往前扫，一块算"平"要同时满足
+    ·**没有攻击**（后一块不比前一块高 2 倍以上，`ATTACK_RATIO`）；·**声带带占比 < 0.75**（`PLAIN_PRESENT_MAX`，
+    且只对 ≥-40dBFS 的块生效，`VOICE_FLOOR` —— 近静音块的占比是两个接近 0 的数相除，实测把一个
+    20s 的平淡收尾砍到 1.8s）；·**不比窗口前半段最响的那一块更响**（`PLAIN_LEVEL_SHARE=1.0`，这就是
+    "还在往结尾爬"的那条）。
+    ⚠️ **这几个数是在 18 首真实收尾上重新定的**（见下），不是拍的：第一版用"低于窗口最响十分位的
+    一半(-6dB)"当响度门，18 首里**没有一首**能连续 15s 满足（多数连 3s 都不到 —— 衰减段的"响"就在
+    收尾自己里面）。
+  - **③ 平淡收尾 → 更早开始**：`widenForOrdinaryPair` 第二段：`plainTailMs ≥ 15s` 时，重叠 =
+    `min(plainTailMs, OVERLAP_EXTENDED_MS=20s)`，label 写 `the outgoing track's ending is measured plain for
+    Nms (nothing attacks in it, nothing sustained in the vocal band, nothing still rising), so the blend
+    starts at the start of it rather than at 15000ms`。**只有测量能给**（没测到 = 0 = 一切照旧）。
+  - **④ 守卫按"最长的重叠"重新定尺**（这是任务点名的那条"别让长重叠被静默降级"）：
+    `TRANSITION_DECIDE_LEAD_MS = OVERLAP_EXTENDED_MS(20s) + TAIL(250ms) + LEAD(9s) + BEAT_SNAP_SLACK_MS(600ms)
+    = 29 850ms`（原 24 250ms 是给 15s 准备的）；arm 仍是计划自己的 `overlap+tail+9s`。
+    **每个边界那行现在同时写提前量、要求和实际**：`remaining=29847ms, lead=25750ms, 重叠=long 16500ms`
+    → 后面 `ramping 16478ms`（实际）。被裁时 label 写 `capped to what is left (Nms)`。
+  - **⑤ 第二到第四个边界：incoming 必须从融合开始就一直被听到**（上一轮遗留的缺陷：
+    `promoted ... at 19769ms` 而重叠只"放过"10385ms）。根因是 `setPlaybackParams` **会启动一个只 prepare 过的
+    player** —— 变速下线后那个副作用一起消失了，`AndroidAudioBackend.onIncomingPrepared` 的 PARKED 分支
+    现在**主动校验**：`parkIncoming()` 看 `isPlaying()`/`getCurrentPosition()`，动过就 `pause()`+`seekTo` 回
+    偏移并 `Logger.warn("the parked incoming had started itself ...")`。真机 8 个边界**一次都没触发**那条 warn
+    （= 平台确实没自己启动），而晋升那行现在是
+    `the incoming is at 16345ms; the overlap heard 16518ms = its start 40ms + the 16478ms ramp`
+    （差 = MediaPlayer 的启动延迟，另一处日志单独解释：`its own clock is Nms behind the ramp's wall clock
+    (start latency, not a skipped part: nothing is seeked here)`）。
+  - **⑥ 低频互换不再被"两格不兼容"带走**：15s 重叠让 `gridsCompatible` 的容忍度从 4s 的 6% 收紧到约 1.6%，
+    实测这个库里的对子**几乎全部**落在门外 → 而互换只需要 **A 自己的一拍**（A 在按自己的速度跑）。
+    所以 `alignToBeatGrid` 里三条"不aligned"的分支现在**照样把 `IncomingMix{bassSwap}` 交给后端**，
+    日志写成 `mix: bass swap, no tempo/key (the two grids slide 1997ms apart over 16525ms, so the overlap is
+    not aligned (nothing is stretched to force it); bass swap at 8380ms)`；aligned 时是
+    `mix: align + bass swap, no tempo/key (aligned to A's beats, bass swap at 4700ms)`。
+    **"没有变速/改调"这句话现在印在每一个重叠边界的 mix 片段里**。
+  - **⑦ 装机验证（Redmi K20 Pro `efaa83b2`，8 个边界，全部是真机日志；`transitionKind=0`(自动)、
+    curve=1(等功率)、`aiBaseUrl` 为空 → 本轮全部走本地规则）**：
+
+    | 边界 | kind | 要求 | 实际（ramping） | 说明 |
+    |---|---|---|---|---|
+    | Life's A Mess → Moonlight | CROSSFADE | **16500ms** | 16478ms / 16470ms / 16433ms | `plainEnding=16500ms` 触发提前开始；3 次重跑一致 |
+    | 90210 → Pray 4 Love | CROSSFADE | 15000ms | 14925ms / 14932ms | 普通对子；B 无拍格 → `align=off (no grid for B)`，**bass swap at 7440ms 照常** |
+    | Portland → Lucid Dreams | CROSSFADE | 15000ms | 14914ms | B 不在音频缓存 → `pre-caching ... 26460KB` 后 `served from the audio cache`；第二次**故意删掉缓存文件**→ `official=-, unblock=ok, playable (not cached: resolved inside the boundary's window)` 照样 arm |
+    | I'm Waiting → Moonlight | SILENCE_TRIM | 250ms | 250ms | A 实测尾部静音 4600ms → 规则选裁切（**唯一会因为测量选它的分支**） |
+    | Moonlight → Lalala | CUT | – | – | `too late: less than 1500ms left`（物理原因，唯一的 CUT） |
+
+    · 连续性（P0/不重播）：`promoted queue slot 0 (Moonlight) at 16381ms` 之后队列存档的位置继续前进
+      （另一次：晋升 14860ms → 40 秒后 `positionMs=59373`），`dumpsys audio` 只有一路 `state:started`；
+      `handoff resume=16518ms (the promoted player reports 16382ms, the overlap heard 40..16518ms)` ——
+      **晋升后的位置下限是"重叠已经放过的量"**，所以第二首不会从头再放。
+    · `bass swap armed → bass swap done` 在 Life's A Mess → Moonlight 与 Portland → Lucid Dreams 上都真的跑了。
+  - **本轮没做/未验证**：
+    1. **没人听过**（第五/八/九/十轮都一样，这次动作最大：默认长度翻倍 + 提前开始的判据）。
+       "15 秒比 8 秒好听吗""20s 的提前开始会不会太长"只有耳朵能判。
+    2. **AI 这条链本轮没被走到**（设备 `aiBaseUrl` 是空的 → 一直用本地规则）。所以
+       `AiTransitionChooser` 那两个新分支（"无 AI 答案时给规则自己的 plan"、"AI 说不重叠就推翻"）
+       **只有代码与单测**；第八/九轮的 `AI cached`/`AI 决策` 行为没变。
+    3. **平淡收尾的判据是用 18 首的收尾定的**（这库几乎全是 hip-hop/EDM）：`plainTailMs ≥ 15s` 的
+       **只有 Life's A Mess 一首（16500ms）**，Runaway 14840ms（差 160ms 没进）、White Iverson 12700ms、
+       Flashing Lights 0（-18.5dBFS 的安静收尾里有一块 0.9 的带占比，那是 `VOICE_FLOOR` 那条修之前的数）。
+       ⚠️ **`PLAIN_PRESENT_MAX=0.75` 是全部常量里最薄的一个**：18 首实测中位 0.21–0.85，中间没有真值来
+       划"有没有人声"这条线；它只拒掉了 I'm Waiting（0.85，整段是 EDM 主音）。换风格要重看。
+    4. 这个库的拍格**在 15s 上几乎都不兼容**（`gridsCompatible` 的容忍度按重叠长度收紧），所以
+       **`align=on` 本轮一次都没出现**（8/8 都是 `align=off`）：对齐仍然在，只是要求严了。想让长重叠
+       也能对拍，要么给对齐换一种做法（把重叠吸附到两格都"站得住"的长度），要么重新考虑兼容门。
+    5. `SILENCE_TRIM` 仍是"有实测尾部静音就选它"，所以**一个收尾有 15s 静音、却又有 15s 平淡段的歌，
+       永远走裁切而不是长融合**（本库没遇到）。
+    6. 非可流式（BILI/LOCAL）造成的 CUT 本轮没有真机样本（无法在队列里造出可播的 BILI 条目），
+       只有代码路径：heuristic 规则 1 + `decideTransition` 的 `cannot be performed into <source>` 降级。
+    7. 设备的静音/拍格缓存里是我这轮重测的值（缓存格式 VERSION 3 会拒掉旧的 17/8 字节文件，所以
+       **换包就会重测**，不是脏数据）。测完已把 `queue.json` 还原成原来那两首（playIndex=1/21325ms）、
+       删掉 `/data/local/tmp/q.json`；**设置一项都没动**（`transitionKind=0`、curve=1、smartTransition=on）。
+  - **交付**：debug APK `98,293,607` 字节；分支 `feat/ai-dj-transition`；tag `ai-dj-transition-2026-09-20`；
+    页面 `https://github.com/xiaozhuhou233/qplayer-compose/releases/tag/ai-dj-transition-2026-09-20`、
+    直链 `https://github.com/xiaozhuhou233/qplayer-compose/releases/download/ai-dj-transition-2026-09-20/app-debug.apk`。
+  - **下一件事**：① 听（15s + 提前开始的听感，这是唯一还没有人做的事）；② AI 那条链（给它配一个
+    baseUrl 再跑同样的 8 个边界）；③ 若"15s 好听但没人对得上"，回头处理对齐的兼容门（见未验证 4）。
+
 **顺序**：P1 → P3 → P5 → P4 → P6。不要先做 P6。（P1/P2/P3/P7、**P6** 与 **P4 的分析+对齐**都已落地；
 剩下的仍是**听觉验证**（P4 现在有装机证据了：能 align=on，但**听感**仍未验证），然后才是 P5 低频互换
 与 P4 的下一步"变速对拍"（`setPlaybackParams` 把 B 拉到 A 的 BPM —— 本轮只对齐了网格，没有拉速度，
@@ -1369,6 +1470,9 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
 跑完了变速+移调+低频互换**（`Moonlight → I'm Waiting`，speed x1.0637 / pitch x1.0595 / bass swap，
 平台回读一致）。**下一步仍然是听感**（第五/八/九轮都没让任何人听过），而且这一轮同时动了速度/音高/低频，
 所以它比前两轮更该先被听。之后才是**接线预渲染混音**（第七轮 Phase C 的文件仍然没有任何代码读它）。
+⚠️ **这一整段的"变速/移调"在第十轮被整体下线了**（用户要求先不管调速变调，见第七节末尾的第十轮）；
+上面关于调性门/强度的推理仍然是**当时的记录**，但那些门与 `MixMatch` 已经不在仓库里，键盘上的
+下一步不再是"重校调性阈值"。
 
 ## 八、工作方式（为了省上下文，请遵守）
 

@@ -42,11 +42,14 @@ public enum TransitionKind {
      * ({@link FadeCurve}): LINEAR is what P1 shipped and dips roughly 3 dB in the
      * middle of a long overlap; EQUAL_POWER holds the summed power flat.
      *
-     * <p>Needs a {@link TransitionPlan#OVERLAP_SHORT_MS short} overlap window at
+     * <p>Needs a {@link TransitionPlan#OVERLAP_LONG_MS long} overlap window at
      * least: the incoming source must resolve, prepare and be placed before the
-     * overlap starts, and both sides must be ordinary streams.
+     * overlap starts, both sides must be ordinary streams, and this is the kind the
+     * ordinary default overlap belongs to — fifteen seconds, or the whole measured
+     * plain ending when that is longer. A chooser that wants less than that is
+     * asking for a shorter mix, which is why it has to name it.
      */
-    CROSSFADE("交叉淡化", TransitionPlan.OVERLAP_SHORT_MS),
+    CROSSFADE("交叉淡化", TransitionPlan.OVERLAP_LONG_MS),
 
     /**
      * The same overlap, short: about a second of it. For a track whose own tail

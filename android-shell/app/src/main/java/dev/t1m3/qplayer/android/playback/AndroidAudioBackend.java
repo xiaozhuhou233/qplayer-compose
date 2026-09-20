@@ -5,7 +5,6 @@ import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.media.MediaPlayer;
-import android.media.PlaybackParams;
 import android.media.audiofx.Equalizer;
 import android.net.Uri;
 import android.os.Handler;
@@ -91,21 +90,26 @@ public final class AndroidAudioBackend implements AudioBackend {
     /** ~30 Hz. A gain ramp has nothing to gain from the display's frame rate. */
     private static final long RAMP_TICK_MS = 32L;
 
-    // --- The mix applied to the incoming player (tempo / key / bass) ---------
-    // A pair that suits each other is not merely overlapped: the incoming track is
-    // pulled onto the outgoing track's beat grid (pitch-preserving, so the notes do
-    // not move), transposed into its key, and the low end hands over between them
-    // part way through the overlap. The first two are asked for with the prepare and
-    // applied the moment the player is in a state that accepts them; the hand-over is
-    // attached with them and fires from the ramp. What actually took is reported
-    // through incomingMix(), because the caller's whole plan was computed around it.
+    // --- The one instruction the incoming player gets (the bass swap) ---------
+    // ⚠️ There is no tempo and no pitch here any more, and there is no
+    // setPlaybackParams call anywhere in this file. An earlier build stretched the
+    // incoming track onto the outgoing track's grid and transposed it into its key
+    // (see AI_HANDOFF §7, "no tempo/key"); both are gone, so what a mix can ask for
+    // is exactly one thing — the low end changing hands part way through the overlap
+    // — and it is asked for with the prepare and fired by the ramp. Nothing else
+    // touches the incoming player and nothing touches the audible one.
+    //
+    // Removing the stretch also removed its side effect: setPlaybackParams STARTS a
+    // player that is merely prepared, which is how the parked incoming (the one the
+    // plan placed at its own content start) ended up rolling silently through the
+    // whole arm window and being promoted ~9 s into the next track while the overlap
+    // had only played ~10 s of it — the listener never heard the first nine seconds.
+    // onIncomingPrepared now asserts the parked state instead of trusting it.
 
     /** What the incoming player was prepared FOR, and what it actually got. The
      *  request is applied once, when the player has prepared (see
-     *  prepareIncoming/onIncomingPrepared); the applied entry is what took, and it is
-     *  what {@link #incomingMix()} reports and what the promotion arithmetic below
-     *  uses — a plan computed for a stretched track must not be applied to one that
-     *  is not stretched. */
+     *  prepareIncoming/onIncomingPrepared) and reported through {@link #incomingMix()}
+     *  so the caller never has to assume anything took. */
     private IncomingMix requestedMix = IncomingMix.IDENTITY;
     private IncomingMix appliedMix;
     /** When the low end hands over, ms into the ramp (from the applied mix), and
@@ -123,29 +127,11 @@ public final class AndroidAudioBackend implements AudioBackend {
      *  band of a device's equalizer is usually 60-120 Hz wide, and the kick's body
      *  and a bassline's fundamental are what has to move. */
     private static final double BASS_SWAP_HZ = 200d;
-
-    /** How long the promoted track takes to come back to its own tempo and pitch.
-     *
-     *  <p>The stretch and the transposition were bought for the overlap, and the
-     *  overlap is over: with one track playing there is no beat to line up with and
-     *  no harmony to clash with, so what is left of either is only an artefact —
-     *  a record that plays 5% fast and a semitone sharp is a record that sounds
-     *  wrong to anyone who knows it, and the error would also compound (the next
-     *  boundary would be planned against a track that is no longer on its own grid).
-     *  A few seconds is enough to be inaudible as a change: it is slower than any
-     *  musical beat, and the two tracks are no longer being heard against each
-     *  other. */
-    private static final long PROMOTION_RESTORE_MS = 6_000L;
-    /** The restore is stepped rather than jumped: one large correction at the
-     *  promotion moment would be a sudden tempo change the listener hears as a
-     *  stutter in the groove. */
-    private static final long RESTORE_TICK_MS = 100L;
-    private long restoreGeneration;
-    private long restoreStartNs;
-    private long restoreDurationNs;
-    private double restoreFromSpeed = 1d;
-    private double restoreFromPitch = 1d;
-    private boolean restoring;
+    /** How far a parked incoming player's play head may sit from the offset it was
+     *  put at before that counts as "it moved". Only the cheap check in
+     *  parkIncoming; a platform that started the player is caught by isPlaying()
+     *  whatever its clock says. */
+    private static final long PARK_TOLERANCE_MS = 100L;
 
     // Audio focus: pause on loss (call / other player), duck on transient-can-duck,
     // resume on regain when the loss was transient.
@@ -349,10 +335,6 @@ public final class AndroidAudioBackend implements AudioBackend {
         Logger.info("MediaPlayer: pause at {}ms{}", position(),
                 crossfading || incomingPlayer != null ? " (with a transition in flight)" : "");
         wantPlay = false;
-        // A pause in the middle of a post-mix ease-back would leave the track at
-        // whatever tempo it had reached and resume it there; the correction is worth
-        // more than the smoothness of a ramp that is being interrupted anyway.
-        finishRestoreNow();
         // Pausing in the middle of an overlap would leave the incoming player
         // audible while the track it is replacing goes quiet. The transition is
         // dropped instead (the outgoing player is restored first), so the pause
@@ -383,9 +365,6 @@ public final class AndroidAudioBackend implements AudioBackend {
     public synchronized void seek(long ms) {
         long target = Math.max(0L, ms);
         Logger.info("MediaPlayer: seek to {}ms", target);
-        // The user is going somewhere else in THIS track: settle any post-mix
-        // ease-back first, so what they seek into is the track at its own tempo.
-        finishRestoreNow();
         // A seek says the user is staying in THIS track, so an overlap that has
         // already started pulling the incoming one up no longer describes what is
         // about to happen at the end of the song: drop it and fade nothing.
@@ -598,19 +577,75 @@ public final class AndroidAudioBackend implements AudioBackend {
         if (incomingSeekMs > 0L) {
             prepared.seekTo(incomingSeekMs, MediaPlayer.SEEK_CLOSEST);
         }
-        // The mix, now that the player is in a state that takes playback parameters —
-        // and still before the first sample is audible, which is the point: the
-        // listener never hears the track at its own tempo first.
+        // The one instruction this boundary has for the incoming player: the low end
+        // hands over part way through the overlap. Attached here, before anything is
+        // audible, because the equalizer is allocated while a single track is playing.
         applyRequestedMix(prepared);
         if (incomingStartMuted && wantPlay) {
+            // ROLLING (unused by the controller today, kept for a trim-style caller):
+            // the player runs silently from here so the ramp fades in a moving stream.
             try {
                 prepared.start();
                 incomingRolling = true;
             } catch (Throwable ignored) { }
+        } else {
+            // ⚠️ THE INVARIANT. A parked incoming must not have moved: its offset is the
+            // sample the overlap is supposed to make audible FIRST, and the ramp is
+            // supposed to be the first moment any of it is heard — anything that starts
+            // it earlier silently eats that much of the next track (measured on the
+            // device: promoted at 19769ms while the overlap had only played 10385ms, so
+            // the listener never heard the first nine seconds of the incoming track).
+            // Nothing here starts it — no tempo and no pitch are applied any more, so
+            // there is no setPlaybackParams whose implicit start could (see the class
+            // section above) — but the platform is not trusted to keep that promise for
+            // free: whatever state the player is in, it leaves here parked, and if it
+            // had started itself this puts it back and says so in the log.
+            parkIncoming(prepared);
         }
         Logger.info("MediaPlayer: incoming prepared {} duration={}ms",
-                incomingStartMuted ? "and rolling muted" : "parked at its offset",
+                incomingStartMuted ? "and rolling muted"
+                        : ("parked at " + incomingSeekMs + "ms, nothing of it heard yet"),
                 prepared.getDuration());
+    }
+
+    /**
+     * Put a prepared incoming player that must not be running back at its own offset.
+     *
+     * <p>See {@link #onIncomingPrepared} for why this matters: the parked player's
+     * offset is where the overlap is supposed to begin making it audible, so a player
+     * that has been rolling since it was prepared has already skipped that much of the
+     * next track by the time the ramp reaches it. Pausing and re-seeking is exactly
+     * the operation the whole parked lane exists to make unnecessary, so it is not
+     * expected to fire — it is here so that the invariant holds on a platform that
+     * starts a prepared player for reasons of its own, rather than being assumed.
+     */
+    private void parkIncoming(MediaPlayer prepared) {
+        long at = -1L;
+        boolean wasRolling = false;
+        try {
+            wasRolling = prepared.isPlaying();
+        } catch (Throwable ignored) { }
+        try {
+            at = prepared.getCurrentPosition();
+        } catch (Throwable ignored) { }
+        if (wasRolling) {
+            try {
+                prepared.pause();
+            } catch (Throwable ignored) { }
+        }
+        if (wasRolling || (at >= 0L && Math.abs(at - incomingSeekMs) > PARK_TOLERANCE_MS)) {
+            try {
+                prepared.seekTo(Math.max(0L, incomingSeekMs), MediaPlayer.SEEK_CLOSEST);
+                Logger.warn("MediaPlayer: the parked incoming had started itself (at {}ms, asked for"
+                        + " {}ms); paused it and put it back, so the ramp starts it at exactly its"
+                        + " own content start and the listener hears the next track from there",
+                        at, incomingSeekMs);
+            } catch (Throwable e) {
+                Logger.warn("MediaPlayer: could not re-park the incoming at {}ms: {}",
+                        incomingSeekMs, e.toString());
+            }
+        }
+        incomingRolling = false;
     }
 
     private synchronized boolean onIncomingError(MediaPlayer failed, int what, int extra) {
@@ -629,35 +664,25 @@ public final class AndroidAudioBackend implements AudioBackend {
     }
 
     /**
-     * Put the just-prepared incoming player on a different tempo, a different key
-     * and (when the mix asked for it) a different low end.
+     * Give the just-prepared incoming player the one thing a blend asks of it: the
+     * low end changes hands part way through the overlap.
      *
-     * <p>All of it through platform APIs that already exist, and none of it against
-     * the audible player:
-     * <ul>
-     *   <li><b>Speed and pitch</b> by {@code MediaPlayer.setPlaybackParams}, whose
-     *       speed is pitch-preserving (the platform's own time-stretch) and whose
-     *       pitch is a separate factor on top of it — which is exactly the pair of
-     *       knobs this needs. The incoming player only.</li>
-     *   <li><b>The low end</b> by an {@code Equalizer} on each player's own audio
-     *       session ({@code getAudioSessionId()}): the incoming's bass bands start
-     *       cut, so the outgoing track keeps the foundation of the mix to itself,
-     *       and the two swap at {@link IncomingMix#bassSwapAtMs()}. Attached here,
-     *       before the ramp, so nothing is allocated while two tracks are sounding
-     *       — and released at the promotion.</li>
-     * </ul>
+     * <p>The hand-over is an {@code Equalizer} on each player's own audio session
+     * ({@code getAudioSessionId()}): the incoming's bass bands start cut, so the
+     * outgoing track keeps the foundation of the mix to itself, and the two swap at
+     * {@link IncomingMix#bassSwapAtMs()}. Attached here, before the ramp, so nothing
+     * is allocated while two tracks are sounding — and released at the promotion.
      *
-     * <p>The tempo and the pitch are what the caller's whole plan was computed
-     * around (the overlap length, the beat grid, the position the track will be
-     * promoted at), so what actually took is recorded in {@link #appliedMix} and
-     * reported through {@link #incomingMix()} rather than assumed. The equalizer is
-     * best-effort by design: a device with no usable effects mixes without the
-     * hand-over, which is a smaller loss than refusing the mix.
+     * <p>What took is recorded in {@link #appliedMix} and reported through
+     * {@link #incomingMix()} rather than assumed, so a caller could always check. It
+     * is best-effort by design: a device with no usable effects plays the same
+     * overlap without the hand-over, which is a smaller loss than refusing the blend.
+     * ⚠️ Nothing here touches the tempo or the pitch — no {@code setPlaybackParams} is
+     * called anywhere in this class (see the section above the mix fields).
      */
     private void applyRequestedMix(MediaPlayer in) {
         IncomingMix mix = requestedMix;
         if (mix == null || mix.isIdentity()) return;
-        if (!applyTempo(in, mix.speed(), mix.pitch())) return;
         appliedMix = mix;
         bassSwapAtMs = mix.bassSwapAtMs();
         attachBassSwap(mix.bassSwapAtMs() >= 0L);
@@ -672,66 +697,6 @@ public final class AndroidAudioBackend implements AudioBackend {
         return appliedMix != null ? appliedMix : IncomingMix.IDENTITY;
     }
 
-    /** {@code MediaPlayer.setPlaybackParams}, and then the same values read back.
-     *
-     *  <p>The read-back is the point of the method: "the platform accepted it" is a
-     *  claim that has to be checkable from a log, because a silently ignored speed
-     *  would leave a plan that assumes a stretched track describing a track that is
-     *  not stretched. {@code getPlaybackParams} throws when nothing has been set, so
-     *  every failure here answers false and the caller keeps the un-mixed plan.
-     *
-     *  <p>The call is made while the incoming player is parked (not started), which
-     *  is also why {@code beginCrossfade} asserts the same values once it has
-     *  started it: a platform that drops parameters set before playback would
-     *  otherwise leave the track at its own tempo while the plan assumes otherwise. */
-    private boolean applyTempo(MediaPlayer mp, double speed, double pitch) {
-        try {
-            Float readSpeed = null;
-            Float readPitch = null;
-            try {
-                mp.setPlaybackParams(new PlaybackParams()
-                        .setSpeed((float) speed).setPitch((float) pitch));
-                PlaybackParams read = mp.getPlaybackParams();
-                readSpeed = read.getSpeed();
-                readPitch = read.getPitch();
-            } catch (Throwable e) {
-                Logger.warn("MediaPlayer: incoming x{} speed / x{} pitch refused: {}",
-                        fmt(speed), fmt(pitch), e.toString());
-                return false;
-            }
-            boolean rolling;
-            try {
-                rolling = mp.isPlaying();
-            } catch (Throwable e) {
-                rolling = false;
-            }
-            Logger.info("MediaPlayer: incoming mix applied to the INCOMING player"
-                            + " (speed x{} pitch x{} asked; platform reports speed x{} pitch x{};"
-                            + " the audible track is untouched; it is parked, and {} was started by"
-                            + " the call)",
-                    fmt(speed), fmt(pitch), fmt(readSpeed), fmt(readPitch),
-                    rolling ? "it" : "nothing");
-            return true;
-        } catch (Throwable e) {
-            Logger.warn("MediaPlayer: incoming mix failed: {}", e.toString());
-            return false;
-        }
-    }
-
-    private static String fmt(double v) {
-        return String.format(java.util.Locale.US, "%.4f", v);
-    }
-
-    private static String fmt(Float v) {
-        return v == null ? "-" : fmt(v.doubleValue());
-    }
-
-    /** The speed the audible player is running at: the applied mix's, or 1.0 when
-     *  there is none — the factor between the wall clock and the promoted track's own
-     *  timeline (see promoteIncoming). */
-    private double appliedSpeed() {
-        return appliedMix != null ? appliedMix.speed() : 1d;
-    }
 
     // --- The low-end hand-over (platform Equalizer) ---------------------------
 
@@ -847,80 +812,6 @@ public final class AndroidAudioBackend implements AudioBackend {
         return null;
     }
 
-    // --- Back to the track's own tempo and pitch ------------------------------
-
-    /** Ease the promoted player from the mix's speed and pitch back to its own, over
-     *  {@link #PROMOTION_RESTORE_MS}. See that constant for why the promotion is the
-     *  moment, and why it is a ramp rather than a step. */
-    private void startTempoRestore(double speed, double pitch) {
-        restoreFromSpeed = speed;
-        restoreFromPitch = pitch;
-        restoreStartNs = System.nanoTime();
-        restoreDurationNs = PROMOTION_RESTORE_MS * 1_000_000L;
-        restoring = true;
-        long generation = ++restoreGeneration;
-        Logger.info("MediaPlayer: easing the promoted track back to its own tempo and pitch"
-                + " over {}ms (from x{} / x{})", PROMOTION_RESTORE_MS, fmt(speed), fmt(pitch));
-        restoreStep(generation);
-    }
-
-    private void restoreStep(long generation) {
-        boolean done = false;
-        synchronized (this) {
-            if (!restoring || generation != restoreGeneration) return;
-            MediaPlayer mp = player;
-            if (mp == null) {
-                restoring = false;
-                return;
-            }
-            long elapsed = System.nanoTime() - restoreStartNs;
-            double t = elapsed >= restoreDurationNs ? 1d
-                    : (double) elapsed / (double) restoreDurationNs;
-            double speed = restoreFromSpeed + (1d - restoreFromSpeed) * t;
-            double pitch = restoreFromPitch + (1d - restoreFromPitch) * t;
-            try {
-                mp.setPlaybackParams(new PlaybackParams()
-                        .setSpeed((float) speed).setPitch((float) pitch));
-            } catch (Throwable e) {
-                Logger.warn("MediaPlayer: restoring the promoted tempo failed ({}); leaving it"
-                        + " at x{}", e.toString(), fmt(speed));
-                restoring = false;
-                return;
-            }
-            if (t >= 1d) {
-                restoring = false;
-                done = true;
-            }
-        }
-        if (done) {
-            Logger.info("MediaPlayer: the promoted track is back at its own tempo and pitch");
-            return;
-        }
-        try {
-            rampHandler.postDelayed(() -> restoreStep(generation), RESTORE_TICK_MS);
-        } catch (Throwable ignored) { }
-    }
-
-    /** End the restore NOW, at its own tempo and pitch.
-     *
-     *  <p>Called whenever playback is interrupted (a pause, a seek, a focus loss, a
-     *  new track, a release): a ramp that stops half way would leave the track
-     *  playing at, say, 3% fast until something else happened to change it, and a
-     *  resumed track at the wrong tempo is worse than one correction. */
-    private void finishRestoreNow() {
-        if (!restoring) return;
-        restoring = false;
-        restoreGeneration++;
-        MediaPlayer mp = player;
-        if (mp == null) return;
-        try {
-            mp.setPlaybackParams(new PlaybackParams().setSpeed(1f).setPitch(1f));
-            Logger.info("MediaPlayer: tempo and pitch restore finished early (playback changed)");
-        } catch (Throwable e) {
-            Logger.warn("MediaPlayer: could not restore the tempo early: {}", e.toString());
-        }
-    }
-
     /** Ramp the audible player down and the incoming one up over {@code ms} along
      *  {@code curve}, then promote the incoming player and release the outgoing
      *  one.
@@ -954,35 +845,22 @@ public final class AndroidAudioBackend implements AudioBackend {
                 bassSwapAtMs = latest;
             }
         }
-        // A parked incoming starts here rather than when it was prepared: this is
-        // the moment its offset was computed for.
+        // ⚠️ A parked incoming starts HERE, and only here: this is the moment its
+        // offset was computed for, and the first moment any of the next track is
+        // allowed to be audible. Everything the listener hears of it during the overlap
+        // is `offset .. offset + ms` — nothing skipped, nothing replayed — which is the
+        // invariant the controller's handoff and the promotion arithmetic both rest on.
         if (!incomingRolling) {
             try {
                 incomingPlayer.start();
                 incomingRolling = true;
-                // Assert the mix now that the player is actually rolling. The values
-                // are the same ones onIncomingPrepared already set and read back, so
-                // this is not a second decision — it is insurance against a platform
-                // that ignores playback parameters applied before playback, which
-                // would leave the incoming at its own tempo while the whole plan
-                // (overlap length, beat grid, the position it will be promoted at)
-                // assumes otherwise.
-                if (appliedMix != null) {
-                    try {
-                        incomingPlayer.setPlaybackParams(new PlaybackParams()
-                                .setSpeed((float) appliedMix.speed())
-                                .setPitch((float) appliedMix.pitch()));
-                    } catch (Throwable e) {
-                        Logger.warn("MediaPlayer: could not re-assert the mix on the rolling"
-                                + " incoming player: {}", e.toString());
-                    }
-                }
             } catch (Throwable e) {
                 Logger.warn("MediaPlayer: parked incoming refused to start: {}", e.toString());
             }
         }
-        Logger.info("MediaPlayer: crossfade begin over {}ms ({}{})", ms, rampCurve,
-                appliedMix != null ? ", " + appliedMix : "");
+        Logger.info("MediaPlayer: crossfade begin over {}ms ({}{}{})", ms, rampCurve,
+                appliedMix != null ? ", " + appliedMix : "",
+                incomingRolling ? ", the incoming starts now at its offset" : "");
         rampStep(generation);
         return true;
     }
@@ -1139,25 +1017,31 @@ public final class AndroidAudioBackend implements AudioBackend {
         } catch (Throwable e) {
             promotedAt = -1L;
         }
-        // Two numbers, because their difference is the whole "the second song plays
-        // its beginning twice" defect: the player's own clock, and how much the
-        // overlap that just ran actually played (its start offset plus the ramp's own
-        // length IN THE INCOMING TRACK'S OWN TIMELINE — a track the mix slowed to 95%
-        // has played 95% of the ramp's wall-clock length of its own audio, and a
-        // track it sped up has played more). The promotion only happens at the end of
-        // the ramp, so an honest player reports at least the second. A player that
-        // reports less — a parked one whose seek/start never really took effect, a
-        // stream that stalled — has not played what was heard, and resuming it from
-        // its own clock replays the part the listener has already been given.
+        // Two numbers, because what they measure is what the listener has been given of
+        // the next track: the promoted player's own clock, and the overlap's count (the
+        // offset it was started at plus the ramp). The player is started BY the ramp and
+        // is never seeked afterwards, so both describe the same span, and the difference
+        // between them is the player's own start latency — measured on the device at
+        // 123-362ms across local-cache sources. The player's clock is the honest one
+        // (that is the audio it emitted); the overlap's count is the upper bound the
+        // controller's reported position is taken from.
+        //
+        // The "nothing skipped" half of the invariant is the same pair of facts: because
+        // nothing starts the incoming before the ramp, `offset .. offset + ramp` is all
+        // of the next track that has ever been audible, and the listener got it from its
+        // very start — nothing was skipped before the ramp and nothing is replayed after
+        // it, because nothing on this path ever seeks.
         long rampPlayedMs = Math.max(0L, rampDurationNs / 1000000L);
-        long overlapPlayedMs = startedAtMs + Math.round(rampPlayedMs * appliedSpeed());
+        long overlapPlayedMs = startedAtMs + rampPlayedMs;
         Logger.info("MediaPlayer: transition promoted, releasing the outgoing player"
-                        + " (the incoming is at {}ms; the overlap already played {}ms{}{})",
-                promotedAt, overlapPlayedMs,
-                appliedMix != null ? " at " + appliedMix : "",
+                        + " (the incoming is at {}ms; the overlap heard {}ms = its start {}ms +"
+                        + " the {}ms ramp{}{})",
+                promotedAt, overlapPlayedMs, startedAtMs, rampPlayedMs,
+                appliedMix != null ? " " + appliedMix : "",
                 promotedAt >= 0L && promotedAt + 200L < overlapPlayedMs
-                        ? " -- BEHIND by " + (overlapPlayedMs - promotedAt)
-                        + "ms, that part would be heard again"
+                        ? " -- its own clock is " + (overlapPlayedMs - promotedAt)
+                        + "ms behind the ramp's wall clock (start latency, not a skipped part:"
+                        + " nothing is seeked here)"
                         : "");
         // ONLY the outgoing player, and only its own listeners: every field above
         // already belongs to the promoted instance.
@@ -1167,14 +1051,10 @@ public final class AndroidAudioBackend implements AudioBackend {
         // outgoing track is gone, so this changes nothing that can be heard — it is
         // here so the effect engines and the sessions behind them are not leaked.
         releaseEqualizers();
-        // The mix's tempo and pitch belonged to the overlap, and the overlap is over:
-        // the promoted track eases back to its own, so the listener ends up with the
-        // record and not with a version of it 5% fast.
-        if (appliedMix != null && !appliedMix.isIdentity()) {
-            startTempoRestore(appliedMix.speed(), appliedMix.pitch());
-        } else {
-            restoreGeneration++;
-        }
+        // ⚠️ No tempo or pitch to undo: the promoted track has been running at its own
+        // speed and pitch the whole time (nothing in this class ever calls
+        // setPlaybackParams — see the mix section above), so there is no ease-back and
+        // nothing about the next boundary's grid is thrown off by this one.
         appliedMix = null;
         requestedMix = IncomingMix.IDENTITY;
         bassSwapAtMs = -1L;
@@ -1374,13 +1254,6 @@ public final class AndroidAudioBackend implements AudioBackend {
         // A ramp in flight belongs to the source being replaced, and so does the
         // player it is ramping toward.
         cancelRamp();
-        // And so does the tempo/pitch of the track being replaced: whatever the
-        // promoted track had already been eased back to is irrelevant now, and the
-        // player it is running on is about to be released (a restore step posted to
-        // the main looper must not touch the *next* player, which is why the
-        // generation is bumped here as well).
-        finishRestoreNow();
-        restoreGeneration++;
         releaseOne(player);
         player = null;
         prepared = false;

@@ -107,15 +107,20 @@ public interface AudioBackend {
     }
 
     /**
-     * Same, with the mix the incoming player should be prepared for: the tempo and
-     * pitch it runs at, and when the low end hands over (see {@link IncomingMix}).
+     * Same, with the mix the incoming player should be prepared for — now a single
+     * instruction (when the low end hands over, see {@link IncomingMix}).
      *
-     * <p>The mix travels with the prepare rather than with the ramp because the
-     * player is prepared asynchronously: the only moment it is known to be in a
-     * state that accepts playback parameters is when it has actually prepared, which
-     * is inside this call's own callback. A backend applies what it can and reports
-     * what it applied through {@link #incomingMix()}, so the caller learns the
-     * answer from the backend rather than from an optimistically returned flag.
+     * <p>It travels with the prepare rather than with the ramp because the player is
+     * prepared asynchronously and the instruction is attached to it, not to the gain
+     * ramp. A backend applies what it can and reports what it applied through
+     * {@link #incomingMix()}, so the caller learns the answer from the backend rather
+     * than from an optimistically returned flag.
+     *
+     * <p>⚠️ No implementation may start a player prepared this way: the caller parks it
+     * at an offset that its overlap is supposed to make audible <em>first</em>, and a
+     * player that rolls from the moment it prepares silently eats that much of the next
+     * track. Note also that a mix can never ask for a different tempo or pitch — the
+     * app does not stretch or transpose anything.
      *
      * @return false when the source cannot be opened or the backend has no second
      *         player — never because of the mix, which is best-effort by definition.
@@ -126,17 +131,17 @@ public interface AudioBackend {
     }
 
     /**
-     * The mix the incoming player is ACTUALLY running at, or {@link IncomingMix#IDENTITY}
+     * The mix the incoming player is ACTUALLY running with, or {@link IncomingMix#IDENTITY}
      * when it is prepared and nothing (or nothing of what was requested) could be
      * applied — or <b>null</b> while that is not yet known, i.e. no incoming player or
      * one that has not finished preparing.
      *
      * <p>Null is a third answer on purpose. Preparing is asynchronous, so a caller that
      * asks at the moment it armed would otherwise read "nothing was applied" from a
-     * player that was simply not open yet and plan an un-mixed boundary around a mix
-     * that is about to arrive. A backend with no second player (the desktop) answers
-     * null for ever, which the caller reads as "keep waiting" and then reaches through
-     * its own guards — never as a refusal it has to act on.
+     * player that was simply not open yet and plan a boundary around a mix that is
+     * about to arrive. A backend with no second player (the desktop) answers null for
+     * ever, which the caller reads as "keep waiting" and then reaches through its own
+     * guards — never as a refusal it has to act on.
      */
     default IncomingMix incomingMix() {
         return null;

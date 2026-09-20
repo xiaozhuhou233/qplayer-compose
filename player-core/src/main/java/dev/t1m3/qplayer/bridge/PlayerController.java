@@ -15,7 +15,6 @@ import dev.t1m3.qplayer.audio.FadeCurve;
 import dev.t1m3.qplayer.audio.HeuristicTransitionChooser;
 import dev.t1m3.qplayer.audio.IncomingMix;
 import dev.t1m3.qplayer.audio.MetadataReader;
-import dev.t1m3.qplayer.audio.MixMatch;
 import dev.t1m3.qplayer.audio.SilenceProfile;
 import dev.t1m3.qplayer.audio.SilenceProfiler;
 import dev.t1m3.qplayer.audio.TransitionChooser;
@@ -576,19 +575,17 @@ public final class PlayerController {
      *  「节拍对齐」 settings row). Off means every boundary behaves as it did before
      *  this existed, whichever grids happen to be cached. */
     private volatile boolean beatAlignmentEnabled = true;
-    /** Whether a pair that suits each other is MIXED rather than merely aligned
-     *  (the 「合拍改调」 settings row): the incoming track pulled onto the outgoing
-     *  track's tempo, transposed into its key, and overlapped for
-     *  {@link TransitionPlan#OVERLAP_MATCHED_MS}. Off means no tempo is ever
-     *  stretched and no key is ever shifted, and an overlap is exactly what the
-     *  chooser asked for — the P4 behaviour, and the fallback this whole phase
-     *  degrades to. */
-    private volatile boolean harmonizeEnabled = true;
-    /** Whether the low end may change hands in the middle of a mix (the
-     *  「低频互换」 settings row). Separate from {@link #harmonizeEnabled} because it
-     *  is the one part of a mix that depends on a platform effect actually working:
-     *  a device whose {@code Equalizer} misbehaves keeps the tempo and the key and
-     *  only loses the bass swap. */
+    /** Whether the low end may change hands in the middle of an overlap (the
+     *  「低频互换」 settings row). It is the one part of a blend that depends on a
+     *  platform effect actually working, so it keeps a switch of its own: a device
+     *  whose {@code Equalizer} misbehaves plays the same overlap without it.
+     *
+     *  <p>⚠️ Nothing else is ever applied to the incoming track. An earlier round
+     *  also stretched its tempo onto the outgoing track's grid and transposed it into
+     *  its key (the 「合拍改调」 row and {@code MixMatch}); both are gone, and
+     *  {@link IncomingMix} cannot even express them — so no {@code setPlaybackParams}
+     *  for a tempo or a pitch exists on any path, and this flag is the only thing
+     *  left that touches the incoming player besides the gain ramp. */
     private volatile boolean bassSwapEnabled = true;
     /** End the ramp this early, so the promotion lands just BEFORE the outgoing
      *  track's own end instead of racing its completion callback. */
@@ -615,13 +612,24 @@ public final class PlayerController {
      *  {@link #CROSSFADE_TAIL_MS} plus its tick interval, so this is pure slack: a
      *  ramp that reports nothing back within it is abandoned rather than waited on. */
     private static final long ADVANCE_DEFERRAL_MS = 700L;
-    /** When the chooser is asked about a boundary: the longest lead any plan can
-     *  need (a LONG overlap, plus the tail, plus the resolve budget above). The
-     *  question is cheap — a cached answer or the local rules — and the arming it
-     *  may lead to is what actually waits for the plan's own
-     *  {@link #transitionArmLeadMs}. */
-    private static final long TRANSITION_DECIDE_LEAD_MS =
-            TransitionPlan.OVERLAP_LONG_MS + CROSSFADE_TAIL_MS + CROSSFADE_LEAD_MS;
+    /**
+     * When the chooser is asked about a boundary: the longest lead any plan can
+     * need — the longest overlap this app will perform
+     * ({@link TransitionPlan#OVERLAP_EXTENDED_MS}, the plain-ending blend), plus the
+     * tail the ramp ends early by, plus the resolve budget, plus the slack a beat
+     * snap can add (half a beat, at the slowest tempo the estimator reports).
+     *
+     * <p>⚠️ <b>This has to grow with the longest overlap, or the longest overlap
+     * silently becomes a short one.</b> A fifteen-second plan decided inside a
+     * nine-second window can never be armed in time — that was the original "long
+     * options get quietly downgraded" bug — so this window is derived from the
+     * longest length the app can ask for and from nothing else. The question is
+     * cheap (a cached answer or the local rules), and the arming it may lead to waits
+     * for the plan's own {@link #transitionArmLeadMs}; every boundary logs the lead
+     * it was decided at and the length that came out. */
+    private static final long BEAT_SNAP_SLACK_MS = 600L;
+    private static final long TRANSITION_DECIDE_LEAD_MS = TransitionPlan.OVERLAP_EXTENDED_MS
+            + CROSSFADE_TAIL_MS + CROSSFADE_LEAD_MS + BEAT_SNAP_SLACK_MS;
     /** The most an overlap skips into the incoming track to reach its first audible
      *  sample. Same bound as a trim's, and for the same reason: a measurement
      *  claiming more than this is far more likely to describe a quiet intro (or a
@@ -691,10 +699,23 @@ public final class PlayerController {
      *  incoming track. */
     private long crossfadeOutgoingMs;
     /** Where the incoming track was started for the boundary in flight (ms into the
-     *  file) and how long the ramp runs, both captured when the ramp starts. Their
-     *  sum is how much of the incoming track the overlap has already played — the
-     *  position the promoted track has to continue from, and the floor the published
-     *  position may never fall below once the overlap is over. Main thread. */
+     *  file — its own content start, or the beat-aligned entry) and how long the ramp
+     *  runs, both captured when the ramp starts. Their sum is exactly how much of the
+     *  incoming track the listener has been given when the ramp ends, and it is
+     *  load-bearing twice over:
+     *
+     *  <ol>
+     *  <li>it is the position the promoted track has to continue from, and the floor
+     *  the published position may never fall below once the overlap is over;</li>
+     *  <li>it is the invariant that says the listener heard the incoming <em>once,
+     *  from its content start</em>: the parked incoming does not roll before the ramp
+     *  starts (see {@code AndroidAudioBackend.onIncomingPrepared}), so the ramp is
+     *  the first moment any of it is audible, and nothing is skipped or replayed.</li>
+     *  </ol>
+     *
+     *  <p>Main thread. No speed factor enters the sum: the incoming track always runs
+     *  at its own tempo (see {@link IncomingMix}), so a millisecond of ramp is a
+     *  millisecond of the incoming track. */
     private volatile long crossfadeIncomingStartMs;
     private volatile long crossfadeRampMs;
     /** How much of a transition's incoming track the listener had already heard when
@@ -768,35 +789,30 @@ public final class PlayerController {
      *  read when the incoming player is armed, which is up to the decision lead
      *  later — hence its own field rather than a local. */
     private volatile long beatEntryMs = -1L;
-    /** What the incoming player has to be configured with for a mix (tempo, key, and
-     *  when the low end hands over), or null when this boundary is not a mix. Decided
-     *  with the plan and applied the moment the ramp starts — "deciding" and
-     *  "applying" are different moments because the decision is taken up to
-     *  {@link #TRANSITION_DECIDE_LEAD_MS} earlier. */
+    /** What the incoming player has to be configured with for this boundary — now
+     *  only "when the low end hands over" (see {@link IncomingMix}), or null when the
+     *  boundary is not an aligned overlap and there is nothing to configure. Decided
+     *  with the plan and read when the incoming player is prepared, which is up to
+     *  {@link #TRANSITION_DECIDE_LEAD_MS} later — hence its own field rather than a
+     *  local. Nothing in it can stretch a tempo or shift a pitch. */
     private volatile IncomingMix incomingMix;
-    /** The overlap the chooser asked for, when {@link #incomingMix} raised it: what the
-     *  ramp falls back to if the backend cannot apply the mix (a plan computed for a
-     *  stretched track must not be performed on one that is not stretched). -1 = no
-     *  mix was planned for this boundary. */
-    private volatile long matchedFallbackOverlapMs = -1L;
-    /** Whether the backend has been asked to apply {@link #incomingMix} for the
-     *  boundary in flight, and whether it refused. One attempt per boundary: a
-     *  platform that refused the stretch will refuse it on the next frame too, and
-     *  the refusal is what the ramp length then has to respect. */
-    private boolean mixTried;
-    private boolean mixRefused;
-    /** The speed the incoming player is actually running at, for the arithmetic that
-     *  turns the ramp's wall-clock length into the incoming track's own milliseconds
-     *  (see the handoff in {@link #playAt(int, boolean)}). 1.0 unless a mix was
-     *  applied. */
-    private volatile double incomingPlaySpeed = 1d;
-    /** What the incoming player is being prepared for. */
+    /** What the incoming player is being prepared for.
+     *
+     *  <p>⚠️ There is no "rolling" case, deliberately. The backend can prepare a
+     *  player already rolling at volume 0 (the interface's {@code startMuted}), and an
+     *  earlier round used it for overlapping kinds to fade in a stream that was already
+     *  moving. That is the defect this round removed: the player is armed up to
+     *  {@link #TRANSITION_DECIDE_LEAD_MS} before its ramp, so a rolling one is that
+     *  many milliseconds into the next track before the listener has heard a single
+     *  sample of it — measured on the device as a promotion at 19769ms while the
+     *  overlap had only played 10385ms, i.e. the first nine seconds of the next track
+     *  were never heard. Every boundary parks, and the ramp is what starts it. */
     private enum IncomingMode {
-        /** Overlapping kinds: prepare it on the target offset and let it roll
-         *  silently, so the ramp fades in a stream that is already moving. */
-        ROLLING,
-        /** SILENCE_TRIM, measurements in: prepare it on the trim's offset and
-         *  leave it parked until the seam starts it. */
+        /** Prepare it on the target offset and leave it parked there until the ramp
+         *  (or, for a trim, the seam) starts it. Both overlapping kinds and
+         *  SILENCE_TRIM use this: what differs between them is the offset — an
+         *  overlap's content start or beat-aligned entry versus a trim's measured
+         *  seam — not whether the player is running. */
         PARKED,
         /** SILENCE_TRIM, measurements missing: only measure the source, prepare
          *  nothing yet. */
@@ -1801,23 +1817,9 @@ public final class PlayerController {
         return beatAlignmentEnabled;
     }
 
-    /** Whether a pair that suits each other may be mixed rather than merely aligned:
-     *  the incoming track pulled onto the outgoing track's tempo (pitch-preserving),
-     *  transposed into its key, over the longer overlap a mix is heard at. Off is the
-     *  P4 behaviour — nothing is stretched, nothing is transposed, and an overlap is
-     *  the length the chooser asked for. */
-    public void setHarmonizeEnabled(boolean enabled) {
-        this.harmonizeEnabled = enabled;
-    }
-
-    public boolean isHarmonizeEnabled() {
-        return harmonizeEnabled;
-    }
-
-    /** Whether the low end may change hands in the middle of a mix. Separate from
-     *  {@link #setHarmonizeEnabled} because it is the one part of a mix that needs a
-     *  platform effect: a device whose audio effects misbehave keeps the tempo and
-     *  the key and only loses the bass swap. */
+    /** Whether the low end may change hands in the middle of an overlap. The one
+     *  part of a blend that needs a platform effect: a device whose audio effects
+     *  misbehave plays the same overlap and only loses the bass swap. */
     public void setBassSwapEnabled(boolean enabled) {
         this.bassSwapEnabled = enabled;
     }
@@ -1971,33 +1973,6 @@ public final class PlayerController {
             return;
         }
         if (!armed) return;                       // still resolving or preparing
-        // What the backend managed to apply of the mix this boundary was planned
-        // around. Read here rather than assumed: the plan's overlap was computed for
-        // a track that runs at A's tempo (that is what made a whole number of A's
-        // beats fit, and what the incoming's entry offset was chosen for), so a
-        // platform that refused the stretch has to be answered with an un-stretched
-        // plan — not with a ten-second overlap of two grids that do not hold
-        // together, which is the "two songs at once" case this phase exists to avoid.
-        if (incomingMix != null && !mixTried) {
-            IncomingMix applied = backend.incomingMix();
-            // Null means the incoming player has not finished preparing, so nothing is
-            // known yet: the parked wait below is exactly this state, and the answer
-            // arrives inside it (beginCrossfade would refuse to start an unprepared
-            // player anyway).
-            if (applied == null) return;
-            mixTried = true;
-            if (!incomingMix.sameTempoAndPitch(applied)) {
-                mixRefused = true;
-                Logger.info("transition: the backend did not apply the mix (asked {}, got {});"
-                                + " this boundary runs un-stretched, at the {}ms the plan asked for"
-                                + " — its beats are not on A's grid",
-                        incomingMix, applied,
-                        matchedFallbackOverlapMs > 0L ? matchedFallbackOverlapMs : overlap);
-            }
-        }
-        if (mixRefused && matchedFallbackOverlapMs > 0L) {
-            overlap = Math.min(overlap, matchedFallbackOverlapMs);
-        }
         // Start the ramp with the whole overlap plus the tail still to come: the
         // ramp ends CROSSFADE_TAIL_MS before the track does (so the promotion lands
         // just before the outgoing track's own completion instead of racing it), and
@@ -2018,12 +1993,6 @@ public final class PlayerController {
             return;
         }
         crossfadeRampMs = rampMs;
-        // The speed the incoming track is really running at, recorded where the ramp
-        // starts: with crossfadeRampMs it is how the handoff turns the ramp's
-        // wall-clock length into that track's own milliseconds. 1.0 whenever the mix
-        // was refused (or never planned), which is exactly the un-stretched case.
-        incomingPlaySpeed = mixTried && !mixRefused && incomingMix != null
-                ? incomingMix.speed() : 1d;
         synchronized (crossfadeLock) {
             if (crossfadeTargetIndex != nextIndex) {
                 // Lost the race against a track change between reading the state and
@@ -2059,7 +2028,7 @@ public final class PlayerController {
             logTransitionDecision(transitionPlan, cur, next, nextIndex, remaining, dur,
                     "too late: less than " + CROSSFADE_MIN_MS + "ms left",
                     new BeatAlignment(transitionPlan, -1L,
-                            "mix: off (too late: " + remaining + "ms left)"));
+                            mixNone("too late: " + remaining + "ms left")));
             return;
         }
         TransitionPlan plan;
@@ -2070,7 +2039,8 @@ public final class PlayerController {
         } else {
             plan = transitionChooser.plan(
                     new TransitionContext(cur, next, remaining, dur,
-                            crossfadeStreamable(cur), crossfadeStreamable(next)));
+                            crossfadeStreamable(cur), crossfadeStreamable(next),
+                            measuredTailSilenceMs(cur), measuredHeadSilenceMs(next)));
             if (plan == null) plan = TransitionPlan.of(TransitionKind.CUT);
             // The chooser labels the branch it took ("AI cached", "rule: ..."),
             // which is the one thing a decision needs to be auditable from the log.
@@ -2085,41 +2055,49 @@ public final class PlayerController {
             why = kind + " cannot be performed into " + next.source;
             kind = TransitionKind.CUT;
             plan = TransitionPlan.of(kind, 0L, null, why);
-        } else if (kind.overlapping() && plan.overlapMs() > remaining - CROSSFADE_TAIL_MS) {
-            // The boundary is closer than the overlap the chooser asked for: cut the
-            // ramp down to what is left rather than arming something that cannot
-            // finish. Labelled, so a shorter ramp than the plan named is explained
-            // in the log instead of looking like the plan itself.
-            plan = plan.withOverlap(remaining - CROSSFADE_TAIL_MS,
-                    "capped to what is left (" + remaining + "ms)");
+        } else {
+            // An ordinary pair's overlap is widened before it is capped, so the two
+            // rules compose in the only order that makes sense: what the pair
+            // deserves first, what the boundary can hold second. See the method — it
+            // is the 15 s target and the plain-ending rule, both applied here rather
+            // than in a chooser because both are about time, and a chooser answers
+            // with a length class, not with a reading of the outgoing track's file.
+            if (kind == TransitionKind.CROSSFADE) {
+                plan = widenForOrdinaryPair(plan, cur, next);
+            }
+            if (kind.overlapping() && plan.overlapMs() > remaining - CROSSFADE_TAIL_MS) {
+                // The boundary is closer than the overlap the plan asks for: cut the
+                // ramp down to what is left rather than arming something that cannot
+                // finish. Labelled, so a shorter ramp than the plan named is explained
+                // in the log instead of looking like the plan itself.
+                plan = plan.withOverlap(remaining - CROSSFADE_TAIL_MS,
+                        "capped to what is left (" + remaining + "ms)");
+            }
         }
         // P4: the grids. An overlapping boundary is the only one that can be
         // aligned (a trim ends A and starts B, so a shift there is a hole in the
         // music rather than an alignment; the sequential kinds do not overlap at
         // all), and the alignment may re-time the overlap — so it runs after the
-        // caps above, and its own cap check is inside it.
+        // caps above, and its own cap check is inside it. Note what this can and
+        // cannot do: it may re-time the overlap and place the incoming track's entry,
+        // and it may decide whether the low end changes hands — it can never turn the
+        // blend into a cut (see alignToBeatGrid).
         beatEntryMs = -1L;
         incomingMix = null;
-        matchedFallbackOverlapMs = -1L;
-        mixTried = false;
-        mixRefused = false;
-        incomingPlaySpeed = 1d;
-        BeatAlignment align = null;
+        BeatAlignment align;
         if (kind.overlapping()) {
             align = alignToBeatGrid(plan, cur, next, remaining, dur);
             plan = align.plan;
             if (align.entryMs >= 0L) beatEntryMs = align.entryMs;
             incomingMix = align.mix;
-            matchedFallbackOverlapMs = align.fallbackOverlapMs;
         } else {
             // A kind that does not overlap never has both tracks audible at once, so
-            // there is no tempo to pull onto the other's grid and no key to bring into
-            // line: the mix is not applicable rather than refused. Said out loud all
-            // the same — the one line per boundary has to state what happened about
-            // the mix on EVERY boundary, or "the mix did not run" cannot be told from
-            // "this build has no mix in it" in the log.
+            // there is nothing to align and nothing to configure on the incoming
+            // player. Said out loud all the same — the one line per boundary has to
+            // state what happened about the mix on EVERY boundary, or "the mix did not
+            // run" cannot be told from "this build has no mix in it" in the log.
             align = new BeatAlignment(plan, -1L,
-                    "mix: off (" + kind + " never has both tracks audible)");
+                    mixNone(kind + " never has both tracks audible"));
         }
         transitionKind = kind;
         transitionPlan = plan;
@@ -2150,48 +2128,61 @@ public final class PlayerController {
     // --- Beat alignment (P4) -------------------------------------------------
 
     /** What {@link #alignToBeatGrid} answers: the plan (its overlap possibly
-     *  re-timed onto a beat, and raised when the pair is one to mix properly),
-     *  where the incoming track should start when its own grid gets to move it
-     *  (-1 = leave it at its content start), what the mix has to do to the incoming
-     *  player (null when this pair is not mixed at all), the length to fall back to
-     *  when the backend cannot do it, and the one fragment the boundary's log line
-     *  needs. Immutable, built once per boundary.
+     *  re-timed onto a beat), where the incoming track should start when its own grid
+     *  gets to move it (-1 = leave it at its content start), what the incoming player
+     *  has to be configured with (null when this boundary cannot be aligned and there
+     *  is nothing to configure), and the one fragment the boundary's log line needs.
+     *  Immutable, built once per boundary.
      *
      *  <p>{@link #log} always ends with the boundary's "mix:" fragment — what was done
-     *  to the incoming track, or why nothing was — on every boundary a mix could
-     *  apply to, whether the answer came from here ({@link #withMixNote}) or from the
-     *  kinds that never overlap at all. {@link #alignToBeatGrid} carries the grids and
-     *  the alignment; the mix has its own vocabulary. */
+     *  to the incoming track (align, and the low-end hand-over), or why nothing was —
+     *  on every boundary, whether the answer came from here ({@link #withMixNote}) or
+     *  from the kinds that never overlap at all. {@link #alignToBeatGrid} carries the
+     *  grids and the alignment; the mix has its own vocabulary, and since 变速/改调 is
+     *  gone that vocabulary has exactly one thing left to report: "no tempo, no key". */
     private static final class BeatAlignment {
         final TransitionPlan plan;
         final long entryMs;
         final String log;
-        /** The tempo/pitch/bass configuration for the incoming player, or null. */
+        /** The low-end hand-over for the incoming player, or null. */
         final IncomingMix mix;
-        /** The overlap the chooser asked for, to be used instead of the plan's when
-         *  the backend refuses {@link #mix} — a plan computed for a stretched track
-         *  must not be performed on one that is not stretched. -1 = not applicable. */
-        final long fallbackOverlapMs;
 
         BeatAlignment(TransitionPlan plan, long entryMs, String log) {
-            this(plan, entryMs, log, null, -1L);
+            this(plan, entryMs, log, null);
         }
 
-        BeatAlignment(TransitionPlan plan, long entryMs, String log, IncomingMix mix,
-                      long fallbackOverlapMs) {
+        BeatAlignment(TransitionPlan plan, long entryMs, String log, IncomingMix mix) {
             this.plan = plan;
             this.entryMs = entryMs;
             this.log = log;
             this.mix = mix;
-            this.fallbackOverlapMs = fallbackOverlapMs;
         }
 
-        /** The same answer with one more fragment on the log line — how the mix half
-         *  of this decision went, when the alignment half is what was returned. */
+        /** The same answer with one more fragment on the log line — the mix half of
+         *  this decision, when the alignment half is what was returned. */
         BeatAlignment withMixNote(String note) {
             if (note == null || note.isEmpty()) return this;
-            return new BeatAlignment(plan, entryMs, log + "; " + note, mix, fallbackOverlapMs);
+            return new BeatAlignment(plan, entryMs, log + "; " + note, mix);
         }
+    }
+
+    /**
+     * The one fragment every boundary's line carries about tempo and key.
+     *
+     * <p>Neither is ever touched: no tempo is stretched onto the other track's grid
+     * and no key is shifted into its harmony ({@code MixMatch}, the 「合拍改调」 row and
+     * the whole {@code setPlaybackParams} lane are gone — see {@link IncomingMix}).
+     * Saying so on every boundary is not decoration: the earlier phase's log had to
+     * be read against a build that <em>could</em> stretch, and a reader now has to be
+     * able to tell "nothing was applied here" from "this build has no such thing".
+     * What the fragment then adds is the one thing that <em>is</em> applied — a
+     * beat-aligned overlap, and the low end changing hands on a beat.
+     *
+     * @param because what this boundary's alignment amounted to, or why it could not
+     *                be aligned; null for the kinds that never overlap.
+     */
+    private static String mixNone(String because) {
+        return "mix: none (no tempo, no key" + (because == null ? "" : "; " + because) + ")";
     }
 
     /**
@@ -2202,26 +2193,35 @@ public final class PlayerController {
      * playing at once (which is why a long overlap could sound worse than a 4 s
      * seam).
      *
-     * <p>Two answers are possible, and which one this is comes first:
-     * <ul>
-     *   <li><b>A pair that suits each other is MIXED, not merely aligned</b> (see
-     *       {@link MixMatch}): the incoming track is played at the outgoing track's
-     *       tempo (pitch-preserving, so its notes do not move), transposed into its
-     *       key, and the two are overlapped for a length worth hearing that way
-     *       ({@link TransitionPlan#OVERLAP_MATCHED_MS}) with the low end changing
-     *       hands once in the middle. This is the only case where the two grids are
-     *       guaranteed to hold together rather than merely start together, which is
-     *       what makes a long overlap worth having.</li>
-     *   <li><b>Everything else is aligned exactly as P4 always did it</b> — which is
-     *       also what happens when the pair is not suitable, when the host has no key
-     *       estimator, or when the settings say not to.</li>
-     * </ul>
+     * <p>⚠️ <b>Nothing here can refuse the overlap.</b> The kind, its length and the
+     * fact that there is a blend at all were decided by the chooser, and the only
+     * things that can take that away are physical (see {@code decideTransition}).
+     * What this method can decide is whether the blend is additionally <em>aligned</em>
+     * — an overlap whose grids cannot be established runs exactly as it would have
+     * before any of this existed, and the log says which piece was missing.
      *
-     * <p>The gates both paths share come first: both grids must exist and be
-     * trustworthy. Material with no beat (ambient, classical, speech) has none — the
-     * estimator refuses it or answers with a confidence below
-     * {@link BeatProfile#MIN_CONFIDENCE} — and then the boundary behaves exactly as
-     * it did before any of this existed.
+     * <p>Two gates, both about the alignment only:
+     * <ul>
+     *   <li>a beat profiler must exist on this host and 节拍对齐 must be on;</li>
+     *   <li>the OUTGOING track's grid must exist and be trustworthy. Every overlap
+     *       snaps to that grid, so a track with no beat (ambient, classical, speech —
+     *       the estimator refuses those, or answers below
+     *       {@link BeatProfile#MIN_CONFIDENCE}) has nothing to snap to.</li>
+     * </ul>
+     * The incoming track's grid is a second, separate gate — it is needed to place the
+     * incoming's own entry — and the two grids being <em>compatible</em> is a third,
+     * needed only for the overlap length to stay on A's grid all the way through.
+     * None of them is about tempo <em>match</em> in the sense of equal tempos, and none
+     * is about key: two tracks whose tempos are nowhere near each other still get their
+     * overlap, they just do not get it snapped onto a grid that would slide apart
+     * during it.
+     *
+     * <p>⚠️ The low-end hand-over is deliberately NOT behind those last two gates. It
+     * needs one musical instant — a beat of the outgoing track, which is running at its
+     * own tempo — and no second grid at all, so a pair whose grids slide apart (which
+     * is most pairs, now that the ordinary overlap is fifteen seconds: the compatibility
+     * gate tolerates about 1.6% of tempo difference over 15 s against 6% over 4 s) still
+     * gets its bass swapped, with the log saying the overlap itself is unaligned.
      */
     private BeatAlignment alignToBeatGrid(TransitionPlan plan, Track cur, Track next,
                                           long remaining, long dur) {
@@ -2236,126 +2236,63 @@ public final class PlayerController {
         // and the line named only the beat half.
         if (beatProfiler == null) {
             return new BeatAlignment(plan, -1L, head + "off (no profiler)")
-                    .withMixNote("mix: off (no beat profiler on this device)");
+                    .withMixNote(mixNone("no beat profiler on this device"));
         }
         if (!beatAlignmentEnabled) {
             return new BeatAlignment(plan, -1L, head + "off (settings off)")
-                    .withMixNote("mix: off (节拍对齐 is off: a mix is performed on the two grids)");
+                    .withMixNote(mixNone("节拍对齐 is off, so the overlap is not aligned"));
         }
         if (a == null || b == null) {
             String which = a == null ? "A" : "B";
-            return new BeatAlignment(plan, -1L, head + "off (no grid for " + which + ")")
-                    .withMixNote("mix: off (no credible grid for " + which
-                            + ": the probe found no beat in its audio)");
+            // The hand-over survives the incoming track having no grid: it is a beat of
+            // A, and A is the one playing. It does NOT survive A having no grid — there
+            // is then no musical instant to put it on, and an arbitrary one is worse than
+            // none (see matchSwapMs).
+            IncomingMix swap = a != null && a.trustworthy() ? bassSwapFor(plan, a) : null;
+            return new BeatAlignment(plan, -1L, head + "off (no grid for " + which + ")",
+                    swap).withMixNote(mixNote(false, "no credible grid for " + which
+                            + " (the probe found no beat in its audio), so the overlap is"
+                            + " not aligned", swap));
         }
         if (!a.trustworthy() || !b.trustworthy()) {
             BeatProfile weak = !a.trustworthy() ? a : b;
             String which = !a.trustworthy() ? "A" : "B";
             String reading = weak.confidenceText() + " < " + BeatProfile.MIN_CONFIDENCE
                     + (weak.prominenceText() != null ? ", " + weak.prominenceText() : "");
-            return new BeatAlignment(plan, -1L, head + "off (confidence " + reading + ")")
-                    .withMixNote("mix: off (no credible grid for " + which + ", confidence "
-                            + reading + ")");
+            IncomingMix swap = a.trustworthy() ? bassSwapFor(plan, a) : null;
+            return new BeatAlignment(plan, -1L, head + "off (confidence " + reading + ")", swap)
+                    .withMixNote(mixNote(false, "no credible grid for " + which + ", confidence "
+                            + reading + ", so the overlap is not aligned", swap));
         }
-        // Both grids are real, so this pair can be judged: is it one whose tempos and
-        // keys go together? The judgement is made over the overlap the mix would
-        // really be performed at (not the one the chooser asked for), because two
-        // tempos that hold together for four seconds may not for ten.
-        long maxOverlap = remaining - CROSSFADE_TAIL_MS;
-        long mixOverlap = Math.min(Math.max(plan.overlapMs(), TransitionPlan.OVERLAP_MATCHED_MS),
-                Math.max(0L, maxOverlap));
-        MixMatch match = harmonizeEnabled
-                ? MixMatch.between(a, b, mixOverlap)
-                : MixMatch.refused("合拍改调 is off (settings)");
-        if (match.suitable() && maxOverlap >= TransitionPlan.OVERLAP_MATCHED_MS) {
-            return matchAlignment(plan, a, b, next, remaining, dur, head, match);
-        }
-        if (match.suitable()) {
-            return alignGrids(plan, a, b, next, remaining, dur, head).withMixNote(
-                    "mix: off (only " + maxOverlap + "ms of the track is left, a mix wants "
-                            + TransitionPlan.OVERLAP_MATCHED_MS + "ms)");
-        }
-        return alignGrids(plan, a, b, next, remaining, dur, head).withMixNote(match.note());
+        return alignGrids(plan, a, b, next, remaining, dur, head);
+    }
+
+    /** When the low end hands over, given only the outgoing track's grid: the first
+     *  beat of A at or after the middle of the overlap the plan asks for, or null when
+     *  there is no room for it (see {@link #matchSwapMs}) or the switch is off. */
+    private IncomingMix bassSwapFor(TransitionPlan plan, BeatProfile a) {
+        if (!bassSwapEnabled || plan == null || a == null) return null;
+        long periodA = Math.max(1L, Math.round(a.periodMs()));
+        long swapAtMs = matchSwapMs(plan.overlapMs(), periodA);
+        return swapAtMs >= 0L ? IncomingMix.bassSwapAt(swapAtMs) : null;
     }
 
     /**
-     * The overlap of a pair that suits each other: the incoming track is pulled onto
-     * the outgoing track's grid (see {@link MixMatch}), so the two grids hold
-     * together for the whole overlap instead of only starting together — which is
-     * what makes the longer overlap below more than two songs at once.
+     * The boundary's "mix:" fragment for an overlap that is <em>not</em> aligned.
      *
-     * <p>Everything about the timing is still the OUTGOING track's: its grid decides
-     * which beat the ramp starts on and the overlap is a whole number of its beats,
-     * exactly as in the plain path. The incoming track's offset is only ever an
-     * offset into its own file.
-     *
-     * <p>Refuses (and hands the boundary back to the plain path) when the incoming
-     * track's own first beat is too far past its content start: the phase of the mix
-     * comes from starting the incoming ON one of its beats, and a mix whose two grids
-     * do not even share a beat has no claim to the length this path asks for.
+     * <p>It still has to say what was done to the blend if anything was: the low-end
+     * hand-over needs no second grid, so a pair whose grids slide apart keeps its bass
+     * swap — and the alternative (saying only "mix: none" for an unaligned pair) would
+     * read as "nothing happened" on a boundary where the audible part of the mix did.
+     * The one thing that never happens is a tempo or a pitch change, which is why the
+     * fragment says so by name.
      */
-    private BeatAlignment matchAlignment(TransitionPlan plan, BeatProfile a, BeatProfile b,
-                                         Track next, long remaining, long dur, String head,
-                                         MixMatch match) {
-        long periodA = Math.max(1L, Math.round(a.periodMs()));
-        long maxOverlap = remaining - CROSSFADE_TAIL_MS;
-        // The length the mix is performed over: what the chooser asked for, raised to
-        // the length a mix is heard at (the ask: "start ten seconds early"), and never
-        // more than what is left.
-        long wanted = Math.min(Math.max(plan.overlapMs(), TransitionPlan.OVERLAP_MATCHED_MS),
-                maxOverlap);
-        long overlap = a.snapOverlapMs(wanted, dur, CROSSFADE_TAIL_MS);
-        if (overlap > maxOverlap) overlap -= periodA;              // step one beat back in
-        if (overlap < periodA) overlap = wanted;                    // no whole beat fits: keep the length
-        TransitionPlan mixed = plan.mixed(overlap, "mix: overlap " + plan.overlapMs()
-                + "->" + overlap + "ms at A's tempo and key");
-        // The incoming track's entry: one of ITS beats, as close to its own content
-        // start as the shift cap allows — the nearest rather than always the next,
-        // because half a beat backwards is inside the head silence the content start
-        // was measured past, while half a beat forwards is that much of the first
-        // phrase skipped. Starting on a beat is what puts the two grids in phase for
-        // the whole overlap, so a pair with no beat within the cap is not mixed at all.
-        long base = contentStartMs(next);
-        long nextBeat = b.beatAtOrAfter(base);
-        long entryMs = -1L;
-        long shift = Long.MAX_VALUE;
-        if (nextBeat <= MAX_OVERLAP_HEAD_SKIP_MS && nextBeat - base <= MAX_BEAT_ENTRY_SHIFT_MS) {
-            entryMs = nextBeat;
-            shift = nextBeat - base;
-        }
-        long prevBeat = nextBeat - Math.max(1L, Math.round(b.periodMs()));
-        if (prevBeat >= 0L && base - prevBeat <= MAX_BEAT_ENTRY_SHIFT_MS
-                && (entryMs < 0L || base - prevBeat < shift)) {
-            entryMs = prevBeat;
-            shift = prevBeat - base;                   // negative: into the head silence
-        }
-        if (entryMs < 0L) {
-            return alignGrids(plan, a, b, next, remaining, dur, head).withMixNote(
-                    "mix: off (the incoming track's nearest beat is "
-                            + (nextBeat - base) + "ms past its content start, past the "
-                            + MAX_BEAT_ENTRY_SHIFT_MS + "ms a mix will skip)");
-        }
-        // The low end changes hands once, at the first beat of the outgoing track at
-        // or after the middle of the overlap: a musical instant in the middle of the
-        // mix, where the incoming track's own foundation takes over. It is a beat of
-        // both tracks (the incoming is running at the outgoing's tempo by then).
-        long swapAtMs = matchSwapMs(overlap, periodA);
-        // The instruction for the platform: the incoming player's tempo, its pitch,
-        // and when the low end hands over. A settings row can take the bass swap out
-        // on its own — a device whose effect framework misbehaves keeps the tempo and
-        // the key, which is the larger part of the mix.
-        IncomingMix mix = IncomingMix.of(match.speed(), match.pitch(),
-                bassSwapEnabled ? swapAtMs : -1L);
-        String note = head + "on (" + match.note()
-                + "; overlap " + overlap + "ms = "
-                + Math.max(1L, Math.round((double) overlap / periodA))
-                + " beats of A at A's tempo, drift 0ms by construction; entry "
-                + base + "->" + entryMs + "ms"
-                + (bassSwapEnabled ? (swapAtMs >= 0L
-                        ? "; bass swap at " + swapAtMs + "ms" : "; no bass swap (shorter than a beat)")
-                        : "; bass swap off (settings)")
-                + ")";
-        return new BeatAlignment(mixed, entryMs, note, mix, plan.overlapMs());
+    private static String mixNote(boolean aligned, String because, IncomingMix swap) {
+        if (!aligned && swap == null) return mixNone(because);
+        String what = swap == null ? (aligned ? "align" : "none")
+                : (aligned ? "align + bass swap" : "bass swap");
+        return "mix: " + what + ", no tempo/key (" + because + "; bass swap at "
+                + (swap != null ? swap.bassSwapAtMs() + "ms" : "off") + ")";
     }
 
     /** The first beat of the outgoing track at or after the middle of the overlap —
@@ -2370,16 +2307,23 @@ public final class PlayerController {
     }
 
     /**
-     * The beat alignment, exactly as P4 shipped it: the overlap becomes a whole
-     * number of the outgoing track's beats and the incoming track starts on one of
-     * its own, but neither track's tempo or key is touched. Both grids must be
-     * <em>compatible</em> ({@link BeatProfile#gridsCompatible}: the phase between
-     * them must not slip more than half a beat across the whole overlap) — otherwise
-     * the alignment is skipped, not forced, because two different tempos cannot be
-     * held together for ten seconds by aligning them once.
+     * The beat alignment: the overlap becomes a whole number of the outgoing track's
+     * beats and the incoming track starts on one of its own, and the low end changes
+     * hands once on a beat in the middle. Neither track's tempo or key is touched.
      *
-     * <p>Reached whenever the pair is not one to mix (see {@link #alignToBeatGrid}),
-     * so a boundary that this phase cannot improve on behaves as it always did.
+     * <p>Both grids must be <em>compatible</em> ({@link BeatProfile#gridsCompatible}:
+     * the phase between them must not slip more than half a beat across the whole
+     * overlap) — otherwise the alignment is skipped, not forced, because two different
+     * tempos cannot be held together for ten seconds by aligning them once. That is a
+     * statement about the alignment, not about the blend: the overlap still happens,
+     * at the length the chooser asked for, and the line says why it is unaligned.
+     *
+     * <p>The low-end hand-over is the one part of this that is not about the two grids:
+     * it needs a single musical instant (a beat of the OUTGOING track, which is running
+     * at its own tempo, so a beat of its grid <em>is</em> a beat of the mix), and it is
+     * best-effort — a device with no usable equalizer plays the same overlap without it.
+     * It is therefore still armed on the branches below that refuse to align the
+     * overlap, as long as A's own grid is there to put it on (see alignToBeatGrid).
      */
     private BeatAlignment alignGrids(TransitionPlan plan, BeatProfile a, BeatProfile b, Track next,
                                      long remaining, long dur, String head) {
@@ -2387,16 +2331,26 @@ public final class PlayerController {
         long maxOverlap = remaining - CROSSFADE_TAIL_MS;
         long wanted = Math.min(plan.overlapMs(), maxOverlap);
         long quantized = a.snapOverlapMs(wanted, dur, CROSSFADE_TAIL_MS);
+        // A's grid is enough for the hand-over, which is the only part of this that
+        // survives the pair failing to align: decided once, here, and reported by
+        // whichever branch below answers.
+        IncomingMix swap = bassSwapFor(plan, a);
         if (quantized < 0L) {
             return new BeatAlignment(plan, -1L, head + "off (nothing left to land a whole beat "
-                    + "of " + periodA + "ms in: overlap " + wanted + "ms of " + maxOverlap + "ms)");
+                    + "of " + periodA + "ms in: overlap " + wanted + "ms of " + maxOverlap + "ms)",
+                    swap).withMixNote(mixNote(false, "no whole beat of A fits in what is left, so"
+                            + " the overlap is not aligned", swap));
         }
         if (quantized > maxOverlap) quantized -= periodA;      // step one beat back in
         if (!BeatProfile.gridsCompatible(a, b, quantized)) {
             return new BeatAlignment(plan, -1L, head + "off (tempos incompatible: the grids "
                     + "slide " + BeatProfile.gridDriftMs(a, b, quantized) + "ms apart over "
                     + quantized + "ms, more than half a beat of "
-                    + String.format(java.util.Locale.US, "%.1f", b.bpm()) + "BPM)");
+                    + String.format(java.util.Locale.US, "%.1f", b.bpm()) + "BPM)", swap)
+                    .withMixNote(mixNote(false, "the two grids slide "
+                            + BeatProfile.gridDriftMs(a, b, quantized)
+                            + "ms apart over " + quantized + "ms, so the overlap is not aligned"
+                            + " (nothing is stretched to force it)", swap));
         }
         TransitionPlan snapped = plan;
         if (quantized != plan.overlapMs()) {
@@ -2417,13 +2371,31 @@ public final class PlayerController {
             entryMs = beatEntry;
             tailNote = "; entry " + base + "->" + beatEntry + "ms";
         }
+        // The low end changes hands once, at the first beat of the outgoing track at
+        // or after the middle of the overlap: a musical instant in the middle of the
+        // blend, where the incoming track's own foundation takes over.
+        long swapAtMs = matchSwapMs(quantized, periodA);
+        IncomingMix mix = bassSwapEnabled && swapAtMs >= 0L
+                ? IncomingMix.bassSwapAt(swapAtMs) : null;
+        String swapNote = !bassSwapEnabled
+                ? "bass swap off (settings)"
+                : (swapAtMs >= 0L
+                        ? "bass swap at " + swapAtMs + "ms"
+                        : "no bass swap (the overlap is shorter than a beat)");
         // Re-read the beat count from the length that survived the cap above, so a
         // ramp that had to step back a beat is logged with the beats it actually has.
         long beatsInOverlap = Math.max(1L, Math.round((double) quantized / periodA));
         return new BeatAlignment(snapped, entryMs, head + "on (overlap "
                 + plan.overlapMs() + "->" + quantized + "ms = " + beatsInOverlap
                 + " beats of A, drift " + BeatProfile.gridDriftMs(a, b, quantized)
-                + "ms of " + Math.round(b.periodMs() / 2d) + "ms" + tailNote + ")");
+                + "ms of " + Math.round(b.periodMs() / 2d) + "ms" + tailNote + "); "
+                // What was actually done to the blend, named as what it is: the two
+                // tracks put on each other's beats and the low end changing hands, and
+                // the one thing that is never done to either of them — no speed and no
+                // pitch are applied anywhere in this app (see IncomingMix). A boundary
+                // that only said "mix: none" would read as "nothing happened" exactly
+                // where the audible part of the mix just ran.
+                + mixNote(true, "aligned to A's beats, " + swapNote, mix), mix);
     }
 
     /** The lead one plan needs before its boundary: the overlap itself, the tail the
@@ -2450,6 +2422,95 @@ public final class PlayerController {
         return Math.min(p.headMs(), MAX_OVERLAP_HEAD_SKIP_MS);
     }
 
+    /** How much silence the outgoing track is measured to trail, ms, or
+     *  {@link TransitionContext#SILENCE_UNKNOWN}.
+     *
+     *  <p>For the chooser, and for one rule only: a track whose file runs on after
+     *  its music is the one case where a trim is demonstrably better than an overlap
+     *  (see {@link HeuristicTransitionChooser#TRIM_TAIL_MIN_MS}). Read from the cache
+     *  exactly like {@link #contentStartMs} — never measured here and never waited
+     *  for: an unmeasured tail is not evidence, so the chooser answers the plain
+     *  overlap and the boundary is the same as if no profiler existed. */
+    private long measuredTailSilenceMs(Track t) {
+        SilenceProfile p = silenceProfileOf(t);
+        return p == null ? TransitionContext.SILENCE_UNKNOWN : p.tailMs();
+    }
+
+    /** How much silence the incoming track is measured to lead with, ms, or
+     *  {@link TransitionContext#SILENCE_UNKNOWN}. Same rules as the tail above. */
+    private long measuredHeadSilenceMs(Track t) {
+        SilenceProfile p = silenceProfileOf(t);
+        return p == null ? TransitionContext.SILENCE_UNKNOWN : p.headMs();
+    }
+
+    /** How much of the outgoing track's ending is measured to be plain — no attack
+     *  in it, nothing sustained in the vocal band, quieter than the body of the
+     *  window it was measured over (see {@link SilenceProfile#plainTailMsOf}). 0 when
+     *  nobody has measured it, which is the answer that changes nothing.
+     *
+     *  <p>This is the whole evidence for starting a blend earlier than its nominal
+     *  overlap, and it is measured, never guessed: it comes from the same decode of
+     *  the tail that the trim's silence numbers come from, cached per track, and
+     *  read here without measuring or waiting for anything. */
+    private long measuredPlainTailMs(Track t) {
+        SilenceProfile p = silenceProfileOf(t);
+        return p == null ? 0L : p.plainTailMs();
+    }
+
+    /**
+     * The two ways an ordinary pair's overlap is widened past what the chooser
+     * named. Both are about the two tracks' own time, not about taste, which is why
+     * they are applied here rather than inside a chooser — a chooser answers with a
+     * kind and a length class, and cannot know how much of the outgoing file is
+     * still music.
+     *
+     * <ol>
+     *   <li><b>The ordinary target: fifteen seconds.</b> A CROSSFADE between two
+     *       ordinary-length streams is the case the feature exists for, and the
+     *       default it is supposed to produce — a chooser (or a cached AI answer)
+     *       that named something shorter is raised to it, with the length it asked
+     *       for left in the log. This is a floor, never a cap: anything longer is
+     *       the chooser's business.</li>
+     *   <li><b>Earlier when the ending is plain.</b> When the outgoing track is
+     *       <em>measured</em> to spend its last {@link TransitionPlan#OVERLAP_LONG_MS}
+     *       or more doing nothing — no attack, no voice, below the body level of the
+     *       window — there is nothing left for the blend to clash with, so it starts
+     *       at the start of that plain stretch instead of at the nominal length,
+     *       up to {@link TransitionPlan#OVERLAP_EXTENDED_MS}. Only that measurement
+     *       can ask for it (a track that ends in vocals or in a beat measures 0 and
+     *       gets the ordinary length), and it is only ever an extension.</li>
+     * </ol>
+     *
+     * <p>Short tracks are excluded: an overlap that eats a fifth of a seventy-second
+     * song is what {@link TransitionKind#QUICK_FADE} exists to avoid.
+     */
+    private TransitionPlan widenForOrdinaryPair(TransitionPlan plan, Track cur, Track next) {
+        if (plan == null || cur == null || next == null) return plan;
+        if (cur.durationMs < HeuristicTransitionChooser.SHORT_TRACK_MS
+                || next.durationMs < HeuristicTransitionChooser.SHORT_TRACK_MS) {
+            return plan;
+        }
+        TransitionPlan widened = plan;
+        long asked = plan.overlapMs();
+        if (widened.overlapMs() < TransitionPlan.OVERLAP_LONG_MS) {
+            widened = widened.withOverlap(TransitionPlan.OVERLAP_LONG_MS,
+                    "raised to the ordinary " + (TransitionPlan.OVERLAP_LONG_MS / 1000L)
+                            + "s blend (the chooser asked for " + asked + "ms)");
+        }
+        long plain = measuredPlainTailMs(cur);
+        if (plain >= TransitionPlan.OVERLAP_LONG_MS) {
+            long target = Math.min(plain, TransitionPlan.OVERLAP_EXTENDED_MS);
+            if (target > widened.overlapMs()) {
+                widened = widened.withOverlap(target,
+                        "the outgoing track's ending is measured plain for " + plain
+                                + "ms (nothing attacks in it, nothing sustained in the vocal"
+                                + " band, nothing still rising), so the blend starts at the"
+                                + " start of it rather than at " + widened.overlapMs() + "ms");
+            }
+        }
+        return widened;
+    }
+
     /** The one line that says how a boundary was decided: the kind and its overlap,
      *  who chose it (the local rules, or the AI — cached or fresh), why a CUT was
      *  answered, and every fact that answer was based on — the two sources, how much
@@ -2460,24 +2521,37 @@ public final class PlayerController {
      *  to be reasoned about.
      *
      * <p>Every boundary's line also carries a "<b>mix:</b>" fragment, whichever of
-     * the two answers it is: what the incoming track was pulled to (its tempo ratio,
-     * its key shift, when the low end hands over) or why nothing was (no credible
-     * grid for one side and what its reading was, the tempos too far apart, the keys
-     * clashing, the settings, a kind that never overlaps). That is deliberate: the
-     * first device run of this phase logged nothing at all about the mix — neither an
-     * action nor a refusal — because the pair was refused upstream of any mix
-     * judgement, which left "the mix had no effect" indistinguishable from "this
-     * build has no mix in it". */
+     * the two answers it is: what the incoming track was pulled to (the beat grid it
+     * was aligned to, when the low end hands over) or why nothing was (no credible
+     * grid for one side and what its reading was, the settings, a kind that never
+     * overlaps). That is deliberate: the first device run of this phase logged
+     * nothing at all about the mix — neither an action nor a refusal — because the
+     * pair was refused upstream of any mix judgement, which left "the mix had no
+     * effect" indistinguishable from "this build has no mix in it".
+     *
+     * <p>The timings are all on this one line, and on purpose: <b>the lead</b> it was
+     * decided at ({@code remaining}, and the {@code lead} this plan needs to be armed
+     * in full before the boundary arrives), <b>the overlap asked for</b> (in
+     * {@code 重叠=}, with whatever the chooser named left in the label whenever this
+     * boundary changed it), and — on the ramp's own line — the overlap that was
+     * actually performed. A blend that came out shorter than it was asked for says so
+     * there rather than looking like the length that was chosen. */
     private void logTransitionDecision(TransitionPlan plan, Track cur, Track next, int nextIndex,
                                        long remaining, long dur, String why, BeatAlignment align) {
         TransitionKind kind = plan != null ? plan.kind() : TransitionKind.CUT;
         long overlap = plan != null ? plan.overlapMs() : 0L;
-        Logger.info("transition: slot {} -> {}: {}{}{} ({}); remaining={}ms, length={}/{}ms,"
-                        + " streamable={}/{}, 智能过渡={}{}",
+        Logger.info("transition: slot {} -> {}: {}{}{} ({}); remaining={}ms, lead={}ms,"
+                        + " length={}/{}ms, streamable={}/{}, 智能过渡={}{}",
                 playIndex, nextIndex, kind,
                 overlap > 0L ? " 重叠=" + TransitionPlan.overlapText(overlap) : "",
                 kind.overlapping() ? ", curve=" + plan.curveOr(fadeCurve) : "",
-                why, remaining, dur,
+                why, remaining,
+                // What this plan needs before the boundary (overlap + tail + resolve
+                // budget) — the number the decision window is derived from. If it is
+                // bigger than remaining, the ramp starts as soon as it is armed, and
+                // the resolve is the part that pays for it.
+                transitionArmLeadMs(plan),
+                dur,
                 next != null && next.durationMs > 0L ? next.durationMs : -1L,
                 crossfadeStreamable(cur) ? "yes" : "no",
                 crossfadeStreamable(next) ? "yes" : "no",
@@ -2523,16 +2597,13 @@ public final class PlayerController {
         fadeOutInArmed = false;
         incomingSrc = null;
         beatEntryMs = -1L;
-        // The mix belongs to the plan it was decided with: nothing about a tempo, a
-        // key or an overlap that was chosen for one pair says anything about the next.
+        // The low-end hand-over belongs to the plan it was decided with: nothing
+        // about an overlap that was chosen for one pair says anything about the next.
+        // crossfadeIncomingStartMs/crossfadeRampMs are deliberately NOT cleared here:
+        // the handoff in playAt() calls this first and then reads them to work out
+        // what the listener has already been given of the incoming track. They are set
+        // when a ramp actually starts, which is the only moment they mean anything.
         incomingMix = null;
-        matchedFallbackOverlapMs = -1L;
-        mixTried = false;
-        mixRefused = false;
-        // incomingPlaySpeed is deliberately NOT cleared here: the handoff in playAt()
-        // calls this first and then reads it (with crossfadeRampMs) to work out how
-        // much of the incoming track the overlap already played. It is set when a ramp
-        // actually starts, which is the only moment it means anything.
         // transitionFadeIn is deliberately NOT cleared here: it is set at the
         // outgoing track's fade-out and has to survive the async resolve of the
         // NEXT track, which is exactly the playAt() that calls this.
@@ -2669,23 +2740,26 @@ public final class PlayerController {
             requestSilenceProfile(currentTrack(), measureSourceOf(currentTrack()));
             return;
         }
-        boolean startMuted = incomingMode != IncomingMode.PARKED;
         // An overlap starts the incoming player at its first audible sample
         // (contentStartMs), which it can only do when that sample has been measured.
         // This is where the source first exists for a track that has never been
         // played, so this is where the measurement can be asked for — off the
         // playback path, cached per track, and used from the next play of this pair
         // on. Nothing waits for it: today's overlap starts at the file's own start.
-        if (incomingMode == IncomingMode.PARKED) {
-            Track incoming = queue.size() > nextIndex ? queue.get(nextIndex) : null;
-            if (silenceProfileOf(incoming) == null) requestSilenceProfile(incoming, src);
-            // Same reasoning as the silence measurement above: this is the first
-            // moment the incoming track's source exists, so it is where a track
-            // nobody has heard yet can be measured. Off the playback path, cached per
-            // track, and never waited for — today's overlap starts where it starts.
-            if (beatProfileOf(incoming) == null) requestBeatProfile(incoming, src);
-        }
-        if (!backend.prepareIncoming(src, incomingStartMs, startMuted,
+        Track incoming = queue.size() > nextIndex ? queue.get(nextIndex) : null;
+        if (silenceProfileOf(incoming) == null) requestSilenceProfile(incoming, src);
+        // Same reasoning as the silence measurement above: this is the first moment the
+        // incoming track's source exists, so it is where a track nobody has heard yet
+        // can be measured. Off the playback path, cached per track, and never waited
+        // for — today's overlap starts where it starts.
+        if (beatProfileOf(incoming) == null) requestBeatProfile(incoming, src);
+        // ⚠️ `false` = prepare it PARKED, never rolling. That is the invariant the whole
+        // overlap rests on: this arm happens up to the plan's own lead before the ramp
+        // (see TRANSITION_DECIDE_LEAD_MS / transitionArmLeadMs), so a player that started
+        // here would be that far into the next track by the time the listener first hears
+        // it. It is started by beginCrossfade, at this offset, and that is the first
+        // sample of the next track the listener gets.
+        if (!backend.prepareIncoming(src, incomingStartMs, false,
                 incomingMix != null ? incomingMix : IncomingMix.IDENTITY)) {
             abandonTransition("backend refused the incoming source, using the hard cut");
             return;
@@ -2778,7 +2852,6 @@ public final class PlayerController {
         // played once the seam is over (see playAt's handoff).
         crossfadeIncomingStartMs = plan.incomingStartMs;
         crossfadeRampMs = seamMs;
-        incomingPlaySpeed = 1d;                 // a trim never stretches anything
         if (!backend.beginCrossfade(seamMs, fadeCurve)) return;
         synchronized (crossfadeLock) {
             if (crossfadeTargetIndex != nextIndex) {
@@ -2993,9 +3066,30 @@ public final class PlayerController {
      */
     private void precacheNextAudio(Track t) {
         if (!transitionEnabled || t == null) return;
-        if (t.source != Track.Source.NETEASE || t.neteaseId == 0L || t.trial) return;
+        // The three ways the ordinary case can be missed, each one line. The boundary
+        // itself also prints where its source came from ("served from the audio cache,
+        // nothing to resolve" / "not cached: resolved inside the boundary's window"), so
+        // a pair of lines answers "did the pre-cache cover this boundary, and if not,
+        // why not" without reading anything else. Measured on the device: every
+        // boundary after a completed pre-cache arms in ~100ms, and every one that has
+        // to resolve inside its own window spends 1-9s doing it.
+        if (t.source != Track.Source.NETEASE || t.neteaseId == 0L || t.trial) {
+            Logger.info("transition: not pre-caching the next track ({}): {} — a"
+                            + " {} track has no audio-cache key, and a trial clip is not what a"
+                            + " blend should fade into; the boundary resolves it itself",
+                    t.title, t.trial ? "it is a trial clip" : "source " + t.source,
+                    t.source);
+            return;
+        }
         final long songId = t.neteaseId;
-        if (diskCache.getAudio(songId) != null) return;      // already local: nothing to fetch
+        if (diskCache.getAudio(songId) != null) {
+            // The best case, and it used to be silent: the boundary will be served
+            // straight off the disk, so nothing about this one can be late.
+            Logger.info("transition: the next track ({}) is already on disk, so the boundary"
+                    + " will be served from the audio cache without resolving anything",
+                    t.title);
+            return;
+        }
         long limitMb = diskCache.getMaxSizeMB();
         if (limitMb > 0L && diskCache.totalSize() >= limitMb * 1024L * 1024L) {
             Logger.info("transition: not pre-caching {}: the audio cache is at its {}MB budget",
@@ -4659,31 +4753,49 @@ public final class PlayerController {
         // exact slot it was saved for.
         //
         // A crossfade handoff instead uses the position the promoted player has
-        // already reached: it has been rolling (silently) since the ramp began, so
-        // the incoming track is that far in — the lyric clock, the progress bar and
-        // the saved queue position all have to start there rather than at 0. The
-        // overlap's own count of what it has already played (the incoming's start
-        // offset plus the ramp, which only ever ends at its full length) is a floor
-        // under that: a promoted player whose own clock comes back smaller — a
-        // stream that stalled during the ramp, a seek that never really landed — must
-        // not make the app hand the listener seconds it has already given it.
+        // already reached: it was started by the ramp (and not before it — see
+        // AndroidAudioBackend.onIncomingPrepared), so the incoming track is exactly that
+        // far in — the lyric clock, the progress bar and the saved queue position all
+        // have to start there rather than at 0. The overlap's own count of what it has
+        // given the listener (the incoming's start offset plus the ramp, which only ever
+        // ends at its full length) is a floor under that: a promoted player whose own
+        // clock comes back smaller — a stream that stalled during the ramp, a seek that
+        // never really landed — must not make the app hand the listener seconds it has
+        // already given it.
         final long liveMs = Math.max(0L, backend.position());
-        // The ramp's length is wall clock; the incoming track's own timeline advances
-        // at the speed the mix put it on. A track the mix slowed to 95% has played 95%
-        // of the ramp's length of its own audio, and one it sped up has played more —
-        // so the floor under the promoted position is the entry plus the ramp scaled
-        // by that speed. Getting this wrong is not cosmetic: the floor is what stops
-        // the handoff from replaying the part of the next track the overlap already
-        // made audible, and a floor that is too high skips music.
-        final long overlapPlayedMs = crossfadeIncomingStartMs
-                + Math.round(crossfadeRampMs * Math.max(0d, incomingPlaySpeed));
+        // ⚠️ The invariant this whole number rests on: `start + ramp` is exactly what
+        // the listener has HEARD of the incoming track, and no more. The parked incoming
+        // player does not roll before the ramp begins, so the ramp is the first moment
+        // any of it is audible, and it is audible continuously from the start offset to
+        // the end of the ramp — nothing skipped (which is what a parked player that
+        // rolled early used to cause: measured on the device, promoted at 19769ms while
+        // the overlap had only played 10385ms, i.e. the listener lost the first nine
+        // seconds of the next track) and nothing replayed. No speed factor enters it:
+        // the incoming track always runs at its own tempo (see IncomingMix).
+        final long overlapPlayedMs = crossfadeIncomingStartMs + crossfadeRampMs;
         long resume;
         if (crossfadeHandoff) {
+            // ⚠️ Nothing here seeks the promoted player — the honest measure of what the
+            // listener has been given is the player's OWN clock, not the overlap's count,
+            // and the two differ by the player's start latency (123-362ms measured on the
+            // device). So the count is used as an upper bound for the number the app
+            // PUBLISHES (the lyric clock, the progress bar, the position a saved queue
+            // resumes from) rather than as the audio's own position, and the audio itself
+            // is untouched either way: it continues from wherever the player is. A count
+            // that is larger than the player's clock therefore costs nothing audible — it
+            // keeps a saved position from falling back into the part that was already
+            // audible, which is the failure a listener notices.
             resume = Math.max(liveMs, overlapPlayedMs);
+            Logger.info("transition: handoff resume={}ms (the promoted player reports {}ms,"
+                    + " the overlap heard {}..{}ms of the incoming track)",
+                    resume, liveMs, crossfadeIncomingStartMs, overlapPlayedMs);
             if (overlapPlayedMs > liveMs + 200L) {
-                Logger.warn("transition: the promoted player reports {}ms but the overlap"
-                        + " already played {}ms; resuming at the overlap's position so the"
-                        + " part already heard is not played twice", liveMs, overlapPlayedMs);
+                Logger.info("transition: the promoted player's own clock ({}ms) is {}ms behind"
+                        + " the overlap's count ({}ms) — that is its start latency, the audio"
+                        + " continues from the player's own position and is never seeked, and"
+                        + " the published position is taken from the overlap so a saved one"
+                        + " cannot fall back into the part already heard",
+                        liveMs, overlapPlayedMs - liveMs, overlapPlayedMs);
             }
         } else {
             resume = (i == pendingResumeIndex) ? Math.max(0L, pendingResumeMs) : 0L;

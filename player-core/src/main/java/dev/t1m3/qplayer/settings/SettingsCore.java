@@ -449,12 +449,11 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
                 case SettingsCatalog.SMART_TRANSITION_KEY:
                 case SettingsCatalog.TRANSITION_KIND_KEY:
                 case SettingsCatalog.TRANSITION_CURVE_KEY:
-                // 节拍对齐/合拍改调/低频互换 take effect on the next boundary, but they
-                // still have to reach the controller when they are toggled — the whole
+                // 节拍对齐/低频互换 take effect on the next boundary, but they still
+                // have to reach the controller when they are toggled — the whole
                 // block is re-pushed, so a row that is switched mid-song is not a
                 // setting that only applies after a restart.
                 case SettingsCatalog.BEAT_ALIGN_KEY:
-                case SettingsCatalog.HARMONIZE_KEY:
                 case SettingsCatalog.BASS_SWAP_KEY:
                 // The AI transition chooser is configured by the same rows the AI DJ
                 // is: changing any of them re-pushes the whole 智能过渡 block, which
@@ -522,7 +521,9 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
                 ? dev.t1m3.qplayer.audio.FadeCurve.EQUAL_POWER
                 : dev.t1m3.qplayer.audio.FadeCurve.LINEAR);
         controller.setBeatAlignmentEnabled(bool(SettingsCatalog.BEAT_ALIGN_KEY));
-        controller.setHarmonizeEnabled(bool(SettingsCatalog.HARMONIZE_KEY));
+        // ⚠️ No 合拍改调 row any more: nothing stretches a tempo or shifts a pitch
+        // (see PlayerController.bassSwapEnabled / IncomingMix), so the rows that
+        // refine 「智能过渡」 are 节拍对齐 and 低频互换 and nothing else.
         controller.setBassSwapEnabled(bool(SettingsCatalog.BASS_SWAP_KEY));
         controller.setAiTransitionConfig(str("aiBaseUrl"), str("aiApiKey"), str("aiModel"),
                 intOf("aiTimeoutMs"));

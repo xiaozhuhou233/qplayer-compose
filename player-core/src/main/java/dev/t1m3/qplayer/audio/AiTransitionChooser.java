@@ -26,6 +26,14 @@ import java.util.concurrent.Executor;
  * exactly as it did before this class existed when the model is unreachable,
  * unconfigured, slow, or wrong.
  *
+ * <p>For the same reason the model's answer can only <em>shape</em> a blend, never
+ * take one away: an answer that would end the outgoing track without the next one
+ * ever being audible (CUT, FADE_OUT_IN, SILENCE_TRIM) is replaced by the local
+ * rules' answer whenever those rules say the pair can be overlapped at all, and the
+ * line says so. What the model decides is the kind among the overlapping ones, how
+ * long the overlap is, and its curve — all of which are audible, and none of which
+ * the rest of the app can check for it. See {@link #plan}.
+ *
  * <h3>Why nothing here blocks</h3>
  * {@link #plan} runs on the render pump, in the frame in which a boundary is
  * decided. It may therefore only read: an answer already in {@link #decided}
@@ -73,7 +81,8 @@ public final class AiTransitionChooser implements TransitionChooser {
             "你是音乐播放器的“切歌过渡”选择器。你听不到音频，只能看到文字元数据（歌名、歌手、专辑、时长、来源），"
             + "外加你本身对这些歌的了解；所以你的判断是建议，不是分析，没有把握就回答 NONE。\n"
             + "可选的过渡方式（KIND，只能选一个）：\n"
-            + "CUT：硬切，上一首播完直接下一首，完全不重叠\n"
+            + "CUT：硬切，上一首播完直接下一首，完全不重叠"
+            + "（只在两首确实放不到一起时才用；两首普通歌曲之间硬切等于白白放弃一次过渡）\n"
             + "CROSSFADE：交叉淡化，两首同时出声并互相交叉\n"
             + "QUICK_FADE：快速淡化，约 1 秒的交叉\n"
             + "FADE_OUT_IN：先淡出再淡入，两首不同时出声\n"
@@ -206,13 +215,18 @@ public final class AiTransitionChooser implements TransitionChooser {
      */
     @Override
     public TransitionPlan plan(TransitionContext ctx) {
-        // The heuristic's own answer first, always: its first three rules are about
+        // The local rules' own answer first, always: its first three rules are about
         // what this boundary can DO (both sides streamable, enough time left, both
         // lengths known), and an AI answer must never talk the player into
         // overlapping a BILI link or ramping inside two seconds. Those rules are
         // therefore a gate the model's answer has to live inside, not a choice it
         // gets to override.
-        TransitionPlan safe = TransitionPlan.of(fallback.choose(ctx));
+        //
+        // Taken from plan() and not choose(), because the rules now name a curve with
+        // the kind they answer (an ordinary pair gets an equal-power overlap over the
+        // medium 8 s), and a fallback that dropped that would silently reinstate the
+        // mid-ramp dip for every pair the model had nothing to say about.
+        TransitionPlan safe = fallback.plan(ctx);
         if (safe.kind() == TransitionKind.CUT) {
             return safe.withOverlap(safe.overlapMs(), "rule: the pair cannot be overlapped");
         }
@@ -223,26 +237,15 @@ public final class AiTransitionChooser implements TransitionChooser {
         if (key == null) return safe.withOverlap(safe.overlapMs(), "rule: no stable key");
         TransitionPlan cached = known(key);
         if (cached == null) {
-            // Not known yet: ask in the background, and answer with the plain overlap
-            // rather than with the rules' own kind.
-            //
-            // The rules' answer for the pairs this matters for — two tracks long
-            // enough to be worth mixing — is SILENCE_TRIM, whose whole seam is 250ms.
-            // That is the least audible transition there is, by design, so a model
-            // answer that arrives a moment late used to degrade the boundary to
-            // "nothing happened": measured on the device, the first run of this phase
-            // logged `SILENCE_TRIM 重叠=short 250ms (rule: no AI decision yet)` on
-            // both boundaries of the session. Meanwhile this boundary is not waiting
-            // for anyone, and whatever it does has to be something a listener can
-            // hear, so it gets the answer every chooser gave before lengths existed:
-            // a plain CROSSFADE over the default (medium, 8 s) overlap — capped to
-            // what the tracks can hold exactly like a late AI answer is (clamp), and
-            // still a CUT when the pair cannot be overlapped at all (the capability
-            // gate above returned that already, so nothing here can talk the player
-            // into overlapping a source with no second player).
+            // Not known yet: ask in the background, and answer with the rules' own
+            // plan — an ordinary pair's plain overlap — rather than with nothing. The
+            // rules' answer used to be SILENCE_TRIM (a 250 ms seam) for every pair of
+            // long tracks, so a model answer that arrived a moment late degraded the
+            // boundary to "nothing happened"; the rules no longer answer that way, and
+            // this branch deliberately still names the overlap rather than letting the
+            // gate below decide it (see the CUT note there).
             prefetch(ctx, "missing at the boundary");
-            return clamp(TransitionPlan.of(TransitionKind.CROSSFADE,
-                    TransitionPlan.OVERLAP_MEDIUM_MS, null, "rule: no AI decision yet"), ctx);
+            return safe;
         }
         // A safe kind other than CUT means this boundary can be transitioned at all
         // (both sides streamable, both lengths known, enough time left), so the
@@ -250,6 +253,35 @@ public final class AiTransitionChooser implements TransitionChooser {
         // to be cut down to fit (clamp, which labels what it did). The one check the
         // rules keep is the capability gate above: the model cannot talk the player
         // into overlapping a source that has no second player to open.
+        //
+        // ⚠️ What the model cannot do either is take the blend away. Three of the five
+        // kinds play the outgoing track to its end without the next one ever being
+        // audible — CUT, FADE_OUT_IN, and SILENCE_TRIM (whose own failure mode, when a
+        // measurement does not arrive in time, is a cut) — and this model has not heard a
+        // note of either track: an answer like that is a guess about two names, and the
+        // rules' answer for an ordinary pair is the overlap the whole feature exists for.
+        // Measured on the device: the model answered CUT for Moonlight -> Lalala and
+        // FADE_OUT_IN for Lalala -> Moonlight, the two answers between which a listener
+        // hears the difference between "nothing happened" and an eight-second blend.
+        // So a non-overlapping answer is replaced by the rules' answer whenever the rules
+        // would give an overlapping one — which the gate above guarantees they do — and
+        // the line says whose answer was overruled and why. What the model keeps is
+        // everything that shapes a blend: the kind among the overlapping ones, its length
+        // and its curve. (A pair that genuinely cannot be overlapped was answered CUT by
+        // the gate above, so nothing here can talk the player into one; and the trim the
+        // rules do answer is backed by a measured tail, which is the only evidence this
+        // app has that a seam is better than a blend.)
+        if (!cached.kind().overlapping()) {
+            String overruled = "AI answered " + cached.kind() + ", but this pair is two"
+                    + " streamable tracks with time to spare and the model has not heard"
+                    + " either one — a blend given up, so the local rules' answer ("
+                    + safe.kind() + ") is used instead";
+            Logger.info("transition: AI 过渡决策 answered {} for {}, but this pair is two"
+                            + " streamable tracks with time to spare — a blend given up, so the"
+                            + " local rules' answer ({}) is used instead",
+                    cached.kind(), key, safe.kind());
+            return clamp(safe.withOverlap(safe.overlapMs(), overruled), ctx);
+        }
         return clamp(cached, ctx);
     }
 

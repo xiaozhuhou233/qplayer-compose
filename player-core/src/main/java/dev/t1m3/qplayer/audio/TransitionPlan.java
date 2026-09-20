@@ -29,26 +29,28 @@ public final class TransitionPlan {
      *  tail is part of the arrangement still reads as a seam. */
     public static final long OVERLAP_SHORT_MS = 4_000L;
 
-    /** The default, and what a chooser that expresses no preference gets. Long
-     *  enough to be heard as a mix, short enough to fit inside the nine-second
-     *  resolve budget without deciding absurdly early. */
+    /** The middle tier. Since the target length was raised it is what a boundary
+     *  gets when something about the pair argues for less than the ordinary
+     *  {@link #OVERLAP_LONG_MS} — and it is still long enough to be heard as a mix
+     *  rather than as a seam. */
     public static final long OVERLAP_MEDIUM_MS = 8_000L;
 
-    /** The "take fifteen seconds from each end" mix. Only worth choosing for two
-     *  tracks whose material actually goes together: a 15 s overlap of mismatched
-     *  tracks is two songs at once, which sounds worse than a seam, not better. */
+    /** <b>The length an ordinary suitable pair is blended over</b>, and therefore
+     *  the default for {@link TransitionKind#CROSSFADE} — two ordinary streams with
+     *  room ahead of them are the case the whole feature exists for, and fifteen
+     *  seconds of equal-power overlap is the length a listener hears as a mix.
+     *  Shorter than this and the boundary is heard as a fade (which is the
+     *  complaint this length answers); much longer and two tracks that do not go
+     *  together are simply both loud at once. */
     public static final long OVERLAP_LONG_MS = 15_000L;
 
-    /** The length a pair that <em>suits each other</em> is mixed over — both grids
-     *  aligned and the incoming track pulled onto the outgoing track's tempo and
-     *  into its key (see {@code MixMatch}). Ten seconds is the ask this phase was
-     *  built for ("start ten seconds early"): long enough that the listener hears a
-     *  mix rather than a seam, short enough to still fit inside the decision lead
-     *  ({@code PlayerController.TRANSITION_DECIDE_LEAD_MS}, which is sized for the
-     *  longest plan there is). Below this a matched pair is merely aligned, and
-     *  above it the chooser's own longer pick is respected — this is a floor for a
-     *  suitable pair, never a cap. */
-    public static final long OVERLAP_MATCHED_MS = 10_000L;
+    /** The longest blend the app will start, and the length an outgoing track whose
+     *  ending is measured to be <em>plain</em> is given: with nothing happening in
+     *  the last twenty seconds there is nothing for the overlap to clash with, so
+     *  the blend may begin at the start of that plain stretch instead of at the
+     *  nominal length (see {@code SilenceProfile.plainTailMs} and the controller's
+     *  plain-ending rule). Only ever chosen on that measurement. */
+    public static final long OVERLAP_EXTENDED_MS = 20_000L;
 
     /** The overlap a kind gets when whoever decides does not name one. Only the
      *  overlapping kinds have a real choice: {@link TransitionKind#QUICK_FADE} is
@@ -56,7 +58,7 @@ public final class TransitionPlan {
      *  own ({@link TransitionKind#SILENCE_TRIM}), or not at all. */
     public static long defaultOverlapMs(TransitionKind kind) {
         if (kind == null) return 0L;
-        if (kind == TransitionKind.CROSSFADE) return OVERLAP_MEDIUM_MS;
+        if (kind == TransitionKind.CROSSFADE) return OVERLAP_LONG_MS;
         return kind.overlapMs();
     }
 
@@ -74,7 +76,6 @@ public final class TransitionPlan {
         if (overlapMs <= 0L) return "none";
         return overlapLabel(overlapMs) + " " + overlapMs + "ms";
     }
-
     /** The plan a bare {@link TransitionKind} answer widens into: the kind's
      *  default overlap, no curve preference, no source label. */
     public static TransitionPlan of(TransitionKind kind) {
@@ -133,26 +134,6 @@ public final class TransitionPlan {
             label = (label == null ? "" : label + "; ") + because;
         }
         return new TransitionPlan(kind, Math.max(0L, ms), curve, label);
-    }
-
-    /**
-     * The same plan as it will actually be performed when the two tracks suit each
-     * other: the overlap a matched mix is heard over ({@link #OVERLAP_MATCHED_MS}),
-     * and — when whoever decided expressed no preference — an EQUAL_POWER curve,
-     * because a raised overlap with a linear ramp is the mid-overlap dip the 3 dB
-     * the curve setting exists for. A chooser that named a curve keeps it: the
-     * length is this phase's business, the shape is still the chooser's.
-     *
-     * <p>{@code because} is appended to the plan's label, so a ramp that is not the
-     * length the AI named says why in the log — exactly like {@link #withOverlap}.
-     */
-    public TransitionPlan mixed(long overlapMs, String because) {
-        String label = decidedBy;
-        if (because != null) {
-            label = (label == null ? "" : label + "; ") + because;
-        }
-        return new TransitionPlan(kind, Math.max(0L, overlapMs),
-                curve != null ? curve : FadeCurve.EQUAL_POWER, label);
     }
 
     /**
