@@ -101,6 +101,17 @@ public final class SettingsCatalog {
      *  misbehaves plays the same overlap and loses only this. Persisted as a bool and
      *  pushed into PlayerController.setBassSwapEnabled. */
     public static final String BASS_SWAP_KEY = "bassSwap";
+    /** How long an ordinary pair is blended over, in SECONDS — the one number the user
+     *  sets about a transition's length. Stored in seconds (4–30, step 1) because that is
+     *  what the row shows, and converted to ms where the controller wants it:
+     *  {@code PlayerController.setBlendDurationMs}. Applied immediately and on every
+     *  change — the controller keeps no copy, so a boundary decided after a change uses
+     *  the new length, and the length appears in the boundary's own log line
+     *  ({@code 重叠=long 20000ms}) plus in the reason a chooser's shorter answer was
+     *  raised ({@code raised to the 过渡时长 (20s) blend}). The default is
+     *  {@code TransitionPlan.OVERLAP_LONG_MS}, which is what every round before this row
+     *  used as a constant. */
+    public static final String TRANSITION_BLEND_KEY = "transitionBlendSeconds";
 
     private SettingsCatalog() {}
 
@@ -186,6 +197,20 @@ public final class SettingsCatalog {
                 .desc("交叉/快速淡化时，在拍点上把低频从当前这首交给下一首（系统均衡器），"
                         + "避免两条低频线打架。设备不支持音频效果器时自动不参与，"
                         + "只少了低频互换，过渡照常")
+                .dependsOn(SMART_TRANSITION_KEY)
+                .build());
+        // The blend's length. One number for every ordinary pair, applied on the next
+        // boundary that is decided (the controller reads it, never a copy), and the
+        // floor under the chooser's own answer: a chooser that names 8s is raised to it.
+        out.add(SettingSpec.slider(TRANSITION_BLEND_KEY, PLAYBACK, "过渡时长", 15, 4, 30, 1)
+                .unit(" 秒").dots()
+                .desc("两首普通歌曲交叉淡化多久。太短听着像淡入淡出（这也是默认改成 15 秒的原因），"
+                        + "太长则两首不搭的歌会同时很响；4–30 秒，默认 15 秒。"
+                        + "当前这首的收尾实测很平淡（没有人声、没有起音、也没有还在往上爬）时，"
+                        + "会在用户选的时长上最多再提前 "
+                        + dev.t1m3.qplayer.audio.TransitionPlan.PLAIN_EXTENSION_MS / 1000L
+                        + " 秒开始融合；"
+                        + "「过渡方式」强制成某一种时，这里只影响交叉淡化/快速淡化")
                 .dependsOn(SMART_TRANSITION_KEY)
                 .build());
         out.add(SettingSpec.toggle("highQuality", PLAYBACK, "高音质播放", true)

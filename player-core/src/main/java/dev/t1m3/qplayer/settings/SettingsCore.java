@@ -461,6 +461,10 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
                 case SettingsCatalog.SMART_TRANSITION_KEY:
                 case SettingsCatalog.TRANSITION_KIND_KEY:
                 case SettingsCatalog.TRANSITION_CURVE_KEY:
+                // The blend's length reaches the controller the same way: one number it
+                // reads when a boundary is decided, so moving the slider mid-song is
+                // simply the length the NEXT boundary gets.
+                case SettingsCatalog.TRANSITION_BLEND_KEY:
                 // 节拍对齐/低频互换 take effect on the next boundary, but they still
                 // have to reach the controller when they are toggled — the whole
                 // block is re-pushed, so a row that is switched mid-song is not a
@@ -537,6 +541,12 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         // MixNaturaliser), on the incoming track only, and a pair it cannot measure is
         // simply overlapped untouched.
         controller.setBassSwapEnabled(bool(SettingsCatalog.BASS_SWAP_KEY));
+        // The blend's length, in ms: the row stores seconds (it is what the slider
+        // shows), the controller works in ms like every other time in the transition
+        // machinery. Pushed on load and on every change of the row, so the next boundary
+        // decided after a move uses the new length and a restart keeps it.
+        controller.setBlendDurationMs(
+                intOf(SettingsCatalog.TRANSITION_BLEND_KEY) * 1000L);
         controller.setAiTransitionConfig(str("aiBaseUrl"), str("aiApiKey"), str("aiModel"),
                 intOf("aiTimeoutMs"));    }
 

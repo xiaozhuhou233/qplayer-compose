@@ -348,6 +348,15 @@ class ComposeQPlayerActivity : ComponentActivity() {
         controller.setBeatProfiler(
             dev.t1m3.qplayer.android.playback.AndroidBeatProfiler(this)
         )
+        // The stem renderer for the DJ edit: the incoming track's own audio with its
+        // vocals taken out of the blend window, rendered on the preload lane minutes
+        // before the boundary and played as ONE file by the incoming deck (so nothing is
+        // ever switched mid-playback). It is inert unless a verified model is in the app's
+        // private files/models/ directory — see AndroidStemEditRenderer, whose missing-model
+        // log line carries the adb push that supplies one.
+        controller.setStemEditRenderer(
+            dev.t1m3.qplayer.android.stem.AndroidStemEditRenderer(this)
+        )
         controller.setClipboard { value ->
             runOnUiThread {
                 val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager

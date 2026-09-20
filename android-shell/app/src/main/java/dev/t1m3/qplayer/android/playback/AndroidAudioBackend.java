@@ -15,6 +15,7 @@ import android.os.PowerManager;
 import dev.t1m3.qplayer.audio.AudioBackend;
 import dev.t1m3.qplayer.audio.FadeCurve;
 import dev.t1m3.qplayer.audio.IncomingMix;
+import dev.t1m3.qplayer.audio.MixNaturaliser;
 import dev.t1m3.qplayer.util.Logger;
 
 import java.io.IOException;
@@ -105,8 +106,18 @@ public final class AndroidAudioBackend implements AudioBackend {
      * new track or a release ends it immediately instead (see
      * {@link #finishRestoreNow()}), because a halfway-eased track resuming at the wrong
      * tempo is worse than a correction.
+     *
+     * <p>⚠️ <b>The pitch half is now the exception rather than the rule.</b> A written note
+     * is absolute, so a transposition is only applied at all when it can be back at the
+     * track's own pitch before that track starts singing — the controller schedules that
+     * ({@link IncomingMix#pitchIdentityAtFileMs()}) and {@link #pitchBackStep} performs it
+     * during the ramp, so by the time the promotion happens the pitch is already the
+     * track's own and there is nothing here to undo for it. What is left for this ramp is
+     * the tempo — and this is the last moment it can be done: any earlier and the incoming
+     * track would come off the outgoing track's grid while both are still sounding, which
+     * is the one thing the lock exists for.
      */
-    private static final long PROMOTION_RESTORE_MS = 6_000L;
+    private static final long PROMOTION_RESTORE_MS = IncomingMix.RESTORE_MS;
 
     /** 10 Hz: the ease-back is a slow glide, and each step is a platform call. */
     private static final long RESTORE_TICK_MS = 100L;
@@ -144,6 +155,32 @@ public final class AndroidAudioBackend implements AudioBackend {
     private long restoreDurationNs;
     private long restoreGeneration;
     private boolean restoring;
+    /**
+     * The user's rule, in the only form the platform can execute it: the pitch goes back
+     * to the incoming track's own by the position in ITS OWN FILE that
+     * {@link IncomingMix#pitchIdentityAtFileMs()} names, eased back over
+     * {@link IncomingMix#RESTORE_MS}.
+     *
+     * <p>Driven by {@code getCurrentPosition()} rather than by the wall clock, and that is
+     * the whole point: the vocal entry the controller measured is a position in the same
+     * file, so this clock is the one the margin is defined in. A wall-clock schedule would
+     * quietly spend the device's start latency (123–822 ms, measured) out of the two
+     * seconds of margin — and the one thing the rule says is that the margin is not to be
+     * squeezed.
+     *
+     * <p>{@link #pitchBackGeneration} guards a step already queued on the main looper,
+     * like {@link #restoreGeneration} does for the promotion's ramp.
+     */
+    private long pitchIdentityAtFileMs = -1L;
+    private MediaPlayer pitchBackPlayer;
+    private double pitchBackFrom = 1d;
+    private double pitchBackSpeed = 1d;
+    private long pitchBackGeneration;
+    private boolean pitchBackRunning;
+    /** Where the player's own clock stood when the pitch reached identity: the number the
+     *  log line reports as the proof, and what the promotion's ramp starts the pitch at
+     *  (1.0, or a warning if the schedule had not finished). */
+    private long pitchBackDoneAtMs = -1L;
     /** When the low end hands over, ms into the ramp (from the applied mix), and
      *  whether it has. A one-shot: the swap happens once, on a beat, and never
      *  again for this overlap. */
@@ -727,6 +764,7 @@ public final class AndroidAudioBackend implements AudioBackend {
      */
     private void applyRequestedMix(MediaPlayer in) {
         IncomingMix mix = requestedMix;
+        pitchIdentityAtFileMs = -1L;
         if (mix == null || mix.isIdentity()) return;
         // The tempo and the pitch first: they are the correction the whole overlap was
         // planned around (the length, the grid, the offset the track will be promoted
@@ -744,6 +782,11 @@ public final class AndroidAudioBackend implements AudioBackend {
         } else {
             appliedMix = mix;
         }
+        // The scheduled pitch return, if this mix has one. Taken from the mix that was
+        // ASKED for and only kept when the transposition really took, so a platform that
+        // refused the parameters cannot leave a schedule running for a pitch that was
+        // never applied (see applyTempo).
+        pitchIdentityAtFileMs = appliedMix == null ? -1L : appliedMix.pitchIdentityAtFileMs();
         bassSwapAtMs = appliedMix.bassSwapAtMs();
         attachBassSwap(bassSwapAtMs >= 0L);
     }
@@ -1076,8 +1119,141 @@ public final class AndroidAudioBackend implements AudioBackend {
         Logger.info("MediaPlayer: crossfade begin over {}ms ({}{}{})", ms, rampCurve,
                 appliedMix != null ? ", " + appliedMix : "",
                 incomingRolling ? ", the incoming starts now at its offset" : "");
+        startPitchBack();
         rampStep(generation);
         return true;
+    }
+
+    /**
+     * Start the rule's own ease-back, if this mix has one scheduled: the pitch of the
+     * incoming track goes back to its own by the position in its file the controller named
+     * ({@link IncomingMix#pitchIdentityAtFileMs()}).
+     *
+     * <p>Started HERE, at the ramp, because this is the moment the incoming player starts
+     * moving and therefore the moment its clock starts meaning something. Nothing is
+     * scheduled before it: a parked player's position does not advance, and a schedule
+     * against a stopped clock would have to fall back on the wall clock, which is the
+     * thing this avoids (see the field's own note).
+     *
+     * <p>A mix with a transposition and no schedule is not started and not warned about:
+     * that is a host that pushed the mix itself (a test, the desktop bridge), and its
+     * transposition is undone by the promotion's ramp as it always was.
+     */
+    private synchronized void startPitchBack() {
+        if (appliedMix == null || appliedMix.semitones() == 0) return;
+        if (pitchIdentityAtFileMs < 0L || incomingPlayer == null) return;
+        pitchBackPlayer = incomingPlayer;
+        pitchBackFrom = appliedMix.pitch();
+        pitchBackSpeed = appliedMix.speed();
+        pitchBackDoneAtMs = -1L;
+        pitchBackRunning = true;
+        long generation = ++pitchBackGeneration;
+        Logger.info("MediaPlayer: the transposition on the incoming track ({} semitone(s),"
+                        + " pitch x{}) is eased back over {}ms, ending by {}ms of its own file"
+                        + " — the incoming is at {}ms now",
+                appliedMix.semitones(), fmt(pitchBackFrom), IncomingMix.RESTORE_MS,
+                pitchIdentityAtFileMs, positionOf(incomingPlayer));
+        pitchBackStep(generation);
+    }
+
+    /** One step of the rule's ease-back: read where the incoming track actually is, and
+     *  set the pitch the position says it should be at. See {@link #pitchIdentityAtFileMs}. */
+    private void pitchBackStep(long generation) {
+        boolean finished = false;
+        double value;
+        long at;
+        synchronized (this) {
+            if (!pitchBackRunning || generation != pitchBackGeneration) return;
+            MediaPlayer mp = pitchBackPlayer;
+            if (mp == null) {
+                pitchBackRunning = false;
+                return;
+            }
+            at = positionOf(mp);
+            if (at < 0L) {
+                // No clock to schedule against: end it at the track's own pitch, which is
+                // the only direction the rule allows.
+                pitchBackRunning = false;
+                try {
+                    mp.setPlaybackParams(new PlaybackParams()
+                            .setSpeed((float) pitchBackSpeed).setPitch(1f));
+                } catch (Throwable e) {
+                    Logger.warn("MediaPlayer: could not end the transposition early: {}",
+                            e.toString());
+                }
+                return;
+            }
+            long remaining = pitchIdentityAtFileMs - at;
+            if (remaining <= 0L) {
+                value = 1d;
+                pitchBackRunning = false;
+                finished = true;
+                pitchBackDoneAtMs = at;
+            } else if (remaining >= IncomingMix.RESTORE_MS) {
+                value = pitchBackFrom;              // still holding the mix's own pitch
+            } else {
+                double t = 1d - (double) remaining / (double) IncomingMix.RESTORE_MS;
+                value = pitchBackFrom + (1d - pitchBackFrom) * t;
+            }
+            try {
+                mp.setPlaybackParams(new PlaybackParams()
+                        .setSpeed((float) pitchBackSpeed).setPitch((float) value));
+            } catch (Throwable e) {
+                Logger.warn("MediaPlayer: could not ease the incoming track's pitch back ({});"
+                        + " leaving it where it is", e.toString());
+                pitchBackRunning = false;
+                return;
+            }
+        }
+        if (finished) {
+            Logger.info("MediaPlayer: the incoming track's pitch is its own again — its own clock"
+                            + " says {}ms, the deadline the rule set was {}ms of its file ({}ms"
+                            + " of margin before its vocals, which is what the controller"
+                            + " measured the blend against)",
+                    at, pitchIdentityAtFileMs, MixNaturaliser.VOCAL_PITCH_MARGIN_MS);
+            return;
+        }
+        try {
+            rampHandler.postDelayed(() -> pitchBackStep(generation), RESTORE_TICK_MS);
+        } catch (Throwable ignored) { }
+    }
+
+    /**
+     * The promotion's answer to the rule: the pitch is the track's own from here on.
+     *
+     * <p>Returns the position the ease-back had to be cut short at, or {@code -1} when it
+     * had already finished (the normal case — the controller only schedules a
+     * transposition when the whole return fits inside the blend, so it is over before the
+     * ramp is). A non-negative answer is a warning: it means the schedule was wrong
+     * somewhere, and the pitch is set to the track's own immediately rather than ramped,
+     * because a transposed vocal must never be heard.
+     */
+    private synchronized long endPitchBackAtPromotion() {
+        if (!pitchBackRunning) return -1L;
+        pitchBackRunning = false;
+        pitchBackGeneration++;
+        MediaPlayer mp = pitchBackPlayer;
+        long at = positionOf(mp);
+        try {
+            if (mp != null) {
+                mp.setPlaybackParams(new PlaybackParams()
+                        .setSpeed((float) pitchBackSpeed).setPitch(1f));
+            }
+        } catch (Throwable e) {
+            Logger.warn("MediaPlayer: could not end the transposition at the promotion: {}",
+                    e.toString());
+        }
+        return at;
+    }
+
+    /** A player's own play head in ms, or -1 when it cannot be read. */
+    private static long positionOf(MediaPlayer mp) {
+        if (mp == null) return -1L;
+        try {
+            return Math.max(0L, mp.getCurrentPosition());
+        } catch (Throwable e) {
+            return -1L;
+        }
     }
 
     /** One gain sample of the running ramp. Applies the very first sample
@@ -1270,8 +1446,26 @@ public final class AndroidAudioBackend implements AudioBackend {
         // in A's key since the ramp began, which was right while both were audible and
         // is artefact now that only one is. Eased back over six seconds, immediately on
         // any interruption (see PROMOTION_RESTORE_MS).
+        //
+        // The pitch half is already done — the rule had it back at the track's own before
+        // the ramp ended (see startPitchBack) — so what this ramps is the tempo, from
+        // x{speed} to the track's own, and the pitch is pinned at its own from here.
         if (appliedMix != null && (appliedMix.hasTempo() || appliedMix.semitones() != 0)) {
-            startTempoRestore(appliedMix.speed(), appliedMix.pitch());
+            long cutShortAt = endPitchBackAtPromotion();
+            if (cutShortAt >= 0L) {
+                Logger.warn("MediaPlayer: the transposition was still on when the promotion"
+                                + " happened (the incoming's own clock said {}ms; the return was"
+                                + " scheduled to finish by {}ms of its file) — it is the track's"
+                                + " own pitch from here, immediately, rather than ramped into the"
+                                + " one thing the rule forbids",
+                        cutShortAt, pitchIdentityAtFileMs);
+            } else if (pitchIdentityAtFileMs >= 0L) {
+                Logger.info("MediaPlayer: the transposition was already its own pitch at the"
+                                + " promotion (reached identity at {}ms of the track's own file,"
+                                + " deadline {}ms), so this ramp is the tempo's alone",
+                        pitchBackDoneAtMs, pitchIdentityAtFileMs);
+            }
+            startTempoRestore(appliedMix.speed(), 1d);
         }
         appliedMix = null;
         requestedMix = IncomingMix.IDENTITY;
@@ -1338,6 +1532,12 @@ public final class AndroidAudioBackend implements AudioBackend {
         appliedMix = null;
         requestedMix = IncomingMix.IDENTITY;
         bassSwapAtMs = -1L;
+        // The scheduled pitch return dies with the player it was written on: a step still
+        // queued on the main looper finds itself out of generation and does nothing.
+        pitchIdentityAtFileMs = -1L;
+        pitchBackRunning = false;
+        pitchBackPlayer = null;
+        pitchBackGeneration++;
     }
 
     @Override

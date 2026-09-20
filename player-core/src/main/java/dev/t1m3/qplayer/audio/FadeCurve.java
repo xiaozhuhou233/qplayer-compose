@@ -53,30 +53,54 @@ public enum FadeCurve {
      * "the song changed" — the complaint this curve answers.
      *
      * <p>The two sides are deliberately not the same function of the same exponent.
-     * The outgoing one is the equal-power cosine of {@code t^1.8}: flat for the
-     * first half (within 1.3 dB until {@code t}=0.55), then falling fast, so its
-     * exit happens over roughly the last quarter rather than across the window. The
-     * incoming one is the sine of {@code t^0.55}: it reaches half its level within
-     * the first seventh of the overlap and is a real bed from there on, and it keeps
-     * the last stretch to itself as the outgoing track goes. The pair therefore sits
-     * within 6 dB of each other for about two thirds of the overlap — <em>both
-     * tracks audible at once</em>, which is what "sounds like a mix" means — at the
-     * cost of summing about 2 dB above a single track in the middle (two tracks at
-     * 0.9 each have 1.6 of the power of one, so a correlated pair can peak higher;
-     * the low-end hand-over is what keeps the loudest, most correlated part — the
-     * bass — from ever doubling).
+     * The outgoing one is the equal-power cosine of {@code t^2.6}: flat for most of
+     * the window (within 1 dB until {@code t}=0.6, -2.7 dB at three quarters), then
+     * falling over the last fifth, so its exit is a fade confined to the end rather
+     * than a decay across the whole window. The incoming one is the sine of
+     * {@code t^0.55}: it reaches half its level within the first seventh of the
+     * overlap and is a real bed from there on, and it keeps the last stretch to
+     * itself as the outgoing track goes. The pair therefore sits within 6 dB of each
+     * other for about three quarters of the overlap — <em>both tracks audible at
+     * once</em>, which is what "sounds like a mix" means — at the cost of summing
+     * about 2.3 dB above a single track in the middle (two tracks at 0.9 each have
+     * 1.6 of the power of one, so a correlated pair can peak higher; the low-end
+     * hand-over is what keeps the loudest, most correlated part — the bass — from
+     * ever doubling).
      *
      * <p>The exponents are the whole tuning: raising the outgoing's makes its hold
      * longer and its exit shorter, lowering the incoming's makes its bed arrive
-     * earlier. They were chosen so that the both-audible share is about 66% against
-     * the symmetric pair's 41% while the mid-overlap power bump stays near 2 dB
-     * ({@code FadeCurveTest} measures both).
+     * earlier. They were chosen so that the both-audible share is about 72% against
+     * the symmetric pair's 41% while the mid-overlap power bump stays near 2.3 dB
+     * ({@code FadeCurveTest} measures both, and the class's own doc carries the
+     * measurement each exponent was picked from).
      */
     DJ_BLEND("DJ 式") {
-        /** How much of the outgoing track's ramp is spent holding: the cosine is
-         *  taken of {@code t} raised to this, so a bigger exponent means a longer
-         *  hold and a shorter, later exit. */
-        private static final double OUT_HOLD_EXPONENT = 1.8d;
+        /** How much of the outgoing track's ramp is spent holding: the cosine is taken of
+         *  {@code t} raised to this, so a bigger exponent means a longer hold and a
+         *  shorter, later exit.
+         *
+         *  <p><b>2.6 since round 12</b> (it was 1.8), because the complaint about the long
+         *  blend was still "it fades": the outgoing track's rhythm was leaving while the
+         *  incoming track's was only arriving. The number is measured
+         *  ({@code ExponentTable} — the same arithmetic, over a 15 s ramp at this curve's own
+         *  incoming exponent), and what it buys and costs is a column of it:
+         *
+         *  <pre>
+         *  p     out@75   out@85   out@90   both6dB        peak
+         *  1.80   -4.5dB   -8.2dB  -11.4dB   9983ms (67%)   2.0dB
+         *  2.60   -2.7dB   -5.8dB   -8.7dB  10800ms (72%)   2.3dB
+         *  3.00   -2.1dB   -4.9dB   -7.7dB  11063ms (74%)   2.4dB
+         *  </pre>
+         *
+         *  <p>At three quarters of the ramp the outgoing track is 1.8 dB louder than it used
+         *  to be and at nine tenths it is 2.7 dB louder — and the last tenth of the ramp is
+         *  exactly where the listener was losing it — for 0.3 dB more summed power in the
+         *  middle (already accepted at 2.0 dB) and a both-audible share of 72% against 67%.
+         *  3.0 buys about another decibel at nine tenths and steepens the exit to match; 2.6
+         *  was taken as the point past most of the gain, where the exit is still a fade
+         *  rather than a step. The incoming side is deliberately untouched: bringing it in
+         *  later would only shorten the window in which both tracks are present. */
+        private static final double OUT_HOLD_EXPONENT = 2.6d;
         /** How fast the incoming track's bed arrives: the sine of {@code t} raised
          *  to this, so a smaller exponent means a level reached sooner. */
         private static final double IN_BED_EXPONENT = 0.55d;

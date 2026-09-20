@@ -17,7 +17,10 @@ import java.util.Locale;
  * slide 2% and more — and transposing it by a semitone or two puts it in the
  * outgoing track's key. Both are small, pitch-preserving corrections applied to the
  * <em>incoming player only</em> (see {@link IncomingMix}), and both are undone over
- * a few seconds once that track is the audible one.
+ * a few seconds: the tempo once that track is the audible one (the last moment it can
+ * be — see {@link IncomingMix}), and the transposition earlier, before that track's
+ * vocals arrive, because a transposed vocal must never be heard
+ * ({@link #pitchFitsBeforeVocals}).
  *
  * <p>⚠️ What this class can <em>not</em> do is take a blend away. An earlier round
  * had the same arithmetic answering "suitable / not suitable" and let a refused pair
@@ -58,6 +61,40 @@ public final class MixNaturaliser {
      * simply is not transposed into a key the other one is not in.
      */
     private static final double MAX_KEY_DISTANCE = 0.55d;
+
+    /**
+     * The margin the user's rule leaves between the incoming track's pitch being its own
+     * again and its vocals arriving: <em>the pitch shift must be back at identity by two
+     * seconds before the incoming track's vocals appear</em>. Two seconds is not a taste
+     * — it is the room a listener needs for the ease-back to be over rather than merely
+     * ending: an ease-back that finishes exactly on the vocal is an ease-back the vocal
+     * arrives in the middle of.
+     */
+    public static final long VOCAL_PITCH_MARGIN_MS = 2_000L;
+
+    /**
+     * Whether this boundary may be transposed at all.
+     *
+     * <p>The rule above has to be affordable: the ease-back takes
+     * {@link IncomingMix#RESTORE_MS} and the margin takes
+     * {@link #VOCAL_PITCH_MARGIN_MS}, and both have to fit inside the blend, before the
+     * incoming track's vocals arrive. When they do not, the answer is <b>no
+     * transposition at all</b> — the restoration is never squeezed into less room than
+     * it needs, because a squeezed restoration is exactly the artefact the rule is about.
+     *
+     * @param vocalInMs  how far into the blend's own ramp the incoming track's vocals are
+     *                   first heard, ms. {@code 0} is not "unknown" — it is the case where
+     *                   the incoming deck is playing the track's own master, whose vocals
+     *                   are in the blend's first sample, and it refuses every
+     *                   transposition, which is the honest answer to the rule.
+     * @param overlapMs the blend this boundary will really run, ms: the return has to
+     *                   finish inside it, or the promotion (which happens at its end)
+     *                   would be the thing that ends the restoration.
+     */
+    public static boolean pitchFitsBeforeVocals(long vocalInMs, long overlapMs) {
+        long deadlineMs = vocalInMs - VOCAL_PITCH_MARGIN_MS;
+        return deadlineMs - IncomingMix.RESTORE_MS >= 0L && deadlineMs <= overlapMs;
+    }
 
     /**
      * Judge one boundary and answer what to apply to the incoming track.
@@ -202,6 +239,26 @@ public final class MixNaturaliser {
     /** Whether anything is applied at all (a tempo or a key shift). */
     public boolean appliesSomething() {
         return speed != 1d || semitones != 0;
+    }
+
+    /**
+     * This same measurement with the transposition <em>not</em> applied, and the reason
+     * written where the semitones would have been.
+     *
+     * <p>What it is for is the user's vocal rule: the harmony was measured and a shift
+     * was worth making, and the boundary still gets no transposition, because the blend
+     * cannot afford to have it back in the track's own key before that track's vocals
+     * arrive (see {@link #pitchFitsBeforeVocals}). The tempo is kept — it is what the
+     * overlap is aligned on — and the log line keeps the two halves it always has (what
+     * was applied to the tempo, and what was applied to the key), so "this pair was not
+     * transposed" cannot be read as "this pair had no transposition available".
+     *
+     * @param why what made the shift unaffordable, with the times; never null.
+     */
+    public MixNaturaliser onlyTempo(String why) {
+        if (semitones == 0) return this;
+        return new MixNaturaliser(speed, 0,
+                tempoNote() + "; pitch x1.0000 on B (dropped: " + why + ")");
     }
 
     /** One fragment for the boundary's single log line: what is done to the incoming

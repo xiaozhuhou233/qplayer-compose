@@ -35,22 +35,37 @@ public final class TransitionPlan {
      *  rather than as a seam. */
     public static final long OVERLAP_MEDIUM_MS = 8_000L;
 
-    /** <b>The length an ordinary suitable pair is blended over</b>, and therefore
-     *  the default for {@link TransitionKind#CROSSFADE} — two ordinary streams with
-     *  room ahead of them are the case the whole feature exists for, and fifteen
-     *  seconds of equal-power overlap is the length a listener hears as a mix.
-     *  Shorter than this and the boundary is heard as a fade (which is the
-     *  complaint this length answers); much longer and two tracks that do not go
-     *  together are simply both loud at once. */
+    /** <b>The length an ordinary suitable pair is blended over by default</b>, and
+     *  therefore the default {@link TransitionKind#CROSSFADE} names: two ordinary streams
+     *  with room ahead of them are the case the whole feature exists for, and fifteen
+     *  seconds of overlap is the length a listener hears as a mix. Shorter than this and
+     *  the boundary is heard as a fade (which is the complaint this length answers); much
+     *  longer and two tracks that do not go together are simply both loud at once.
+     *
+     *  <p>⚠️ This is the <em>default</em>, not the law: the user sets the length with the
+     *  「过渡时长」 row ({@code SettingsCatalog.TRANSITION_BLEND_KEY}, 4–30 s, step 1, this
+     *  value as its default) and the controller raises a CROSSFADE to whatever that row
+     *  says (see {@code PlayerController.widenForOrdinaryPair}). This constant survives as
+     *  the answer a chooser gets when nobody names a length and as the setting's own
+     *  default — nothing derives a decision from it any more. */
     public static final long OVERLAP_LONG_MS = 15_000L;
 
-    /** The longest blend the app will start, and the length an outgoing track whose
-     *  ending is measured to be <em>plain</em> is given: with nothing happening in
-     *  the last twenty seconds there is nothing for the overlap to clash with, so
-     *  the blend may begin at the start of that plain stretch instead of at the
+    /** What the plain-ending rule reaches at the default blend length: with nothing
+     *  happening in the last twenty seconds there is nothing for the overlap to clash
+     *  with, so the blend may begin at the start of that plain stretch instead of at the
      *  nominal length (see {@code SilenceProfile.plainTailMs} and the controller's
-     *  plain-ending rule). Only ever chosen on that measurement. */
+     *  plain-ending rule).
+     *
+     *  <p>It is kept as a constant because it is the number the device rounds were read
+     *  against, but the rule itself is <em>relative</em> to the user's blend length now
+     *  ({@code blend + PLAIN_EXTENSION_MS}); at the default 15 s the two are identical.
+     *  Only a measurement can ask for the extension at all. */
     public static final long OVERLAP_EXTENDED_MS = 20_000L;
+
+    /** How far past the user's blend length the plain-ending rule may reach. Five
+     *  seconds, which is what made {@link #OVERLAP_EXTENDED_MS} twenty at the original
+     *  fifteen-second default. */
+    public static final long PLAIN_EXTENSION_MS = OVERLAP_EXTENDED_MS - OVERLAP_LONG_MS;
 
     /** The overlap a kind gets when whoever decides does not name one. Only the
      *  overlapping kinds have a real choice: {@link TransitionKind#QUICK_FADE} is

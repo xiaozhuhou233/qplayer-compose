@@ -80,6 +80,18 @@ public final class DiskCache {
      *  ({@link #BLEND_MAX_COUNT}) AND counted in {@link #totalSize()}, because unlike the
      *  twelve-byte entries next door this one can actually fill a disk. */
     public static final String BLEND = "blend";
+    /** One DJ edit per (track, blend length): the incoming track's own audio with the
+     *  vocals taken out of its first N ms and handed back on a bar line, written as one
+     *  playable file because that is what makes the incoming deck able to play the whole
+     *  thing — before the blend, through the promotion, and to the end of the track —
+     *  without ever changing source.
+     *
+     *  <p>Its own sub-directory rather than a second name in {@link #BLEND}: these are
+     *  minutes of encoded audio (~5 MB each) instead of a fifteen-second window, they are
+     *  keyed by a track and a length rather than by a pair, and they are read by the
+     *  playback path — so they get their own, much smaller count cap. Counted in
+     *  {@link #totalSize()} like {@link #BLEND}, because they can actually fill a disk. */
+    public static final String DJEDIT = "djedit";
 
     /** Oldest files (by lastModified) are deleted once the count exceeds this,
      *  every time a new one is cached — see {@link #cacheThumb64}. */
@@ -98,6 +110,12 @@ public final class DiskCache {
      *  what keeps the sub-cache from growing without bound, and the byte budget the media
      *  sub-caches share is what keeps it from evicting the audio out from under a queue. */
     private static final int BLEND_MAX_COUNT = 20;
+
+    /** {@link #DJEDIT}: four edits is already ~20 MB of encoded audio and covers the
+     *  only two boundaries that can be in flight (this one and the next), so the count is
+     *  what keeps it bounded. Eviction is by age, like every other count-capped
+     *  sub-cache — an edit for a pair the queue has left is the one to lose. */
+    private static final int DJEDIT_MAX_COUNT = 4;
 
     private volatile long maxSizeBytes;
 
@@ -173,6 +191,17 @@ public final class DiskCache {
     public String blendPath(String key) {
         if (key == null || key.isEmpty()) return null;
         return baseDir + "/" + BLEND + "/" + Math.abs(key.hashCode()) + ".blend";
+    }
+
+    /** Resolve cache file for one track's DJ edit (see {@link #DJEDIT}), keyed by the
+     *  track's own cache key joined with the removal window it was rendered for (see
+     *  {@code PlayerController.djEditPath}) — a longer story than the other keys, so it
+     *  is hashed like they are. The extension is {@code .m4a} on purpose: the file is
+     *  AAC in an MP4 and the platform picks its extractor partly by extension, so a name
+     *  that lies about the container would be the one thing that stops it playing. */
+    public String djEditPath(String key) {
+        if (key == null || key.isEmpty()) return null;
+        return baseDir + "/" + DJEDIT + "/" + Math.abs(key.hashCode()) + ".m4a";
     }
 
     /** Resolve cache file for a track's silence measurement, keyed by the
@@ -362,12 +391,23 @@ public final class DiskCache {
         evictCountCapped(BLEND, BLEND_MAX_COUNT, "blend");
     }
 
+    /** Apply {@link #DJEDIT}'s count cap. The file itself is written by the host's stem
+     *  renderer (a muxer needs the path, not a byte array), so the eviction cannot ride
+     *  along with the write the way {@link #cacheBlend} does — the caller says when a
+     *  render finished instead. */
+    public void evictDjEdits() {
+        evictCountCapped(DJEDIT, DJEDIT_MAX_COUNT, "djedit");
+    }
+
     // ---- size & cleanup ---------------------------------------------------
 
-    /** Total bytes used by all eight cache sub-directories. */
+    /** Total bytes used by every cache sub-directory, the DJ edits included — they are
+     *  the largest derived files this app writes and the byte budget the media
+     *  sub-caches share is the only thing standing between them and a full disk. */
     public long totalSize() {
         long total = 0;
-        for (String sub : new String[]{AUDIO, LYRIC, IMAGE, THUMB64, SILENCE, TRANSITION, BEAT, BLEND}) {
+        for (String sub : new String[]{AUDIO, LYRIC, IMAGE, THUMB64, SILENCE, TRANSITION, BEAT,
+                BLEND, DJEDIT}) {
             total += dirSize(new File(baseDir, sub));
         }
         return total;
@@ -375,7 +415,8 @@ public final class DiskCache {
 
     /** Delete all cached files. */
     public void clearAll() {
-        for (String sub : new String[]{AUDIO, LYRIC, IMAGE, THUMB64, SILENCE, TRANSITION, BEAT, BLEND}) {
+        for (String sub : new String[]{AUDIO, LYRIC, IMAGE, THUMB64, SILENCE, TRANSITION, BEAT,
+                BLEND, DJEDIT}) {
             deleteRecursive(new File(baseDir, sub));
         }
     }
@@ -460,7 +501,7 @@ public final class DiskCache {
         File[] dirs = {new File(baseDir, AUDIO), new File(baseDir, LYRIC),
                 new File(baseDir, IMAGE), new File(baseDir, SILENCE),
                 new File(baseDir, TRANSITION), new File(baseDir, BEAT),
-                new File(baseDir, BLEND)};
+                new File(baseDir, BLEND), new File(baseDir, DJEDIT)};
         java.util.List<File> files = new java.util.ArrayList<>();
         for (File dir : dirs) {
             if (dir.isDirectory()) {

@@ -11,6 +11,7 @@ import dev.t1m3.qplayer.ai.AiPlaylistResult;
 import dev.t1m3.qplayer.ai.WebSearchClient;
 import dev.t1m3.qplayer.audio.BeatProfile;
 import dev.t1m3.qplayer.audio.BeatProfiler;
+import dev.t1m3.qplayer.audio.DjEdit;
 import dev.t1m3.qplayer.audio.FadeCurve;
 import dev.t1m3.qplayer.audio.HeuristicTransitionChooser;
 import dev.t1m3.qplayer.audio.IncomingMix;
@@ -18,6 +19,7 @@ import dev.t1m3.qplayer.audio.MetadataReader;
 import dev.t1m3.qplayer.audio.MixNaturaliser;
 import dev.t1m3.qplayer.audio.SilenceProfile;
 import dev.t1m3.qplayer.audio.SilenceProfiler;
+import dev.t1m3.qplayer.audio.StemEditRenderer;
 import dev.t1m3.qplayer.audio.TransitionChooser;
 import dev.t1m3.qplayer.audio.TransitionContext;
 import dev.t1m3.qplayer.audio.TransitionKind;
@@ -590,6 +592,16 @@ public final class PlayerController {
      *  a condition on the blend ever happening, which is what this round restored them
      *  as: a pair nothing can be measured for is overlapped untouched. */
     private volatile boolean bassSwapEnabled = true;
+    /** How long an ordinary pair is blended over, ms — the 「过渡时长」 row, read when a
+     *  boundary is decided (see {@link #setBlendDurationMs}). It replaces the constant
+     *  every round up to this one used as the ordinary target
+     *  ({@link TransitionPlan#OVERLAP_LONG_MS}, which is what the row defaults to), and
+     *  it is a floor rather than a cap: a chooser that named something shorter is raised
+     *  to it, and the plain-ending rule may extend it further. */
+    private volatile long blendDurationMs = BLEND_DEFAULT_MS;
+    /** The host's stem renderer (see {@link #setStemEditRenderer}), or null where there
+     *  is none. Without one nothing on this class's stem path is ever entered. */
+    private volatile StemEditRenderer stemEditRenderer;
     /** End the ramp this early, so the promotion lands just BEFORE the outgoing
      *  track's own end instead of racing its completion callback. */
     private static final long CROSSFADE_TAIL_MS = 250L;
@@ -631,7 +643,33 @@ public final class PlayerController {
      * for the plan's own {@link #transitionArmLeadMs}; every boundary logs the lead
      * it was decided at and the length that came out. */
     private static final long BEAT_SNAP_SLACK_MS = 600L;
-    private static final long TRANSITION_DECIDE_LEAD_MS = TransitionPlan.OVERLAP_EXTENDED_MS
+    /** The range the 「过渡时长」 row offers, and the default it starts at. Kept here as
+     *  well as in the catalog because this class clamps what it is handed: a host that
+     *  pushes a value from somewhere other than the row (a test, the desktop bridge)
+     *  must not be able to ask for a blend this app cannot perform. */
+    private static final long BLEND_MIN_MS = 4_000L;
+    private static final long BLEND_MAX_MS = 30_000L;
+    private static final long BLEND_DEFAULT_MS = TransitionPlan.OVERLAP_LONG_MS;
+    /**
+     * When the chooser is asked about a boundary: the longest lead any plan can need —
+     * the longest overlap this app will perform, plus the plain-ending extension, plus
+     * the tail the ramp ends early by, plus the resolve budget, plus the slack a beat
+     * snap can add (half a beat, at the slowest tempo the estimator reports).
+     *
+     * <p>⚠️ <b>This has to grow with the longest overlap, or the longest overlap
+     * silently becomes a short one.</b> A fifteen-second plan decided inside a
+     * nine-second window can never be armed in time — that was the original "long
+     * options get quietly downgraded" bug — so this window is derived from the longest
+     * length the app can ask for and from nothing else. Since the 过渡时长 row exists that
+     * longest length is the row's maximum, not the default: a plan of
+     * {@code BLEND_MAX_MS + OVERLAP_EXTENDED_MS - OVERLAP_LONG_MS} (35 s at the widest)
+     * is legal, and it is the number this is sized for. The question is cheap (a cached
+     * answer or the local rules), and the arming it may lead to waits for the plan's own
+     * {@link #transitionArmLeadMs}; every boundary logs the lead it was decided at and
+     * the length that came out, so a plan that was cut down is visible rather than
+     * inferred. */
+    private static final long TRANSITION_DECIDE_LEAD_MS = BLEND_MAX_MS
+            + TransitionPlan.PLAIN_EXTENSION_MS
             + CROSSFADE_TAIL_MS + CROSSFADE_LEAD_MS + BEAT_SNAP_SLACK_MS;
     /** The most an overlap skips into the incoming track to reach its first audible
      *  sample. Same bound as a trim's, and for the same reason: a measurement
@@ -1843,6 +1881,43 @@ public final class PlayerController {
         return bassSwapEnabled;
     }
 
+    /**
+     * How long an ordinary pair is blended over (the 「过渡时长」 row), ms.
+     *
+     * <p>Settings are the single source of truth (see SettingsCore.pushTransition): the
+     * controller keeps the number and reads it when a boundary is decided, so moving the
+     * slider takes effect at the very next boundary — no restart, and a boundary already
+     * in flight finishes at the length it was decided with. Clamped to the row's own
+     * range here as well, because the desktop/QML path and manual testing both come
+     * through this method and a blend of an hour is not a thing this app knows how to
+     * perform.
+     */
+    public void setBlendDurationMs(long ms) {
+        long clamped = Math.max(BLEND_MIN_MS, Math.min(BLEND_MAX_MS, ms));
+        if (clamped == blendDurationMs) return;
+        blendDurationMs = clamped;
+        // One line per change, so the log says which length the next boundary will get
+        // rather than leaving it to be inferred from the boundary line alone.
+        Logger.info("transition: 过渡时长 set to {}ms ({}s); the next boundary that is"
+                        + " decided blends over that, and a chooser that asked for less is"
+                        + " raised to it", clamped, clamped / 1000L);
+    }
+
+    public long blendDurationMs() {
+        return blendDurationMs;
+    }
+
+    /**
+     * The host's stem renderer: the thing that can write a {@link DjEdit} file (one
+     * track with its vocals taken out of the first {@link #blendDurationMs()} and handed
+     * back on a bar line). Without one — a host that has no model, or no stem code at
+     * all — no edit is ever asked for, looked for or played, and every boundary is
+     * exactly what it was before this existed.
+     */
+    public void setStemEditRenderer(StemEditRenderer renderer) {
+        this.stemEditRenderer = renderer;
+    }
+
     /** True while the backend is ramping the two tracks against each other, or
      *  holding a prepared one for a transition. The ordinary end-of-track fade must
      *  stand down for that whole window. */
@@ -2244,8 +2319,14 @@ public final class PlayerController {
      * @param swapNote  the low-end hand-over's own note ("bass swap at 4700ms" /
      *                  "bass swap off (settings)" / "no bass swap (the overlap is
      *                  shorter than a beat)"), or null when there is nothing to say.
+     * @param pitchNote the pitch rule's own sentence — where the transposition is back
+     *                  at the incoming track's own pitch, with the times (see
+     *                  {@link #pitchRuleNote}), or null when this boundary has no
+     *                  transposition to schedule (which includes the case where the rule
+     *                  dropped it: then the reason is in the naturaliser's own note).
      */
-    private static String mixFragment(MixNaturaliser nat, String alignment, String swapNote) {
+    private static String mixFragment(MixNaturaliser nat, String alignment, String swapNote,
+                                      String pitchNote) {
         StringBuilder what = new StringBuilder(48);
         if (nat != null && nat.hasTempo()) {
             what.append(String.format(java.util.Locale.US, "speed x%.4f on B", nat.speed()));
@@ -2269,6 +2350,7 @@ public final class PlayerController {
         if (swapNote != null && !swapNote.startsWith("bass swap at ")) {
             detail.append("; ").append(swapNote);
         }
+        if (pitchNote != null) detail.append("; ").append(pitchNote);
         return "mix: " + (what.length() == 0 ? "none" : what.toString())
                 + " (" + detail + ")";
     }
@@ -2379,24 +2461,133 @@ public final class PlayerController {
      */
     private BeatAlignment blend(TransitionPlan plan, long entryMs, String beatLog,
                                 MixNaturaliser nat, String alignment, IncomingMix swap) {
+        // ⚠️ The user's rule about the vocal, applied here because this is the one place
+        // that knows both halves: what the harmony measurement wanted done to the
+        // incoming track's pitch, and when that track's vocals are going to arrive.
+        //
+        // A transposed vocal must never be heard, so the transposition is only applied
+        // when the blend can afford to have it back at the track's own pitch two seconds
+        // before the voice arrives — and when it cannot, no transposition is applied to
+        // this pair at all. The restoration is never squeezed into less room than it
+        // needs (see MixNaturaliser.pitchFitsBeforeVocals): a half-finished ease-back is
+        // the very artefact the rule exists to remove.
+        //
+        // When the vocals arrive depends on what the incoming deck is going to play, and
+        // that is one of two things:
+        //   • a DJ edit (see requestStemEdit), whose vocals are out for the user's whole
+        //     blend length and start coming back RETURN_RAMP_MS before the end of it;
+        //   • the track's own master, whose vocals are in the blend's first sample —
+        //     zero, which refuses every transposition. That is not a missing measurement:
+        //     it is the honest answer for a blend that starts a song's singing in its
+        //     first beat, and it is why the transposition needs the stem path to exist at
+        //     all (the rule has teeth — see AI_HANDOFF).
+        String pitchNote = null;
+        long pitchIdentityAtFileMs = -1L;
+        if (nat != null && nat.semitones() != 0) {
+            Track incoming = incomingOfBoundary();
+            long entry = entryMs >= 0L ? entryMs : contentStartMs(incoming);
+            boolean edited = djEditFor(incoming) != null;
+            long vocalIn = vocalInBlendMs(edited, entry);
+            long overlap = plan != null && plan.kind().overlapping() ? plan.overlapMs() : 0L;
+            if (MixNaturaliser.pitchFitsBeforeVocals(vocalIn, overlap)) {
+                pitchIdentityAtFileMs = entry + vocalIn - MixNaturaliser.VOCAL_PITCH_MARGIN_MS;
+                pitchNote = pitchRuleNote(vocalIn, entry, pitchIdentityAtFileMs, overlap);
+                Logger.info("transition: pitch rule — this pair is transposed {} semitone(s) and"
+                                + " the pitch is back at the incoming track's own by {}ms of its"
+                                + " file (eased back over {}ms from {}ms), {}ms before its vocals"
+                                + " arrive at {}ms; the blend is {}ms",
+                        nat.semitones(), pitchIdentityAtFileMs, IncomingMix.RESTORE_MS,
+                        pitchIdentityAtFileMs - IncomingMix.RESTORE_MS,
+                        MixNaturaliser.VOCAL_PITCH_MARGIN_MS, entry + vocalIn, overlap);
+            } else {
+                nat = nat.onlyTempo(dropReason(edited, vocalIn, entry, overlap));
+                Logger.info("transition: pitch rule — no transposition on this pair: {}",
+                        dropReason(edited, vocalIn, entry, overlap));
+            }
+        }
         IncomingMix mix = swap;
         if (nat != null && (nat.hasTempo() || nat.semitones() != 0)) {
             // The naturaliser's own note travels with the instruction so the backend —
             // and anything reading a dump of it — sees why the incoming track is being
             // played at a ratio.
             mix = IncomingMix.of(swap != null ? swap.bassSwapAtMs() : -1L,
-                    nat.speed(), nat.semitones(), nat.note());
+                    nat.speed(), nat.semitones(), pitchIdentityAtFileMs, nat.note());
         }
         String swapNote = swap != null ? "bass swap at " + swap.bassSwapAtMs() + "ms"
                 : (!bassSwapEnabled ? "bass swap off (settings)"
                         : "no bass swap for this boundary (no beat of A to put it on, or the"
                                 + " overlap is shorter than a beat)");
         return new BeatAlignment(plan, entryMs,
-                beatLog + "; " + mixFragment(nat, alignment, swapNote), mix);
+                beatLog + "; " + mixFragment(nat, alignment, swapNote, pitchNote), mix);
+    }
+
+    /**
+     * How far into this blend's own ramp the incoming track's vocals are first heard,
+     * ms — the number the pitch rule is measured against, and a <em>lower bound</em>.
+     *
+     * <p>With a DJ edit the removal window is the user's blend length and the return ramp
+     * starts {@link DjEdit#RETURN_RAMP_MS} before the end of it, so the earliest the voice
+     * can possibly be audible is the end of the window minus that ramp, minus the offset
+     * the deck starts at. The bar line the return actually lands on is the renderer's
+     * (it estimates a downbeat from the separated bass), and it is always at or after
+     * that — so identity here is identity before the vocals wherever the line fell: the
+     * bound is what makes the rule hold without the controller having to be told where
+     * the line was.
+     *
+     * <p>Without one there is nothing to bound: the deck is playing the track's own
+     * master from its entry, so its vocals are in the first sample of the blend. Zero.
+     * The rule refuses every transposition on that answer, deliberately (see the caller).
+     */
+    private long vocalInBlendMs(boolean edited, long entryMs) {
+        if (!edited) return 0L;
+        return blendDurationMs() - DjEdit.RETURN_RAMP_MS - entryMs;
+    }
+
+    /** Why the transposition was dropped, with every time the rule was measured against
+     *  — the sentence that goes where the semitones would have been. */
+    private String dropReason(boolean edited, long vocalInMs, long entryMs, long overlapMs) {
+        long deadline = vocalInMs - MixNaturaliser.VOCAL_PITCH_MARGIN_MS;
+        String where = edited
+                ? "the blend is " + overlapMs + "ms and its vocals start coming back " + vocalInMs
+                        + "ms in"
+                : "the incoming deck plays the track's own master, so its vocals are in the"
+                        + " blend's first sample (0ms of " + overlapMs + "ms)";
+        return where + ", so the pitch would have to be its own by " + deadline + "ms —"
+                + " the " + IncomingMix.RESTORE_MS + "ms ease-back plus the "
+                + MixNaturaliser.VOCAL_PITCH_MARGIN_MS + "ms of margin before the voice do not"
+                + " fit before it, and a transposed vocal must never be heard"
+                + (vocalInMs < 0L ? " (the entry at " + entryMs
+                        + "ms is already past the voice)" : "");
+    }
+
+    /** Where the transposition goes back, with the times: the position in the incoming
+     *  track's own file the pitch is its own at, the window it was eased back over, and
+     *  the vocal entry it was measured against. */
+    private String pitchRuleNote(long vocalInMs, long entryMs, long identityAtFileMs,
+                                 long overlapMs) {
+        return "the transposition is its own pitch again by " + identityAtFileMs + "ms of its own"
+                + " file (eased back over " + IncomingMix.RESTORE_MS + "ms from "
+                + (identityAtFileMs - IncomingMix.RESTORE_MS) + "ms), "
+                + MixNaturaliser.VOCAL_PITCH_MARGIN_MS + "ms before its vocals arrive at "
+                + (entryMs + vocalInMs) + "ms, inside the " + overlapMs + "ms blend";
+    }
+
+    /**
+     * The incoming track of the boundary in flight, or null.
+     *
+     * <p>Read from {@link #transitionKindTo}, the field every other part of this
+     * boundary's machinery reads to know which two tracks are meeting — set before the
+     * plan is widened or aligned, so it is the same track the alignment, the arm and the
+     * log line all name.
+     */
+    private Track incomingOfBoundary() {
+        int i = transitionKindTo;
+        return i >= 0 && i < queue.size() ? queue.get(i) : null;
     }
 
     /** When the low end hands over, given only the outgoing track's grid: the first
-     *  beat of A at or after the middle of the overlap the plan asks for, or null when
+     *  beat of A at or after {@link #BASS_SWAP_AT} of the overlap the plan asks for, or null
+     *  when
      *  there is no room for it (see {@link #matchSwapMs}) or the switch is off. */
     private IncomingMix bassSwapFor(TransitionPlan plan, BeatProfile a) {
         if (!bassSwapEnabled || plan == null || a == null) return null;
@@ -2405,14 +2596,25 @@ public final class PlayerController {
         return swapAtMs >= 0L ? IncomingMix.bassSwapAt(swapAtMs) : null;
     }
 
+    /** How far into the blend the low end changes hands, as a fraction of it: three fifths
+     *  (round 12; it was the middle). The hand-over is what takes the outgoing track's kick
+     *  away, so this is the instant its rhythm loses its bottom, and moving it later is the
+     *  cheapest thing that can be done about "the first track's beat ends too early" — the
+     *  outgoing track is a single stream, so nothing else about its low end can be shaped.
+     *  Six tenths keeps the kick for 1.5 s longer of a 15 s blend and still leaves the
+     *  incoming track owning the bottom for 40% of the ramp by the time it is promoted, well
+     *  after the point its own content is established (28% of the ramp — the incoming gain
+     *  curve reaches -3 dB there). */
+    private static final double BASS_SWAP_AT = 0.6d;
+
     /**
-     * The first beat of the outgoing track at or after the middle of the overlap —
-     * where the low end hands over, so the change lands on a beat rather than in the
-     * middle of one. {@code -1} when the overlap is shorter than a beat, which is
-     * the caller's cue to leave the low end alone. */
+     * The first beat of the outgoing track at or after {@link #BASS_SWAP_AT} of the overlap —
+     * where the low end hands over, so the change lands on a beat rather than in the middle of
+     * one. {@code -1} when the overlap is shorter than a beat, which is the caller's cue to
+     * leave the low end alone. */
     private static long matchSwapMs(long overlapMs, long periodMs) {
         if (overlapMs < periodMs) return -1L;
-        long beats = Math.max(1L, Math.round((double) overlapMs / 2d / periodMs));
+        long beats = Math.max(1L, Math.round(overlapMs * BASS_SWAP_AT / periodMs));
         long at = beats * periodMs;
         return at < overlapMs ? at : overlapMs - periodMs;
     }
@@ -2420,7 +2622,8 @@ public final class PlayerController {
     /**
      * The beat alignment: the overlap becomes a whole number of the outgoing track's
      * beats and the incoming track starts on one of its own, and the low end changes
-     * hands once on a beat in the middle. Neither track's tempo or key is touched.
+     * hands once on a beat, {@link #BASS_SWAP_AT} of the way in. Neither track's tempo or
+     * key is touched.
      *
      * <p>Both grids must be <em>compatible</em> ({@link BeatProfile#gridsCompatible}:
      * the phase between them must not slip more than half a beat across the whole
@@ -2497,7 +2700,7 @@ public final class PlayerController {
             tailNote = "; entry " + base + "->" + beatEntry + "ms";
         }
         // The low end changes hands once, at the first beat of the outgoing track at
-        // or after the middle of the overlap: a musical instant in the middle of the
+        // or after BASS_SWAP_AT of the overlap: a musical instant inside the
         // blend, where the incoming track's own foundation takes over.
         long swapAtMs = matchSwapMs(quantized, periodA);
         IncomingMix mix = bassSwapEnabled && swapAtMs >= 0L
@@ -2596,20 +2799,28 @@ public final class PlayerController {
      * still music.
      *
      * <ol>
-     *   <li><b>The ordinary target: fifteen seconds.</b> A CROSSFADE between two
+     *   <li><b>The user's target: the 过渡时长 row.</b> A CROSSFADE between two
      *       ordinary-length streams is the case the feature exists for, and the
      *       default it is supposed to produce — a chooser (or a cached AI answer)
      *       that named something shorter is raised to it, with the length it asked
      *       for left in the log. This is a floor, never a cap: anything longer is
-     *       the chooser's business.</li>
+     *       the chooser's business. Until this round the target was the constant
+     *       {@link TransitionPlan#OVERLAP_LONG_MS} (15 s); it is now whatever the row
+     *       says (4–30 s, default 15 s), read at decision time so a change takes effect
+     *       at the next boundary.</li>
      *   <li><b>Earlier when the ending is plain.</b> When the outgoing track is
-     *       <em>measured</em> to spend its last {@link TransitionPlan#OVERLAP_LONG_MS}
-     *       or more doing nothing — no attack, no voice, below the body level of the
-     *       window — there is nothing left for the blend to clash with, so it starts
-     *       at the start of that plain stretch instead of at the nominal length,
-     *       up to {@link TransitionPlan#OVERLAP_EXTENDED_MS}. Only that measurement
-     *       can ask for it (a track that ends in vocals or in a beat measures 0 and
-     *       gets the ordinary length), and it is only ever an extension.</li>
+     *       <em>measured</em> to spend its whole chosen blend doing nothing — no attack,
+     *       no voice, below the body level of the window — there is nothing left for the
+     *       blend to clash with, so it starts at the start of that plain stretch instead
+     *       of at the nominal length. <b>The rule is relative to the user's own length,
+     *       not to a constant:</b> the extension may reach
+     *       {@link TransitionPlan#PLAIN_EXTENSION_MS} (5 s) past it, and only a
+     *       measurement can ask for it at all (a track that ends in vocals or in a beat
+     *       measures 0 and gets the ordinary length). At the original 15 s default this
+     *       reproduces the 20 s cap every earlier round was read against — and it is a
+     *       cap: a plain ending 40 s long does not buy a 40 s blend, because past a few
+     *       seconds of the outgoing track doing nothing the blend has stopped being a
+     *       blend and become an instrumental.</li>
      * </ol>
      *
      * <p>Short tracks are excluded: an overlap that eats a fifth of a seventy-second
@@ -2621,22 +2832,25 @@ public final class PlayerController {
                 || next.durationMs < HeuristicTransitionChooser.SHORT_TRACK_MS) {
             return plan;
         }
+        long target = blendDurationMs();
         TransitionPlan widened = plan;
         long asked = plan.overlapMs();
-        if (widened.overlapMs() < TransitionPlan.OVERLAP_LONG_MS) {
-            widened = widened.withOverlap(TransitionPlan.OVERLAP_LONG_MS,
-                    "raised to the ordinary " + (TransitionPlan.OVERLAP_LONG_MS / 1000L)
-                            + "s blend (the chooser asked for " + asked + "ms)");
+        if (widened.overlapMs() < target) {
+            widened = widened.withOverlap(target,
+                    "raised to the 过渡时长 (" + (target / 1000L) + "s) blend the user set"
+                            + " (the chooser asked for " + asked + "ms)");
         }
         long plain = measuredPlainTailMs(cur);
-        if (plain >= TransitionPlan.OVERLAP_LONG_MS) {
-            long target = Math.min(plain, TransitionPlan.OVERLAP_EXTENDED_MS);
-            if (target > widened.overlapMs()) {
-                widened = widened.withOverlap(target,
+        if (plain >= target) {
+            long extended = Math.min(plain, target + TransitionPlan.PLAIN_EXTENSION_MS);
+            if (extended > widened.overlapMs()) {
+                widened = widened.withOverlap(extended,
                         "the outgoing track's ending is measured plain for " + plain
                                 + "ms (nothing attacks in it, nothing sustained in the vocal"
                                 + " band, nothing still rising), so the blend starts at the"
-                                + " start of it rather than at " + widened.overlapMs() + "ms");
+                                + " start of it rather than at " + widened.overlapMs() + "ms"
+                                + " (at most " + TransitionPlan.PLAIN_EXTENSION_MS
+                                + "ms past the user's " + (target / 1000L) + "s)");
             }
         }
         return widened;
@@ -2782,6 +2996,29 @@ public final class PlayerController {
         if (nextIndex < 0 || nextIndex >= queue.size()) return;
         final Track t = queue.get(nextIndex);
         if (!crossfadeStreamable(t)) return;
+        // The rendered DJ edit wins over every stream, when one exists for this track at
+        // the user's blend length: it IS this track's own audio, with the vocals taken
+        // out of the front and handed back on a bar line, so the incoming deck plays one
+        // file from before the blend through the promotion and for the rest of the track
+        // — nothing about it is ever switched mid-playback. Only an overlapping boundary
+        // can use it (a trim or a cut has no window for the removal to mean anything in),
+        // and only when the file was rendered for exactly the length this boundary's
+        // setting names: a file whose removal window does not match is a miss, not an
+        // approximation.
+        if (incomingMode == IncomingMode.PARKED && transitionKind != null
+                && transitionKind.overlapping()) {
+            String edit = djEditFor(t);
+            if (edit != null) {
+                TransitionPlan plan = transitionPlan;
+                Logger.info("transition: incoming slot {} ({}) is the rendered DJ edit —"
+                                + " vocals out for the first {}ms, back on a bar line, then the"
+                                + " master continues; this boundary blends {}ms",
+                        nextIndex, t.title, blendDurationMs(),
+                        plan != null ? plan.overlapMs() : -1L);
+                onMain(() -> armIncoming(generation, nextIndex, edit, incomingStartMs, incomingMode));
+                return;
+            }
+        }
         if (t.source == Track.Source.NETEASE && t.neteaseId != 0L) {
             String cached = diskCache.getAudio(t.neteaseId);
             if (cached != null) {
@@ -3227,6 +3464,12 @@ public final class PlayerController {
             Logger.info("transition: the next track ({}) is already on disk, so the boundary"
                     + " will be served from the audio cache without resolving anything",
                     t.title);
+            // ... and its DJ edit, if the stem path is on and this one has not been made
+            // yet. Same lane, same moment, same reasoning as the pre-cache below: a
+            // separation is tens of seconds of CPU (measured: 15-35s for a head window on
+            // the reference device), which nothing on a playback path may wait for.
+            precacheGeneration.incrementAndGet();
+            requestStemEdit(t, diskCache.getAudio(songId));
             return;
         }
         long limitMb = diskCache.getMaxSizeMB();
@@ -3273,6 +3516,84 @@ public final class PlayerController {
             }
             Logger.info("transition: pre-cached the next track ({}): {}KB on disk, the boundary"
                     + " will not have to resolve it", t.title, bytes / 1024L);
+            // The audio is here, so the DJ edit can be made from it — same lane, and it
+            // is the last moment that is still minutes early enough (see
+            // requestStemEdit). The generation this render was asked for is the one above,
+            // so a queue that moved on while the download was running also cancels it.
+            requestStemEdit(t, diskCache.audioPath(songId));
+        });
+    }
+
+    // --- the stem DJ edit ----------------------------------------------------
+
+    /**
+     * The DJ edit for a track at a removal window: one cache file per (track, window),
+     * named by the same key convention every other per-track cache here uses. The window
+     * is part of the name because it is part of the audio — an edit made for a 15 s blend
+     * puts the vocals back at 15 s and cannot stand in for a 20 s one.
+     */
+    private String djEditPath(String trackKey, long removalMs) {
+        if (trackKey == null || trackKey.isEmpty()) return null;
+        return diskCache.djEditPath(trackKey + "@" + removalMs);
+    }
+
+    /** The finished edit for this track at the user's blend length, or null — the
+     *  boundary's own check, and deliberately only a stat: the file's presence is the
+     *  whole answer, because a render that fails deletes what it wrote. */
+    private String djEditFor(Track t) {
+        StemEditRenderer renderer = stemEditRenderer;
+        if (renderer == null || t == null) return null;
+        String path = djEditPath(TransitionPlan.trackKey(t), blendDurationMs());
+        if (path == null) return null;
+        return new File(path).isFile() ? path : null;
+    }
+
+    /**
+     * Ask for one DJ edit, from the preload lane, at the moment the incoming track's
+     * audio becomes available — the same moment and the same reasoning as the pre-cache
+     * above, and never on a playback path: a head-window separation is tens of seconds of
+     * CPU on the reference device (round 6 measured 15.65 s of wall clock for a 15 s
+     * window, 32.2 s for 30 s with the quarter model), which is minutes of margin at the
+     * start of a track and nothing at all inside a boundary's own lead.
+     *
+     * <p>Every failure is silent by design: the renderer is absent (a host with no model,
+     * or no stem code), the track has no identity to key an edit by, the file is already
+     * there, the render does not start, or the render fails part way and deletes what it
+     * wrote. In every one of those cases the boundary blends exactly as it did before
+     * this existed — the edit is an improvement to what the incoming deck contributes,
+     * never a condition on the transition happening.
+     */
+    private void requestStemEdit(final Track t, final String sourcePath) {
+        final StemEditRenderer renderer = stemEditRenderer;
+        if (renderer == null || !transitionEnabled || t == null
+                || sourcePath == null || sourcePath.isEmpty()) {
+            return;
+        }
+        final long removalMs = blendDurationMs();
+        final String path = djEditPath(TransitionPlan.trackKey(t), removalMs);
+        if (path == null) return;
+        final BeatProfile grid = beatProfileOf(t);
+        final long generation = precacheGeneration.get();
+        precacheWorker.submit(() -> {
+            if (generation != precacheGeneration.get()) return;      // the queue moved on
+            if (new File(path).isFile()) {
+                Logger.info("transition: the DJ edit for {} is already rendered ({}, vocals out"
+                        + " for the first {}ms)", t.title, path, removalMs);
+                return;
+            }
+            StemEditRenderer.Request request = new StemEditRenderer.Request(sourcePath, path, t,
+                    removalMs, grid != null ? grid.periodMs() : 0d,
+                    grid != null ? grid.firstBeatMs() : 0d,
+                    () -> generation == precacheGeneration.get());
+            if (!renderer.render(request)) {
+                // Not an error: an inert feature (no model) says so itself, once.
+                Logger.info("transition: no DJ edit for {} this time; the boundary blends the"
+                        + " plain stream", t.title);
+            } else {
+                // The renderer wrote the file; the cap on how many of them exist is this
+                // cache's business, not the renderer's.
+                diskCache.evictDjEdits();
+            }
         });
     }
 

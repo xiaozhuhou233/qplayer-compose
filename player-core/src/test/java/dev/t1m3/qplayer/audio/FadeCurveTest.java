@@ -33,11 +33,12 @@ public class FadeCurveTest {
         assertTrue("the symmetric ramp should be both-audible for about two fifths of"
                         + " the overlap, was " + symmetric + "ms of " + LONG_MS + "ms",
                 symmetric >= 5_800L && symmetric <= 6_500L);
-        // The staged one holds both tracks for about two thirds of it, which is the
-        // whole point: it is not a fade with a long overlap, it is a mix.
+        // The staged one holds both tracks for about three quarters of it, which is the
+        // whole point: it is not a fade with a long overlap, it is a mix. (72% at the
+        // round-12 exponents, 67% before them.)
         assertTrue("the DJ shape should be both-audible for a large share of the overlap,"
                         + " was " + dj + "ms of " + LONG_MS + "ms",
-                dj >= 9_000L && dj <= 11_000L);
+                dj >= 10_500L && dj <= 11_500L);
         assertTrue("the DJ shape should be at least half again the symmetric one",
                 dj >= symmetric * 3L / 2L);
     }
@@ -56,11 +57,18 @@ public class FadeCurveTest {
         // a fade that starts immediately.
         assertTrue("the outgoing track should still be within ~1.5dB at the middle",
                 FadeCurve.DJ_BLEND.outGain(0.5f) >= 0.84f);
-        // ... and its exit is a short tail rather than a decay across the window.
-        assertTrue("the outgoing track should be mostly gone in the last tenth",
-                FadeCurve.DJ_BLEND.outGain(0.9f) <= 0.35f);
-        assertTrue("the outgoing track should be nearly silent right before the end",
-                FadeCurve.DJ_BLEND.outGain(0.97f) <= 0.12f);
+        // ... and its exit is a short tail rather than a decay across the window. The hold
+        // was lengthened in round 12 (the exponent 1.8 -> 2.6), which moved this boundary
+        // later on purpose: at nine tenths of the ramp the outgoing track is now at 0.37
+        // (-8.7 dB) where it used to be at 0.27 (-11.4 dB), and the exit is the last
+        // twelfth instead of the last tenth. The pair of assertions is what pins that: the
+        // track is still plainly there at 0.9 and gone by 0.98.
+        assertTrue("the outgoing track should be on its way out at nine tenths, was "
+                        + FadeCurve.DJ_BLEND.outGain(0.9f),
+                FadeCurve.DJ_BLEND.outGain(0.9f) <= 0.40f);
+        assertTrue("the outgoing track should be nearly silent right before the end, was "
+                        + FadeCurve.DJ_BLEND.outGain(0.98f),
+                FadeCurve.DJ_BLEND.outGain(0.98f) <= 0.12f);
     }
 
     @Test
