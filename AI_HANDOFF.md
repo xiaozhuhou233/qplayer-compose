@@ -127,6 +127,10 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
    **第一次在两首不同的歌上跑出变速+移调+低频互换（已装机验证）** —— 见第七节第九轮。**
    **第十一轮（2026-09-20：变速/改调以自然化器回归、曲线换成 DJ 式分阶段、`align=on` 5/7、
    两首同响 41%→67%，已装机验证）见第七节末尾。**
+   **第十二轮（2026-09-20：过渡时长成为滑动条设置、incoming 渲染成“人声剥离的 DJ 编辑文件”并真的播了出去、
+   音高在人声前 2s 回到原调（放不下就整对不移调）、DJ 式曲线 hold 指数 1.8→2.6 + 低频交接从中间移到五分之三
+   （同响 67%→72%、交接 10056→12151ms），已装机验证；`BlendPulse` 记录了“三种拍子在位代理都测不出真实音乐”
+   这条否定结论）见第七节末尾。**
    **下一步第一件事仍然是**听感**（第四/五/八/九/十/十一轮都没让任何一次过渡真的播给人听过），
    第十一轮末尾列了"没人听过"的具体清单，优先确认：
    (a) **DJ 式曲线 + 16.5s 重叠**听起来是不是真的不只是"淡入淡出"（先听
@@ -1541,6 +1545,202 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
     中段抬升 + 一个 `+2` 半音的移调，信息量最大）；② 把 AI 那条链接上再跑同样几个边界；
     ③ 若"15s 好听但两首鼓组还是错开"，下一步是把入口偏移从"自己的拍点"改成"与 A 的拍点对齐"
     （现在受 `MAX_BEAT_ENTRY_SHIFT_MS = 400ms` 与启动延迟限制）。
+
+- **2026-09-20 第十二轮：过渡时长成设置项、人声感知的 incoming（DJ 编辑）、音高规则、第一个歌的拍子
+  （四项都装机验证；Redmi K20 Pro `efaa83b2`，`transitionKind` 临时强制 2 跑完已还原 0，模型跑完已删除）**
+  **用户原话（四项）**：①「在设置里添加能让用户自定义过渡时间的滑动条设置」②「把前一首后一首歌的开头和结尾
+  人声分离只混背景，再逐渐接近人声，如果两首歌结束和开始时没有人声的话」③「在下一首歌人声出来前两秒钟
+  必须停止降调」④「让第一个歌的拍子不那么早结束，取决于你」。
+  - **① 过渡时长（滑动条）**：`SettingsCatalog.TRANSITION_BLEND_KEY = "transitionBlendSeconds"`，
+    `SettingSpec.slider(..., 15, 4, 30, 1)` + `unit(" 秒")` + `dots()`，`dependsOn(智能过渡)`；
+    目录里**本来就有 slider 类型**（`SettingSpec.SLIDER`，字号/缓存上限/超时都用它），所以 Compose
+    设置页与 QML 页**一行 UI 都没改**（`ComposeQPlayerActivity.kt` 的 `SettingSpec.SLIDER` 分支 /
+    `shared-qml/settings/SettingSliderRow.qml` 自动渲染）。`SettingsCore.pushTransition` 推
+    `PlayerController.setBlendDurationMs(秒 × 1000)`（内部 clamp 到 4–30s）；控制器**只在决策那一刻读**，
+    所以**改完不用重启、下一个边界生效**，并打一行 `transition: 过渡时长 set to 20000ms (20s)`。
+    `TransitionPlan.OVERLAP_LONG_MS` 仍是常量，但**只作为 chooser 没指定时的答案与设置默认值**；
+    「平淡收尾」的上抬**改成相对用户值**（`PLAIN_EXTENSION_MS = 5s`，`plain >= 用户值` 才抬，
+    上限 `用户值 + 5s`）——真机两种都验到了：用户 20s 时 Life's A Mess（`plainEnding=16520ms`）**不抬**
+    （16520 < 20000，边界就是 20000ms）；用户 15s 时抬到 16520ms，日志写
+    `(at most 5000ms past the user's 15s)`。
+    `TRANSITION_DECIDE_LEAD_MS` = `BLEND_MAX(30s) + 5s + 250ms + 9s + 600ms = 44.85s`（按最长的**可能**计划定尺）。
+  - **② 人声感知的 incoming = 一个 DJ 编辑文件（只做 incoming 一侧，这是本轮的取舍）**
+    · **为什么只做一侧**：outgoing 是一路正在播的流，剥离它必须**在播放中途换音频源**——那正是 P0
+      （"晋升即死"）与"第二首从头重放"两次事故的机制。incoming 可以干净地做：**渲染成一个连续文件**
+      （背景 + 人声在一条小节线上回来 + 之后就是原 master），incoming 播放器**自始至终只开这一个源**，
+      过渡、晋升、之后的整首歌都不换源。**要不要剥 outgoing 是下一个切片**（见未验证 8）。
+    · **模型查找**：app 私有目录 `files/models/`，`StemModel` 的清单里两个候选，**名字 + 字节数 + sha256
+      三者全对才认**：`htdemucs-quarter.onnx`（97,978,156 字节，`427b9588…4aec20`）与
+      `htdemucs.onnx`（108,644,650，`099b5be7…d0912329`）。**缺失或不匹配 ⇒ 完全 inert**，只写一行日志
+      （含 `adb push` 那一行与两个哈希），边界与今天**逐位相同**——真机验到：无模型时
+      `stem DJ edits are OFF — no verified model in /data/user/0/dev.t1m3.qplayer.debug/files/models …`
+      以及控制器的 `no DJ edit for Moonlight this time; the boundary blends the plain stream`。
+      **注意**：`available()`/`logInertReason` 只在**真的被要求渲染时**才跑，所以那行不在起播时出现。
+    · **只挂 preload lane**：`PlayerController.requestStemEdit`（在 `precacheNextAudio` 的同一条
+      `qplayer-precache` 单线程 lane 上，下一首音频到位那一刻提交；`stillWanted` 每 16 个解码块 / 每个分离
+      分块轮询一次，队列一走就丢）。**渲染成本实测比第六轮估的高**：`separation` 25.9–28.2s（20–22.7s 窗口）
+      + 整曲 AAC 重编码 → **整跑 53.2 / 53.4 / 72.1 / 82.5 秒**（`Session 0.6s`、`arena off`、4 线程、
+      quarter 段长 86016）；所以要 **≥2 分钟的提前量**（本轮给的是 120s，都在边界前完成）。
+      产物落到新子目录 `files/cache/djedit/`（键 = `trackKey + "@" + removalMs`，文件名
+      `abs(key.hashCode())+".m4a"`，**扩展名不能改**：平台按扩展名挑 extractor），计数上限 4、计入
+      `totalSize()` 与 LRU/clearAll（`DiskCache.DJEDIT`）。**文件存在即"渲染完成"**：任何失败路径都删掉半成品。
+    · **文件内容**（`DjEdit` + `AndroidStemEditRenderer`）：解码**文件开头**的
+      `removalMs + (一拍×4 + 1s，上限 8s)` 窗口 → 需要时重采样到 44.1k（库里 48k 的歌很多）→ htdemucs 分离
+      → `other` 用**减法**重算（模型四轨相加只有 −32dB，会有"残余人声"，减出来才精确）→
+      `DjEdit.renderHead`（其它三轨 unity，vocals 走 `Plan.vocalGainAt`）→ 重采样回源采样率 → **同一个
+      encoder/muxer 继续把整首歌的其余部分接在后面**（时间轴 = 文件时间轴，所以 content start / 拍点入口 /
+      斜坡 / 发布位置**含义不变**）。**不加总线限幅器**（一路 deck，编辑必须就是 master；只用 16-bit 硬
+      clamp 并计数）。人声回来的位置 = **incoming 自己的一小节线**：`downbeatOffsetSec` 从**分离出来的 bass
+      轨**低频包络估（平台没有结构分析，这是第 7 轮就写下的"扩展、非移植"），**从不用拍格相位**（那错 3/4）。
+    · **人声存在性（用户那条 clause）**：`DjEdit.presence`，判据 = 窗口内 25ms 帧里**高于 −50dBFS 的比例
+      ≥ 5%**（`SINGING_FRAME_SHARE`）。**装机实测：三首 incoming 全部 "sings"**（Moonlight 31%、
+      Life's A Mess 99%、The Other Side Of Paradise 30%），所以**短路分支本轮一次都没走到**；而且按第 7 轮
+      测过的两段"没人声"素材（In My Head 前奏 27.9% 高于门、坏女孩 33s 段 56% 高于门）**它们也不会短路**。
+      **结论：这个阈值实际上让所有真实歌都走渲染色**——想省下渲染（50–85s CPU）就动
+      `SINGING_FRAME_SHARE` 这一个数，不要动别的。这条日志正反两面都写清（`its first Nms does sing — …
+      median/p90/peak/静音帧占比` / `not needed — …`）。
+    · **人声抑制"实测"（不是断言）**：把渲染出来的 `djedit/589080835.m4a` 与 app 的原始
+      `audio/1460801818.cache` 都放到设备 `/data/local/tmp/hb/`，用**同一个分离 harness**
+      （`HtdemucsBench --metrics`）各测一遍同一窗口：
+      **blend 窗口（0–20s）：vocals rms −22.5 → −43.0 dBFS（抑制 20.5dB），25ms 帧静音占比 1.4% → 80%**；
+      **小节线之后（22–32s）：vocals −19.4 → −19.5 dBFS（0.1dB = 二次编码的差），mix −18.4 → −18.5**，
+      即"人声在小节线回来、之后就是 master"。**对照行**：`other`（最大的一路背景）−30.1 → −30.3dBFS，
+      证明编辑**只**动了人声。（⚠️ 那条 harness 命令解 48k 不重采样，两个文件都一样地测，所以**比较成立**、
+      绝对值不可当真——见它自己打的 `WARNING: source is 48000Hz`。）
+    · **播种（delivery 仍未实现，这一行就是交付路径）**：
+      `adb push htdemucs-quarter.onnx /sdcard/ && adb shell run-as dev.t1m3.qplayer.debug cp /sdcard/htdemucs-quarter.onnx files/models/`
+      （本轮装机就是这么做的：模型本来就在设备上，`run-as cp /data/local/tmp/hb/htdemucs-quarter.onnx files/models/`
+      **不用重新 push 98MB**）。**跑完已把模型删掉**（保持用户默认行为不变）；用户想试再 push。
+  - **③ 音高规则（用户那条"人声出来前两秒必须停止降调"）**：`MixNaturaliser` 新增
+    `VOCAL_PITCH_MARGIN_MS = 2000` 与 `pitchFitsBeforeVocals(vocalIn, overlap)`；`IncomingMix` 新增
+    `pitchIdentityAtFileMs`（+`RESTORE_MS = 6s` 现在从这里导出）；`AndroidAudioBackend` 新增
+    `startPitchBack` / `pitchBackStep` / `endPitchBackAtPromotion`，**由播放器自己的
+    `getCurrentPosition()` 驱动**（不用墙钟：vocalIn 本来就是同一文件的毫秒数，用墙钟会把设备启动延迟
+    （123–822ms）悄悄从 2s 余量里扣掉）。`PlayerController.blend` 里判定：
+    · **能放下 ⇒ 排定还原**：`vocalInBlendMs = blendDurationMs − RETURN_RAMP_MS − entry`（**下界**：
+      DJ 编辑的人声在小节线上回来，晚于它；没有编辑时 = 0），`pitchIdentityAtFileMs = entry + vocalIn − 2000`。
+    · **放不下 ⇒ 这一对完全不移调**（不是"压缩还原"），并把理由写进 `mix:` 片段
+      （真机：`pitch x1.0000 on B (dropped: the incoming deck plays the track's own master, so its vocals
+      are in the blend's first sample (0ms of 20000ms), …)`）。
+    · **真机两条分支都验到**（这是本轮最硬的一条）：
+      `pitch rule — this pair is transposed 1 semitone(s) and the pitch is back at the incoming track's own
+      by 17500ms of its file (eased back over 6000ms from 11500ms), 2000ms before its vocals arrive at
+      19500ms; the blend is 20000ms` → 后端回读
+      `incoming mix applied … platform reports speed x1.0000 pitch x1.0595` →
+      **`the incoming track's pitch is its own again — its own clock says 17513ms, the deadline the rule set
+      was 17500ms of its file (2000ms of margin before its vocals …)`**（另一条边界 17572ms；**比名义期限晚
+      13/72ms = 10Hz 驱动的一拍**，但离人声还有 1987/1928ms，规则要的 2s 余量正是为了吃掉这一拍）→
+      晋升时 `the transposition was already its own pitch at the promotion … so this ramp is the tempo's alone`。
+      **那对子是 `Life's A Mess(n1460801818) → Moonlight(n1388960663)`（−1 半音）与反向（+1 半音）**。
+    · **音色的推荐（任务要求"评估并建议，不要静默决定"）**：**建议速度不要提前还原**（保持晋升后 6s 平滑还原）。
+      理由与数字：① 速度锁的**唯一目的**就是"两首还同时听得见的时候，拍子不许散"——提前还原正好在
+      **两首都还在响**的窗口里把 incoming 拉回自己的网格；② 本轮的移调之所以能提前，是因为**音高是绝对的**
+      （唱出来的音高有绝对参照），而**速度是相对的**：一个快 6% 的人声听起来"和另一首的鼓在一起"，
+      不是"被改过"；③ 提前还原会**重新引入漂移**：第 11 轮的真机 `x1.0752`（+7.5%）若在 `vocalIn`
+      （≈14.5s）处还原，剩下的 ~5.5s 里两格会滑开 `0.0752 × 5500ms ≈ 414ms ≈ 1.8 拍`——那正是速度锁存在的理由
+      （`drift 0ms by construction` 会立刻变成几百毫秒）；④ 代价不对称：音高晚还原 ⇒ 听众听到**一整段变调的人声**
+      （不可接受），速度晚还原 ⇒ 听众听到**被拉齐的鼓**（正是想要的）。所以速度维持现状，**规则只对音高生效**。
+  - **④ 第一个歌的拍子（D）—— 量化 + 两处改动 + 一条诚实的否定结论**
+    · **新工具 `audio/BlendPulse`（纯 Java，6 个单测）+ 设备 harness `D:\qplayer-dev\harness\BlendPulseBench.java`**
+      （`build_bp.sh` 出 dex，`app_process`，用**仓库自己的** `BeatAnalysis`/`FadeCurve`/`BlendPulse`；
+      网格在**曲末 30s 就地测**并把相位投到 ramp 起点，`period=`/`phase=` 可覆盖）。
+      它报告：逐 2s 切片的**低频段电平**（相对本窗口最响切片，dB）与**最深的"坑"**（`lowHoleDb`）、
+      **低频段交接的精确时刻**（`outgoingKickEndsAt`，来自 swap 参数）与 **incoming 内容到位的时刻**
+      （`incomingEstablishedAt`，**从增益曲线精确算出**，不是测的）、以及**两首同响的窗口**
+      （`FadeCurve.bothAudibleMs`）。
+    · **⚠️ 否定结论（必须记住，别再走一遍）："这一小段里还有没有拍"这个数，用三种做法在这台库的真实音乐上
+      都测不出来。**（a）低频段电平比（on-beat ÷ 本切片均值）：对一首 125BPM 拍点很清楚的歌，
+      **把网格相位扫 8 个点，读数全程 0.54–2.15**（真实音乐的低频是"持续贝斯 + 上面的鼓"，电平比不动）；
+      （b）onset 包络占比：同一首歌同一次扫描 **0.4–1.8**（密编曲每个细分都有 onset）；
+      （c）on-beat ÷ **between-beats**（经典突出度）：分母在"incoming 低频被切掉"时本身趋 0，
+      实测**在满音量的混音中段报出 "beatless stretch"**（假阳性）。估计器自己的梳状分能分开（0.5–0.9），
+      但要 30s 窗口，**无法定位 15s 里的 2s**。**要多段"拍子没掉"的证据，只能把 outgoing 的鼓组留下来
+      （= 剥它的 stems）**——这与用户"让第一个歌的拍子不那么早结束"的诉求是同一件事的两面。
+      这段推理**写进了 `BlendPulse` 的类注释**（下一个会话不用重新发明）。
+    · **改动 1：`FadeCurve.DJ_BLEND` 的 `OUT_HOLD_EXPONENT` 1.8 → 2.6**。依据是一张**算术表**
+      （`harness/ExponentTable.java`，15s 斜坡、incoming 指数 0.55）：
+      `p=1.80: out@75 −4.5dB, out@90 −11.4dB, 同响 67%, 峰值 +2.0dB`；
+      `p=2.60: −2.7dB / −8.7dB / 72% / +2.3dB`；`p=3.00: −2.1 / −7.7 / 74% / +2.4dB`。
+      选 2.6：九成处的留声比原来多 2.7dB（那正是"听不见了"的地方），代价只是中段 +0.3dB；
+      3.0 再多买 1dB 但尾巴更陡。**incoming 一侧刻意没动**（把它推晚只会缩短"两首都在"的窗口）。
+    · **改动 2：低频交接从"重叠的中间"移到"五分之三"**（`PlayerController.BASS_SWAP_AT = 0.6`，
+      取 A 的拍上、仍夹在 `overlap − period` 内）。依据：交接那一刻就是**outgoing 失去底鼓**的时刻
+      （`bassSwapNow` 一次把 incoming 低频还回来、把 outgoing 的低频切到设备最低增益），
+      而 outgoing 是一路单流，**这是唯一能给它拍子延命的旋钮**。移到 0.6 后：outgoing 的底鼓多留
+      1.5s/15s（真机 20s 重叠：10056ms → 12151ms），晋升前 incoming 拥有低频的时间仍有 40%。
+    · **真机 before/after（同一对子、同一个 20s 计划，只差 core jar）**：
+      | | 同响窗口 | 低频交接 |
+      |---|---|---|
+      | 旧（1.8 / 中间） | 13292ms of 19913ms（**67%**） | **10056ms**（50.3%） |
+      | 新（2.6 / 0.6） | 14352ms of 19933ms（**72%**） | **12151ms**（60.8%） |
+      另外两条边界（Life's A Mess→TOSOP、Moonlight→Life's A Mess）都是 72% / 14324–14397ms、交接 12220ms。
+    · **一个观测（不是本轮改的，但值得记）**：`align=on` 用的 A 的网格是**文件开头 30s** 测的那一份，
+      再用 `MediaPlayer.getDuration()` 外推到曲末；`BlendPulseBench` 一开始照这个做，**同一首歌在
+      116s 处的相位就与"就地测最后 30s"给出的差得让读数全成了噪声**（换成就地测量才拿到有意义的数字）。
+      这正是 §7 第四轮风险 4"两个时钟不是同一个"的可听版本：**长曲子上的 `align=on` 可能差半拍**。
+      下一轮若要做"两首鼓组真的重合"，先量这个投影误差。
+    · **顺带的一个新数据**：把设备自己的 18 个 profile 拉下来（`harness/PairScan.java` + `pull_prof.py`，
+      编译的是**仓库里的** `BeatProfile`/`MixNaturaliser`），**26 对吗子会被移调**（第 11 轮那 7 个边界里只有
+      2 个真的移成），速度锁也有若干对；也就是说 `合拍改调` 现在**经常**会动音高——本轮的真机边界就是
+      "−1 半音 / +1 半音"各一次。profile 缓存（`files/cache/beat/`）现在是 VERSION 5、29 字节。
+  - **覆盖率（本轮 6 次装机跑）**：
+    | 边界 | kind | 计划 → 实际 | 同响 | 交接 | DJ 编辑 |
+    |---|---|---|---|---|---|
+    | Life's A Mess → Moonlight（用户 20s） | CROSSFADE | 20000 → 19913ms | 67%→72% | 10056→**12151** | 有（渲染+播放） |
+    | Moonlight → Life's A Mess（用户 20s） | CROSSFADE | 20000 → 19996ms | 72% | 12220ms | 有（同一对子复用） |
+    | Life's A Mess → The Other Side Of Paradise | CROSSFADE | 20000 → 19995ms | 72% | 12151ms | 有 |
+    | Life's A Mess → Moonlight（用户 15s，自动规则） | CROSSFADE | **16520**（平淡收尾相对上抬）→ 16490ms | 72% | 10056ms | 有（15s 窗口） |
+    | Life's A Mess → Moonlight（剩 1s） | **CUT** | – | – | – | 无（`too late: less than 1500ms left`） |
+    | 无模型时的同一条边界 | CROSSFADE | 20000ms | – | – | 无（inert） |
+  - **不变量（本轮 6 次跑全部成立）**：**没有一行 `playAt: slot N starts at …`**（没有任何边界从 0 重放）、
+    `dumpsys audio` **只有一路** `state:started`、两次晋升后都没有 `not transitioned`（唯一那条出现在起播前的
+    暂停态、行号在晋升之前）、`handoff resume ≥ 重叠已放过的量`、晋升行
+    `the overlap heard start..start+ramp` 连续。
+  - **本轮没做/未验证（重要）**：
+    1. **没人听过**（第 5/8/9/10/11 轮都一样，而且这一轮第一次让**渲染出来的文件真的播了出去**）。
+       DJ 编辑里"背景-only 20s → 人声在小节线回来"的手感、2.6 的尾巴、延后 2s 的交接、−1/+1 半音
+      （真机上真的移了）、20s 的默认长度，**全部只能靠耳朵**。
+    2. **小节线的正确性没有听感验证**：`downbeatOffsetSec`（bass 低频最强相位）只在合成信号上单测过；
+       "人声正好在小节线上回来"目前只有"它落在 14/13/7 条小节线之一"这一层证据。
+    3. **短路分支一次都没走到**（三首 incoming 全部 sings，见 ②）。这也是**设计冗余**的证据：
+       `SINGING_FRAME_SHARE=5%` 实际上等于"永远渲染"。
+    4. **渲染成本 53–85s**：比第六轮估的"15–35s"高一倍多（多出来的是**整曲 AAC 重编码**：43.8s/52.4s of
+       encode）。preload lane 上一条单线程：**队列走得快（或提前量 <2 分钟）时渲染会赶不上**，
+       `stillWanted` 会把它丢掉——行为是安全的（回落到今天的流），但用户不会知道"这次没有 DJ 编辑"。
+    5. **DJ 编辑与计划长度可能不一致**（本轮实测）：编辑按**渲染那一刻的设置**（15s）做，而边界计划
+       （16520ms，平淡收尾上抬）更长 → 人声在小节线（~15.7s）回来，**早于计划终点**；这不是 bug
+       （规则的下界法仍然安全），但"移除窗口 = 设置值 ≠ 计划长度"这件事要记住。
+    6. **编辑二次编码的代价**：晋升后听到的是 AAC 192kbps 重编码（实测 22–32s 窗口 mix 差 0.1dB），
+       编辑比原曲长 47ms（muxer 量化）。
+    7. **`pitchBack` 的一拍**：10Hz 驱动，所以"正好在期限上"实际会晚 ≤100ms（本轮 13/72ms）；
+       2s 余量就是为它准备的。若以后有人把余量调小，这条会成为第一个响的。
+    8. **剥 outgoing 的 stems**（本轮的取舍另一半，下一个切片）：要让**第一首**的鼓组在它身体淡出后
+       继续存在，必须给 outgoing 也做一个"文件"——也就是**在播放中途换源**。可行做法是
+       **提前把 outgoing 的尾巴也渲染成一个文件**（同一套 DJ 编辑机制，只是加在 outgoing 上），
+       并在**一个已知的、非边界的时刻**把当前播放切成那个文件；风险正是 P0 那类换源问题，
+       所以要有独立验收（切源后位置连续、只有一个 started 播放器、不重放）。
+    9. **`BlendPulse` 只在这台库的 18 首上试过**；低频段的 `LOW_CORNER_HZ=200` / `BASS_CUT_DB=-15`
+       是设备 EQ 的近似（设备真实响应是它自己的 5 段）。
+  - **交付**：debug APK `98,312,565` 字节；分支 `feat/ai-dj-transition`（commit `72a4aae`，**`main` 未动**）；
+    tag `ai-dj-transition-2026-09-20c`；
+    页面 `https://github.com/xiaozhuhou233/qplayer-compose/releases/tag/ai-dj-transition-2026-09-20c`、
+    直链 `https://github.com/xiaozhuhou233/qplayer-compose/releases/download/ai-dj-transition-2026-09-20c/app-debug.apk`
+    （实测 HTTP **200**，98,312,565 字节）。`release.yml` 照旧失败（既有原因）。
+  - **测试**：`mvn -pl player-core test` = **175 个用例、1 个失败**，就是那个既有的
+    `SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`（`pageTransitionPreset`
+    只有常量没有 spec，与本轮无关）。本轮新增：`BlendPulseTest` 6 个、`DjEditTest` 11 个、
+    `StemModelTest` 5 个（后两个是上一轮遗留的；本轮第一次真的编 app 才发现
+    `AndroidStemEditRenderer:228` 给 `final` 变量赋值——**core 能过不代表 app 能过**）。
+  - **设备卫生**：跑完把 `transitionKind` 还原成 0、`transitionBlendSeconds` 还原成 15、`files/state/queue.json`
+    还原成 [Lalala, Moonlight] playIndex=1 positionMs=21325（app 已 force-stop）、
+    **模型已删除**（`run-as rm files/models/htdemucs-quarter.onnx`）、`/data/local/tmp/hb/` 里本轮的
+    `edit_lam.m4a`（4.9MB）与 `orig_lam.bin`（42MB）已删。留在设备上的新东西：
+    `/data/local/tmp/bp/classes.dex`（38KB，`BlendPulseBench` 用）。
+  - **下一件事（按顺序）**：① **听**——这一轮第一次有"真的播出去的渲染文件"，先听
+    `Moonlight → Life's A Mess`（20s + DJ 式 2.6 + 延后 2s 的交接 + 一个 +1 半音 + 人声在 20.75s 回来），
+    再听反向的 `Life's A Mess → Moonlight`（−1 半音）；② 若"背景-only 的 20s"听着太空或太长，先动
+    `SINGING_FRAME_SHARE` 与移除窗口的关系（**不要**动 `RETURN_RAMP_MS` / `BEATS_PER_BAR`）；
+    ③ 剥 outgoing 的 stems（见未验证 8）；④ 量 `align` 的头部网格投影误差（见 ④ 的观测）。
 
 **顺序**：P1 → P3 → P5 → P4 → P6。不要先做 P6。（P1/P2/P3/P7、**P6** 与 **P4 的分析+对齐**都已落地；
 剩下的仍是**听觉验证**（P4 现在有装机证据了：能 align=on，但**听感**仍未验证），然后才是 P5 低频互换
