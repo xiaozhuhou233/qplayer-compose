@@ -291,6 +291,11 @@ private val ShapeSmall = RoundedCornerShape(8.dp)
 private val ShapeMedium = RoundedCornerShape(12.dp)
 private val ShapeLarge = RoundedCornerShape(20.dp)
 private val ShapeExtraLarge = RoundedCornerShape(32.dp)
+
+/** The same 32dp, as a number, for the one place a corner radius has to reach a
+ *  platform {@link android.view.ViewOutlineProvider} rather than a Compose shape
+ *  (see [BiliVideoSurface]). Kept beside [ShapeExtraLarge] so the two cannot drift. */
+private const val SHAPE_EXTRA_LARGE_DP = 32f
 private val ShapeSheetTop = RoundedCornerShape(topStart = 48.dp, topEnd = 48.dp)
 private val GoogleSansFlexBold = FontFamily(
     Font(R.font.google_sans_flex_bold, FontWeight.Bold)
@@ -400,6 +405,15 @@ class ComposeQPlayerActivity : ComponentActivity() {
         settings.load(PrefsSettingsStore(this), SettingsCatalog.ANDROID)
 
         setContent { QPlayerComposeApp(controller, settings) }
+        // The app is on screen as of the first frame this window draws: that frame is the
+        // one carrying the first composition, so the callback below is what "the first
+        // frame" means here. The controller holds the transition warmups (a whole track's
+        // download, two decodes, an AI question, and a separation render that would hash
+        // 98 MB and then take four cores) until it has this signal plus a quiet interval —
+        // see PlayerController's startup gate. Nothing on the playback path waits on them.
+        android.view.Choreographer.getInstance().postFrameCallback {
+            controller.notifyUiInteractive()
+        }
         controller.loadHome()
         requestAudioPermission()
         requestNotificationPermission()
@@ -5251,7 +5265,14 @@ private fun VideoLayer(state: PlayerUiState, controller: PlayerController) {
                 }
             }
         ) {
-            BiliVideoSurface(Modifier.fillMaxSize())
+            // The picture keeps the surrounding UI's shape while it is inline, and goes
+            // edge to edge in full-screen: the radius is 0 there, which is the "no clip"
+            // case of the same platform outline (see BiliVideoSurface).
+            BiliVideoSurface(
+                modifier = Modifier.fillMaxSize(),
+                cornerRadiusPx = if (fullscreen) 0f
+                else with(density) { SHAPE_EXTRA_LARGE_DP.dp.toPx() }
+            )
         }
         if (fullscreen) {
             BiliFullscreenControls(
@@ -5495,27 +5516,95 @@ private fun BiliFavItemsScreen(
  *  <p>It lives in the Compose tree (not in a window overlay) so the app's own panels
  *  keep drawing over it — a sibling view added above the Compose content floated over
  *  the queue sheet. The picture is fitted inside whatever box the caller frames, and
- *  the caller sizes that box from the source's aspect ratio. */
+ *  the caller sizes that box from the source's aspect ratio.
+ *
+ *  <p>[cornerRadiusPx] is the shape of that box, rounded on the platform side rather
+ *  than by Compose: see the factory below for why a Compose clip cannot reach a
+ *  SurfaceView's picture and what the outline is applied to instead. The inline
+ *  preview passes the surrounding UI's 32dp; full-screen passes 0, which is the
+ *  unclipped, edge-to-edge case. */
 @Composable
-private fun BiliVideoSurface(modifier: Modifier = Modifier) {
+private fun BiliVideoSurface(modifier: Modifier = Modifier, cornerRadiusPx: Float = 0f) {
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
-            android.view.SurfaceView(ctx).apply {
-                holder.addCallback(object : android.view.SurfaceHolder.Callback {
-                    override fun surfaceCreated(holder: android.view.SurfaceHolder) {
-                        videoBackend?.attachVideoSurface(holder.surface)
-                    }
-                    override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, hh: Int) {
-                        videoBackend?.attachVideoSurface(h.surface)
-                    }
-                    override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
-                        videoBackend?.detachVideoSurface(holder.surface)
-                    }
-                })
+            // The picture is a SurfaceView, so a Compose clip (or a plain
+            // clipToOutline on the view that merely *contains* it) does nothing to it:
+            // the picture is not drawn by this window at all. A SurfaceView with the
+            // default Z order is composited BEHIND the window and shows through a hole
+            // this view punches in it ("clear the window's pixels here"), so the shape
+            // that matters is the shape of that hole. Setting an outline on the views
+            // that draw the hole is the platform's own way of shaping it — the corner
+            // regions then keep whatever the app painted there (this page's opaque
+            // background), which is exactly the rounded box the surrounding UI uses.
+            //
+            // Both the SurfaceView and its holder carry the outline: which of the two
+            // display lists the hole is recorded in is a platform detail, and a clip on
+            // either of them covers it.
+            val holder = android.widget.FrameLayout(ctx)
+            val surface = android.view.SurfaceView(ctx)
+            holder.outlineProvider = RoundRectOutlineProvider(cornerRadiusPx)
+            surface.outlineProvider = RoundRectOutlineProvider(cornerRadiusPx)
+            applyVideoCornerRadius(holder, cornerRadiusPx)
+            applyVideoCornerRadius(surface, cornerRadiusPx)
+            surface.holder.addCallback(object : android.view.SurfaceHolder.Callback {
+                override fun surfaceCreated(holder: android.view.SurfaceHolder) {
+                    videoBackend?.attachVideoSurface(holder.surface)
+                }
+                override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, hh: Int) {
+                    videoBackend?.attachVideoSurface(h.surface)
+                }
+                override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
+                    videoBackend?.detachVideoSurface(holder.surface)
+                }
+            })
+            holder.addView(surface, android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT))
+            holder
+        },
+        update = { holder ->
+            // The radius follows the box: 32dp inline, 0 (edge to edge, no clip) in
+            // full-screen. The outline itself is rebuilt from the view's size, so a
+            // resized box keeps its corners without any other help.
+            for (i in 0 until holder.childCount) {
+                applyVideoCornerRadius(holder.getChildAt(i), cornerRadiusPx)
             }
+            applyVideoCornerRadius(holder, cornerRadiusPx)
         }
     )
+}
+
+/** A round-rect outline of one radius, in pixels. 0 means "no rounding", which is
+ *  also the flag that turns the clip off entirely (see [applyVideoCornerRadius]). */
+private class RoundRectOutlineProvider(private var radiusPx: Float) :
+    android.view.ViewOutlineProvider() {
+    override fun getOutline(view: android.view.View, outline: android.graphics.Outline) {
+        outline.setRoundRect(0, 0, view.width, view.height, radiusPx)
+    }
+
+    fun radius(): Float = radiusPx
+
+    fun setRadius(r: Float) {
+        radiusPx = r
+    }
+}
+
+/** Puts [radiusPx] on one view of the video node: the outline says what shape, the
+ *  clip says whether it is applied, and `invalidateOutline` is what makes the
+ *  platform rebuild the outline for the current size. */
+private fun applyVideoCornerRadius(view: android.view.View, radiusPx: Float) {
+    val provider = view.outlineProvider as? RoundRectOutlineProvider
+    val clipped = radiusPx > 0f
+    if (provider != null) {
+        if (provider.radius() != radiusPx) {
+            provider.setRadius(radiusPx)
+            view.invalidateOutline()
+        }
+    } else {
+        view.outlineProvider = RoundRectOutlineProvider(radiusPx)
+    }
+    if (view.clipToOutline != clipped) view.clipToOutline = clipped
 }
 
 @Composable
@@ -5528,7 +5617,10 @@ private fun ApkDetailCover(
     if (state.biliPlaying) {
         // B站视频：同一个 MediaPlayer 挂上这个 SurfaceView 就出画，音画同一时钟。
         BiliVideoSurface(
-            modifier = modifier.clip(ShapeExtraLarge).clickable { onClick() }
+            modifier = modifier.clip(ShapeExtraLarge).clickable { onClick() },
+            cornerRadiusPx = with(androidx.compose.ui.platform.LocalDensity.current) {
+                SHAPE_EXTRA_LARGE_DP.dp.toPx()
+            }
         )
         return
     }
