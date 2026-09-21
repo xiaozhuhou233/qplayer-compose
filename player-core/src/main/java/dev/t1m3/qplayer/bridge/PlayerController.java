@@ -6399,6 +6399,11 @@ public final class PlayerController {
             }
             if (playingIntent) {
                 playingIntent = false;
+                // The user's pause is decided here, not when the fade-out reaches the
+                // backend: a focus loss that paused the track just before this tap
+                // must not resume it behind the user's back because its fade-out was
+                // still running.
+                backend.cancelAutoResume();
                 post(() -> playing.set(false));
                 if (fadeEnabled) {
                     // UI reflects paused immediately; the actual backend.pause()
@@ -6575,6 +6580,19 @@ public final class PlayerController {
     }
 
     private void performAutoAdvance() {
+        // Nothing here may start while another app's audio focus has playback paused:
+        // this runs at the exact moment an overlap is dropped or a track ends, and a
+        // focus loss that lands in that window (B站 starting a video is the report)
+        // must not be answered by the next track starting itself and taking the focus
+        // back from it. The advance is simply not taken: the ended track stays
+        // current and paused, and starting it again — the user's play, or the focus
+        // regain the pause armed — fires its completion at once and lands right back
+        // here with the flag cleared.
+        if (backend.pausedByAudioFocusLoss()) {
+            Logger.info("playback: audio focus is with another app — the queue is not advanced"
+                    + " into playback (slot {} stays current, paused)", playIndex);
+            return;
+        }
         // The boundary is being taken by the ordinary switch, and (if it was armed for
         // this exact slot) that switch has to resume the incoming track where the
         // overlap left it off — see droppedIncomingMs. Marked as automatic so a track
@@ -9838,6 +9856,12 @@ public final class PlayerController {
      *  arrive on a binder thread on some OEM ROMs (MIUI/HyperOS, HarmonyOS)
      *  where main-thread message delivery is throttled in the background. */
     public void mediaPause() {
+        // Before the guard, not after: a pause command is a user saying "do not come
+        // back on your own", and it must be honoured even when a focus loss has
+        // already paused the app (a hardware/Bluetooth pause button, or a live-media
+        // surface that still offers one). The intent is cleared here rather than when
+        // the deferred backend.pause() runs.
+        backend.cancelAutoResume();
         if (!playingIntent) return;
         playingIntent = false;
         post(() -> playing.set(false));

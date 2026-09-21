@@ -301,14 +301,44 @@ public final class AndroidAudioBackend implements AudioBackend {
      *  whatever its clock says. */
     private static final long PARK_TOLERANCE_MS = 100L;
 
-    // Audio focus: pause on loss (call / other player), duck on transient-can-duck,
-    // resume on regain when the loss was transient.
+    // Audio focus: ONE request for the whole app (the second player of an overlap is
+    // an incoming track, not a second listener — it never asks for a focus of its
+    // own, see prepareIncoming, so a loss can only ever arrive once).
+    //
+    // Policy, all four hints, in one place:
+    //   LOSS (permanent)          -> pause; the request is forgotten (Android sends
+    //                                nothing more to an app that lost focus for good,
+    //                                so the next play()/resume() asks again).
+    //   LOSS_TRANSIENT            -> pause and come back on AUDIOFOCUS_GAIN.
+    //   LOSS_TRANSIENT_CAN_DUCK   -> PAUSE, never duck: mixing two players is exactly
+    //                                what the user is asking us not to do, and a
+    //                                ducked track is one they then cannot find again.
+    //                                Same come-back rule as a transient loss.
+    //   GAIN                      -> resume, but only a pause WE made for a loss; a
+    //                                pause the user asked for stays a pause.
+    // resumeOnGain is that intent, and it is cleared by anything the app or the user
+    // decides by hand (pause(), play(), cancelAutoResume()).
     private final AudioManager audioManager;
     private final Context appContext;
     private AudioFocusRequest focusRequest;
     private boolean hasFocus;
     private boolean resumeOnGain;
+    /** True from the loss that paused us until focus is ours again or the user starts
+     *  something by hand: nothing may start playing on its own while it is set
+     *  (see pausedByAudioFocusLoss). */
+    private boolean pausedByFocus;
     private boolean ducked;
+    /** Whether a permanent loss is allowed to come back on AUDIOFOCUS_GAIN.
+     *
+     *  <p>False, and on this platform it is also moot: a permanent loss takes the
+     *  request out of the focus stack (measured on the device — after the other app
+     *  released focus the stack was empty and no AUDIOFOCUS_GAIN was ever delivered),
+     *  so there is nothing for the app to come back from. Coming back from a permanent
+     *  loss is what the user's play is for: the next play()/resume() re-requests focus
+     *  (see forgetFocusAfterPermanentLoss). A transient or duck loss is different —
+     *  there the app keeps its place in the stack and IS told when focus returns, so
+     *  that pause comes back on its own. */
+    private static final boolean RESUME_AFTER_PERMANENT_LOSS = false;
 
     public AndroidAudioBackend(Context ctx) {
         appContext = ctx.getApplicationContext();
@@ -323,6 +353,12 @@ public final class AndroidAudioBackend implements AudioBackend {
         pendingSeekMs = Math.max(0L, startMs);
         wantPlay = true;
         prepared = false;
+        // The app is starting a source of its own: whatever a focus loss paused is
+        // past (and there is nothing left for a later AUDIOFOCUS_GAIN to resume), and
+        // the request is re-made if the permanent-loss path dropped it — this is how
+        // the app gets a focus of its own back after another app took it for good.
+        resumeOnGain = false;
+        pausedByFocus = false;
         requestFocus();
 
         MediaPlayer mp = new MediaPlayer();
@@ -503,6 +539,13 @@ public final class AndroidAudioBackend implements AudioBackend {
         Logger.info("MediaPlayer: pause at {}ms{}", position(),
                 crossfading || incomingPlayer != null ? " (with a transition in flight)" : "");
         wantPlay = false;
+        // A pause the APP (or the user) decided is the one thing that cancels a
+        // pending focus come-back: "it paused when B站 started, and the user then
+        // pressed pause" must not be undone by the next AUDIOFOCUS_GAIN. The focus
+        // loss's own pause does not come through here — it pauses the player
+        // directly, which is what keeps its flag alive.
+        resumeOnGain = false;
+        pausedByFocus = false;
         // A pause in the middle of a post-mix ease-back would leave the track at
         // whatever tempo it had reached and resume it there; the correction is worth
         // more than the smoothness of a ramp that is being interrupted anyway.
@@ -522,6 +565,11 @@ public final class AndroidAudioBackend implements AudioBackend {
     public synchronized void resume() {
         Logger.info("MediaPlayer: resume at {}ms", position());
         wantPlay = true;
+        // The user (or the media session) asked for playback: there is nothing left
+        // for a later focus regain to resume, and a loss from before this request no
+        // longer describes what the app is doing.
+        resumeOnGain = false;
+        pausedByFocus = false;
         requestFocus();
         if (player != null && prepared) {
             player.start();
@@ -2602,10 +2650,27 @@ public final class AndroidAudioBackend implements AudioBackend {
                         .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                         .build())
                 .setOnAudioFocusChangeListener(this::onFocusChange)
-                .setWillPauseWhenDucked(false)
+                // Ducking is not what qplayer does, and this flag is the whole of it:
+                // with `false` the framework answers another app's "may duck" request
+                // (what a video player asks for so it can keep its own audio going)
+                // by applying its OWN volume shaper to our MediaPlayer — measured on
+                // the device: 1.0 -> 0.2, and NO focus callback to us at all. The
+                // track kept "playing" under the other app, the media session still
+                // said PLAYING, and it never came back to full when the other app left.
+                // With `true` the same request arrives as a loss we can act on, so the
+                // app pauses (and resumes on the way back) exactly like a transient
+                // one, and nothing of ours plays under anything else.
+                .setWillPauseWhenDucked(true)
                 .build();
         focusRequest = req;
         hasFocus = audioManager.requestAudioFocus(req) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+        if (!hasFocus) {
+            // Only an app holding a transient-exclusive focus can refuse this (a call,
+            // a recorder). Playing without focus is what makes a later app's request
+            // invisible to us, so it is named here rather than started silently.
+            Logger.warn("MediaPlayer: the audio focus request was refused (another app holds it"
+                    + " exclusively); playback will wait for the user");
+        }
     }
 
     private void abandonFocus() {
@@ -2616,6 +2681,76 @@ public final class AndroidAudioBackend implements AudioBackend {
         hasFocus = false;
         ducked = false;
         resumeOnGain = false;
+        pausedByFocus = false;
+    }
+
+    /** A permanent loss takes the request with it: Android sends no further focus
+     *  callback until the app asks again, so the app would keep playing (and the next
+     *  app to take focus would never pause it — the "it stopped reacting after I
+     *  resumed it by hand" report). The request object is kept but no longer owned;
+     *  the next play()/resume() registers a fresh one. */
+    private void forgetFocusAfterPermanentLoss() {
+        focusRequest = null;
+        hasFocus = false;
+    }
+
+    /** See {@link AudioBackend#pausedByAudioFocusLoss()}. */
+    @Override
+    public synchronized boolean pausedByAudioFocusLoss() {
+        return pausedByFocus;
+    }
+
+    /** See {@link AudioBackend#cancelAutoResume()}. */
+    @Override
+    public synchronized void cancelAutoResume() {
+        if (resumeOnGain) {
+            Logger.info("MediaPlayer: the user's own pause cancels the pending focus auto-resume");
+        }
+        resumeOnGain = false;
+        pausedByFocus = false;
+    }
+
+    /**
+     * One focus loss, whatever the hint: stop everything of ours that is audible,
+     * remember whether a regain may resume, and drop the overlap. The three hints
+     * differ only in the come-back rule (see the field comment above) — the work is
+     * shared so none of them can be the one that forgot to pause.
+     *
+     * @param hint                 the case, for the log line
+     * @param resumeWhenFocusComes true when this pause is ours and focus should bring
+     *                             the track back
+     * @param keepFocus            false for a permanent loss, where the request is gone
+     */
+    private void onFocusLoss(String hint, boolean resumeWhenFocusComes, boolean keepFocus) {
+        // Read before anything is torn down: these two decide whether the app has to
+        // republish a paused state at all.
+        boolean wasAudible = player != null && prepared && player.isPlaying();
+        boolean wasOverlapping = crossfading || incomingPlayer != null;
+        Logger.info("MediaPlayer: audio focus {} at {}ms — pausing (audible={}, overlapping={});"
+                        + " {}{}",
+                hint, position(), wasAudible, wasOverlapping,
+                resumeWhenFocusComes
+                        ? "auto-resume is armed for the next AUDIOFOCUS_GAIN"
+                        : "NO auto-resume",
+                keepFocus ? ""
+                        : " and the focus request is forgotten, so the next play/resume"
+                                + " asks for it again");
+        // The play intent goes before the overlap does: dropping the overlap can reach
+        // the controller's ordinary track switch (an outgoing track that already ended
+        // during the ramp advances the queue), and that switch must find the app
+        // already paused — otherwise it starts the next track and takes audio focus
+        // back from the app that just asked for it.
+        wantPlay = false;
+        pausedByFocus = true;
+        resumeOnGain = resumeWhenFocusComes;
+        if (!keepFocus) forgetFocusAfterPermanentLoss();
+        // Audio focus is with another app, so nothing here may keep playing — including
+        // the incoming player of a running overlap.
+        abortCrossfade(true);
+        if (player != null && prepared && player.isPlaying()) {
+            player.pause();
+        }
+        if (wasAudible || wasOverlapping) fire(onPaused);
     }
 
     private synchronized void onFocusChange(int change) {
@@ -2625,41 +2760,24 @@ public final class AndroidAudioBackend implements AudioBackend {
         // otherwise undiagnosable.
         switch (change) {
             case AudioManager.AUDIOFOCUS_LOSS:
-                Logger.info("MediaPlayer: audio focus lost (permanently) at {}ms", position());
-                // Another app took over for good: pause, don't auto-resume.
-                resumeOnGain = false;
-                // Audio focus is lost to another app, so nothing here may keep
-                // playing — including the incoming player of a running overlap.
-                abortCrossfade(true);
-                if (player != null && prepared && player.isPlaying()) {
-                    player.pause();
-                    wantPlay = false;
-                    fire(onPaused);
-                }
+                // Another app took the focus for good (its own video or music).
+                onFocusLoss("LOST (permanent: another app took it)", RESUME_AFTER_PERMANENT_LOSS,
+                        false);
                 break;
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
-                Logger.info("MediaPlayer: audio focus lost (transient) at {}ms", position());
-                // Call / brief interruption: pause and remember to resume on regain.
-                abortCrossfade(true);
-                if (player != null && prepared && player.isPlaying()) {
-                    player.pause();
-                    wantPlay = false;
-                    resumeOnGain = true;
-                    fire(onPaused);
-                }
+                // Call / brief interruption: pause and come back on regain.
+                onFocusLoss("LOST (transient)", true, true);
                 break;
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
-                Logger.info("MediaPlayer: audio focus lost (duck) at {}ms", position());
-                // Pause when another app starts media; do not mix two players.
-                abortCrossfade(true);
-                if (player != null && prepared && player.isPlaying()) {
-                    player.pause();
-                    wantPlay = false;
-                    resumeOnGain = false;
-                    fire(onPaused);
-                }
+                // We are allowed to duck; we pause instead (documented above), so two
+                // players never mix, and come back the same way a transient loss does.
+                onFocusLoss("LOST (transient, may duck — qplayer pauses instead of ducking)",
+                        true, true);
                 break;
             case AudioManager.AUDIOFOCUS_GAIN:
+                // Focus is ours again, so playback may start normally from here on.
+                pausedByFocus = false;
+                hasFocus = true;
                 Logger.info("MediaPlayer: audio focus gained at {}ms (ducked={}, resumeOnGain={})",
                         position(), ducked, resumeOnGain);
                 if (ducked) {
@@ -2673,6 +2791,9 @@ public final class AndroidAudioBackend implements AudioBackend {
                         wantPlay = true;
                         fire(onResumed);
                     }
+                } else {
+                    Logger.info("MediaPlayer: focus regained, but nothing is resumed: this pause"
+                            + " was not made for a focus loss (a pause by the user stays a pause)");
                 }
                 break;
             default:

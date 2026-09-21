@@ -64,6 +64,25 @@ public interface AudioBackend {
     default void setOnResumed(Runnable callback) { }
 
     /**
+     * True while another app's audio focus has playback paused on purpose — the loss
+     * paused us and nothing has started playing since. The controller reads it before
+     * a boundary it advances by itself: an automatic switch must not restart playback
+     * (and take audio focus back from the app that just asked for it) behind the
+     * user's back. Cleared by regaining focus or by the app starting something the
+     * user asked for. Platforms without audio focus answer false. Default false.
+     */
+    default boolean pausedByAudioFocusLoss() { return false; }
+
+    /**
+     * Drop any pending "resume when focus comes back" intent: this is a pause the
+     * user asked for, so a later {@code AUDIOFOCUS_GAIN} must leave the app paused.
+     * Called at the moment the user's pause is decided rather than when the pause
+     * reaches the backend, so a fade-out that is still running cannot lose the race
+     * and resume into the user's pause. Default no-op.
+     */
+    default void cancelAutoResume() { }
+
+    /**
      * Callback invoked when the backend encounters a playback error (e.g.
      * MediaPlayer error, invalid source). May fire on the audio thread.
      * Default no-op.

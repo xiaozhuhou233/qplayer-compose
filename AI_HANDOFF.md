@@ -106,6 +106,8 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
 
 ### 其他
 - 主题/动画/歌词/播放详情等见旧版本记录，未变。
+- **音频焦点（别人放歌/视频 → 自动暂停；别人停了 → 自动恢复）—— 2026-09-21 修好并装机验证，
+  见第九节**（含"为什么以前不会暂停"的两个根因、四种焦点的规则、以及能复现全部四种焦点的探针工具）。
 
 ## 五、待办
 
@@ -2193,3 +2195,107 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
 3. **一轮只推进一个能编译的步骤**，跨轮计划写进本文档（不要记在脑子里）。
 4. 改完后：编译 →（设备在线就）装机 → 用 `musicplayer` 标签的 logcat 验证 → 更新本文档。
 5. 编辑前重读目标区域（多工作区同时改），用 `sed -n 'N,Mp'` 而不是整文件读。
+
+## 九、音频焦点：自动暂停 / 自动恢复（2026-09-21 修复，装机验证）
+
+**用户诉求**：别的 App（B站、别的视频软件、别的音乐）开始放 → qplayer 自动暂停；那个 App 停了/暂停了
+→ qplayer 自动恢复。这一节是这条契约的全部事实与证据，别再重新摸索。
+
+### 为什么以前不会暂停（两个根因，都在代码里，都在真机上复现过）
+
+1. **`hasFocus` 在永久丢失后没有清掉**（`AndroidAudioBackend.requestFocus()` 的
+   `if (hasFocus || audioManager == null) return;`）。另一个 App 用 `AUDIOFOCUS_GAIN`（视频/音乐 App
+   的常规请求）拿走焦点时，框架给我们的 `AUDIOFOCUS_LOSS` 会**把我们移出焦点栈**——
+   `dumpsys audio` 实测：`handleLoss code:-2` 之后（另一 App 释放后）栈是**空的**，
+   我们**再也不会收到任何焦点回调**。而 `hasFocus` 仍为 true → 用户手动按播放时
+   `requestFocus()` 直接 return → 之后所有 App 抢焦点我们**收不到通知** → "它不再暂停了"。
+   → 修：永久丢失时 `forgetFocusAfterPermanentLoss()`（`focusRequest=null; hasFocus=false`），
+   下一次 `play()/resume()` 重新申请。**这是本轮的主修**。
+2. **`setWillPauseWhenDucked(false)` 让框架替我们"静默 duck"**。别的 App 发
+   `AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK`（视频 App 为了让自己能被导航/提示压过去，常用这个）时，
+   框架**不问我们**，直接给我们自己的 MediaPlayer 挂一个 VolumeShaper：`dumpsys audio` 实测
+   `ducking player piid:13335 … mVolumes[]=[1.0, 0.2]`，**没有任何 focus 回调**：
+   歌继续以 20% 音量在视频底下响，媒体会话还写着 PLAYING，另一 App 走了也不会恢复。
+   这正是"B站一放，qplayer 没暂停"的现场。
+   → 修：`setWillPauseWhenDucked(true)`（焦点栈里我们的 flags 变成 `PAUSES_ON_DUCKABLE_LOSS`），
+   同一个请求于是变成一个我们能处理的 transient loss → 暂停、并在回来时恢复。
+
+### 四种焦点的规则（每条都有一行日志：哪种、做了什么、会不会恢复）
+
+| 收到 | 行为 | 恢复 |
+|---|---|---|
+| `AUDIOFOCUS_LOSS`（永久，别的视频/音乐 App 抢走） | 丢弃重叠 + 暂停，并**忘掉焦点申请**（下次 play/resume 重申请） | **不自动恢复**（该平台根本不会再来 GAIN），用户按播放才回来 |
+| `AUDIOFOCUS_LOSS_TRANSIENT`（来电、短暂打断） | 丢弃重叠 + 暂停，`resumeOnGain=true` | GAIN 时自动恢复 |
+| `AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK` | **暂停，绝不 duck**（两个播放器不同时出声），与 transient 同规则 | GAIN 时自动恢复 |
+| `AUDIOFOCUS_GAIN` | `pausedByFocus=false`，`resumeOnGain` 为真才 `start()` | —— |
+
+- **`resumeOnGain` 的清零点**（= 用户插手的四种方式）：`pause()`（App/用户自己的暂停，
+  焦点丢失自己的暂停走 `player.pause()`，刻意不经过它）、`play()`（换/起一首）、`resume()`、
+  `cancelAutoResume()`（控制器在**用户按下暂停的那一刻**调用，而不是等淡出结束——
+  `mediaPause()` 的 `cancelAutoResume()` 放在 `if (!playingIntent) return;` **之前**，
+  这样硬件/蓝牙暂停键在"已被焦点暂停"时也算数）。
+- **过渡中途丢焦点**：`onFocusLoss()` 先落 `wantPlay=false` / `pausedByFocus=true`，
+  **再** `abortCrossfade(true)`——丢弃重叠会走到控制器的常规换歌（`outgoingEndedDuringRamp` 那条），
+  它必须发现 App 已经暂停。另外 `performAutoAdvance()` 开头有闸门
+  （`backend.pausedByAudioFocusLoss()`）：焦点在别人手上时**队列不推进到播放**，
+  既不偷回焦点也不在用户背后开声（`playback: audio focus is with another app — the queue is not advanced`）。
+
+### 真机证据（Redmi K20 Pro `efaa83b2`，2026-09-21，logcat tag `musicplayer`）
+
+- **别的视频 App 抢焦点 → 暂停**：`Glimpse`（LineageOS 相册，media3，焦点栈里 `gain: GAIN`）
+  ```
+  MediaPlayer: audio focus LOST (permanent: another app took it) at 6352ms — pausing
+  (audible=true, overlapping=false); NO auto-resume and the focus request is forgotten,
+  so the next play/resume asks for it again
+  ```
+  媒体会话：`PLAYING(3) position=217` → `PAUSED(2) position=6353`（就停在被打断处）。
+- **视频退出 → 不自动恢复**：`dumpsys audio` 的焦点栈变空，App **没有** GAIN 行（永久丢失不会再被通知）。
+- **用户手动播放 → 重新拿到焦点**（主修的验证点）：`pack: dev.t1m3.qplayer.debug / gain: GAIN /
+  flags: PAUSES_ON_DUCKABLE_LOSS`，会话回到 `PLAYING(3) position=6394`（接着 6353 走，不重头）。
+- **transient（探针 hint=2，模拟来电）**：`LOST (transient) at 16367ms … auto-resume is armed`
+  → 6s 后 `audio focus gained at 16368ms (ducked=false, resumeOnGain=true)` → `PLAYING(3) position=16526`。
+- **may-duck（探针 hint=3，视频 App 那种）**：`LOST (transient, may duck — qplayer pauses instead of
+  ducking) at 23058ms` → GAIN → `PLAYING(3)`。
+- **用户按下暂停后再来焦点**：`the user's own pause cancels the pending focus auto-resume` →
+  `audio focus gained … (ducked=false, resumeOnGain=false)` →
+  `focus regained, but nothing is resumed: this pause was not made for a focus loss`，会话**保持 PAUSED**。
+- **过渡不变量**（同一次会话，自动模式 15s DJ_BLEND）：`audio-clock … 0 gap(s)` 全程、
+  `transition promoted, releasing the outgoing player (the incoming is at 14999ms; the overlap heard
+  15151ms = its start 160ms + the 14991ms ramp)`、`handoff resume=15151ms (… 15072ms …)`、
+  `releasing the outgoing player at silence — … (-60.0000 dB …)` → 听得连续、不重播、按拍交接。
+- **过渡中途丢焦点**（框架侧，`dumpsys audio` 的 Events log；那一秒 App 自己的行被长跑 logcat 吞了）：
+  `22:38:48.021 requestAudioFocus() … req=2` → `22:38:48.022 focus owner: …qplayer… code:-2 event:handleLoss`
+  （此时 15s 的 crossover 正在跑）→ 之后 7 秒**没有任何 audio-clock 行**（重叠已丢弃、无声音），
+  `22:38:55.025 … code:1 event:handleGain` → App 恢复并**重新 arm** 了那条过渡。
+
+### 复现工具（不必装 B站/第二个播放器）
+
+**这台机器上 `tv.danmaku.bili` 并没有安装**（`pm list packages -3` 只有 5 个包，没有 B站），
+所以四种焦点用探针复现：`D:\qplayer-dev\harness\focusprobe\`（源码 + 已编译的 `probe.jar`）
+```bash
+adb push D:/qplayer-dev/harness/focusprobe/focusprobe.jar /data/local/tmp/probe.jar   # ⚠️ 别用目录形式推送：文件名会被截成 focusprobe.ja
+adb shell "CLASSPATH=/data/local/tmp/probe.jar app_process /system/bin dev.t1m3.probe.FocusProbe 2 6000"
+#   hint: 1=GAIN(永久, 视频 App) 2=TRANSIENT(来电) 3=TRANSIENT_MAY_DUCK(视频/提示)；第二个参数=持有毫秒数，到时 abandon(=对方停了)
+```
+- 它用 `ActivityThread.systemMain()` 拿系统 Context（无 APK，走 shell uid），
+  `d8` 用 gradle 缓存里的 `com.android.tools:r8:8.13.17` 打 dex（build-tools 里的老 d8 会 NPE）。
+- **看框架侧的权威记录**：`adb shell "dumpsys audio" | sed -n '/Events log/,$p' | tail -20`
+  —— 每次 `requestAudioFocus()`（带 `req=` 提示号）与 `focus owner … code:… event:handleLoss/handleGain`
+  都在这里，App 自己的 logcat 掉行时靠它。
+- **看会话状态**：`adb shell dumpsys media_session | grep state=PlaybackState`；
+  `adb shell cmd media_session dispatch play|pause` 可以当成用户按播放/暂停。
+- ⚠️ **长跑 `logcat` 到文件会掉行也会滞后**（本轮就有一次 `audio focus LOST` 的行被吞掉）；
+  要证据就 `dumpsys audio` 对一遍。另外 `adb shell` 里 `date "+%F"` 不支持，`grep -a -i` 有时被
+  ugrep 误解析 → 用 `awk`。
+
+### 未验证 / 风险
+
+1. **B站本身没测到**（没装）。规则是"任何 App 的焦点请求"通用，但 B站到底发 GAIN 还是
+   MAY_DUCK **没有实测**；若是 MAY_DUCK，本轮第二个根因修的就是它（暂停 + 恢复都会生效）。
+2. **永久丢失后"对方停了自动恢复"在这一层做不到**：框架不再给永久丢失方任何回调
+   （实测栈为空）。要那个行为只能靠别的手段（例如 `AudioManager.isMusicActive()` 轮询），
+   而它违反"永久丢失只由用户播放恢复"的约定，本轮**没做**。
+3. **`outgoingEndedDuringRamp` + 焦点丢失**那个窄窗口（出曲已经在 ramp 里放完、队列还没推进）
+   没被时间上撞到过；闸门在 `performAutoAdvance()` 里，逻辑上覆盖，但没有那一条日志证据。
+4. 每一次焦点丢失都会**丢弃正在进行的重叠**（正确性优先，与既有约定一致）：过渡会因为一次来电
+   从头重新 arm（`transition: arming slot N behind slot M`），听感上重叠会重新开始。
