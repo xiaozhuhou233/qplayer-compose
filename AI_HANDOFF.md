@@ -2187,6 +2187,123 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
     （`r15/measure.sh` + `before-1f3520d.apk`）与 B站内联预览圆角截图仍未做。
 
 
+- **2026-09-21 第十七轮：上一首压成背景（A）、人声等融合完再回来（B）、调性融合可测量（C）、五种过渡真的都用上（D）
+  —— 四项全部装机验证（Redmi K20 Pro `efaa83b2`，同对子同长度的 before/after）**
+  用户原话（四条）：①「让ai过渡部分的前一首歌部分淡一点，要不抢了」②「过渡部分的人声混合的很乱，问题挺严重，
+  让过渡部分不要保留非常高亢人声，过渡完再放人声，实在不行就播淡的人声」③「音调融合效果还是不是很强,听着有点割裂,
+  注意一定要是歌的背景音乐完全融合再接入人声才是丝滑」④「确保用上多种过渡方式」。
+  **约束（不要反抗）**：outgoing 不能被剥 stems（那要在播放中途换音源 = P0「晋升即死」与「重播一次」的机制）；
+  只有 incoming 被渲染成一个连续文件。所以「过渡里人声乱」= 两首歌的人声同时在响，只能用**电平/形状/时序**解决。
+  - **A. `FadeCurve.DJ_BLEND` 改成用 dB 定义的三段**（`player-core/.../audio/FadeCurve.java`）：
+    · 常量：`OUT_BED_DB=-10`、`OUT_BED_ARRIVE=0.30`、`OUT_EXIT_START=0.50`、`OUT_EXIT_FLOOR=0.82`、
+      `OUT_EXIT_FLOOR_DB=-66`、`OUT_SILENT_TAIL=0.01`（不变）、`IN_BED_EXPONENT 0.55→0.45`。
+      形状在 **dB 域**里是三段各带 raised-cosine 缓入缓出（首段降到 bed、中段保持、后段退到 -66dB），
+      `outGain = 10^(db/20)`；**dB 单调不升**（测试按 1/1000 走一遍）。
+    · 实测电平表（15s 斜坡，`r17/Curve17.java` 与 `FadeCurveTest` 打印同一张表）：
+
+      | t | 0.25 | 0.50 | 0.75 | 0.90 | -30dB 处 | -60dB 处 | 两首同响 |
+      |---|---|---|---|---|---|---|---|
+      | 旧（12–16 轮 `cos t^2.6` + 出口窗） | -0.0 | -0.3 | -2.7 | -17.9 | 94% | 98% | **68%** |
+      | 新（本轮） | **-9.3** | **-10.0** | **-59.6** | **-66.0** | **63%** | **75%** | **17%** |
+
+      真机同一对子（`1460801818` Life's A Mess → `1410815174`，15s 用户设置、强制 CROSSFADE）逐 6dB 轨迹：
+      旧 `-6.0dB@t=0.817 / -12.1@0.869 / -18.5@0.903 / -30@0.945 / 静音@0.99`；
+      新 `-6.1@0.171 / -12.2@0.540 / -18.1@0.579 / -30.2@0.631 / -48.1@0.698 / -66(-60 地板)@0.820`。
+      日志那行现在是 `both tracks audible for 2472ms of the 14758ms ramp (17%) — the symmetric … gives 6051ms`。
+    · **低频交接从 0.6 挪到 0.15**（`PlayerController.BASS_SWAP_AT` 与 `StemBridge.SWAP_AT` 同步改）：
+      依据是**两条增益曲线的交点 t=0.14**（out 0.60 / in 0.60，差 0.1dB）——低频是"一次拿走一份、还回一份"，
+      只有那一刻交换电平才不掉；`BlendPulse` 实测同一合成对子的低端最深处：**无交接 -1.9dB / 0.15 处 -2.2dB /
+      旧的 0.6 处 -7.3dB**。代价是 outgoing 的底鼓 2.3s（15s 里）就交出去了，而它 4.5s 时本来就只剩 -10dB。
+      真机：`bass swap done … 2104ms into a 14819ms ramp`（旧的是 8841ms）。
+  - **B. 人声严格在融合之后回来（`DjEdit` + 控制器 + 渲染器）**：
+    · 新增 `DjEdit.VOCAL_RETURN_MARGIN_SEC = 2×RETURN_RAMP_SEC = 1.0s`：**整段 blend 人声恒定 0**，
+      回升从 `blend 结束 + 1.0s - 0.5s` 才开始，**落点是"blend 结束 +1s 之后的第一条小节线"**（几乎总是更晚）。
+      旧行为是 removal 窗口正好在 blend 结束处、回升的 0.5s 有一半在 blend 里面。
+    · `MixNaturaliser.pitchFitsBeforeVocals` 去掉了"deadline 必须落在 blend 内"这条（那是**梯子**的约束，不是规则的），
+      梯子改为在 `PlayerController` 里**夹到 promotion 之前最后一个拍**（它的写作用于"马上要被释放的那一路"）；
+      规则本身只剩"人声前 2s 音高回到原位"。
+    · **blend 不许活得比 edit 长**：`blend()` 里若 `plan.overlapMs() > 人声回来的时刻`，就把重叠裁到那一刻并写明理由。
+      这条是**本轮真机抓到的真洞**：平淡收尾把 blend 抬到 16525ms，而 edit 是按 15s 设置渲染的，
+      于是那行自己报出 `the voice is INSIDE THE BLEND — THE RULE IS NOT MET`。
+    · **每一条重叠边界一行显式的时序证据**（用户规则的 headline，`grep "backing before vocals"`）：
+      `the blend is 14849ms long (…); the key modulation's last write is at 13806ms of the file (5 steps on each deck);
+       the incoming track's voice is first heard at 16169ms of the ramp, 1320ms after its end (the DJ edit's own bar
+       line puts the voice back at 16214ms …) — the voice is outside the blend, and the modulation (whose last write is
+       at 13761ms of the ramp) is over 2408ms before the first vocal: 13761ms <= 16169ms, with the blend ending at 14849ms`。
+    · **无模型/无 edit 的降级路**（`capWithoutEdit`，`DEGRADED_BLEND_MS = 8000`）：此时 incoming 播原曲、人声在
+      blend 第一帧里，时序救不了 → **把 blend 砍到 8s** 并在 reason 里写明 `DEGRADED: …`（用户原话"实在不行就播淡的
+      人声"）。真机（删掉模型 + 清 djedit 缓存）：`CROSSFADE 重叠=long 8145ms … DEGRADED: no DJ edit for this pair
+      (no verified model, or the render is not ready) … the blend is cut to 8000ms rather than the 16520ms the user asked for`。
+  - **C. 调性融合**：`KeyGlide.MAX_STEPS 6→8`；调制段现在**跑满整个 blend**（规则的 deadline 不再被 blend 截断，
+    真机 12093→13761ms、4→5 步）；新增 `KeyGlide.convergenceNote(...)`：用两首**真实 chroma** 报"混音的调"
+    与"下一首自己的调"的距离（起点/中点/末步，中点是半音 bin 之间的插值）——真机同一对子
+    `0.28 → 0.19 → 0.20`（末值是这对子移调后**自己的残差**，不是没到位）。可 `grep "key convergence"`。
+  - **D. 选择器按时序/测量分流**（`HeuristicTransitionChooser` + `TransitionContext.PairFit` + `BeatProfile.relatedTempo`）：
+    · 新增公开测量 `BeatProfile.relatedTempo(a,b)`（同一律动：1、2、0.5、3、1/3、1.5、2/3，容差 8% = `MAX_SPEED_STEP`）
+      与 `TransitionContext.PairFit`（keys 测到打架 / 速度既锁不住又不是亲属 → `overlapsBadly()`），
+      由 `PlayerController.pairFitOf` 用两首的缓存 profile 现算（和静音测量同样的"决策时读、绝不等"）。
+    · 规则顺序：不可播/太晚/长度未知 → CUT；**测到尾部静音 ≥1.2s → SILENCE_TRIM（提到短歌规则之前）**；
+      任一侧 <90s → QUICK_FADE；`overlapsBadly()` → **FADE_OUT_IN**；其余 → 15s CROSSFADE。
+    · **真机五种全到**（同一台设备，`transitionKind=0` 自动）：CROSSFADE（多）、SILENCE_TRIM（3 次，含
+      `measured to end in 5300ms of silence`）、FADE_OUT_IN（`PairFit{keys not measured, tempo UNRELATED
+      (144.0 vs 61.0BPM, the incoming at x2.3599 (outside the clamp))}`）、QUICK_FADE（`one of the two tracks is
+      only 60s long (under 90s)`；库里最短 96s，这一条是把**元数据**时长改成 60s 逼出来的分支，音频是真文件）、
+      CUT（`too late: less than 1500ms left`）。
+    · **规则分布（设备自己的 36 个 profile，1260 个有序对，`r17/R17Dist.java`）**：CROSSFADE 959（76%）、
+      FADE_OUT_IN 301（24%）；"只靠调性打架"0 对（这库里 key 门很少真打架），全部来自速度无关。
+      ⚠️ 第一版把 `123.1 vs 61.0BPM`（x2.02 = 同一拍读成一半）判成"打架"，是 harness 抓出来的假阳性 ——
+      `relatedTempo` 就是为它写的。真实队列的 6 个可测边界全是 CROSSFADE（相邻曲目本来就近）。
+  - **装机 A/B（同对子、同长度、同一台设备；before = `r16/app-debug.apk`，after = 本轮包）**：
+
+    | 项 | before（12–16 轮形状） | after（本轮） |
+    |---|---|---|
+    | 两首同响 | 10054ms of 14785ms（**68%**） | 2472ms of 14758ms（**17%**） |
+    | outgoing 到 -30dB | t=0.945 | **t=0.631** |
+    | outgoing 静音 | t≈0.99 | **t=0.82**（-60dB 地板） |
+    | 低频交接 | 0.6（8841ms） | **0.15（2104ms）** |
+    | 人声回来（incoming 文件内） | 15.047s（= removal 窗末，**在 blend 内 347ms**） | **16.714s（blend 结束 +1.3s）** |
+    | 调性梯子 | 4 步 / 12093ms | **5 步 / 13761ms** |
+    | 不变量 | 无 `playAt: slot … starts at`；一路 started；0 clock gap | 同（0 gap / 0 frozen） |
+
+  - **B 的"实测"（用 harness 量渲染出来的文件，不是断言）**：把 `djedit/1204756479-v16714.m4a`（本轮渲染）
+    与源文件 `cache/audio/1410815174.cache` 都推到设备，用同一个分离 harness（`HtdemucsBench --metrics --series`）
+    分别测 0–20s 的 vocal stem：
+    · **0–12.5s：抑制 40–70dB**（原始中位 -20.8dBFS → 编辑里 -86…-94dBFS，几乎数字静音）；
+    · **13.4s 起：抑制崩到 3–4dB**（人声回来了）；**另一首（`405867780-v17399.m4a`，48000Hz 源、需要重采样）
+      完全按计划**：0–16.5s 都是 -85dBFS 上下，16.5–17.4s 回升，17.0s 到 -22.8（= master）✓。
+    · ⚠️ **这是本轮发现但没修好的真洞**：第一首渲染出来的 edit，人声在 **13.4s** 就回来了，而**它的计划与日志写的是
+      16.21s**（差 2 条小节线 = 3.33s）。已排除：时间轴错位（drums 行 12s 之后 lag 稳定在 +0.05s、差 0.7–1.1dB）、
+      文件时长（编辑 173.429s vs 源 173.383s ✓）、解码/重采样（这一首 44100，无重采样）、bridge（本轮 bridge 在
+      3.379–6.713s 且被自己的测量否掉）。**没有结论**；下一轮第一件事就是把这个"早 2 条小节线"查清（怀疑渲染器把 plan
+      的秒映射到 head 数组时的一处偏移），在那之前"人声在 blend 里为 0"这句话**对每个文件都要实测**，不要只信 plan/日志。
+  - **本轮没做/未验证**：
+    1. **仍然没有人听过任何一段**（第 5/8/9/10/11/12/13/14/15/16 轮都一样）。这一轮同时改了曲线形状、低频交接时刻、
+       人声回归时刻、调性梯子长度与选择器，**听感这一条比任何时候都更该先做**。
+    2. 上面那条早退（B 的核心）只在计划/日志层面成立；A/C/D 的真机证据是完整的。
+    3. `relatedTempo` 的 8% 与 FADE_OUT_IN 的 24% 分布只在这台库的 36 个窗口上量过；换库要看这个数
+       （"一半的歌被读成半/倍速"是这个库的常态，第 8 轮记过）。
+    4. `capWithoutEdit`（8s 降级）与 `blend()` 里的"裁到 edit 的窗口"各只在真机上走到一次。
+    5. 前一首的 stems 仍然没剥（用户规则的另一半：让第一首的鼓组活到它身体淡出之后）——要做只能"提前把尾巴也渲染成
+       文件、在一个非边界的时刻换源"，风险是 P0 那一类，必须独立验收。
+  - **交付**：debug APK `98,335,123` 字节；分支 `feat/ai-dj-transition`；tag/release 见本节末尾。
+    本轮 harness：`D:\qplayer-dev\harness\r17\`（`Curve17.java` 电平表、`R17Pulse.java` 低频穴、`R17Dist.java` 分布 +
+    `dist-final.txt`、`R17Pairs.java` 选对子、`run17.sh`/`poll17.sh` 真机跑一次边界、`before.logcat`/`after4.logcat`/
+    `degraded.logcat`/`foi.logcat`/`cut.logcat`/`qf.logcat`、`edit.m4a`/`orig.bin`/`edit-lam.m4a` 与 `ser-*.csv` 帧数据）。
+    ⚠️ **两个真机坑（本轮踩到，记住）**：① `run-as … cat` 读二进制会坏（`exec-out` 才对，md5 验证过）；
+    ② 设备**锁屏时什么都不会播**（`am start` 成功但 player 不启动），且**跑之前必须先 force-stop**，
+    否则还在跑的 App 会把自己的 queue 状态盖在刚 push 的 queue 上；脚本里加了 `input tap` 按播放键（首页 mini-player 中心 766,1999）。
+  - **测试**：`mvn -pl player-core test` = **207 个用例、1 个失败**，仍是既有的
+    `SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`（与本轮无关）。新增
+    `HeuristicTransitionChooserTest`（8 个：五种 kind 都可达 + 亲属速度不是打架）；`KeyGlideTest` 加了收敛报告用例；
+    `FadeCurveTest` 重写为 dB 形状的电平表。
+  - **设备卫生（跑完已做）**：`transitionKind` 2→**0**、`transitionBlendSeconds` 仍 15、`files/models/` 删除、
+    `files/cache/djedit/` 清空、`files/state/queue.json` 还原成跑之前的 33 首（playIndex 0 / positionMs 30769）、
+    `/data/local/tmp/r17` 与临时文件删除、`svc power stayon false`。
+  - **下一件事（按顺序）**：① **听**（听 `Life's A Mess → 1410815174`：A 的床 + 17% 同响 + 0.15 的低频交接 +
+    5 步 +2 半音梯子 + 人声在 blend 之后 1.32s 回来）；② 查 B 的那个"早 2 条小节线"（渲染器 plan→head 的映射）；
+    ③ 听感决定 `OUT_BED_DB`（-10 是不是太狠）与 `BASS_SWAP_AT`（0.15 会不会让人觉得第一首的鼓没了）；
+    ④ 若"两首同响 17%"听下来太空，把 `OUT_BED_DB` 抬到 -7/-8 或把 `OUT_EXIT_START` 往后挪（一个数）。
+
 ## 八、工作方式（为了省上下文，请遵守）
 
 1. **先读本文档，再动手**；不要先探索仓库。
