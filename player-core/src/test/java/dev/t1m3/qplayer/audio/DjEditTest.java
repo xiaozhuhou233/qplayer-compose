@@ -74,30 +74,44 @@ public class DjEditTest {
     }
 
     @Test
-    public void aBarLineInsideTheBlendIsNotUsed() {
-        // A return before the blend is over is not what this edit is for: the window
-        // itself is the floor, and the plan says so rather than pretending.
+    public void aReturnInsideTheBlendIsNotUsedAndTheMarginMovesItPastTheEnd() {
+        // ⚠️ Round 17 changed this from "the window itself is the floor" to "the window plus
+        // the margin is": a return ON the blend's end still puts the last half second of the
+        // lift inside the blend, which is the "人声混合得很乱" the user reported. So the floor is
+        // `blend + RETURN_RAMP` (one ramp, so the lift starts at the first sample after the
+        // blend) plus another half second of the backing alone — 1.0s for the shipped ramp.
         DjEdit.Plan plan = DjEdit.plan(15.0, 9.0);
         println("plan (bar line before the window): %s", plan.describe());
-        assertEquals(15.0, plan.returnEndSec, 1e-9);
+        assertEquals(15.0 + DjEdit.VOCAL_RETURN_MARGIN_SEC, plan.returnEndSec, 1e-9);
         assertFalse(plan.onBarLine);
+        // The whole blend is at exactly zero, and so is the margin after it.
         assertEquals(0.0, plan.vocalGainAt(14.5), 1e-9);
-        assertEquals(1.0, plan.vocalGainAt(15.0), 1e-9);
+        assertEquals(0.0, plan.vocalGainAt(15.0), 1e-9);
+        assertEquals(0.0, plan.vocalGainAt(plan.returnStartSec), 1e-9);
+        assertTrue("the lift must start after the blend ends, at " + plan.returnStartSec,
+                plan.returnStartSec >= 15.0);
+        assertEquals(1.0, plan.vocalGainAt(plan.returnEndSec), 1e-9);
     }
 
     @Test
-    public void noGridMeansTheReturnIsTheEndOfTheWindow() {
+    public void noGridMeansTheReturnIsTheWindowPlusTheMargin() {
         DjEdit.Plan plan = DjEdit.plan(12.0, Double.NaN);
         println("plan (no grid): %s", plan.describe());
         assertFalse(plan.onBarLine);
-        assertEquals(12.0, plan.returnEndSec, 1e-9);
-        assertEquals(11.5, plan.returnStartSec, 1e-9);
-        // A window shorter than the ramp still ramps from its own start.
-        DjEdit.Plan tiny = DjEdit.plan(0.2, Double.NaN);
-        assertEquals(0.0, tiny.returnStartSec, 1e-9);
-        assertEquals(0.2, tiny.returnEndSec, 1e-9);
-        println("a window shorter than the %.2fs ramp starts the ramp at 0 (%.3f)",
-                DjEdit.RETURN_RAMP_SEC, tiny.returnStartSec);
+        assertEquals(12.0 + DjEdit.VOCAL_RETURN_MARGIN_SEC, plan.returnEndSec, 1e-9);
+        assertEquals(plan.returnEndSec - DjEdit.RETURN_RAMP_SEC, plan.returnStartSec, 1e-9);
+        // The rule is the invariant, however short the window is: the voice is at exactly zero
+        // for the whole blend (and for the margin after it).
+        for (double blend : new double[] {0.2d, 1.0d, 4.0d, 15.0d, 30.0d}) {
+            DjEdit.Plan p = DjEdit.plan(blend, Double.NaN);
+            assertEquals("a " + blend + "s blend must start the lift after the blend",
+                    blend + DjEdit.VOCAL_RETURN_MARGIN_SEC - DjEdit.RETURN_RAMP_SEC,
+                    p.returnStartSec, 1e-9);
+            assertTrue("the lift may not begin inside the blend (" + blend + "s): "
+                            + p.returnStartSec, p.returnStartSec >= blend);
+            assertEquals("and the whole blend is silent in the vocal stem", 0.0,
+                    p.vocalGainAt(blend), 1e-9);
+        }
     }
 
     @Test

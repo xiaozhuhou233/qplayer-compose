@@ -75,38 +75,36 @@ public final class MixNaturaliser {
     /**
      * Whether this boundary may be transposed at all.
      *
-     * <p>The rule above has to be affordable: the modulation section — the part of the blend
-     * the pitch travels over, which is also the part before the incoming track's vocals — has
-     * to exist and to end inside the blend the boundary will really run. When it cannot, the
-     * answer is <b>no transposition at all</b>: the return is never squeezed into a
-     * non-section, because a modulation crammed into a fraction of a second is exactly the
-     * artefact the rule is about.
+     * <p>The rule above has to be affordable: the pitch has to be back at the incoming track's
+     * own key before its voice arrives, with {@link #VOCAL_PITCH_MARGIN_MS} of margin — and that
+     * margin has to exist at all (a deck whose entry is already past its own vocals, or one whose
+     * vocals are in the blend's first sample because it is playing the track's master, gets no
+     * transposition: see the {@code vocalInMs} note).
      *
-     * <p>⚠️ <b>Round 14 removed six seconds from this gate, and that was the squeeze the user
-     * asked to have removed.</b> Until round 13 the transposition was eased back over
-     * {@link IncomingMix#RESTORE_MS} (six seconds), so a boundary whose deadline was closer
-     * than six seconds got no transposition — the requirement follows from the shape of a
-     * <em>glide</em>. Round 13 replaced that glide with a single write, which needs no room at
-     * all, and left the gate demanding the six seconds anyway: every pair with less than
-     * eight seconds of vocals-out window was silently refused a transposition it could have
-     * had, and the modulation section was capped at {@code overlap − margin − 6s} for the
-     * pairs that did get one. What the gate asks now is only what is really needed — the
-     * rule's own deadline ({@code VOCAL_PITCH_MARGIN_MS} before the vocals arrive) must fall
-     * inside this blend — and {@link KeyGlide} decides separately whether the room that is
-     * left is enough for a ladder rather than for a single step.
+     * <p>⚠️ <b>Round 17 dropped the upper bound this gate used to carry</b>
+     * ({@code deadlineMs <= overlapMs}). That bound was about the <em>ladder</em>: its steps write
+     * the outgoing deck as well as the incoming one, and the outgoing deck is released when the
+     * blend ends, so the last step has to land before that. It is now enforced where it belongs
+     * and exactly — {@code PlayerController} clamps the ladder's own end to the last beat at or
+     * before the promotion, and a ladder with no room for its steps answers
+     * {@link KeyGlide#none} and leaves round 13's single step, which writes the incoming deck
+     * alone and is therefore safe after the promotion (that deck is the one still playing).
+     * Keeping the old bound here instead would have started refusing transpositions for the very
+     * pairs round 17 exists to serve: the incoming track's vocals come back a margin <em>after</em>
+     * the blend now, so a pair whose voice returns more than two seconds after the blend's end
+     * would have had its transposition silently dropped.
      *
      * @param vocalInMs  how far into the blend's own ramp the incoming track's vocals are
-     *                   first heard, ms. {@code 0} is not "unknown" — it is the case where
-     *                   the incoming deck is playing the track's own master, whose vocals
-     *                   are in the blend's first sample, and it refuses every
-     *                   transposition, which is the honest answer to the rule.
-     * @param overlapMs the blend this boundary will really run, ms: the return has to
-     *                   finish inside it, or the promotion (which happens at its end)
-     *                   would be the thing that ends the restoration.
+     *                   first heard, ms — which is <em>after</em> the blend for a DJ edit
+     *                   (round 17) and 0 for a deck playing the track's own master.
+     *                   {@code 0} is not "unknown": it is the honest answer to the rule, and
+     *                   it refuses every transposition.
+     * @param overlapMs the blend this boundary will really run, ms. No longer part of the
+     *                   verdict — kept in the signature because every caller has it and the
+     *                   sentence a refusal logs is about the blend the pair will play.
      */
     public static boolean pitchFitsBeforeVocals(long vocalInMs, long overlapMs) {
-        long deadlineMs = vocalInMs - VOCAL_PITCH_MARGIN_MS;
-        return deadlineMs >= 0L && deadlineMs <= overlapMs;
+        return vocalInMs - VOCAL_PITCH_MARGIN_MS >= 0L;
     }
 
     /**
@@ -330,6 +328,11 @@ public final class MixNaturaliser {
             this.measured = measured;
         }
 
+        /** This same measurement as the public value a chooser can read (see {@link Keys}). */
+        Keys keys() {
+            return new Keys(measured, atZero, distance, semitones, allowed, allowedDistance);
+        }
+
         String note(BeatProfile a, BeatProfile b) {
             if (!measured) {
                 if (a == null || b == null || a.key() == null || b.key() == null) {
@@ -378,6 +381,70 @@ public final class MixNaturaliser {
                             allowed, allowedDistance))
                     + ")";
         }
+    }
+
+    /**
+     * The pair's key measurement, as a value a caller other than the shift decision can read:
+     * whether the keys could be judged at all, how far apart they are as they stand, and the
+     * shift (if any) that was sanctioned and worth making.
+     *
+     * <p>⚠️ Round 17 hoists this out of the private arithmetic because a <em>chooser</em> now has
+     * to answer with it: {@link HeuristicTransitionChooser} asks "do these two tracks overlap
+     * badly?" — and that question is exactly "their keys clash and their tempos cannot be
+     * pulled onto one grid", which is this object's {@link #clash()} plus the tempo half. Before
+     * this, the same numbers existed but only the shift decision could see them.
+     */
+    public static final class Keys {
+        /** Whether both keys were measured and are trustworthy — the gate every answer below
+         *  is behind. */
+        public final boolean measured;
+        /** The profile distance as the two keys stand (0 = as close as the measurement gets). */
+        public final double distance;
+        /** The distance with {@link #shift} applied. */
+        public final double distanceAfter;
+        /** The shift that was both allowed and worth making, semitones; 0 = none. */
+        public final int shift;
+        /** The best shift that was allowed at all, whether worth making or not. */
+        public final int allowedShift;
+        /** Its distance. */
+        public final double allowedDistance;
+
+        Keys(boolean measured, double distance, double distanceAfter, int shift,
+             int allowedShift, double allowedDistance) {
+            this.measured = measured;
+            this.distance = distance;
+            this.distanceAfter = distanceAfter;
+            this.shift = shift;
+            this.allowedShift = allowedShift;
+            this.allowedDistance = allowedDistance;
+        }
+
+        /** The two keys are measured and nothing brings them together: the pair is in two keys
+         *  at once, which is a clash rather than a nuance. False when they were not measured at
+         *  all — an unmeasured pair is not evidence of a clash. */
+        public boolean clash() {
+            return measured && shift == 0 && distance > MAX_KEY_DISTANCE;
+        }
+
+        /** The shift that is worth making would move the profiles by less than
+         *  {@link #MIN_KEY_IMPROVEMENT} — a shift that was available but would not have bought
+         *  anything. Named separately from {@link #clash()} because the two log differently:
+         *  "the keys already sit together" is not "the keys are too far apart to mix". */
+        public boolean shiftNotWorthMaking() {
+            return measured && allowedShift != 0 && shift == 0;
+        }
+
+        @Override
+        public String toString() {
+            if (!measured) return "keys{not measured}";
+            return String.format(Locale.US, "keys{distance %.2f, shift %+d -> %.2f}",
+                    distance, shift, distanceAfter);
+        }
+    }
+
+    /** This pair's key measurement: see {@link Keys}. Never null. */
+    public static Keys keys(BeatProfile a, BeatProfile b) {
+        return keyShift(a, b).keys();
     }
 
     /**

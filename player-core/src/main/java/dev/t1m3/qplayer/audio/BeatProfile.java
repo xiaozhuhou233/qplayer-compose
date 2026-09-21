@@ -258,6 +258,59 @@ public final class BeatProfile {
         return Math.round(beats * Math.abs(a.periodMs() - b.periodMs()));
     }
 
+    /**
+     * How much two measured tempos may differ, as a fraction, and still be the same groove:
+     * used between a tempo and its half, double, third, three halves and two thirds.
+     *
+     * <p>It is {@link IncomingMix#MAX_SPEED_STEP} exactly, and that is not a coincidence: it is
+     * the same tolerance asked a different question. That one asks "can the incoming deck be
+     * stretched onto this grid?", which is a statement about the correction the app is willing
+     * to apply; this one asks "are these two the same rhythm?", which is a statement about what
+     * a listener hears. They agree on 8% because a groove pulled further than that is no longer
+     * the same groove.
+     */
+    public static final double RELATIVE_TEMPO_TOLERANCE = IncomingMix.MAX_SPEED_STEP;
+
+    /**
+     * Whether two measured tempos are the <em>same groove</em>: the same beat, half or double
+     * it, a third of it, three halves or two thirds — each within
+     * {@link #RELATIVE_TEMPO_TOLERANCE}.
+     *
+     * <p>⚠️ Why this exists. The estimator reports the tempo of a 30 s window, and half of this
+     * library is reported at half or double its nominal tempo (round 8 measured it: 71.6 for a
+     * true 143, 64.0 for 128 — the same grid read an octave apart, and both readings are correct
+     * for what they describe). A pair read at 123.1 and 61.0 is therefore <em>the same beat</em>,
+     * and anything that treats "the ratio is not 1.00" as a clash calls a pair that mixes
+     * perfectly unmixable — the round-17 kind-distribution harness found exactly that pair
+     * (x2.0170, reported as a rhythm clash) before this method existed.
+     *
+     * <p>It is deliberately NOT a stretch: nothing here re-interprets a half-tempo reading as a
+     * double-time one when deciding whether to pull the incoming deck (round 4 chose not to, and
+     * round 10 deleted that stretch altogether). This answers a question about the
+     * <em>listener</em>, not about the player: two grooves an octave apart do not fight, so they
+     * are not evidence for playing the two tracks one after the other.
+     */
+    public static boolean relatedTempo(BeatProfile a, BeatProfile b) {
+        if (a == null || b == null) return false;
+        double periodA = a.periodMs();
+        double periodB = b.periodMs();
+        if (!(periodA > 0d) || !(periodB > 0d)) return false;
+        return nearRelativeTempo(periodB / periodA);
+    }
+
+    /** The relationships {@link #relatedTempo} accepts, given as {@code periodB / periodA}:
+     *  B's beat twice as slow as A's is 2, twice as fast is 0.5. */
+    private static final double[] TEMPO_RELATIVES = {1d, 2d, 0.5d, 3d, 1d / 3d, 1.5d, 2d / 3d};
+
+    /** {@link #relatedTempo}'s arithmetic on the ratio alone, so a test can sweep it. */
+    public static boolean nearRelativeTempo(double ratio) {
+        if (!(ratio > 0d)) return false;
+        for (double relative : TEMPO_RELATIVES) {
+            if (Math.abs(ratio - relative) <= RELATIVE_TEMPO_TOLERANCE * relative) return true;
+        }
+        return false;
+    }
+
     // --- disk form ----------------------------------------------------------
 
     /** Version byte of {@link #toBytes()}: bump it when the layout changes, so an

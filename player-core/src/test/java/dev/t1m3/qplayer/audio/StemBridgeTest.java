@@ -82,8 +82,8 @@ public class StemBridgeTest {
         StemBridge.Plan plan = StemBridge.plan(bars(barSec, window), barSec, removal, window);
         ok(plan.fits, plan.reason);
         ok(plan.onBarLine);
-        // 0.6 of 20s is 12s; with 2s bars the first line at or after it is 12s exactly.
-        assertEquals(12d, plan.startSec, 1e-9);
+        // 0.15 of 20s is 3s; with 2s bars the first line at or after it is 4s.
+        assertEquals(4d, plan.startSec, 1e-9);
         assertEquals(2 * barSec, plan.lengthSec(), 1e-9);
         assertEquals(plan.startSec, plan.swapSec(), 1e-9);
         ok(plan.startSec >= removal * StemBridge.SWAP_AT - 1e-9,
@@ -94,8 +94,11 @@ public class StemBridgeTest {
     public void aBridgeThatWouldRunPastTheVocalRemovalIsRefused() {
         double beatSec = 0.5d;
         double barSec = beatSec * StemBridge.BEATS_PER_BAR;
-        // The removal window ends 0.5s after the placement floor: a two-bar bridge cannot fit.
-        StemBridge.Plan plan = StemBridge.plan(bars(barSec, 30d), barSec, 11d, 30d);
+        // ⚠️ Round 17: the floor is 0.15 of the removal window now, so the case that does not
+        // fit is a SHORT removal window rather than a long one: with 2s bars, a 5s window puts
+        // the first line at or after the floor (0.75s) at 2s and the two-bar bridge would end at
+        // 6s — inside the incoming's vocals.
+        StemBridge.Plan plan = StemBridge.plan(bars(barSec, 30d), barSec, 5d, 30d);
         bad(plan.fits);
         ok(plan.reason.contains("run past"), plan.reason);
     }
@@ -105,7 +108,7 @@ public class StemBridgeTest {
         StemBridge.Plan plan = StemBridge.plan(null, 2d, 20d, 25d);
         ok(plan.fits, plan.reason);
         bad(plan.onBarLine);
-        assertEquals(12d, plan.startSec, 1e-9);
+        assertEquals(20d * StemBridge.SWAP_AT, plan.startSec, 1e-9);
     }
 
     @Test
@@ -302,7 +305,8 @@ public class StemBridgeTest {
 
     @Test
     public void aPlanThatDoesNotFitCarriesNothing() {
-        StemBridge.Plan refused = StemBridge.plan(null, 2d, 9d, 30d);
+        // A removal window too short for a two-bar bridge at the hand-over's own fraction.
+        StemBridge.Plan refused = StemBridge.plan(null, 2d, 4d, 30d);
         bad(refused.fits);
         assertNull(StemBridge.layer(bassline(0.5d, 4d, 55d, 0.5d), RATE, refused, 1d, 0d));
     }

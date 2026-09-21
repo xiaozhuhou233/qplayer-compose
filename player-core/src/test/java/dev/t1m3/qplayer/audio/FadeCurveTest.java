@@ -6,86 +6,126 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 /**
- * The shapes an overlap's gains can follow, and the one property of them that can
- * be measured rather than argued about: how much of the overlap has <em>both</em>
- * tracks audible at once.
+ * The shapes an overlap's gains can follow, and the properties of them that can be
+ * measured rather than argued about: how much of the overlap has <em>both</em> tracks
+ * audible at once, how far the outgoing track is taken down, and where it leaves.
  *
- * <p>The complaint that produced {@link FadeCurve#DJ_BLEND} was "it still sounds
- * like a fade-in/fade-out rather than a mix", and the reason is arithmetic: with the
- * symmetric pair (linear or equal power) the two gains are only comparable near the
- * middle of the window, so one track is alone at each end. A listener hears that as
- * a song changing. The staged shape is the answer, and these numbers are what says
- * so — about 68% of the window against the symmetric pair's 41%, for about 2.3 dB of
- * extra summed power in the middle.
+ * <p>Three rounds of listening reports are encoded here, and they point in different
+ * directions on purpose:
+ * <ul>
+ *   <li>rounds 10–12 — "it still sounds like a fade-in/fade-out rather than a mix": the
+ *       symmetric pair keeps the two gains comparable only near the middle (41% of the
+ *       window), so the staged shape was built to hold both tracks up;</li>
+ *   <li>round 16 — 「上一首歌戛然而止」 (the previous song cut off): holding the outgoing
+ *       track at its own level until three quarters and then dropping it is heard as a
+ *       cliff, so the exit got a shape of its own;</li>
+ *   <li>round 17 — 「让…前一首歌部分淡一点，要不抢了」 and 「过渡部分不要保留非常高亢人声」
+ *       (make the previous song quieter so it stops stealing the show; do not keep loud
+ *       vocals inside the blend): the outgoing track's vocals cannot be removed from its
+ *       stream, so the shape takes the whole track down to a −10 dB bed early and leaves
+ *       it earlier. The both-audible share falls from 68% to 17% and that is the point.</li>
+ * </ul>
  *
- * <p>Round 16's half of the same story is the other end of the shape: the staged
- * shape held the outgoing track at its own level for so long that its exit became a
- * cliff, which the user heard as the previous song being cut off. The exit now has
- * its own window, and what says so is the second group of assertions here: the level
- * at nine tenths, the inaudibility at 95%, the monotone descent, and the held zero
- * the promotion releases the outgoing player inside.
+ * <p>The numbers below are printed by {@code Curve17} in the round-17 harness and by
+ * running this class; they are the same arithmetic either way.
  */
 public class FadeCurveTest {
 
     /** The ordinary overlap: what every target in this test is measured against. */
     private static final long LONG_MS = 15_000L;
 
-    @Test
-    public void theDjShapeKeepsBothTracksAudibleThroughMostOfTheOverlap() {
-        long symmetric = FadeCurve.EQUAL_POWER.bothAudibleMs(LONG_MS);
-        long dj = FadeCurve.DJ_BLEND.bothAudibleMs(LONG_MS);
-        // The symmetric pair's share is the "feels short" defect written as a number:
-        // gains within 6 dB of each other only where cos and sin are within a factor
-        // of two, i.e. t in about [0.30, 0.70].
-        assertTrue("the symmetric ramp should be both-audible for about two fifths of"
-                        + " the overlap, was " + symmetric + "ms of " + LONG_MS + "ms",
-                symmetric >= 5_800L && symmetric <= 6_500L);
-        // The staged one holds both tracks for about two thirds of it, which is the
-        // whole point: it is not a fade with a long overlap, it is a mix. (72% at the
-        // round-12 exponents; 68% since round 16 gave the exit its own window, because a
-        // longer hold and a longer exit cannot both be had and the exit was the complaint.)
-        assertTrue("the DJ shape should be both-audible for a large share of the overlap,"
-                        + " was " + dj + "ms of " + LONG_MS + "ms",
-                dj >= 10_100L && dj <= 11_500L);
-        assertTrue("the DJ shape should be at least half again the symmetric one",
-                dj >= symmetric * 3L / 2L);
+    /** The outgoing track's own level at {@code t}, dB, for the tables below. */
+    private static double levelDb(float t) {
+        return FadeCurve.gainDb(FadeCurve.DJ_BLEND.outGain(t));
     }
 
     @Test
-    public void theIncomingTrackArrivesEarlyAndTheOutgoingTrackHoldsAndThenLeaves() {
-        // The incoming bed is there from the first seventh of the window: this is the
-        // "comes in early and low" half, and it is what stops the incoming track from
-        // being a mirror of the outgoing track's decay.
-        assertTrue("the incoming bed should be up within the first 15%",
-                FadeCurve.DJ_BLEND.inGain(0.15f) >= 0.40f);
-        assertTrue("the incoming track should be clearly present by the middle",
-                FadeCurve.DJ_BLEND.inGain(0.5f) >= 0.75f);
-        // The outgoing track is still at its own level through the first half — that
-        // is the "holds up longer" half, and it is the difference between a blend and
-        // a fade that starts immediately.
-        assertTrue("the outgoing track should still be within ~1.5dB at the middle",
-                FadeCurve.DJ_BLEND.outGain(0.5f) >= 0.84f);
-        // ... and its exit is a tail confined to the end rather than a decay across the whole
-        // window, which is what the hold exponent buys. The level at three quarters is the
-        // number to keep: the exit starts after it, so no shape change may make the outgoing
-        // track leave earlier than this without saying so here.
-        assertTrue("the outgoing track should still be within ~3dB at three quarters, was "
-                        + db(FadeCurve.DJ_BLEND.outGain(0.75f)),
-                FadeCurve.DJ_BLEND.outGain(0.75f) >= 0.70f);
-        // The exit itself (round 16): the complaint it answers is 「上一首歌戛然而止」 — the
-        // previous song cut off — and the shape that caused it held the outgoing track at
-        // -2.7 dB at three quarters and -8.7 dB at nine tenths and then dropped it to
-        // silence inside the last tenth: at its own level, then gone. The window changes
-        // exactly that: from nine tenths on the outgoing track is already 9 dB further down
-        // than it was (0.13 = -17.9 dB against 0.37 = -8.7 dB), by 95% it is inaudible
-        // (-34.6 dB against -14.2 dB), and the last second of the blend is spent at a level
-        // that is no longer part of the mix rather than carrying most of the drop.
-        assertTrue("the outgoing track should be well down at nine tenths, was "
-                        + db(FadeCurve.DJ_BLEND.outGain(0.9f)),
-                FadeCurve.DJ_BLEND.outGain(0.9f) <= 0.15f);
-        assertTrue("the outgoing track should be inaudible at 95%, was "
-                        + db(FadeCurve.DJ_BLEND.outGain(0.95f)),
-                FadeCurve.gainDb(FadeCurve.DJ_BLEND.outGain(0.95f)) <= -30f);
+    public void theOutgoingTrackIsTakenDownToABedEarlyAndLeavesBeforeTheBlendEnds() {
+        // The table the round-17 report is written from. The "before" numbers are what rounds
+        // 12–16 shipped (cos(t^2.6) with a quarter-ramp release window): at its own level
+        // through the first half, -2.7 dB at three quarters, and then the cliff.
+        System.out.println("outgoing level, dB, over a " + LONG_MS + "ms ramp:");
+        System.out.printf(java.util.Locale.US, "  t=0.25 %7.2f   (before  -0.00)%n", levelDb(0.25f));
+        System.out.printf(java.util.Locale.US, "  t=0.50 %7.2f   (before  -0.30)%n", levelDb(0.5f));
+        System.out.printf(java.util.Locale.US, "  t=0.75 %7.2f   (before  -2.66)%n", levelDb(0.75f));
+        System.out.printf(java.util.Locale.US, "  t=0.90 %7.2f   (before -17.89)%n", levelDb(0.9f));
+        // 1. The bed: the whole point is that the outgoing track stops competing early, and
+        //    the requirement is quantified at a quarter of the ramp.
+        assertTrue("the outgoing track must already be at its bed by a quarter of the ramp, was "
+                        + levelDb(0.25f) + " dB", levelDb(0.25f) <= -9f);
+        assertTrue("... and no louder than the bed itself there, was " + levelDb(0.25f) + " dB",
+                levelDb(0.25f) <= -10f + 1f);
+        // 2. It is a BED, not silence and not its own level: the key blend's ladder moves both
+        //    decks, so a bed that is there is what it is for.
+        assertTrue("... and still plainly present, was " + levelDb(0.5f) + " dB",
+                levelDb(0.5f) >= -14f);
+        // 3. Ten decibels down where the old shape was at its own level is the whole change:
+        //    this is the number the outgoing track's unremovable vocals sit at.
+        assertTrue("the bed must be at least 9 dB under the old shape's level at a half, was "
+                        + levelDb(0.5f) + " dB", levelDb(0.5f) <= -9f);
+        // 4. The exit is earlier and complete before the end: gone (below the inaudible floor)
+        //    by 85% of the ramp, where the old shape was still at -14 dB at 95%.
+        assertTrue("the outgoing track must be inaudible by 85% of the ramp, was "
+                        + levelDb(0.85f) + " dB", levelDb(0.85f) <= FadeCurve.INAUDIBLE_DB);
+        assertTrue("... and well down at three quarters, was " + levelDb(0.75f) + " dB",
+                levelDb(0.75f) <= -35f);
+        // 5. Monotone in dB — the property the shape is defined in. A gain-domain shape has a
+        //    dB curve whose slope runs away wherever the gain approaches zero, which is how the
+        //    round-16 exit managed to be monotone and still sound like a cliff.
+        double previous = 1d;
+        int last = (int) Math.floor(1000d * (1d - FadeCurve.DJ_BLEND.outSilentTail())) - 1;
+        for (int i = 0; i <= last; i++) {
+            double db = levelDb(i / 1000f);
+            assertTrue("the outgoing track's level must never rise (t=" + (i / 1000f) + ": "
+                            + previous + " -> " + db + ")", db <= previous + 1e-4);
+            previous = db;
+        }
+    }
+
+    @Test
+    public void theOutgoingTrackLeavesFarEarlierThanItUsedTo() {
+        // "Earlier and faster" as a number a report can carry: the fraction of the ramp at
+        // which the outgoing track crosses each level, this build against rounds 12–16.
+        System.out.println("milestone (share of the ramp)   this build   rounds 12-16");
+        assertTrue("the outgoing track must reach -30 dB before two thirds of the ramp",
+                shareAt(-30d) <= 0.66d);
+        assertTrue("... at least a quarter of the ramp earlier than the old shape did",
+                shareAt(-30d) <= oldShareAt(-30d) - 0.25d);
+        assertTrue("and it must be inaudible with a fifth of the ramp still to go",
+                shareAt(FadeCurve.INAUDIBLE_DB) <= 0.80d);
+        assertTrue("... which is also earlier than the old shape's own inaudible point",
+                shareAt(FadeCurve.INAUDIBLE_DB) <= oldShareAt(FadeCurve.INAUDIBLE_DB) - 0.15d);
+    }
+
+    /** The share of a 15 s ramp at which the shipped shape crosses {@code wantDb}. */
+    private static double shareAt(double wantDb) {
+        return shareAt(wantDb, false);
+    }
+
+    /** The same for the shape rounds 12–16 shipped ({@code cos(t^2.6)} with a quarter-ramp
+     *  release window). Kept here only so the "earlier" claim is measured against the real
+     *  previous shape rather than asserted. */
+    private static double oldShareAt(double wantDb) {
+        return shareAt(wantDb, true);
+    }
+
+    private static double shareAt(double wantDb, boolean old) {
+        for (int i = 0; i <= 10_000; i++) {
+            float t = i / 10_000f;
+            if (FadeCurve.gainDb(old ? oldOutGain(t) : FadeCurve.DJ_BLEND.outGain(t)) <= wantDb) {
+                return t;
+            }
+        }
+        return 1d;
+    }
+
+    /** Rounds 12–16's outgoing shape, for the before/after comparison only. */
+    private static float oldOutGain(float t) {
+        if (t >= 0.99f) return 0f;
+        double hold = Math.cos(Math.pow(t, 2.6d) * Math.PI / 2d);
+        if (t <= 0.75d) return (float) hold;
+        double u = (t - 0.75d) / 0.25d;
+        return (float) (hold * 0.5d * (1d + Math.cos(Math.PI * u)));
     }
 
     @Test
@@ -100,11 +140,11 @@ public class FadeCurveTest {
         assertTrue("the ramp's end must be silent", FadeCurve.DJ_BLEND.outGain(1f) == 0f);
         assertTrue("... and held there, not just reached",
                 FadeCurve.DJ_BLEND.outGain(0.995f) == 0f && FadeCurve.DJ_BLEND.outGain(0.99f) == 0f);
-        // Where the held zero starts, the window was already below the floor: 4.5 ms of a
-        // 15 s ramp is spent between -60 dB and -infinity, which is not a fade any more.
+        // Where the held zero starts, the exit was already below the floor — and by a margin,
+        // so "at or below -60 dB" is never a question of the last bit of a logarithm.
         float atHead = FadeCurve.DJ_BLEND.outGain(0.9899f);
         assertTrue("the step into the held zero must itself be inaudible, was "
-                        + db(atHead), FadeCurve.gainDb(atHead) <= FadeCurve.INAUDIBLE_DB);
+                        + db(atHead), FadeCurve.gainDb(atHead) <= FadeCurve.INAUDIBLE_DB - 5f);
         // No tick of the outgoing track's exit may end up louder than the one before it:
         // a tail that rose anywhere would be a level bump inside the fade.
         float previous = FadeCurve.DJ_BLEND.outGain(0.5f);
@@ -145,19 +185,38 @@ public class FadeCurveTest {
     }
 
     @Test
-    public void bothTracksAreAudibleAtOnceAcrossTheMiddleOfTheDjShape() {
-        // Stated as the listener hears it rather than as a formula: at a fifth, a
-        // half and four fifths of the window the two gains are within 6 dB.
-        for (float t : new float[] {0.2f, 0.35f, 0.5f, 0.65f, 0.8f}) {
-            float out = FadeCurve.DJ_BLEND.outGain(t);
-            float in = FadeCurve.DJ_BLEND.inGain(t);
-            float louder = Math.max(out, in);
-            float quieter = Math.min(out, in);
-            double db = 20d * Math.log10(louder / quieter);
-            assertTrue("at t=" + t + " the two should be within 6dB (out=" + out + ", in="
-                    + in + ", " + String.format(java.util.Locale.US, "%.1f", db) + "dB)",
-                    db <= 6d + 1e-6);
-        }
+    public void theDjShapesBothAudibleWindowIsDeliberatelyTheSmallOne() {
+        // ⚠️ Round 17 reverses the claim this test used to make. Until round 16 the staged shape
+        // won on "both tracks audible at once" (68% against the symmetric pair's 41%) and this
+        // test asserted that it must. The measurement was right and the target was wrong: both
+        // tracks at their own level is exactly the "人声混合得很乱" the user reported, because the
+        // outgoing track's vocals cannot be removed from it. What the shape buys now is the
+        // opposite, and the numbers are the ones in its own doc.
+        long symmetric = FadeCurve.EQUAL_POWER.bothAudibleMs(LONG_MS);
+        long dj = FadeCurve.DJ_BLEND.bothAudibleMs(LONG_MS);
+        // The symmetric pair's share is the "feels short" defect written as a number:
+        // gains within 6 dB of each other only where cos and sin are within a factor
+        // of two, i.e. t in about [0.30, 0.70].
+        assertTrue("the symmetric ramp should be both-audible for about two fifths of"
+                        + " the overlap, was " + symmetric + "ms of " + LONG_MS + "ms",
+                symmetric >= 5_800L && symmetric <= 6_500L);
+        // The staged one spends about a sixth of the window with both tracks within 6 dB: the
+        // stretch where the outgoing track is still descending into its bed and the incoming
+        // one has arrived. Everything after that is one track plus the other one's bed.
+        assertTrue("the DJ shape should be both-audible for about a sixth of the overlap, was "
+                        + dj + "ms of " + LONG_MS + "ms ("
+                        + FadeCurve.DJ_BLEND.bothAudibleText(LONG_MS) + ")",
+                dj >= 2_000L && dj <= 3_200L);
+        assertTrue("... which is deliberately less than the symmetric pair's share, because"
+                        + " 'both audible' now means 'both at a level the listener compares'",
+                dj < symmetric);
+        // The shape is not a fade, though: the window still exists, and the outgoing track is
+        // inside it rather than gone at the start.
+        assertTrue("the window must not vanish: " + dj, dj >= 1_500L);
+        float out = FadeCurve.DJ_BLEND.outGain(0.2f);
+        float in = FadeCurve.DJ_BLEND.inGain(0.2f);
+        assertTrue("the two must actually meet near a fifth of the ramp (out=" + out + ", in="
+                        + in + ")", Math.abs(20d * Math.log10(out / in)) <= 6d);
     }
 
     @Test
@@ -175,24 +234,33 @@ public class FadeCurveTest {
     }
 
     @Test
-    public void theSummedPowerNeverLiftsTheBlendMoreThanAboutTwoAndAHalfDb() {
-        // Two tracks at once are louder than one, and that is the point — but a shape
-        // that summed to, say, +6 dB would be heard as a volume jump rather than as a
-        // mix, and would risk clipping on material that is already mastered loud. The
-        // staged shape's bump is measured here so a future tweak to its exponents
-        // cannot quietly make the blend louder.
+    public void theSummedPowerOfTheBlendNeverLiftsItAndOnlyDipsBriefly() {
+        // Two tracks at once used to be louder than one, and the staged shape deliberately paid
+        // for its both-audible window in summed power — up to +2.3 dB in the middle, which is
+        // the "音量跳" risk. With the outgoing track taken down to a bed the sum no longer
+        // exceeds one track's level anywhere (+0.2 dB at the very start, where the outgoing
+        // track is still at unity and the incoming one has just begun), and the only shape
+        // left to watch is the trough: the outgoing track leaves faster than the incoming one
+        // arrives, so the blend dips by about 1.9 dB at a fifth of the ramp.
         double worst = 0d;
+        double lowest = Double.MAX_VALUE;
         for (int i = 0; i <= 1000; i++) {
             float t = i / 1000f;
             double out = FadeCurve.DJ_BLEND.outGain(t);
             double in = FadeCurve.DJ_BLEND.inGain(t);
-            worst = Math.max(worst, out * out + in * in);
+            double power = out * out + in * in;
+            worst = Math.max(worst, power);
+            lowest = Math.min(lowest, power);
         }
-        double bumpDb = 10d * Math.log10(worst);
-        assertTrue("the summed power should stay under +2.5dB, was "
-                + String.format(java.util.Locale.US, "%.2f", bumpDb) + "dB", bumpDb <= 2.5d);
-        assertTrue("... and it should actually sum to more than one track (both audible)",
-                bumpDb >= 1.0d);
+        double peakDb = 10d * Math.log10(worst);
+        double troughDb = 10d * Math.log10(Math.max(1e-9, lowest));
+        System.out.printf(java.util.Locale.US,
+                "summed blend power: peak %+.2f dB, trough %.2f dB%n", peakDb, troughDb);
+        assertTrue("the blend must never sum above one track by more than a dB, was "
+                + String.format(java.util.Locale.US, "%.2f", peakDb) + "dB", peakDb <= 1.0d);
+        assertTrue("... and the trough must stay under 3 dB, so the blend does not dip"
+                        + " audibly, was " + String.format(java.util.Locale.US, "%.2f", troughDb)
+                        + "dB", troughDb >= -3.0d);
     }
 
     @Test

@@ -84,23 +84,39 @@ public final class HeuristicTransitionChooser implements TransitionChooser {
         //    callback is most likely to arrive while a ramp is still running. The
         //    historical hard cut is the only honest answer.
         if (!ctx.hasBothLengths()) return TransitionKind.CUT;
-        // 4. Either side short: fade, but briefly. An 8 s overlap would eat a
-        //    noticeable fraction of a song that is only a minute or two long.
+        // 4. The outgoing track is measured to end in silence: there is nothing to
+        //    overlap, so trim the dead air instead (see TRIM_TAIL_MIN_MS). This is
+        //    the only case where a seam beats an overlap, and it is the only reason
+        //    SILENCE_TRIM is ever the automatic answer. Evidence first: a measurement
+        //    about THIS boundary outweighs the length heuristic below, so it comes
+        //    before it (round 17 — the order was the other way round, which meant a
+        //    short track with a measured silent tail got a quick fade into nothing).
+        if (ctx.outgoingTailSilenceMs() >= TRIM_TAIL_MIN_MS) {
+            return TransitionKind.SILENCE_TRIM;
+        }
+        // 5. Either side short: fade, but briefly. An 8 s overlap would eat a
+        //    noticeable fraction of a song that is only a minute or two long — and a
+        //    short overlap is also the least damaging answer for a pair whose material
+        //    clashes (see rule 6), because there is barely a stretch where the two are
+        //    audible together at all.
         if (ctx.outgoingDurationMs() < SHORT_TRACK_MS
                 || ctx.incomingDurationMs() < SHORT_TRACK_MS) {
             return TransitionKind.QUICK_FADE;
         }
-        // 5. The outgoing track is measured to end in silence: there is nothing to
-        //    overlap, so trim the dead air instead (see TRIM_TAIL_MIN_MS). This is
-        //    the only case where a seam beats an overlap, and it is the only reason
-        //    SILENCE_TRIM is ever the automatic answer.
-        if (ctx.outgoingTailSilenceMs() >= TRIM_TAIL_MIN_MS) {
-            return TransitionKind.SILENCE_TRIM;
+        // 6. The pair's own material is measured to overlap badly — their keys clash, or
+        //    their tempos cannot be brought onto one grid — so a blend would be two
+        //    keys or two tempos at once for its whole length. Play them one after the
+        //    other instead: FADE_OUT_IN ramps the outgoing track out, starts the next
+        //    one from silence and never has both audible, which is the one arrangement
+        //    nothing about the pair can ruin. See PairFit.overlapsBadly for why "we
+        //    measured something" is not the trigger — only a measured clash is.
+        if (ctx.pairFit().overlapsBadly()) {
+            return TransitionKind.FADE_OUT_IN;
         }
-        // 6. Everything else: the plain overlap. Two ordinary streams with room
+        // 7. Everything else: the plain overlap. Two ordinary streams with room
         //    ahead of them are exactly the case the whole feature exists for, and a
         //    cut here would be a blend given up for no reason at all. The length is
-        //    the kind's default (fifteen seconds, the ordinary target — raised
+        //    the kind's default (the setting's own 过渡时长, default 15 s — raised
         //    further by the controller when the outgoing track's own ending is
         //    measured to be plain) and the curve is named with it (see plan()): a
         //    symmetric ramp over a window this long spends most of itself with one
@@ -142,6 +158,14 @@ public final class HeuristicTransitionChooser implements TransitionChooser {
                             + "ms of silence (>= " + TRIM_TAIL_MIN_MS + "ms), so the seam is"
                             + " trimmed rather than ramped into it");
         }
+        if (kind == TransitionKind.FADE_OUT_IN) {
+            return TransitionPlan.of(kind, TransitionPlan.defaultOverlapMs(kind), null,
+                    "rule: " + (ctx == null ? "no context"
+                            : "the pair's own material overlaps badly — " + ctx.pairFit()
+                                    + " — so the two are played one after the other rather"
+                                    + " than together (nothing is mixed, so nothing about the"
+                                    + " pair can clash)"));
+        }
         return TransitionPlan.of(kind, TransitionPlan.defaultOverlapMs(kind), null,
                 "rule: " + cutOrShortReason(ctx, kind));
     }
@@ -154,8 +178,11 @@ public final class HeuristicTransitionChooser implements TransitionChooser {
         }
         if (ctx.remainingMs() < MIN_REMAINING_MS) return "too late in the track";
         if (!ctx.hasBothLengths()) return "a length nobody knows";
-        if (kind == TransitionKind.QUICK_FADE) return "one of the two tracks is under "
-                + (SHORT_TRACK_MS / 1000L) + "s, so the overlap is kept short";
+        if (kind == TransitionKind.QUICK_FADE) {
+            long shorter = Math.min(ctx.outgoingDurationMs(), ctx.incomingDurationMs());
+            return "one of the two tracks is only " + (shorter / 1000L) + "s long (under "
+                    + (SHORT_TRACK_MS / 1000L) + "s), so the overlap is kept short";
+        }
         return "no reason recorded";
     }
 }

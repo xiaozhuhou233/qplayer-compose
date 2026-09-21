@@ -71,13 +71,14 @@ public final class KeyGlide {
     /**
      * The most writes ONE deck gets over the whole modulation section.
      *
-     * <p>Six is a shape, not a budget: a semitone spread over six steps is a move a listener
-     * hears as a modulation rather than as a jump, and six parameter writes on the deck the
-     * listener is hearing is not the tick loop that produced round 13's hiccup (that was
-     * 156 writes at 10 Hz). Raising it buys smoothness in steps of a sixth of a semitone,
-     * which is below the resolution of the thing being changed.
+     * <p>Eight since round 17 (it was six): the section grew to the whole blend when the vocal
+     * return moved past its end (round 17 — the rule's deadline is no longer capped at the
+     * blend, so the ladder can use all of it), and the same travel spread over more, smaller
+     * steps is a smoother modulation. It is still a handful of writes — 16 at the very most for
+     * a boundary, against round 13's measured 156 for a per-tick glide — and the spacing rule
+     * below still rounds up to whole bars, so most pairs keep the count they had.
      */
-    public static final int MAX_STEPS = 6;
+    public static final int MAX_STEPS = 8;
 
     /**
      * Fewer steps than this and there is no glide: the boundary keeps round 13's single
@@ -279,6 +280,69 @@ public final class KeyGlide {
      *  ladder, and what the boundary says in its own mix fragment. Never null. */
     public String describe() {
         return note;
+    }
+
+    /**
+     * How the pair's tonality <em>converges</em> over this ladder, as a sentence for the
+     * boundary's log line — the report the user asked for ("the key distance at the blend's
+     * start, middle and end must converge"), measured on the two tracks' own chroma profiles.
+     *
+     * <p>The number is the profile distance between what the two decks are <em>sounding</em>
+     * (the mix's key, which by construction is one key at every instant) and the incoming
+     * track's own key. It starts at the pair's raw distance — the incoming track is transposed
+     * into the outgoing track's key, so the mix is exactly as far from the incoming track's key
+     * as the two tracks' keys are from each other — and ends at the distance between the
+     * incoming track's key and itself, which is zero: the modulation is a move from the
+     * outgoing track's key to the incoming track's own, and this is that move as a number.
+     *
+     * <p>⚠️ The steps between the ends are <b>fractional</b> semitones, and a chroma profile is
+     * only defined at whole ones, so the middle value is interpolated between the two
+     * neighbouring semitone bins and says so. The per-step {@code semitones} in
+     * {@link #describe()} are exact and are the primary evidence; this sentence is the
+     * convergence the user asked to see.
+     *
+     * @param outgoingKey the outgoing track's own key profile, or null
+     * @param incomingKey the incoming track's own key profile (the destination), or null
+     * @return the sentence, or null when this boundary has no ladder or no keys to measure
+     */
+    public String convergenceNote(KeyProfile outgoingKey, KeyProfile incomingKey) {
+        if (!isGliding() || outgoingKey == null || incomingKey == null) return null;
+        double[] chromaA = outgoingKey.chroma();
+        double[] chromaB = incomingKey.chroma();
+        int middle = steps() / 2;
+        int last = steps() - 1;
+        StringBuilder sb = new StringBuilder(140);
+        sb.append(String.format(Locale.US,
+                "the mix's key converges on the incoming track's own over the modulation: the"
+                        + " profile distance between the two decks' sounding keys and the"
+                        + " incoming track's own is %.2f at the blend's start (%+.2f semitones on"
+                        + " the incoming deck, %+.2f on the audible one), %.2f at the middle step"
+                        + " (%+.2f / %+.2f, interpolated between semitone bins), and %.2f at the"
+                        + " last (%+.2f / %+.2f — both decks are in %s by then, and that residual"
+                        + " is the closest the two keys come: it is the distance the pair's own"
+                        + " two keys have after the shift, not a failure to arrive)",
+                distanceAt(chromaA, chromaB, 0d), (double) semitones(), 0d,
+                distanceAt(chromaA, chromaB, outgoingSemitones(middle)),
+                incomingSemitones(middle), outgoingSemitones(middle),
+                distanceAt(chromaA, chromaB, outgoingSemitones(last)),
+                incomingSemitones(last), outgoingSemitones(last), incomingKey.label()));
+        return sb.toString();
+    }
+
+    /** The distance between the mix's key (the outgoing track's material shifted by
+     *  {@code outgoingSemitones}) and the incoming track's own key, with the fractional shift
+     *  interpolated between the two neighbouring semitone bins. */
+    private static double distanceAt(double[] chromaA, double[] chromaB, double outgoingSemitones) {
+        double lo = Math.floor(outgoingSemitones);
+        double f = outgoingSemitones - lo;
+        double[] at = KeyProfile.rotated(chromaA, (int) lo);
+        if (f > 1e-9d) {
+            double[] next = KeyProfile.rotated(chromaA, (int) lo + 1);
+            for (int i = 0; i < at.length; i++) {
+                at[i] = at[i] * (1d - f) + next[i] * f;
+            }
+        }
+        return KeyProfile.distance(at, chromaB);
     }
 
     @Override

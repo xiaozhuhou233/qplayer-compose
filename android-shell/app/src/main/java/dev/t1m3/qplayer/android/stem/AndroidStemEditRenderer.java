@@ -73,12 +73,13 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
     /** The most frames one encoder input buffer takes. */
     private static final int ENCODE_CHUNK_FRAMES = 4096;
 
-    /** How far past the removal window the separated head reaches: the vocals return on
-     *  the first bar line at or after it, and a bar is four beats — so the window has to
-     *  cover a whole bar of the incoming track at its own tempo, plus a second of slack.
-     *  Capped, because a very slow track must not turn a 15 s blend into a 40 s
-     *  separation. */
-    private static final long RETURN_SPAN_MAX_MS = 8_000L;
+    /** How far past the removal window the separated head reaches: the vocals are at zero
+     *  for the whole blend and return on the first bar line at or after
+     *  {@code blend end + }{@link DjEdit#VOCAL_RETURN_MARGIN_SEC} — so the window has to
+     *  cover the margin plus a whole bar of the incoming track at its own tempo, plus a
+     *  second of slack. Capped, because a very slow track must not turn a 15 s blend into a
+     *  40 s separation. */
+    private static final long RETURN_SPAN_MAX_MS = 10_000L;
 
     /** Below this a written edit is not a recording (the same "did the file come out
      *  plausibly" check the audio pre-cache makes, at a lower bar because this is a
@@ -208,10 +209,13 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         long removalMs = request.removalMs;
         long spanMs = returnSpanMs(request.beatPeriodMs);
         long headMs = removalMs + spanMs;
-        Logger.info("transition: rendering the DJ edit for {} — vocals out for the first {}ms,"
-                        + " back on a bar line inside the next {}ms; source {}Hz, window {}ms from"
-                        + " the file's own start (so the file's timeline is the track's timeline)",
-                request.title(), removalMs, spanMs, format.rate, headMs);
+        Logger.info("transition: rendering the DJ edit for {} — vocals at exactly zero for the"
+                        + " first {}ms (the whole blend), back on a bar line inside the next {}ms"
+                        + " (never earlier than {}ms after the blend ends); source {}Hz, window"
+                        + " {}ms from the file's own start (so the file's timeline is the track's"
+                        + " timeline)",
+                request.title(), removalMs, spanMs, DjEdit.VOCAL_RETURN_MARGIN_MS, format.rate,
+                headMs);
 
         // 1. The head, decoded from the file's start. Starting at zero is what keeps every
         //    offset the transition machinery already computes — the content start, the
@@ -516,21 +520,34 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         return bars;
     }
 
-    /** The plan for the window: the return ends on the first bar line at or after the
-     *  removal window, and without a grid it ends with the window itself. */
+    /** The plan for the window: the return ends on the first bar line at or after the removal
+     *  window PLUS the margin the user's rule needs ({@link DjEdit#VOCAL_RETURN_MARGIN_SEC}), and
+     *  without a grid it ends at that instant itself.
+     *
+     *  <p>⚠️ Round 17: the search starts at {@code removal + margin} rather than at the removal
+     *  window. The margin is what keeps the voice at exactly zero for the whole blend — the old
+     *  search could (and did, whenever the blend length was a whole number of bars) land the
+     *  return exactly ON the blend's end, which put the last half second of the lift inside the
+     *  blend. {@link DjEdit#plan} enforces the same floor, so a bar line the caller hands in
+     *  earlier than that is ignored rather than honoured. */
     private DjEdit.Plan editPlan(double[] inBars, Request request, double windowSec,
                                  double removalSec, long headMs) {
+        double earliest = removalSec + DjEdit.VOCAL_RETURN_MARGIN_SEC;
         if (inBars == null || inBars.length == 0) {
             Logger.info("transition: DJ edit for {}: no bar grid for this track, so the vocals"
-                            + " return at the end of the {}ms window", request.title(),
-                    request.removalMs);
+                            + " return {}ms after the {}ms blend ends, at the margin's own"
+                            + " instant (no bar line to land on)",
+                    request.title(), DjEdit.VOCAL_RETURN_MARGIN_MS, request.removalMs);
             return DjEdit.plan(removalSec, Double.NaN);
         }
-        double at = DjEdit.firstBarAtOrAfter(inBars, removalSec);
+        double at = DjEdit.firstBarAtOrAfter(inBars, earliest);
         Logger.info("transition: DJ edit for {}: vocals return {}",
                 request.title(), Double.isNaN(at)
-                        ? "at the end of the window (no bar line in it)"
-                        : "at " + String.format(java.util.Locale.US, "%.3f", at) + "s (a bar line)");
+                        ? "at the end of the window plus the " + DjEdit.VOCAL_RETURN_MARGIN_MS
+                                + "ms margin (no bar line in it)"
+                        : "at " + String.format(java.util.Locale.US, "%.3f", at) + "s (a bar line"
+                                + " at or after the blend's end plus "
+                                + DjEdit.VOCAL_RETURN_MARGIN_MS + "ms)");
         return DjEdit.plan(removalSec, at);
     }
 
@@ -609,12 +626,13 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         return request.removalMs + returnSpanMs(request.beatPeriodMs);
     }
 
-    /** How far past the removal window the head has to reach for the return to land on a
-     *  bar line: one bar of the incoming track at its own tempo, plus a second. */
+    /** How far past the removal window the head has to reach for the return to land on a bar
+     *  line: the round-17 margin (the voice stays at zero through the blend and starts coming
+     *  back after it), one bar of the incoming track at its own tempo, plus a second of slack. */
     private static long returnSpanMs(double beatPeriodMs) {
-        if (!(beatPeriodMs > 0)) return 1_500L;
+        if (!(beatPeriodMs > 0)) return DjEdit.VOCAL_RETURN_MARGIN_MS + 1_500L;
         long bar = Math.round(beatPeriodMs * DjEdit.BEATS_PER_BAR);
-        return Math.min(RETURN_SPAN_MAX_MS, bar + 1_000L);
+        return Math.min(RETURN_SPAN_MAX_MS, DjEdit.VOCAL_RETURN_MARGIN_MS + bar + 1_000L);
     }
 
     // --- decode / resample --------------------------------------------------

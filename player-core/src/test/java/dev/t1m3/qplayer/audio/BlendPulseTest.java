@@ -84,24 +84,26 @@ public class BlendPulseTest {
         float[] a = tail(kicks(20d, PHASE_SEC, 60d));
         float[] b = head(bedWithKicks(20d));
         long swap = 7_500L;
-        // The shipped curve is 2.6; the comparison runs a shorter hold (what round 11
-        // shipped) against it and against a longer one, so the direction is pinned from both
-        // sides rather than against a copy of the shipped exponents.
+        // ⚠️ Round 17: this is the candidate family ({@code cos(t^p)}), no longer the shipped
+        // shape — {@link FadeCurve#DJ_BLEND} is defined in decibels now and cannot be expressed
+        // as one of these exponents at all, so the shipped curve is not in the comparison. What
+        // the sweep still pins is the instrument's own direction: a longer hold must leave the
+        // outgoing track higher at three quarters and must show up as more summed power.
         BlendPulse.Result shortHold = BlendPulse.measure(a, b, RATE, RAMP_MS,
                 1.8d, 0.55d, swap, PERIOD_MS);
-        BlendPulse.Result shipped = BlendPulse.measure(a, b, RATE, RAMP_MS,
-                FadeCurve.DJ_BLEND, swap, PERIOD_MS);
+        BlendPulse.Result middle = BlendPulse.measure(a, b, RATE, RAMP_MS,
+                2.6d, 0.55d, swap, PERIOD_MS);
         BlendPulse.Result longer = BlendPulse.measure(a, b, RATE, RAMP_MS,
                 3.2d, 0.55d, swap, PERIOD_MS);
-        System.out.println("hold 1.80  (round 11): " + shortHold.describe());
-        System.out.println("DJ_BLEND   (2.60): " + shipped.describe());
+        System.out.println("hold 1.80: " + shortHold.describe());
+        System.out.println("hold 2.60: " + middle.describe());
         System.out.println("hold 3.20: " + longer.describe());
         assertTrue("a longer hold must leave the outgoing track higher at three quarters: "
-                        + shortHold.outgoingAt75PctDb + " -> " + shipped.outgoingAt75PctDb,
-                shipped.outgoingAt75PctDb > shortHold.outgoingAt75PctDb);
-        assertTrue("and longer still must not go backwards: " + shipped.outgoingAt75PctDb
+                        + shortHold.outgoingAt75PctDb + " -> " + middle.outgoingAt75PctDb,
+                middle.outgoingAt75PctDb > shortHold.outgoingAt75PctDb);
+        assertTrue("and longer still must not go backwards: " + middle.outgoingAt75PctDb
                         + " -> " + longer.outgoingAt75PctDb,
-                longer.outgoingAt75PctDb >= shipped.outgoingAt75PctDb);
+                longer.outgoingAt75PctDb >= middle.outgoingAt75PctDb);
         assertTrue("holding the outgoing track up longer must show up as more summed power: "
                         + shortHold.maxPowerDb + " -> " + longer.maxPowerDb,
                 longer.maxPowerDb > shortHold.maxPowerDb);
@@ -151,21 +153,38 @@ public class BlendPulseTest {
 
     @Test
     public void aMatchedHandOverLeavesNoHole() {
-        // The same arrangement with the incoming track carrying its own kick at the outgoing
-        // track's level: the low end changes hands without the bottom dropping.
+        // ⚠️ Round 17 rewrites what "matched" means, and the number is why: the low end changes
+        // hands in ONE step, so the low band's level survives it only where the two decks' gains
+        // are equal — and with the shipped shape those curves cross at t = 0.14, not at the 0.6
+        // the hand-over used to sit at. Measured here: no hand-over at all leaves a -1.9 dB hole
+        // (the outgoing track's own descent to its bed), the hand-over at the level-matched
+        // instant adds 0.3 dB to it, and the round-12 placement (0.6) opens it to -7.3 dB —
+        // because from the bed until the hand-over the only low end in the mix is a deck that has
+        // been taken 10 dB down, and then a second deck's bottom arrives from nowhere.
         float[] a = tail(kicks(20d, PHASE_SEC, 60d));
         float[] b = head(bedWithKicks(20d));
-        BlendPulse.Result r = BlendPulse.measure(a, b, RATE, RAMP_MS,
-                FadeCurve.DJ_BLEND, 7_500L, PERIOD_MS);
-        System.out.println("matched hand-over: " + r.describe());
-        assertTrue("the low end must not be reported as holing: " + r.lowHoleDb + "dB",
-                r.lowHoleDb > -1d);
+        long matchedAt = Math.round(RAMP_MS * StemBridge.SWAP_AT);
+        BlendPulse.Result none = BlendPulse.measure(a, b, RATE, RAMP_MS,
+                FadeCurve.DJ_BLEND, -1L, PERIOD_MS);
+        BlendPulse.Result matched = BlendPulse.measure(a, b, RATE, RAMP_MS,
+                FadeCurve.DJ_BLEND, matchedAt, PERIOD_MS);
+        BlendPulse.Result late = BlendPulse.measure(a, b, RATE, RAMP_MS,
+                FadeCurve.DJ_BLEND, Math.round(RAMP_MS * 0.6d), PERIOD_MS);
+        System.out.println("no hand-over:      " + none.describe());
+        System.out.println("hand-over at " + matchedAt + "ms: " + matched.describe());
+        System.out.println("hand-over at 9000ms: " + late.describe());
+        assertTrue("the hand-over where the curves cross must cost nothing measurable: "
+                        + none.lowHoleDb + " -> " + matched.lowHoleDb + "dB",
+                matched.lowHoleDb >= none.lowHoleDb - 1d);
+        assertTrue("... and must be far better than waiting until the outgoing track is already"
+                        + " a bed: " + matched.lowHoleDb + " vs " + late.lowHoleDb + "dB",
+                matched.lowHoleDb >= late.lowHoleDb + 3d);
         assertTrue("and its last slice must be at the window's own peak",
-                Math.abs(r.lowLevelDb[r.lowLevelDb.length - 1]) < 1d);
+                Math.abs(matched.lowLevelDb[matched.lowLevelDb.length - 1]) < 1d);
     }
 
     @Test
-    public void theStagedShapeLeavesTheOutgoingTrackHigherThanTheSymmetricOne() {
+    public void theStagedShapeLeavesTheOutgoingTrackLowerThanTheSymmetricOne() {
         float[] a = tail(kicks(20d, PHASE_SEC, 60d));
         float[] b = head(bedWithKicks(20d));
         BlendPulse.Result symmetric = BlendPulse.measure(a, b, RATE, RAMP_MS,
@@ -174,15 +193,25 @@ public class BlendPulseTest {
                 FadeCurve.DJ_BLEND, 7_500L, PERIOD_MS);
         System.out.println("equal power: " + symmetric.describe());
         System.out.println("dj blend:    " + staged.describe());
-        assertTrue("the staged shape is the one that keeps the outgoing track up: "
+        // ⚠️ Round 17 reverses this assertion, deliberately. Until round 16 the staged shape's
+        // whole claim was "the outgoing track holds its own level for most of the window"
+        // (outgoingAt75PctDb −2.7 dB against the symmetric −3.0), and its own test said so.
+        // That hold is what made the outgoing track's unremovable vocals the loudest thing in
+        // the blend; the shape now takes it down to a bed (−10 dB) instead, so at three
+        // quarters it is far below the symmetric curve — and the both-audible share it used to
+        // win on is now deliberately the smaller one.
+        assertTrue("the staged shape is the one that takes the outgoing track DOWN: "
                         + symmetric.outgoingAt75PctDb + " -> " + staged.outgoingAt75PctDb,
-                staged.outgoingAt75PctDb > symmetric.outgoingAt75PctDb);
-        assertTrue("and it holds both tracks audible for longer, which is the arithmetic"
-                        + " number the curve owns: "
+                staged.outgoingAt75PctDb < symmetric.outgoingAt75PctDb);
+        assertTrue("... by a lot, not a little: " + symmetric.outgoingAt75PctDb + " -> "
+                        + staged.outgoingAt75PctDb,
+                staged.outgoingAt75PctDb < symmetric.outgoingAt75PctDb - 12d);
+        assertTrue("and it is the one that spends LESS of the ramp with both tracks within 6 dB"
+                        + " — two loud tracks at once is the defect, not the goal: "
                         + FadeCurve.EQUAL_POWER.bothAudibleText(RAMP_MS)
                         + " vs " + FadeCurve.DJ_BLEND.bothAudibleText(RAMP_MS),
                 FadeCurve.DJ_BLEND.bothAudibleMs(RAMP_MS)
-                        > FadeCurve.EQUAL_POWER.bothAudibleMs(RAMP_MS));
+                        < FadeCurve.EQUAL_POWER.bothAudibleMs(RAMP_MS));
     }
 
     @Test

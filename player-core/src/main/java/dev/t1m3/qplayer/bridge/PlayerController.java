@@ -2280,6 +2280,52 @@ public final class PlayerController {
                 FadeCurve.EQUAL_POWER.bothAudibleMs(rampMs) + "ms", rampMs);
     }
 
+    /**
+     * The two tracks' own measured material, as the one verdict a chooser can rule on: see
+     * {@link TransitionContext.PairFit}. Read here because this is where the profiles are —
+     * both are per-track caches the boundary reads anyway ({@code alignToBeatGrid} asks for the
+     * same two profiles a moment later) — and because the verdict has to exist BEFORE the
+     * chooser answers: the rules that choose FADE_OUT_IN do so on it.
+     *
+     * <p>Nothing here is measured on demand: a track nobody has played yet has no profiles and
+     * the answer is {@link TransitionContext.PairFit#UNMEASURED}, which fires no rule. That is
+     * the same "measured at the decision, never waited for" contract the silence measurements
+     * have, and it is what keeps this off the playback path.
+     */
+    private TransitionContext.PairFit pairFitOf(Track cur, Track next) {
+        BeatProfile a = beatProfileOf(cur);
+        BeatProfile b = beatProfileOf(next);
+        if (a == null || b == null) return TransitionContext.PairFit.UNMEASURED;
+        MixNaturaliser.Keys keys = MixNaturaliser.keys(a, b);
+        boolean gridsMeasured = a.trustworthy() && b.trustworthy();
+        // ⚠️ "Lockable" is deliberately wider than "stretchable": two tempos an octave apart are
+        // the same groove read twice (see BeatProfile.relatedTempo), and a pair the app cannot
+        // phase-lock is still not a pair whose rhythms fight. What the rule needs is a clash, not
+        // a correction it declined to apply.
+        double ratio = MixNaturaliser.speedFor(a, b);
+        boolean stretchable = MixNaturaliser.withinClamp(ratio);
+        boolean related = BeatProfile.relatedTempo(a, b);
+        boolean lockable = gridsMeasured
+                && (BeatProfile.gridsCompatible(a, b, blendDurationMs()) || stretchable || related);
+        String what = String.format(java.util.Locale.US,
+                "keys %s (chroma distance %.2f%s), tempo %s (%.1f vs %.1fBPM, the incoming at"
+                        + " x%.4f%s%s)",
+                keys.measured ? (keys.clash() ? "measured and clashing" : "measured")
+                        : "not measured",
+                keys.measured ? keys.distance : 0d,
+                keys.measured && keys.allowedShift != 0
+                        ? String.format(java.util.Locale.US, ", best allowed shift %+d reaches"
+                                + " %.2f", keys.allowedShift, keys.allowedDistance)
+                        : "",
+                gridsMeasured ? (lockable ? "lockable" : "UNRELATED") : "not measured",
+                a.bpm(), b.bpm(), ratio,
+                stretchable ? String.format(java.util.Locale.US, ", inside the x%.2f clamp",
+                        1d + IncomingMix.MAX_SPEED_STEP) : " (outside the clamp)",
+                related ? " and a relative of A's (the same groove)" : "");
+        return new TransitionContext.PairFit(keys.measured, keys.clash(), gridsMeasured,
+                lockable, keys.measured ? keys.distance : 0d, what, what);
+    }
+
     /** Decide the kind (and its overlap, and its curve) for one boundary, once.
      *  The chooser only sees metadata; everything it answers is checked here
      *  against what this boundary can actually do. */
@@ -2312,7 +2358,8 @@ public final class PlayerController {
             plan = transitionChooser.plan(
                     new TransitionContext(cur, next, remaining, dur,
                             crossfadeStreamable(cur), crossfadeStreamable(next),
-                            measuredTailSilenceMs(cur), measuredHeadSilenceMs(next)));
+                            measuredTailSilenceMs(cur), measuredHeadSilenceMs(next),
+                            pairFitOf(cur, next)));
             if (plan == null) plan = TransitionPlan.of(TransitionKind.CUT);
             // The chooser labels the branch it took ("AI cached", "rule: ..."),
             // which is the one thing a decision needs to be auditable from the log.
@@ -2336,6 +2383,11 @@ public final class PlayerController {
             // with a length class, not with a reading of the outgoing track's file.
             if (kind == TransitionKind.CROSSFADE) {
                 plan = widenForOrdinaryPair(plan, cur, next);
+                // ⚠️ Then the no-edit fallback, and the ORDER matters: it has to be able to take
+                // back what `widenForOrdinaryPair` just gave (a 15–25 s blend), because the
+                // reason the long blend is right is exactly what this pair does not have — see
+                // capWithoutEdit.
+                plan = capWithoutEdit(plan, next);
             }
             if (kind.overlapping() && plan.overlapMs() > remaining - CROSSFADE_TAIL_MS) {
                 // The boundary is closer than the overlap the plan asks for: cut the
@@ -2671,6 +2723,26 @@ public final class PlayerController {
                 }
             }
             long overlap = plan != null && plan.kind().overlapping() ? plan.overlapMs() : 0L;
+            // ⚠️ Round 17: the blend may not outlive the edit that keeps the voice out of it.
+            // The edit is rendered for the SETTING (过渡时长), and the controller can widen the
+            // blend past it — the plain-ending rule extends it by up to 5 s, and a plain 16.5 s
+            // ending against a 15 s setting is exactly what the device did (a 16525 ms blend
+            // whose incoming deck's edit put the voice back at 16169 ms: 356 ms of voice inside
+            // the blend, which the boundary's own ordering row detected and reported). The
+            // instant is known here — the render's own bar line when its name carries one, the
+            // rule's bound otherwise — and this is the last place the plan can still be changed,
+            // so the blend is capped to it and the label says why.
+            if (plan != null && plan.kind().overlapping() && edit != null && vocalIn > 0L
+                    && vocalIn < plan.overlapMs()) {
+                plan = plan.withOverlap(vocalIn, String.format(java.util.Locale.US,
+                        "capped to the edit's own vocals-out window (%dms): the blend the setting"
+                                + " asks for is %dms and this render holds the incoming track's"
+                                + " voice out until %dms of it, so a longer blend would put a"
+                                + " vocal inside the blend — the voice comes back as the blend"
+                                + " ends rather than during it",
+                        vocalIn, plan.overlapMs(), vocalIn));
+                overlap = vocalIn;
+            }
             if (MixNaturaliser.pitchFitsBeforeVocals(vocalIn, overlap)) {
                 long deadline = vocalInFileMs - MixNaturaliser.VOCAL_PITCH_MARGIN_MS;
                 // ⚠️ Round 13 took the return in ONE write rather than a sixty-step glide (the
@@ -2685,6 +2757,16 @@ public final class PlayerController {
                 // rather than merely be less well hidden. A grid that is not trustworthy is not
                 // used at all (the single step then lands exactly on the deadline, which is legal
                 // either way).
+                // The key blend: the same deadline, but travelled to over the section rather
+                // than jumped to. Nothing about the RULE changes — the incoming deck's pitch is
+                // its own by `pitchIdentityAtFileMs` — and where the ladder itself has to stop
+                // is a separate question: its steps write the audible deck too, and that deck is
+                // released when the promotion ends the blend, so the last step may not be
+                // planned past it (round 17; the ladder used to be safe only because the rule's
+                // deadline was required to fall inside the blend). Clamped to the last beat of
+                // the incoming track's own grid at or before the promotion, which keeps every
+                // step on the grid, and a section with no room left answers `none` (round 13's
+                // single step, which touches the incoming deck alone).
                 BeatProfile stepGrid = beatProfileOf(incoming);
                 long snapped = deadline;
                 String stepNote = "";
@@ -2697,11 +2779,34 @@ public final class PlayerController {
                                         + " the deadline allows)", deadline - beat);
                     }
                 }
+                // ⚠️ Round 17: the rule's deadline is no longer required to fall inside the
+                // blend (the incoming track's voice comes back after it — see vocalInBlendMs),
+                // so this is the place that has to keep the writes off a deck that is about to
+                // be released. Nothing may be written past the promotion: the ladder's steps
+                // touch the AUDIBLE deck (which the promotion releases microseconds later), and
+                // the single step would land on the promoted track while it is the only one
+                // playing — a pitch jump in the middle of a song rather than inside a blend. So
+                // the return's instant is clamped to the last beat of the incoming track's own
+                // grid at or before the promotion, which is early rather than late and therefore
+                // cannot break the rule (the rule is a deadline).
+                long overlapMs = plan != null && plan.kind().overlapping() ? plan.overlapMs() : 0L;
+                long promotionFileMs = entry + (speed > 0d ? Math.round(overlapMs * speed) : 0L);
+                long promotionBeat = stepGrid != null && stepGrid.trustworthy()
+                        ? stepGrid.beatAtOrBefore(promotionFileMs) : -1L;
+                long latestPossible = promotionBeat > 0L ? promotionBeat : promotionFileMs;
+                String promotionNote = "";
+                if (snapped > latestPossible) {
+                    promotionNote = String.format(java.util.Locale.US,
+                            " The rule's deadline (%dms of the file) is past the promotion (%dms),"
+                                    + " so the return is placed at %dms instead: nothing may be"
+                                    + " written to a deck that is about to be released, and the"
+                                    + " rule is a deadline — earlier is legal. The listener hears"
+                                    + " the modulation end %dms before the blend does.",
+                            snapped, promotionFileMs, latestPossible,
+                            Math.round((snapped - latestPossible) / Math.max(1e-9d, speed)));
+                    snapped = latestPossible;
+                }
                 pitchIdentityAtFileMs = snapped;
-                // The key blend: the same deadline, but travelled to over the section rather
-                // than jumped to. Nothing about the rule changes — the last step IS
-                // `pitchIdentityAtFileMs` — and a section too short to hold a ladder answers
-                // `none` with its own measurement, which is round 13's single step.
                 keyGlide = KeyGlide.plan(nat.semitones(), entry, snapped, stepGrid);
                 long sectionFileMs = keyGlide.sectionFileMs();
                 long sectionBlendMs = speed > 0d ? Math.round(sectionFileMs / speed) : sectionFileMs;
@@ -2712,7 +2817,7 @@ public final class PlayerController {
                                 + " ramp, from the incoming deck's entry at {}ms to the last beat"
                                 + " before the rule's deadline, {}{}); the pitch is back at the"
                                 + " incoming track's own by {}ms of its own file, {}ms before its"
-                                + " vocals arrive at {}ms ({}), inside the {}ms blend. {}",
+                                + " vocals arrive at {}ms ({}), inside the {}ms blend.{}{}",
                         nat.semitones(), sectionFileMs, sectionBlendMs, entry,
                         sectionBlendMs + "ms of the " + overlap + "ms blend the user set",
                         speed != 1d ? String.format(java.util.Locale.US,
@@ -2726,7 +2831,8 @@ public final class PlayerController {
                                 : "the lower bound (the edit says nothing about its return)",
                         overlap,
                         keyGlide.isGliding() ? keyGlide.describe()
-                                : "NO key glide: " + keyGlide.note());
+                                : "NO key glide: " + keyGlide.note(),
+                        promotionNote);
             } else {
                 nat = nat.onlyTempo(dropReason(edited, vocalIn, entry, overlap));
                 Logger.info("transition: pitch rule — no transposition on this pair: {}",
@@ -2779,35 +2885,138 @@ public final class PlayerController {
                         : (!bassSwapEnabled ? "bass swap off (settings)"
                                 : "no bass swap for this boundary (no beat of A to put it on, or"
                                         + " the overlap is shorter than a beat)"));
+        if (plan != null && plan.kind().overlapping()) {
+            // The user's rule, as a row of times rather than as an absence of complaints:
+            // where the outgoing track's backing stops being blended (the modulation's last
+            // write, or nothing at all when the pair was not transposed), where the blend ends,
+            // and when the incoming track's own voice is first heard. The invariant is the
+            // order of those three, and it is the whole point of round 17's timing changes.
+            logBackingBeforeVocals(mix, edit, entry, speed, plan);
+            logKeyConvergence(mix);
+        }
         return new BeatAlignment(plan, entryMs,
                 beatLog + "; " + mixFragment(nat, alignment, swapNote, pitchNote), mix);
+    }
+
+    /**
+     * "The backing is fully blended before any of the incoming track's vocals" — the
+     * invariant the user's rule is, written as the three instants it is about (in the blend's
+     * own ramp, i.e. the listener's clock) and logged for every overlapping boundary.
+     *
+     * <p>Why it has to be a log line and not a comment: the app cannot remove the outgoing
+     * track's vocals, so "no loud vocals inside the blend" is a statement about the incoming
+     * deck's file (is the voice out of it?) and about <em>when</em> the two events happen — and
+     * the only place both are known is here, one decision before the boundary runs. The row is
+     * printed whether or not the pair was transposed, and the two shapes it can take say which
+     * of the two paths this boundary is on:
+     * <ul>
+     *   <li><b>with a DJ edit</b> — the incoming deck's voice is at exactly zero for the whole
+     *       blend and comes back after it, so the row is three numbers and a check;</li>
+     *   <li><b>without one</b> — the deck plays the track's own master, its voice is in the
+     *       blend's first sample, and no timing can fix that. The row says so and names the
+     *       shortened blend {@link #capWithoutEdit} left this boundary with.</li>
+     * </ul>
+     */
+    private void logBackingBeforeVocals(IncomingMix mix, EditRef edit, long entry,
+                                        double speed, TransitionPlan boundary) {
+        long blendEndMs = boundary != null ? boundary.overlapMs() : blendDurationMs();
+        long modulationEndMs = -1L;
+        String modulationHow = "the pair was not transposed, so there is no modulation to finish";
+        if (mix != null && mix.keyGlide() != null && mix.keyGlide().isGliding()) {
+            modulationEndMs = blendMsOf(mix.keyGlide().identityAtFileMs(), entry, speed);
+            modulationHow = String.format(java.util.Locale.US,
+                    "the key modulation's last write is at %dms of the file (%s on each deck)",
+                    mix.keyGlide().identityAtFileMs(), mix.keyGlide().steps() + " steps");
+        }
+        long firstVoiceMs;
+        String voiceHow;
+        if (edit == null) {
+            firstVoiceMs = 0L;
+            voiceHow = "no DJ edit for this pair, so the incoming deck plays the track's own"
+                    + " master and its voice is in the blend's first sample — the backing cannot"
+                    + " be blended before a voice that is already there";
+        } else if (edit.vocalReturnEndMs > 0L) {
+            firstVoiceMs = blendMsOf(edit.vocalReturnEndMs - DjEdit.RETURN_RAMP_MS, entry, speed);
+            voiceHow = String.format(java.util.Locale.US,
+                    "the DJ edit's own bar line puts the voice back at %dms of the file"
+                            + " (%dms at unity, %dms of ramp before it)",
+                    edit.vocalReturnEndMs - DjEdit.RETURN_RAMP_MS, edit.vocalReturnEndMs,
+                    DjEdit.RETURN_RAMP_MS);
+        } else {
+            firstVoiceMs = blendDurationMs() + DjEdit.VOCAL_RETURN_MARGIN_MS
+                    - DjEdit.RETURN_RAMP_MS - entry;
+            voiceHow = "the DJ edit's name does not carry its return, so this is the rule's own"
+                    + " lower bound (the blend's length plus the margin, minus the return ramp)";
+        }
+        boolean afterBlend = firstVoiceMs >= blendEndMs;
+        StringBuilder verdict = new StringBuilder(170);
+        verdict.append("the voice is ").append(afterBlend
+                ? "outside the blend"
+                : "INSIDE THE BLEND — THE RULE IS NOT MET " + (edit == null
+                        ? "(this deck has no edit to take its voice out of it)"
+                        : "(the edit was rendered for a shorter window than this blend: its own"
+                                + " bar line puts the voice back before the blend ends)"));
+        if (modulationEndMs >= 0L) {
+            verdict.append(String.format(java.util.Locale.US,
+                    ", and the modulation (whose last write is at %dms of the ramp) is over %dms"
+                            + " before the first vocal: %dms <= %dms, with the blend ending at"
+                            + " %dms",
+                    modulationEndMs, firstVoiceMs - modulationEndMs, modulationEndMs, firstVoiceMs,
+                    blendEndMs));
+        } else {
+            verdict.append("; there is no modulation to order ahead of it (this pair was not"
+                    + " transposed), which is the only ordering this boundary has to get right");
+        }
+        Logger.info("transition: backing before vocals — the blend is {}ms long (the outgoing"
+                        + " track's own level is at its bed from a quarter of it and gone by"
+                        + " four fifths either way); {}; the incoming track's voice is first heard"
+                        + " at {}ms of the ramp, {}ms {} its end ({}) — {}",
+                blendEndMs, modulationHow, firstVoiceMs,
+                Math.abs(firstVoiceMs - blendEndMs),
+                firstVoiceMs >= blendEndMs ? "after" : "before", voiceHow, verdict);
+    }
+
+    /** A position in the incoming track's own file as the millisecond of the blend's own ramp —
+     *  the deck plays the file at {@code speed}, so the file's milliseconds are that much longer
+     *  than the listener's. */
+    private static long blendMsOf(long fileMs, long entry, double speed) {
+        return speed > 0d ? Math.round((fileMs - entry) / speed) : fileMs - entry;
+    }
+
+    /** The key blend's own convergence, when this boundary has a ladder and both keys were
+     *  measured: see {@link KeyGlide#convergenceNote}. Silent otherwise (a pair that was not
+     *  transposed has no tonality to travel). */
+    private void logKeyConvergence(IncomingMix mix) {
+        if (mix == null || mix.keyGlide() == null || !mix.keyGlide().isGliding()) return;
+        BeatProfile a = beatProfileOf(outgoingOfBoundary());
+        BeatProfile b = beatProfileOf(incomingOfBoundary());
+        if (a == null || b == null || a.key() == null || b.key() == null) return;
+        String note = mix.keyGlide().convergenceNote(a.key(), b.key());
+        if (note != null) Logger.info("transition: key convergence — {}", note);
     }
 
     /**
      * How far into this blend's own ramp the incoming track's vocals are first heard,
      * ms — the number the pitch rule is measured against, and a <em>lower bound</em>.
      *
-     * <p>With a DJ edit the removal window is the user's blend length and the return ramp
-     * starts {@link DjEdit#RETURN_RAMP_MS} before the end of it, so the earliest the voice
-     * can possibly be audible is the end of the window minus that ramp, minus the offset
-     * the deck starts at. The bar line the return actually lands on is the renderer's
-     * (it estimates a downbeat from the separated bass), and it is always at or after
-     * that — so identity here is identity before the vocals wherever the line fell: the
-     * bound is what makes the rule hold without the controller having to be told where
-     * the line was.
+     * <p>⚠️ Round 17 moved the whole vocal return past the blend's own end, which is the user's
+     * rule read literally (「过渡完再放人声」 — the voice comes after the transition), so this is
+     * now <em>after</em> the blend rather than inside it: the edit holds the voice at exactly
+     * zero for the whole blend and starts the lift {@link DjEdit#VOCAL_RETURN_MARGIN_MS} after
+     * it ends, so the earliest the voice can be audible is the blend's end plus one ramp minus
+     * the margin — and the bar line the return actually lands on is at or after that, never
+     * before. The bound is what makes the pitch rule hold without the controller having to be
+     * told where the line was; when the render does say (every edit this build makes carries its
+     * {@code -v} time), the caller replaces this answer with the real instant.
      *
-     * <p>⚠️ The bound is what a <em>round-12</em> edit leaves: one whose name carries no
-     * return time. Every edit this build renders carries it (see {@code StemEditRenderer.Result}),
-     * and then the caller replaces this answer with the render's own bar line — the rule is
-     * then measured against the real instant rather than against a bound (round 13).
-     *
-     * <p>Without one there is nothing to bound: the deck is playing the track's own
-     * master from its entry, so its vocals are in the first sample of the blend. Zero.
-     * The rule refuses every transposition on that answer, deliberately (see the caller).
+     * <p>Without an edit there is nothing to bound: the deck is playing the track's own master
+     * from its entry, so its vocals are in the first sample of the blend. Zero. The rule refuses
+     * every transposition on that answer (see the caller), deliberately — and the blend itself
+     * is kept short by {@link #capWithoutEdit} for the same reason.
      */
     private long vocalInBlendMs(boolean edited, long entryMs) {
         if (!edited) return 0L;
-        return blendDurationMs() - DjEdit.RETURN_RAMP_MS - entryMs;
+        return blendDurationMs() + DjEdit.VOCAL_RETURN_MARGIN_MS - DjEdit.RETURN_RAMP_MS - entryMs;
     }
 
     /** Why the transposition was dropped, with every time the rule was measured against
@@ -2866,6 +3075,14 @@ public final class PlayerController {
         return i >= 0 && i < queue.size() ? queue.get(i) : null;
     }
 
+    /** The outgoing track of the boundary in flight, or null — the other half of
+     *  {@link #incomingOfBoundary}, for the one caller that needs both keys (the convergence
+     *  report). */
+    private Track outgoingOfBoundary() {
+        int i = transitionKindFrom;
+        return i >= 0 && i < queue.size() ? queue.get(i) : null;
+    }
+
     /** When the low end hands over, given only the outgoing track's grid: the first
      *  beat of A at or after {@link #BASS_SWAP_AT} of the overlap the plan asks for, or null
      *  when
@@ -2877,16 +3094,34 @@ public final class PlayerController {
         return swapAtMs >= 0L ? IncomingMix.bassSwapAt(swapAtMs) : null;
     }
 
-    /** How far into the blend the low end changes hands, as a fraction of it: three fifths
-     *  (round 12; it was the middle). The hand-over is what takes the outgoing track's kick
-     *  away, so this is the instant its rhythm loses its bottom, and moving it later is the
-     *  cheapest thing that can be done about "the first track's beat ends too early" — the
-     *  outgoing track is a single stream, so nothing else about its low end can be shaped.
-     *  Six tenths keeps the kick for 1.5 s longer of a 15 s blend and still leaves the
-     *  incoming track owning the bottom for 40% of the ramp by the time it is promoted, well
-     *  after the point its own content is established (28% of the ramp — the incoming gain
-     *  curve reaches -3 dB there). */
-    private static final double BASS_SWAP_AT = 0.6d;
+    /** How far into the blend the low end changes hands, as a fraction of it: 0.15 since
+     *  round 17 (it was 0.6 in round 12, the middle before that).
+     *
+     *  <p>⚠️ <b>The fraction is not a taste — it is where the two gain curves cross.</b> The
+     *  hand-over takes the outgoing track's low end away in one step and gives the incoming
+     *  track's back in the same step, so the low band's <em>level</em> only survives it
+     *  intact if the two decks' gains are equal at that instant (what the two tracks carry
+     *  down there is assumed comparable — the two masters' own bass levels are not something
+     *  this app can measure). With round 17's shape, {@code outGain} and {@code inGain} cross
+     *  at t=0.14 (0.60 against 0.60, a gap of 0.1 dB) — the outgoing track is on its way down
+     *  to the bed and the incoming track is on its way up — and they never come that close
+     *  again.
+     *
+     *  <p>Measured with {@link dev.t1m3.qplayer.audio.BlendPulse} on the same synthetic pair
+     *  the tests use (a kick track against a bed with kicks on the same grid, a 15 s ramp):
+     *  the blend's lowest slice falls <b>−1.9 dB</b> below its loudest with no hand-over at
+     *  all, <b>−2.2 dB</b> with the hand-over at this fraction, and <b>−7.3 dB</b> at the old
+     *  0.6. The 5 dB between those is the hole the round-12 placement opens once the outgoing
+     *  track is a bed rather than a full-level track: from the bed until the hand-over the only
+     *  low end in the mix is a deck that has been taken 10 dB down, and then a second deck's
+     *  bottom arrives from nowhere.
+     *
+     *  <p>What it costs is the thing round 12 was answering: the outgoing track's kick is gone
+     *  2.3 s into a 15 s blend instead of 9 s. That is affordable <em>because of the same
+     *  shape change</em> — the outgoing track is 10 dB down by 4.5 s and gone by 12.3 s, so its
+     *  kick stops being the listener's beat reference about then either way — and the bridge
+     *  ({@code StemBridge}) exists to carry that low end forward when it can. */
+    private static final double BASS_SWAP_AT = 0.15d;
 
     /**
      * The first beat of the outgoing track at or after {@link #BASS_SWAP_AT} of the overlap —
@@ -3136,6 +3371,59 @@ public final class PlayerController {
         }
         return widened;
     }
+
+    /**
+     * The blend when there is no DJ edit for the incoming track: <b>brief</b>, and labelled as
+     * the degraded path.
+     *
+     * <p>The user's rule is about voices: 「过渡部分不要保留非常高亢人声…过渡完再放人声，实在不行就
+     * 播淡的人声」 — do not keep loud vocals inside the blend, bring them after it, and if that
+     * truly cannot be done then play faded vocals. With an edit the voice is taken out of the
+     * incoming deck's file for the whole blend, which is the first half of the rule; the second
+     * half (what happens without one) cannot be done at all by timing, because the deck is then
+     * playing the track's own master and its voice is in the blend's first sample. The app
+     * cannot remove the <em>outgoing</em> track's voice either (that would mean switching the
+     * audible deck's source mid-playback — the mechanism behind the P0 and the replay
+     * incidents). So the honest fallback is what is left: keep the stretch where two voices are
+     * audible as short as possible, and say so.
+     *
+     * <p><b>Eight seconds</b> — the length the ordinary blend used before round 10 — because it
+     * is the one length that is both clearly shorter than the 15–30 s the user asked for and long
+     * enough to still be a blend rather than a seam ({@link TransitionPlan#curveOr} also still
+     * gives it the DJ shape). With it, the incoming track's voice is inside the blend for the
+     * whole 8 s and the outgoing one is 10 dB down within 2.4 s and gone by 6.6 s; before this
+     * cap the same pair ran the blend the user set, with both voices at full level for all of
+     * it — the case the user reported as 「人声混合得很乱，问题挺严重」.
+     *
+     * <p>What is <em>not</em> shortened: the animation, the kind, the curve, the low-end
+     * hand-over, the fade of the outgoing track. Only the window shrinks. And the label carries
+     * the whole reason, so "this boundary blended for 8 s although the setting says 20" is
+     * explained in the same line as the decision, with the words {@code DEGRADED} in it.
+     *
+     * <p>⚠️ The check is a stat (does the file exist for this pair at the user's blend length),
+     * and it runs at DECISION time (~45 s before the boundary), which is where every other edit
+     * fact about this boundary is read as well. A render that lands after this instant does not
+     * restore the long blend for this boundary — the ramp's length is already fixed by then —
+     * though the deck will still play the edit it lands (its voice just comes back later than
+     * the 8 s blend ends, which is the safe direction).
+     */
+    private TransitionPlan capWithoutEdit(TransitionPlan plan, Track next) {
+        if (plan == null || plan.overlapMs() <= DEGRADED_BLEND_MS) return plan;
+        if (stemEditRenderer == null) return plan;              // a host with no stem path at all
+        if (djEditFor(next) != null) return plan;                // the voice is out of the blend
+        return plan.withOverlap(DEGRADED_BLEND_MS, String.format(java.util.Locale.US,
+                "DEGRADED: no DJ edit for this pair (no verified model, or the render is not"
+                        + " ready), so the incoming deck plays the track's own master and its"
+                        + " vocals are inside the blend — the blend is cut to %dms rather than the"
+                        + " %dms the user asked for, so the two voices are together only briefly"
+                        + " (实在不行就播淡的人声; the outgoing track is at a -10dB bed from a"
+                        + " quarter of it either way)",
+                DEGRADED_BLEND_MS, plan.overlapMs()));
+    }
+
+    /** How long the blend is kept when there is no DJ edit to take the incoming track's vocals
+     *  out of it: see {@link #capWithoutEdit} for the whole derivation. */
+    private static final long DEGRADED_BLEND_MS = 8_000L;
 
     /** The one line that says how a boundary was decided: the kind and its overlap,
      *  who chose it (the local rules, or the AI — cached or fresh), why a CUT was

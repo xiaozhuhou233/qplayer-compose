@@ -36,12 +36,12 @@ public enum FadeCurve {
     },
 
     /**
-     * The staged, DJ-shaped hand-over: the incoming track arrives <em>early and
-     * low</em> (a bed under the outgoing one, not a mirror of its decay), the
-     * outgoing track <em>holds</em> near its own level for most of the window and
-     * then leaves over a short tail at the end instead of decaying across the whole
-     * of it. This is the shape that makes a long overlap read as a mix rather than
-     * as a fade.
+     * The staged, DJ-shaped hand-over: the outgoing track is <em>taken down to a low bed
+     * early</em> and then <em>leaves</em> it part way through, and the incoming track
+     * arrives as a bed under it and grows to its own level by the end of the window.
+     * This is the shape that makes a long overlap read as a mix rather than as a fade —
+     * and, since round 17, the one that keeps the outgoing track's (unremovable) vocals
+     * from being the loudest thing in the blend.
      *
      * <p><b>Why the symmetric curves read as a fade.</b> With {@code cos}/{@code sin}
      * the two levels are only comparable while {@code t} is near the middle: the
@@ -52,84 +52,115 @@ public enum FadeCurve {
      * track up and the last third fading the other one out, which the ear reads as
      * "the song changed" — the complaint this curve answers.
      *
-     * <p>The two sides are deliberately not the same function of the same exponent.
-     * The outgoing one is the equal-power cosine of {@code t^2.6} <em>multiplied by a
-     * release window</em> (see {@link #OUT_RELEASE_FRACTION}): flat for most of the
-     * window (within 1 dB until {@code t}=0.6, -2.7 dB at three quarters), then
-     * leaving over an explicit exit instead of over its exponent's own tail. The
-     * incoming one is the sine of {@code t^0.55}: it reaches half its level within
-     * the first seventh of the overlap and is a real bed from there on, and it keeps
-     * the last stretch to itself as the outgoing track goes. The pair therefore sits
-     * within 6 dB of each other for about two thirds of the overlap — <em>both tracks
-     * audible at once</em>, which is what "sounds like a mix" means — at the cost of
-     * summing about 2.3 dB above a single track in the middle (two tracks at 0.9 each
-     * have 1.6 of the power of one, so a correlated pair can peak higher; the low-end
-     * hand-over is what keeps the loudest, most correlated part — the bass — from
-     * ever doubling).
+     * <p><b>What round 17 changed, and why.</b> Rounds 12–16 held the outgoing track
+     * within 3 dB of its own level until three quarters of the window. That maximised
+     * the both-audible share (68%) — and it was the wrong target, because the reason
+     * the listener hears "two songs fighting" is not that both are audible, it is that
+     * both are <em>loud</em>, and the outgoing track's vocals cannot be taken out of it
+     * (see {@link #OUT_BED_DB}). The shape is now written in <b>decibels</b>, in three
+     * eased stretches: down into a −10 dB bed over the first three tenths, held there
+     * until the middle, and gone (six decibels under {@link #INAUDIBLE_DB}) by 82%.
      *
-     * <p>The exponents are the whole tuning: raising the outgoing's makes its hold
-     * longer and its exit shorter, lowering the incoming's makes its bed arrive
-     * earlier. They were chosen so that the both-audible share is about 72% against
-     * the symmetric pair's 41% while the mid-overlap power bump stays near 2.3 dB
-     * ({@code FadeCurveTest} measures both, and the class's own doc carries the
-     * measurement each exponent was picked from).
+     * <p>Measured over a 15 s ramp ({@code FadeCurveTest} prints the same table; the
+     * "before" column is what rounds 12–16 shipped):
+     *
+     * <pre>
+     *                     t=0.25   t=0.50   t=0.75   t=0.90   -30dB at   -60dB at   both6dB
+     * before (cos t^2.6)   -0.0dB   -0.3dB   -2.7dB  -17.9dB   14.10s     14.72s       68%
+     * after  (this shape)  -9.3dB  -10.0dB  -59.6dB  -66.0dB    9.46s     11.28s       17%
+     * </pre>
+     *
+     * <p>So the outgoing track's vocals are 10 dB down within the first quarter of the
+     * blend, 30 dB down by the start of its last third and gone 3.7 s before the blend
+     * ends — against "at its own level until three quarters, then gone in a second". The
+     * both-audible share falls from 68% to 17%, and that is the point rather than a
+     * regression: the earlier number described two tracks at their own level at once.
+     *
+     * <p>The incoming track is the sine of {@code t^0.45} (see {@link #IN_BED_EXPONENT}):
+     * it reaches half its level within the first tenth of the window, is a real bed from
+     * there on, and owns the last stretch alone. The two are summed, so the blend's own
+     * loudness dips about 1.9 dB at a fifth of the ramp (the outgoing track leaving faster
+     * than the incoming one arrives) and is back at one track's level by two thirds of it;
+     * the peak every earlier version had — up to +2.3 dB in the middle — is gone (+0.2 dB,
+     * a dip in the middle instead).
      */
     DJ_BLEND("DJ 式") {
-        /** How much of the outgoing track's ramp is spent holding: the cosine is taken of
-         *  {@code t} raised to this, so a bigger exponent means a longer hold — and, before
-         *  {@link #OUT_RELEASE_FRACTION} existed, a shorter, later exit as well.
+        /**
+         * The level the outgoing track is brought down to, dB below its own full scale, for
+         * the body of the blend — the "淡一点，要不抢了" half of the shape.
          *
-         *  <p><b>2.6 since round 12</b> (it was 1.8), because the complaint about the long
-         *  blend was still "it fades": the outgoing track's rhythm was leaving while the
-         *  incoming track's was only arriving. At three quarters of the ramp the outgoing
-         *  track is 1.8 dB louder than it used to be and at nine tenths it is 2.7 dB
-         *  louder, for 0.3 dB more summed power in the middle and a both-audible share of
-         *  72% against 67%.
+         * <p>The staged shape used to hold the outgoing track at its own level for most of
+         * the window and spend the whole exit at the end (rounds 12–16, {@code cos(t^2.6)}).
+         * The measurement that ended it is a listening one: with the outgoing track at unity
+         * and the incoming one arriving underneath it, the outgoing track's <em>vocals</em> —
+         * which this app cannot remove, because stripping them would mean switching the
+         * audible deck's source mid-playback, the mechanism behind the P0 ("playback died
+         * after a transition") and the replay incidents — stay the loudest thing in the room
+         * for the whole blend, and two sets of vocals at once is the "人声混合得很乱" the
+         * user reported as a serious problem. Nothing about the material can fix that from
+         * inside the deck; the only lever is level.
          *
-         *  <p><b>The exponent no longer shapes the exit.</b> Round 16 gave the exit its own
-         *  shape ({@link #OUT_RELEASE_FRACTION}) after the growth of this number turned the
-         *  hold into a cliff: the outgoing track sits within 3 dB of its own level until
-         *  three quarters of the ramp and then carries the whole 8.7 dB to silence in the
-         *  last tenth, which the user heard as 「上一首歌戛然而止」 — the previous song cut
-         *  off. The two jobs are now separate on purpose: this exponent says how long the
-         *  outgoing track holds, the window below says how it leaves. The hold is unchanged
-         *  at 2.6 — it is the shape the earlier round tuned and nothing about it was wrong. */
-        private static final double OUT_HOLD_EXPONENT = 2.6d;
+         * <p>Ten decibels is a third of the amplitude and about half the loudness: the
+         * outgoing track is still plainly there as the bed the incoming one is built over —
+         * which the key blend needs, since its ladder moves <em>both</em> decks — while its
+         * vocals sit 10 dB under the incoming track's own material instead of on top of it.
+         * The cost is measured, not hidden: the two tracks are within 6 dB of each other for
+         * about a sixth of the ramp instead of two thirds
+         * ({@link #bothAudibleMs(long)} — see the class's table), because a track that is
+         * deliberately 10 dB down is not "both tracks at the same level". That is the point
+         * of the change: the earlier rounds' 68% was two full-level tracks at once.
+         */
+        private static final double OUT_BED_DB = -10d;
 
         /**
-         * The release window: the last quarter of the ramp is where the outgoing track
-         * leaves, whatever the hold exponent is doing.
+         * How much of the ramp is spent stepping down into {@link #OUT_BED_DB}: the first
+         * three tenths, with zero slope at both ends so the step is a fade rather than a
+         * duck.
          *
-         * <p>Until {@code t = 1 - OUT_RELEASE_FRACTION} the gain is the hold shape alone;
-         * from there it is the hold shape multiplied by a raised cosine, which reaches
-         * exactly zero at {@code t}=1 <em>with zero slope</em> — the level falls away
-         * smoothly instead of plunging. The previous form (the hold shape's own tail, no
-         * window) left the outgoing at -2.7 dB three quarters of the way through and at
-         * -8.7 dB at nine tenths: held at its own level and then gone inside a second and a
-         * half, which is the "the song stopped" the window answers.
-         *
-         * <p>Measured over a 15 s ramp ({@code TailTable} in the round-16 harness — the
-         * same arithmetic, on this curve's own incoming exponent):
-         *
-         * <pre>
-         * shape               out@75   out@85   out@90   out@95   out@97   both6dB         peak
-         * no window (r12–15)   -2.7dB   -5.8dB   -8.7dB  -14.2dB  -18.5dB  10808ms (72%)   2.34dB
-         * window 25%           -2.7dB   -9.4dB  -17.9dB  -34.6dB  -47.6dB  10226ms (68%)   2.34dB
-         * </pre>
-         *
-         * <p>The hold is identical; everything the window changes is in the exit, where the
-         * outgoing track is now established 5.7 dB lower at nine tenths and inaudible by
-         * 95% instead of still being at -14 dB. What it costs is 582 ms of the
-         * both-audible window (the 6 dB line is reached earlier because the outgoing track
-         * is allowed to fall sooner) — 68% of the ramp against 72%, both far above the
-         * 41% a symmetric ramp gives, and the price of an exit that is heard as a fade.
-         *
-         * <p>The window is not tied to the ramp's length in ms: it is a share of it, so a
-         * 30 s blend gets a 7.5 s exit and an 8 s one gets 2 s, and the promotion — which
-         * happens when {@code t} reaches 1 — always lands after the exit is over rather
-         * than in the middle of it.
+         * <p>Not shorter, because a fast drop to the bed is heard as the current song being
+         * turned down; not longer, because the whole point is that the outgoing track stops
+         * competing early. Three tenths of a 15 s ramp is 4.5 s, which is a bar or two at
+         * this library's tempos — the length of an ordinary musical gesture.
          */
-        private static final double OUT_RELEASE_FRACTION = 0.25d;
+        private static final double OUT_BED_ARRIVE = 0.30d;
+
+        /**
+         * Where the exit starts, as a share of the ramp: the middle. Everything before it is
+         * the bed; everything after it is the outgoing track leaving.
+         *
+         * <p>This is the "更早" half of the requirement. The round-16 shape began its exit at
+         * three quarters of the ramp, and — because it was working from −2.7 dB rather than
+         * from the bed — only crossed −30 dB at 94% of the window. This one crosses it at
+         * 63% (measured on a 15 s ramp: 9.5 s against 14.1 s) and is gone by 82% rather than
+         * at 97%, so the last stretch of the blend belongs to the incoming track alone. Its
+         * own vocals are out for that whole stretch (see {@code DjEdit}), so what the
+         * listener keeps hearing is the incoming track's backing — and then, after the blend
+         * has ended, its voice.
+         */
+        private static final double OUT_EXIT_START = 0.50d;
+
+        /**
+         * Where the exit is over, as a share of the ramp: the level has reached
+         * {@link #OUT_EXIT_FLOOR_DB} here and stays there until the held zero.
+         *
+         * <p>0.82 rather than the round-16 shape's ~0.97: the exit is the same shape but
+         * moved forward as a whole, which is what "faster" means where it can be measured —
+         * the time the outgoing track spends above −30 dB of its own level. The peak slope
+         * is unchanged (a raised cosine over 0.32 of the ramp covering 56 dB: about 17 dB/s
+         * on a 15 s blend), so the exit sounds like the round-16 one, just earlier.
+         */
+        private static final double OUT_EXIT_FLOOR = 0.82d;
+
+        /**
+         * The level the exit reaches, dB below full scale: six decibels under
+         * {@link #INAUDIBLE_DB}, so "the outgoing track was released at or below the floor"
+         * is never a question of the last bit of a logarithm.
+         *
+         * <p>It is not zero: the shape's promise of an exactly-zero stretch is
+         * {@link #OUT_SILENT_TAIL}, which begins later, and a written gain of −66 dB is the
+         * same nothing but keeps the trajectory expressible as a number in the log.
+         */
+        private static final double OUT_EXIT_FLOOR_DB = -66d;
 
         /**
          * The stretch at the very end of the ramp where this shape is at <b>exactly</b>
@@ -138,36 +169,62 @@ public enum FadeCurve {
          * <p>The ramp promotes (and the backend releases the outgoing player) on the first
          * tick at {@code t >= 1}, which can be up to one {@code RAMP_TICK_MS} after the
          * ramp's end and therefore after the last gain write of a player that is being torn
-         * down microseconds later. The window above already asks for silence at {@code t}=1,
-         * but "silence at exactly one instant" is a weaker promise than it looks: a tick
-         * delayed by a stalled main thread, or a release reached by any path that is not
-         * the promotion, would tear the player down at whatever the previous tick set. So
-         * the last 1% of the ramp is not a fade but a held zero: the outgoing track has
-         * been at exactly zero for at least ({@code OUT_SILENT_TAIL} × ramp − one tick)
-         * before anything can release it — 118 ms of a 15 s ramp, 168 ms of a 30 s one.
+         * down microseconds later. The exit above already asks for −66 dB from 82% on, but
+         * "silence at exactly one instant" is a weaker promise than it looks: a tick delayed
+         * by a stalled main thread, or a release reached by any path that is not the
+         * promotion, would tear the player down at whatever the previous tick set. So the
+         * last 1% of the ramp is not a fade but a held zero: the outgoing track has been at
+         * exactly zero for at least ({@code OUT_SILENT_TAIL} × ramp − one tick) before
+         * anything can release it — 118 ms of a 15 s ramp, 168 ms of a 30 s one.
          *
-         * <p>1% is invisible as a discontinuity: the window is already at -51 dB when the
+         * <p>1% is invisible as a discontinuity: the shape is already at −66 dB when the
          * held zero begins, on the far side of {@link #INAUDIBLE_DB}. The backend logs that
          * assertion at every release (see {@code AndroidAudioBackend}'s release line), so a
          * future shape that lost this property would say so instead of only being heard. */
         private static final double OUT_SILENT_TAIL = 0.01d;
 
         /** How fast the incoming track's bed arrives: the sine of {@code t} raised
-         *  to this, so a smaller exponent means a level reached sooner. */
-        private static final double IN_BED_EXPONENT = 0.55d;
+         *  to this, so a smaller exponent means a level reached sooner.
+         *
+         *  <p>0.45 since round 17 (it was 0.55). With the outgoing track now down at
+         *  {@link #OUT_BED_DB} for the body of the blend, the incoming track is the only
+         *  track at its own level, and the earlier it gets there the smaller the trough
+         *  between the two: the summed power dips about 1.9 dB at a fifth of the ramp with
+         *  0.45 against about 2.6 dB with 0.55. It also puts the incoming track's backing in
+         *  place sooner, which is the other half of "让上一首淡一点，让下一首铺进来". */
+        private static final double IN_BED_EXPONENT = 0.45d;
 
         @Override public float outGain(float t) {
             double x = clamp(t);
             // Held at zero for the last OUT_SILENT_TAIL of the ramp: anything that releases
             // this player from here on is releasing something that is not making a sound.
             if (x >= 1d - OUT_SILENT_TAIL) return 0f;
-            double hold = Math.cos(Math.pow(x, OUT_HOLD_EXPONENT) * Math.PI / 2.0);
-            if (x <= 1d - OUT_RELEASE_FRACTION) return (float) hold;
-            // The exit: a raised cosine over the last quarter, so the level lands on zero
-            // smoothly rather than arriving there at the hold shape's own steep tail.
-            double u = (x - (1d - OUT_RELEASE_FRACTION)) / OUT_RELEASE_FRACTION;
-            double window = 0.5d * (1d + Math.cos(Math.PI * u));
-            return (float) (hold * window);
+            return (float) Math.pow(10d, outLevelDb(x) / 20d);
+        }
+
+        /**
+         * The outgoing track's own level at {@code t}, dB — the shape is defined in dB and
+         * converted to a gain, and that is deliberate: what the requirement is written in,
+         * what the boundary's log line reports and what "monotone" has to mean are all
+         * decibels. A shape defined as a gain has a dB curve whose slope runs away wherever
+         * the gain approaches zero, which is how the round-16 exit managed to be both
+         * monotone in gain and audible as a cliff.
+         *
+         * <p>Three stretches, each eased with a raised cosine so there is no step in level
+         * <em>or</em> in slope at either end of it: down into the bed, the bed, and the
+         * exit. Never increasing — the test walks it at 1/1000 resolution.
+         */
+        private double outLevelDb(double t) {
+            if (t < OUT_BED_ARRIVE) return OUT_BED_DB * ease(t / OUT_BED_ARRIVE);
+            if (t <= OUT_EXIT_START) return OUT_BED_DB;
+            double u = Math.min(1d, (t - OUT_EXIT_START) / (OUT_EXIT_FLOOR - OUT_EXIT_START));
+            return OUT_BED_DB + (OUT_EXIT_FLOOR_DB - OUT_BED_DB) * ease(u);
+        }
+
+        /** A raised cosine over 0..1: 0 at both ends, 1 in the middle, zero slope at both
+         *  ends, so anything built from it joins its neighbours smoothly. */
+        private double ease(double u) {
+            return 0.5d * (1d - Math.cos(Math.PI * clamp((float) u)));
         }
 
         @Override public float inGain(float t) {

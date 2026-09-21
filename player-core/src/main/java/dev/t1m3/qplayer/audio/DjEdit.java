@@ -39,6 +39,33 @@ public final class DjEdit {
      *  rule is about the voice <em>arriving</em>, which is when the gain leaves zero. */
     public static final long RETURN_RAMP_MS = Math.round(RETURN_RAMP_SEC * 1000d);
 
+    /**
+     * How long after the end of the blend the voice <em>starts</em> coming back: twice
+     * {@link #RETURN_RAMP_SEC}, so the return ramp (half a second) plus half a second of the
+     * incoming track's backing alone.
+     *
+     * <p><b>Round 17, and it is the user's whole rule.</b> 「过渡完再放人声」 — bring the vocals
+     * after the transition is over — so the removal window is not the blend any more: the
+     * voice is at <b>exactly zero</b> for the entire blend, and the lift begins after it has
+     * ended. The margin is the smallest one that can promise that: the ramp is
+     * {@link #RETURN_RAMP_SEC} long and it may not start before the blend ends, so the return
+     * has to <em>finish</em> at or after {@code blend end + RETURN_RAMP_SEC} — and a margin of
+     * exactly one ramp means the first sample of the lift is the first sample after the blend.
+     * Half a second more is spent at zero so the promise does not rest on a rounding.
+     *
+     * <p>Before this, the window ended <em>at</em> the blend's end and the ramp reached back
+     * into its last half second, so the incoming track's voice rose through the end of the
+     * blend — the "人声混合得很乱" the user reported, with the outgoing track's own vocals
+     * (which this app cannot remove) still at whatever the curve left them at.
+     *
+     * <p>⚠️ Where the return actually lands is the renderer's answer: the first bar line of the
+     * incoming track at or after {@code removal + this margin}, so it is usually later than the
+     * margin and never earlier. See {@code AndroidStemEditRenderer.editPlan}. */
+    public static final double VOCAL_RETURN_MARGIN_SEC = 2d * RETURN_RAMP_SEC;
+
+    /** {@link #VOCAL_RETURN_MARGIN_SEC} in milliseconds. */
+    public static final long VOCAL_RETURN_MARGIN_MS = Math.round(VOCAL_RETURN_MARGIN_SEC * 1000d);
+
     /** A 25 ms frame of the vocal stem this far below full scale counts as "nothing
      *  singing there" (the same floor the round-7 stem measurements used). */
     public static final double SILENT_FRAME_DBFS = -50;
@@ -69,21 +96,24 @@ public final class DjEdit {
     public static final int BEATS_PER_BAR = 4;
 
     /**
-     * When the vocals go back in: the removal window, and the ramp that ends at the end
-     * of that window (or at the first bar line after it).
+     * When the vocals go back in: the removal window, and the ramp that ends on the first bar
+     * line after it.
      *
-     * <p>{@code returnStart} is inside the removal window by {@link #RETURN_RAMP_SEC},
-     * which is the "gradually approach the vocals" half of the feature: the last half
-     * second of the blend lifts the voice back to unity and lands on the bar line
-     * rather than switching it on.
+     * <p>{@code returnEnd} is at or after {@code removal + }{@link #VOCAL_RETURN_MARGIN_SEC} and
+     * {@code returnStart} follows from it, so the gain is exactly zero for the whole blend and
+     * the lift happens entirely after it (round 17 — see the margin's own note). The half second
+     * the ramp lasts is the "gradually approach the vocals" half of the feature: the voice is
+     * lifted back to unity and lands on the bar line rather than being switched on.
      */
     public static final class Plan {
-        /** Where the vocals start coming back, seconds into the window. */
+        /** Where the vocals start coming back, seconds into the window — at or after the end
+         *  of the blend. */
         public final double returnStartSec;
-        /** Where they are back at unity — a bar line of the incoming track. */
+        /** Where they are back at unity — a bar line of the incoming track, at or after the
+         *  end of the blend plus the margin. */
         public final double returnEndSec;
         /** True when {@link #returnEndSec} is an actual bar line rather than the plain
-         *  end of the removal window (no grid, or no measurement). */
+         *  end of the removal window plus the margin (no grid, or no measurement). */
         public final boolean onBarLine;
 
         Plan(double returnStartSec, double returnEndSec, boolean onBarLine) {
@@ -103,9 +133,10 @@ public final class DjEdit {
         /** One line for the log: the window and when the voice comes back. */
         public String describe() {
             return String.format(java.util.Locale.US,
-                    "vocals out for %.2fs, back over %.2fs ending at %.2fs (%s)",
+                    "vocals at exactly zero for the first %.2fs (the blend), then back over"
+                            + " %.2fs ending at %.2fs (%s)",
                     returnStartSec, returnEndSec - returnStartSec, returnEndSec,
-                    onBarLine ? "a bar line of the incoming track" : "the end of the window");
+                    onBarLine ? "a bar line of the incoming track" : "the window plus the margin");
         }
     }
 
@@ -115,25 +146,23 @@ public final class DjEdit {
      * @param removalSec    how long the incoming track plays without its vocals — the
      *                      blend the user asked for (see the 过渡时长 setting)
      * @param returnEndSec  where the vocals are back at unity, in seconds into the
-     *                      window: the first bar line at or after {@code removalSec}
-     *                      when the incoming track's grid is known, otherwise
-     *                      {@code removalSec} itself. Anything earlier than
-     *                      {@code removalSec} is ignored (a return inside the blend is
-     *                      not what this edit is for) — see {@link #firstBarAtOrAfter}.
+     *                      window: the first bar line at or after
+     *                      {@code removalSec + }{@link #VOCAL_RETURN_MARGIN_SEC} when the
+     *                      incoming track's grid is known, otherwise that same instant
+     *                      itself. Anything EARLIER than the margin is ignored: a return
+     *                      inside the blend, or in its last instant, is exactly what round 17
+     *                      exists to stop — see {@link #firstBarAtOrAfter}.
      */
     public static Plan plan(double removalSec, double returnEndSec) {
         double removal = Math.max(0.05, removalSec);
+        double earliest = removal + VOCAL_RETURN_MARGIN_SEC;
         double end = returnEndSec;
         boolean onBar = true;
-        if (!(end >= removal) || Double.isNaN(end)) {
-            end = removal;
+        if (!(end >= earliest) || Double.isNaN(end)) {
+            end = earliest;
             onBar = false;
         }
-        // The ramp must never start before the window does: a bar line one hop after
-        // the blend on a very short grid would put returnStart at or below zero, and a
-        // ramp from zero is the only thing that keeps the voice out of the blend.
-        double start = Math.max(0, end - RETURN_RAMP_SEC);
-        return new Plan(start, end, onBar);
+        return new Plan(end - RETURN_RAMP_SEC, end, onBar);
     }
 
     /**

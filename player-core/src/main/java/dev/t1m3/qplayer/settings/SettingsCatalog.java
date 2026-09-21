@@ -159,7 +159,8 @@ public final class SettingsCatalog {
         // hard cut on its own whenever it cannot be carried out.
         out.add(SettingSpec.toggle(SMART_TRANSITION_KEY, PLAYBACK, "智能过渡", true)
                 .desc("切歌时自动选择过渡方式；已配置 AI 时由 AI 挑选（它听不到音频，只是建议，"
-                        + "报错或用不上就用本地规则）。无法完成时回退为硬切。")
+                        + "报错或用不上就用本地规则）。两首的节拍或调性测出来不搭时改为淡出淡入"
+                        + "（不重叠），无法完成时回退为硬切。")
                 .build());
         out.add(SettingSpec.segmented(TRANSITION_KIND_KEY, PLAYBACK, "过渡方式", 0,
                         "自动",

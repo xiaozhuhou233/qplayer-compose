@@ -56,8 +56,15 @@ public final class StemBridge {
     /** The fraction of the blend the low-end hand-over sits at, copied from
      *  {@code PlayerController.BASS_SWAP_AT}: the earliest the bridge may start. Duplicated
      *  rather than imported because the controller depends on this class and not the other way
-     *  round; {@code StemBridgeTest} pins the two numbers together. */
-    public static final double SWAP_AT = 0.6d;
+     *  round; {@code StemBridgeTest} pins the two numbers together.
+     *
+     *  <p>0.15 since round 17 (it was 0.6): the hand-over belongs where the outgoing track's
+     *  gain curve crosses the incoming track's (t = 0.14 with round 17's shape), which is the
+     *  only place the low band's level survives the step. See {@code BASS_SWAP_AT} for the
+     *  measurement. The bridge follows it because the bridge <em>is</em> the hand-over when it
+     *  exists: the low end is carried forward from exactly the instant the outgoing deck gives
+     *  its own up. */
+    public static final double SWAP_AT = 0.15d;
 
     /** How much source material past the bridge's own length is taken, in bars. The outgoing's
      *  grid and the incoming's are usually not the same length, so a carried passage of exactly

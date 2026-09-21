@@ -5,6 +5,7 @@ import org.junit.Test;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -158,19 +159,111 @@ public class KeyGlideTest {
         assertTrue("both curves are named", note.contains("-> 0") && note.contains("0 -> -1.00"));
     }
 
+    /** A major key's pitch-class profile: the triad carries most of the weight, the other
+     *  nine classes a low floor — the same shape {@code MixNaturaliserTest} uses, so the two
+     *  files' distances are comparable. */
+    private static KeyProfile majorKey(int tonic) {
+        double[] c = new double[12];
+        for (int i = 0; i < 12; i++) c[i] = 0.05d;
+        c[tonic] += 1.00d;
+        c[(tonic + 4) % 12] += 0.70d;
+        c[(tonic + 7) % 12] += 0.60d;
+        double sum = 0d;
+        for (double v : c) sum += v;
+        double[] out = new double[12];
+        for (int i = 0; i < 12; i++) out[i] = c[i] / sum;
+        return new KeyProfile(tonic, true, 0.8f, out);
+    }
+
+    /** The numbers in a sentence, for a comparison that prints what it read. */
+    private static double[] distances(KeyProfile a, KeyProfile b, KeyGlide glide) {
+        double[] out = new double[glide.steps()];
+        for (int i = 0; i < glide.steps(); i++) {
+            double shift = glide.outgoingSemitones(i);
+            double lo = Math.floor(shift);
+            double f = shift - lo;
+            double[] at = KeyProfile.rotated(a.chroma(), (int) lo);
+            if (f > 1e-9d) {
+                double[] next = KeyProfile.rotated(a.chroma(), (int) lo + 1);
+                for (int k = 0; k < at.length; k++) at[k] = at[k] * (1d - f) + next[k] * f;
+            }
+            out[i] = KeyProfile.distance(at, b.chroma());
+        }
+        return out;
+    }
+
+    @Test
+    public void theConvergenceReportShowsTheKeyDistanceClosingOverTheLadder() {
+        // The user's ask, as a measurement: the key distance at the blend's start, middle and
+        // end, and it has to converge. The pair is a whole tone apart (C major against D major),
+        // which is the largest shift the ladder may apply.
+        KeyProfile cMajor = majorKey(0);
+        KeyProfile dMajor = majorKey(2);
+        double raw = KeyProfile.distance(cMajor.chroma(), dMajor.chroma());
+        // The shift comes from the naturaliser, not from this test: which direction brings B's
+        // key into A's is its own arithmetic, and hardcoding it here is how a test starts
+        // agreeing with a bug. Asserted below that it is the shift that minimises the distance.
+        BeatProfile gridA = new BeatProfile(128d, 0L, 0.8f, 0.7f, cMajor);
+        BeatProfile gridB = new BeatProfile(128d, 0L, 0.8f, 0.7f, dMajor);
+        int shift = MixNaturaliser.keys(gridA, gridB).shift;
+        assertTrue("a whole tone apart must be shifted, not left: " + shift, shift != 0);
+        for (int s : new int[] {-2, -1, 1, 2}) {
+            assertTrue("the chosen shift must be the closest one (shift " + shift + " vs " + s
+                            + ")", KeyProfile.distance(cMajor.chroma(),
+                            KeyProfile.rotated(dMajor.chroma(), shift))
+                    <= KeyProfile.distance(cMajor.chroma(), KeyProfile.rotated(dMajor.chroma(), s))
+                            + 1e-9d);
+        }
+        KeyGlide glide = KeyGlide.plan(shift, 0L, 16_000L, grid128());
+        assertTrue(glide.isGliding());
+        String note = glide.convergenceNote(cMajor, dMajor);
+        assertTrue(note, note != null);
+        double[] d = distances(cMajor, dMajor, glide);
+        System.out.println("raw pair distance " + String.format(java.util.Locale.US, "%.3f", raw)
+                + "; over the ladder: " + java.util.Arrays.toString(d));
+        System.out.println("convergence: " + note);
+        // The blend's own start — the shift the deck is prepared with, before any write — is the
+        // pair's raw distance: the incoming track is transposed into the outgoing track's key,
+        // so that is exactly how far the mix is from the incoming track's own key there.
+        assertEquals("the blend's start is the pair's raw distance", raw,
+                KeyProfile.distance(cMajor.chroma(), dMajor.chroma()), 1e-9);
+        assertTrue("no step may be further from the incoming track's key than the blend's own"
+                        + " start (" + d[0] + " of " + raw + ")", d[0] <= raw + 1e-9);
+        assertEquals("the last step must be both decks in the incoming track's own key", 0d,
+                d[d.length - 1], 1e-6);
+        for (int i = 1; i < d.length; i++) {
+            assertTrue("the distance must not rise: " + java.util.Arrays.toString(d),
+                    d[i] <= d[i - 1] + 1e-9d);
+        }
+        assertTrue("the middle must be strictly between the two ends: "
+                        + java.util.Arrays.toString(d), d[d.length / 2] < d[0]
+                        && d[d.length / 2] > d[d.length - 1]);
+        // And the sentence says all three, so the boundary's log carries them.
+        assertTrue(note, note.contains("converges"));
+        assertTrue("the sentence must name the three distances: " + note,
+                note.contains("%+.2f") || note.contains("0.00"));
+        // A pair in one key has nothing to converge: the semitones are 0 and there is no ladder.
+        assertNull(KeyGlide.none("not transposed").convergenceNote(cMajor, dMajor));
+        assertNull(glide.convergenceNote(null, dMajor));
+    }
+
     @Test
     public void theOldEaseBackRequirementIsNoLongerPartOfTheRule() {
         // Round 13 shipped a single write but left the rule asking for six seconds of ease-back
         // room, which silently refused a transposition to every pair with less than eight
-        // seconds of vocals-out window. The gate is now what the rule really needs: the margin
-        // has to fall inside the blend.
+        // seconds of vocals-out window. Round 14 dropped that; round 17 dropped the upper bound
+        // as well — the rule is only "the voice is at least the margin away", and the ladder's
+        // own end is clamped to the promotion by the controller (its steps write the audible
+        // deck, which the promotion releases), so a deadline past the blend's end is no longer a
+        // reason to refuse a pair.
         assertTrue(MixNaturaliser.pitchFitsBeforeVocals(7_000L, 15_000L));
         assertTrue(MixNaturaliser.pitchFitsBeforeVocals(2_500L, 4_000L));
+        assertTrue("the voice comes back after the blend now, so a deadline past its end is the"
+                        + " ordinary case rather than a refusal",
+                MixNaturaliser.pitchFitsBeforeVocals(20_000L, 15_000L));
         assertFalse("a vocal that arrives inside the margin is refused",
                 MixNaturaliser.pitchFitsBeforeVocals(1_999L, 15_000L));
         assertFalse("the master's own vocals are in the blend's first sample: refused",
                 MixNaturaliser.pitchFitsBeforeVocals(0L, 15_000L));
-        assertFalse("a deadline past the end of the blend is refused",
-                MixNaturaliser.pitchFitsBeforeVocals(20_000L, 15_000L));
     }
 }
