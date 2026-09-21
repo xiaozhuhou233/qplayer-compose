@@ -2086,6 +2086,14 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
   - **测试**：`mvn -pl player-core test` = **196 个用例、1 个失败**，就是那个既有的
     `SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`（`pageTransitionPreset` 只有常量没有 spec）。
     本轮**没有新增测试**（改的是设置文本、启动顺序与线程归属；Kotlin 侧没有测试基建）。
+  - **交付**：debug APK **98,329,797 字节**（sha256 `b4d0782d4b6bf7457ac42248e8487fcda87cd768ab774acee2cac0f83f8557cf`，
+    与 GitHub 资产自报的 digest 逐位一致）；分支 `feat/ai-dj-transition`（代码 commit `440a815`，**`main` 未动**）；
+    tag `ai-dj-transition-2026-09-20f`；
+    页面 `https://github.com/xiaozhuhou233/qplayer-compose/releases/tag/ai-dj-transition-2026-09-20f`、
+    直链 `https://github.com/xiaozhuhou233/qplayer-compose/releases/download/ai-dj-transition-2026-09-20f/app-debug.apk`
+    （实测 HTTP **200**，302 到 CDN；`gh` 两次 TLS handshake timeout，第三次成功）。
+    `release.yml` 照旧失败（既有原因）。基线包留在 `D:\qplayer-dev\harness\r15\before-1f3520d.apk`
+    （98,328,180 字节，md5 `d4c2ca2bbb2e0426d5457329f9589b79`），测量脚本 `r15\measure.sh`。
   - **设备卫生**：本轮**没有设备**，所以没有 push/装/改任何设备状态（`files/models/`、`files/legacy-ease-backs`、
     `transitionKind`、`transitionBlendSeconds`、`queue.json` 全部保持上一轮还原后的样子）。
   - **下一件事（按顺序）**：① **插上 K20 Pro**，先跑 `measure.sh` 的 before（`before-1f3520d.apk`）再跑 after（本轮包），
