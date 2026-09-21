@@ -2006,6 +2006,96 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
     ④ round 13 ④ 那条"停着的入歌播放器起不来"仍未修（本轮第一次 run 的 9 个"停住"样本是**探针误报**，
     但 round 13 那次是真的）。
 
+- **2026-09-20 第十五轮：过渡/AI 设置文案压缩、B站内联预览的圆角（平台 outline）、启动掉帧的三处结构性改动
+  —— ⚠️ 本轮**没有设备**（`adb devices` 全程为空，USB 树里也没有 Android 设备，LAN 扫 5555 无应答），
+  所以 Task B 的截图与 Task C 的帧数据都**没有拿到**，下面逐条写明"已证明/未证明"。**
+  用户三条要求：①「简化 ai 过渡那些文案」②「播放 b 站视频的预览直角边切成圆角」③「修复刚开应用所有东西都掉帧的问题」。
+  - **① Task A（文案，唯一真值源 `SettingsCatalog`，Compose 与 QML 都吃它）**：只改 `desc` 文本，
+    **key/类型/默认值/滑条语义一个都没动**（`SettingsCatalogTest` 只断言类型与默认值，没有 desc 断言）。
+    | 行 | before | after |
+    |---|---|---|
+    | 智能过渡 | 切歌时按歌曲信息选择合适的过渡方式；无法完成时自动回退为硬切。已在「AI 音乐助手」里配置服务商时，由 AI 依据歌曲信息挑选（含重叠长度），同样只是建议：无网络/超时/回答无法解析时用本地规则；AI 听不到音频。过渡会做节拍对齐、低频互换，并按两首测得的拍速/调性做小幅变速与升降调（只动下一首、幅度很小、晋升后 6 秒内还原）；测不到就完全不做，任何情况下都不会因此取消过渡 | 切歌时自动选择过渡方式；已配置 AI 时由 AI 挑选（它听不到音频，只是建议，报错或用不上就用本地规则）。无法完成时回退为硬切。 |
+    | 过渡方式 | 自动：本地规则按时长与静音测量挑选（AI 已配置时由 AI 挑选）；其余为强制使用某一种。普通的可流式歌曲之间默认是约 15 秒的交叉淡化 | 自动：按歌曲信息挑选（已配置 AI 时由 AI 挑选）；其余为强制使用某一种。 |
+    | 淡化曲线 | DJ 式：下一首早早低声铺进来，当前这首压住到结尾才用一小段退出去，整段里大部分时间两首都听得到（像串烧）；等功率/线性是对称的，只有中点附近两首差不多响，听感更像淡入淡出。AI 或本地规则选了 8 秒以上的重叠时自动用 DJ 式 | DJ 式：大部分时间两首都听得到，像串烧；等功率/线性是对称的，更像淡入淡出。8 秒以上的重叠自动用 DJ 式。 |
+    | 节拍对齐 | 交叉/快速淡化时把重叠长度对到整拍，并让下一首从自己的拍点进入，两首的节拍才能真正对上（需要两侧都测得可信的节拍，测不到时自动不参与，等于没有这个功能；拍速差得多时会先把下一首小幅变速对上，再对齐） | 把重叠对到整拍、让下一首从拍点进入，两首鼓点才对得上；测不到可信的节拍就不参与，过渡照常。 |
+    | 低频互换 | 交叉/快速淡化时，在拍点上把低频从当前这首交给下一首（系统均衡器），避免两条低频线打架。设备不支持音频效果器时自动不参与，只少了低频互换，过渡照常 | 在拍点上把低频交给下一首，避免两条低频线打架；设备不支持时不参与，过渡照常。 |
+    | 过渡时长 | 两首普通歌曲交叉淡化多久。太短听着像淡入淡出（这也是默认改成 15 秒的原因），太长则两首不搭的歌会同时很响；4–30 秒，默认 15 秒。当前这首的收尾实测很平淡（没有人声、没有起音、也没有还在往上爬）时，会在用户选的时长上最多再提前 5 秒开始融合；「过渡方式」强制成某一种时，这里只影响交叉淡化/快速淡化 | 两首交叉淡化多久，4–30 秒。太短像淡入淡出，太长则两首不搭的歌会同时很响。当前这首收尾很平淡时最多提前 5 秒开始融合。 |
+    （`过渡时长` 那句里的 5 仍然来自 `TransitionPlan.PLAIN_EXTENSION_MS / 1000L`，所以单一真值源没破。）
+    全仓库只在 `SettingsCatalog` 里有面向用户的过渡文案：扫过 `*.kt/*.qml/*.java` 里所有「过渡/淡入淡出/AI 挑选/节拍对齐」
+    命中，其余都在注释、日志或 `AiTransitionChooser` 的**模型提示词**里（后者不是给用户看的，未动）。
+  - **② Task B（B站内联预览圆角）—— 改了，但**没有截图**（无设备）**
+    - **原来为什么是直角**：画面由根节点 `VideoLayer` 里的 `BiliVideoSurface`（真 `SurfaceView`）绘制，
+      而内联槽位 `VideoSlotReporter` 上那个 `.clip(ShapeExtraLarge)` 只是画在**上报盒子的空节点**上
+      （它一个字都不画）—— 播放画面不在那个节点里。Compose 的 clip 对 SurfaceView 天然无效：
+      画面根本不是这个窗口画的。
+    - **平台机制（本轮从 AOSP 源码确认，不是猜）**：默认 Z 序的 `SurfaceView` 是**在窗口下面**合成的，
+      靠"在窗口里挖洞"显示出来 —— `SurfaceView.clearSurfaceViewPort()` 最终是
+      `SkiaCanvas::punchHole() = mCanvas->drawRRect(rect, kDstOut)`（`libs/hwui/SkiaCanvas.cpp`），
+      也就是一个**普通绘制操作**，因此**受 canvas 的 clip 约束**。所以把承载这个洞的 view 用圆角 outline
+      clip 起来，洞就变圆角，而**四个角保留 App 自己画的像素**（详情页根节点是
+      `Box(fillMaxSize().background(colorScheme.surfaceContainer))`，不透明）→ 看上去就是和周围 UI 一致的圆角。
+      （`SurfaceView.setCornerRadius()` 是 `@hide`、且不在任何 greylist 上 → 反射在 targetSdk 35 上会被挡，不能用。）
+    - **改动（`ComposeQPlayerActivity.kt`，只有一个视频节点）**：`BiliVideoSurface(modifier, cornerRadiusPx)`
+      的 AndroidView 根从裸 `SurfaceView` 换成一个 `FrameLayout` 容器，**容器和 SurfaceView 两个都**挂
+      `RoundRectOutlineProvider`（圆角半径）并 `clipToOutline = radius > 0`（`applyVideoCornerRadius`）；
+      内联传 `SHAPE_EXTRA_LARGE_DP = 32f`（= 原来的 `ShapeExtraLarge`，注释里写死绑定关系），
+      **全屏传 0 = 不 clip（edge-to-edge 保持）**。outline 由 view 的宽高现算，所以盒子缩放时圆角跟着走。
+      `ApkDetailCover` 里那条（当前不可达的）bili 分支也传同一个半径。
+  - **③ Task C（启动掉帧）—— 代码层面的三处改动 + 埋点；**帧数据没有拿到**（无设备，见上）**
+    - **这一轮的诚实边界**：任务要求"先量再改"，但设备全程不在线，**我没有测到任何一帧**。
+      所以下面写的是"**从代码里能确证在启动路径上的重活**"以及把它们移出启动窗口的改动，
+      **不是**"测出来就是它"。下一轮的第一件事就是跑 `D:\qplayer-dev\harness\r15\measure.sh`（见下）把 before/after 补齐。
+    - **确证在启动路径上（主线程）的两处 I/O**（这两条不需要设备就能看出来）：
+      1. `SettingsCore` 加载时 `pushToController()` → `PlayerController.setCacheMaxSizeMB` →
+         `DiskCache.setMaxSizeMB` 里**同步** `evictIfNeeded()`：`totalSize()` 会**遍历九个子目录**（每个缓存文件一次
+         `listFiles`+`length`，用过一阵的设备上几百个），超预算时还要**排序所有文件并逐个删除**；
+         紧接着 `refreshCacheSize()` 再走一遍。全部发生在 `onCreate` 里、首帧之前。
+      2. `preloadAdjacent()` 末尾的 `precacheNextAudio(next)` 在主线程上调 `diskCache.totalSize()`（同一个走查）。
+    - **改动**：
+      1. `DiskCache.setMaxSizeMB` **只存预算**，新增 `evictIfOverBudget()` 由调用方决定线程；
+         `PlayerController.setCacheMaxSizeMB/refreshCacheSize` 把"淘汰 + 走查 + 发布 `cacheSizeMB`"整体丢给 `worker`
+         （两个调用者都不等这个数：设置页那一行读的是 state）。
+      2. `precacheNextAudio` 的**预算检查**移到 `qplayer-precache` lane 里（generation 检查之后）——
+         那里的调用者就是主线程。
+      3. **启动闸门**（`PlayerController` 新增，`STARTUP_QUIET_MS = 3s` / `STARTUP_FALLBACK_MS = 15s`）：
+         `runAfterStartup(Runnable)` 在闸门没开时把**提交动作**（不是工作本身）排队，开闸后按顺序放行。
+         `notifyUiInteractive()` 由宿主在"第一帧之后"调用（Android：`setContent` 之后
+         `Choreographer.postFrameCallback { controller.notifyUiInteractive() }`，3 秒安静期后开闸）；
+         没有宿主的进程（桌面/测试）由 15 秒兜底开闸，**闸门只会延后、永远不会把功能关掉**。
+         走闸门的只有 `preloadAdjacent()` 里的四个预热（`warmCurrentSilenceProfile`、`requestEarlyBeatProfile`、
+         `prefetchAiTransition`、`precacheNextAudio`）与 `warmCurrentTrackProfilesSoon`（改成"开闸后再等 4s"）——
+         **解析、起播、封面、歌词、边界时刻自己的测量（`armIncoming`）一律不过闸门**，
+         所以"过渡从不在播放路径上做重活"这条不变量没有变，只是把"起播瞬间的预热"推迟到 UI 起来之后。
+         取消语义仍然靠既有的 generation/`playIndex` 检查（推迟提交不会让一条过期的预热真的跑起来）。
+      4. `qplayer-beat` 与 `qplayer-precache` 两条 lane 设 `Thread.MIN_PRIORITY`（**不是** `qplayer-silence`：
+         静音测量是唯一可能被边界"等"的探针，9 秒窗口里要出结果，见 lane 上的注释）。
+         ORT 的 4 条线程是从 precache lane 里创建的本地线程、**继承它的 nice**，所以 DJ 编辑渲染也一起降级。
+      5. **埋点**（下一轮归因用）：`PlayerController` 构造函数一行
+         `startup: controller ready in Nms (lyric offsets … song meta … playlist cache … queue … custom playlist …; search history 与缓存走查在 worker 上；过渡预热等首帧)`；
+         开闸一行 `startup: the UI is up and quiet — releasing N deferred transition warmup(s)`；
+         `AndroidStemEditRenderer.model()` 的 ON 行现在带 `hashed in Nms`（模型校验耗时）。
+    - **HTTP 测量脚本（已写好，下一轮直接用）**：`D:\qplayer-dev\harness\r15\measure.sh <apk> <label> [runs] [secs]`
+      —— force-stop → `gfxinfo reset` → `am start -W` → 等 10s → 收 `dumpsys gfxinfo`（含 `Janky frames`/
+      `Number Frame deadline missed`/p50–p99）、`framestats`（逐帧）与 `logcat -v threadtime | grep musicplayer`
+      （把帧与"那一秒在干什么"对齐）。基线包已留在 `D:\qplayer-dev\harness\r15\before-1f3520d.apk`
+      （= HEAD `1f3520d` 的 debug 包，98,328,180 字节，md5 `d4c2ca2bbb2e0426d5457329f9589b79`）。
+    - ⚠️ **仍未排除的三个嫌疑（本轮一行没动，因为无法测量）**：素材库扫描（`AndroidLibraryScanner` + 元数据读取，
+      宿主线程）、`controller.loadHome()`（网络+JSON）、以及**首帧本身的合成成本**（Monet 取色、首页列表、
+      封面位图上传 —— 封面解码本身已经在 `Dispatchers.IO` 上，见 `rememberCoverBitmap`）。
+      另外 `songMetaIndex.load()`/`playlistCacheIndex.load()` 仍在构造函数里同步读 JSON。
+  - **测试**：`mvn -pl player-core test` = **196 个用例、1 个失败**，就是那个既有的
+    `SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`（`pageTransitionPreset` 只有常量没有 spec）。
+    本轮**没有新增测试**（改的是设置文本、启动顺序与线程归属；Kotlin 侧没有测试基建）。
+  - **设备卫生**：本轮**没有设备**，所以没有 push/装/改任何设备状态（`files/models/`、`files/legacy-ease-backs`、
+    `transitionKind`、`transitionBlendSeconds`、`queue.json` 全部保持上一轮还原后的样子）。
+  - **下一件事（按顺序）**：① **插上 K20 Pro**，先跑 `measure.sh` 的 before（`before-1f3520d.apk`）再跑 after（本轮包），
+    把"哪些帧掉了、那一秒在干什么"写进本文档（这是本轮唯一欠的账）；② 顺手在真机上**看一眼 B站内联预览的四个角**
+    （一个截图即可）——若仍是直角，`punchHole` 那条推理的某个前提不成立，下一步是把
+    "用页面自己的背景色画四个角"的 matte 加上（`VideoLayer` 里画在 `BiliVideoSurface` **之后**即可盖住画面：
+    画面在窗口下面，App 画的东西永远在它上面），或者把内联那一路换成 `TextureView`（代价是
+    第 4 节那条"一个常驻 Surface 永不重建"的架构要重做，风险高，别先做）；
+    ③ 仍然**没有人听过任何一次过渡**（第五/八/九/十/十一/十二/十三/十四轮都没听过）。
+
 
 ## 八、工作方式（为了省上下文，请遵守）
 
