@@ -228,32 +228,32 @@ public final class SettingsCatalog {
                 "自定义 OpenAI 兼容", "DeepSeek", "OpenAI", "Gemini")
                 .build());
         out.add(SettingSpec.text("aiBaseUrl", AI, "API 地址 *", "https://api.openai.com/v1")
-                .desc("填写兼容 OpenAI /v1/chat/completions 的地址")
+                .desc("填写兼容 OpenAI 接口的地址")
                 .build());
         out.add(SettingSpec.text("aiApiKey", AI, "API Key *", "")
-                .desc("仅保存在本机设置中，不会写入源码")
+                .desc("仅保存在本机，不会写入源码")
                 .build());
         out.add(SettingSpec.text("aiModel", AI, "模型名称 *", "gpt-5.6-luna")
                 .build());
         out.add(SettingSpec.slider("aiTimeoutMs", AI, "请求超时", 60000, 10000, 180000, 5000)
                 .unit(" ms").build());
         out.add(SettingSpec.toggle("aiExcludeLiked", AI, "排除已收藏歌曲", false)
-                .desc("推荐时仍以收藏歌曲分析风格，但不重复推荐收藏歌曲")
+                .desc("仍按收藏歌曲分析风格，但不重复推荐")
                 .build());
         out.add(SettingSpec.toggle("aiGeminiKnowledgeOnly", AI, "Gemini 强制使用知识库", false)
-                .desc("Gemini 不使用联网工具，仅依据模型知识生成歌曲推荐")
+                .desc("Gemini 不联网，只用模型知识推荐")
                 .build());
         out.add(SettingSpec.text("aiWebSearchUrl", AI, "搜索 API 地址", "https://api.tavily.com/search")
-                .desc("默认使用 Tavily，也可填写兼容的自定义搜索接口")
+                .desc("默认 Tavily，可填兼容的自定义搜索接口")
                 .build());
         out.add(SettingSpec.text("aiWebSearchKey", AI, "搜索 API Key", "")
-                .desc("由用户自行申请并填写，仅保存在本机设置中")
+                .desc("自行申请填写，仅保存在本机")
                 .build());
         out.add(SettingSpec.toggle("aiForceKnowledge", AI, "强制使用知识库", false)
-                .desc("联网搜索不可用时使用 AI 内置知识库继续生成，不因搜索失败直接拒绝")
+                .desc("联网搜索失败时改用模型知识库继续生成")
                 .build());
         out.add(SettingSpec.toggle("aiShowOutput", AI, "显示输出结果", false)
-                .desc("在 AI 对话框中显示模型原始输出，即使解析歌曲失败也可查看")
+                .desc("显示模型原始输出，便于排查解析失败")
                 .build());
         addCustomApiFields(out);
 
