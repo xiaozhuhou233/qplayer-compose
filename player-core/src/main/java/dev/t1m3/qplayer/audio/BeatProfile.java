@@ -179,6 +179,24 @@ public final class BeatProfile {
     }
 
     /**
+     * The last beat of this grid at or before {@code tMs}, never below 0 — the mirror of
+     * {@link #beatAtOrAfter}, and where a change that has to be hidden behind a transient is
+     * placed (round 13 puts the incoming track's pitch step on one: the DJ edit has that
+     * deck's vocals out, so the loudest thing under the step is the drumkit, and a beat is
+     * where the drumkit is loudest).
+     *
+     * <p>Deliberately "at or before" rather than "nearest": the caller is a deadline
+     * (identity has to be reached by a named position), and a beat later than it would
+     * violate the deadline rather than merely be less well hidden.
+     */
+    public long beatAtOrBefore(long tMs) {
+        long period = Math.max(1L, Math.round(periodMs()));
+        long delta = tMs - firstBeatMs;
+        if (delta <= 0L) return Math.max(0L, firstBeatMs);
+        return firstBeatMs + (delta / period) * period;
+    }
+
+    /**
      * The overlap length nearest {@code wantedMs} at which an overlap ends on one of
      * this track's beats.
      *

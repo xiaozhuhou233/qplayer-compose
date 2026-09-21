@@ -280,19 +280,45 @@ public final class DjEdit {
      */
     public static float[][] renderHead(float[][][] stems, int sampleRate, double windowSec,
                                        Plan plan, int[] clipped) {
+        return renderHead(stems, sampleRate, windowSec, plan, clipped, null, 0);
+    }
+
+    /**
+     * The same render with a bridge in it: {@code layer} is added to the window starting at
+     * {@code layerStartSample}, before the vocal gain is applied to anything else.
+     *
+     * <p>The layer is the material {@link StemBridge} carried forward from the outgoing track
+     * — its bass, taken from the instant the low-end hand-over takes the outgoing deck's own
+     * low end away, so the two never sum (see that class). It is added rather than mixed with
+     * a curve of its own because it has one job: be the low end while the outgoing deck has
+     * none. Its own length decides where it stops, and nothing past its end is touched.
+     *
+     * @param layer            {@code [channel][sample]} to add at the bridge's start, or null
+     * @param layerStartSample where in the window to add it, samples
+     */
+    public static float[][] renderHead(float[][][] stems, int sampleRate, double windowSec,
+                                       Plan plan, int[] clipped, float[][] layer,
+                                       int layerStartSample) {
         int channels = stems[0].length;
         int length = stems[0][0].length;
         float[][] out = new float[channels][length];
         int clippedCount = 0;
         StemGesture.Stem[] all = StemGesture.Stem.ALL;
+        int layerFrames = layer != null && layer.length > 0 && layer[0] != null
+                ? layer[0].length : 0;
         for (int i = 0; i < length; i++) {
             double t = i / (double) sampleRate;
             double vocalGain = plan.vocalGainAt(t);
+            int layerAt = i - layerStartSample;
+            boolean fromLayer = layerFrames > 0 && layerAt >= 0 && layerAt < layerFrames;
             for (int ch = 0; ch < channels; ch++) {
                 double sum = 0;
                 for (StemGesture.Stem stem : all) {
                     double gain = stem == StemGesture.Stem.VOCALS ? vocalGain : 1.0;
                     if (gain != 0) sum += gain * stems[stem.row()][ch][i];
+                }
+                if (fromLayer && ch < layer.length && layer[ch] != null) {
+                    sum += layer[ch][layerAt];
                 }
                 if (sum > 1.0) { sum = 1.0; clippedCount++; }
                 else if (sum < -1.0) { sum = -1.0; clippedCount++; }

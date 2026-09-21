@@ -14,6 +14,7 @@ import ai.onnxruntime.OrtSession;
 import ai.onnxruntime.TensorInfo;
 
 import dev.t1m3.qplayer.audio.DjEdit;
+import dev.t1m3.qplayer.audio.StemBridge;
 import dev.t1m3.qplayer.audio.StemEditRenderer;
 import dev.t1m3.qplayer.audio.StemGesture;
 import dev.t1m3.qplayer.audio.StemModel;
@@ -159,38 +160,43 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
     // --- the render ---------------------------------------------------------
 
     @Override
-    public boolean render(Request request) {
+    public StemEditRenderer.Result render(Request request) {
         StemModel.Candidate weights = model();
         if (weights == null) {
             logInertReason();
-            return false;
+            return null;
         }
-        File out = new File(request.outPath);
+        // The finished file's name is built inside run(): the two numbers the boundary needs are
+        // what this render learns (see StemEditRenderer.Result). `out` is the path a render
+        // without a bridge would take, and the one every failure path cleans up.
+        File out = new File(request.outBasePath + ".m4a");
         File parent = out.getParentFile();
         if (parent != null && !parent.isDirectory()) parent.mkdirs();
         long startedAt = System.currentTimeMillis();
         try {
-            if (run(weights, request, out, startedAt)) return true;
+            StemEditRenderer.Result result = run(weights, request, out, startedAt);
+            if (result != null) return result;
             deleteQuietly(out);
-            return false;
+            return null;
         } catch (Throwable e) {
-            // Every failure is this one: the boundary blends the plain stream. Logged with
-            // the fact that it happened at all, because "the render failed" and "the render
-            // was never asked for" are different things to know about this feature.
+            // Every failure is this one: the boundary blends the plain stream (and, with no
+            // bridge, plays the round-12 edit if one exists). Logged with the fact that it
+            // happened at all, because "the render failed" and "the render was never asked for"
+            // are different things to know about this feature.
             Logger.warn("transition: DJ edit for {} failed ({}); the boundary blends the plain"
                     + " stream", request.title(), e.toString());
             deleteQuietly(out);
-            return false;
+            return null;
         }
     }
 
-    private boolean run(StemModel.Candidate weights, Request request, File out, long startedAt)
-            throws Exception {
+    private StemEditRenderer.Result run(StemModel.Candidate weights, Request request, File out,
+                                        long startedAt) throws Exception {
         Format format = probe(request.sourcePath);
         if (format == null) {
             Logger.warn("transition: DJ edit for {}: no audio track in {}", request.title(),
                     request.sourcePath);
-            return false;
+            return null;
         }
         long removalMs = request.removalMs;
         long spanMs = returnSpanMs(request.beatPeriodMs);
@@ -208,7 +214,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         final float[][] head = new float[2][(int) headFrames];
         long[] decoded = new long[1];
         boolean[] cancelled = new boolean[1];
-        boolean completed = decode(request.sourcePath, 2, head[0].length, request.stillWanted,
+        boolean completed = decode(request.sourcePath, 2, 0L, head[0].length, request.stillWanted,
                 cancelled, (pcm, frames) -> {
                     for (int ch = 0; ch < head.length && ch < pcm.length; ch++) {
                         System.arraycopy(pcm[ch], 0, head[ch], (int) decoded[0], frames);
@@ -218,17 +224,13 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         if (cancelled[0]) {
             Logger.info("transition: DJ edit for {} cancelled while decoding the head (the queue"
                     + " moved on)", request.title());
-            return false;
+            return null;
         }
         if (!completed || decoded[0] < format.rate / 4L) {
             Logger.warn("transition: DJ edit for {}: the head decoded to only {} frames; nothing"
                     + " to render", request.title(), decoded[0]);
-            return false;
+            return null;
         }
-        // The decode fills a buffer sized for the whole window and reports how much of it is
-        // real; the trimmed copy is a second array rather than a reassignment, because the
-        // sink above captures the first one (and because a `final` local cannot be
-        // reassigned — this is the line the first build of this class failed on).
         final float[][] headWindow = trim(head, (int) decoded[0]);
 
         // 2. The separation, at the rate and on the grid the model was trained for.
@@ -238,7 +240,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         if (stems == null) {
             Logger.info("transition: DJ edit for {} cancelled during the separation",
                     request.title());
-            return false;
+            return null;
         }
         long separateMs = System.currentTimeMillis() - separateStart;
 
@@ -254,33 +256,141 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                             + " have no vocals in it, so there is nothing to strip and the"
                             + " incoming plays its own stream: {}",
                     request.title(), removalMs, presence.describe());
-            return false;
+            return null;
         }
         Logger.info("transition: DJ edit for {}: its first {}ms does sing — {}", request.title(),
                 removalMs, presence.describe());
 
-        // 4. Where the voice comes back: the first bar line of the incoming track at or
-        //    after the removal window. The offset is estimated from the separated BASS
-        //    stem's low end — the documented extension this platform has instead of a
-        //    structure pass — and never from the beat grid's phase, which is a different
-        //    question and wrong three times in four.
+        // 4. The incoming's grid and where the voice comes back: the first bar line at or after
+        //    the removal window. The offset is estimated from the separated BASS stem's low end
+        //    — the documented extension this platform has instead of a structure pass — and
+        //    never from the beat grid's phase, which is a different question and wrong three
+        //    times in four.
         double windowSec = headForModel[0].length / (double) StemModel.MODEL_RATE;
-        DjEdit.Plan plan = editPlan(stems, request, windowSec, removalSec);
+        double beatSecIn = request.beatPeriodMs > 0 ? request.beatPeriodMs / 1000.0 : 0d;
+        double[] inBars = barLinesOf(stems, StemModel.MODEL_RATE, beatSecIn,
+                request.beatPhaseMs / 1000.0, 0d, windowSec, request.title());
+        DjEdit.Plan plan = editPlan(inBars, request, windowSec, removalSec, headMs);
 
-        // 5. The render.
+        // 5. The bridge: the outgoing track's low end, carried forward inside this same file.
+        //    Everything about it is measured before it is written — see StemBridge, and the
+        //    acceptance block below.
+        StemBridge.Plan bridge = null;
+        float[][] layer = null;
+        StemBridge.Report bridgeReport = null;
+        float[][] bridgeSource = null;
+        float[][] outgoingVocals = null;
+        long bridgeStartMs = -1L;
+        if (request.canBridge()) {
+            bridge = planBridge(request, inBars, beatSecIn, removalSec, windowSec);
+            if (bridge != null && bridge.fits) {
+                long tailMs = bridgeTailWindowMs(request.outgoingBeatPeriodMs);
+                double durationMs = probeDurationMs(request.outgoingSourcePath);
+                if (durationMs > 0d) {
+                    long fromMs = Math.max(0L, Math.round(durationMs - tailMs));
+                    float[][][] tail = separateTail(weights, request, format, fromMs,
+                            Math.round(tailMs), cancelled);
+                    if (tail != null && !cancelled[0]) {
+                        double tailSec = tail[0][0].length / (double) StemModel.MODEL_RATE;
+                        double outBeatSec = request.outgoingBeatPeriodMs > 0
+                                ? request.outgoingBeatPeriodMs / 1000.0 : 0d;
+                        double[] outBars = barLinesOf(tail, StemModel.MODEL_RATE, outBeatSec,
+                                request.outgoingBeatPhaseMs / 1000.0, fromMs / 1000.0, tailSec,
+                                "the outgoing tail");
+                        double barSec = outBeatSec > 0 ? outBeatSec * StemBridge.BEATS_PER_BAR : 0d;
+                        double fromSec = StemBridge.sourceFromSec(outBars, barSec);
+                        layer = StemBridge.layer(
+                                tail[StemGesture.Stem.BASS.row()], StemModel.MODEL_RATE, bridge,
+                                request.speed, fromSec);
+                        if (layer != null) {
+                            bridgeStartMs = Math.round(bridge.startSec * 1000d);
+                            // The material the layer was taken from, at the same length: the
+                            // comb test and the level check are against a single copy of it.
+                            bridgeSource = copyOf(tail[StemGesture.Stem.BASS.row()],
+                                    (int) Math.round(fromSec * StemModel.MODEL_RATE),
+                                    layer[0].length);
+                            outgoingVocals = slice(tail[StemGesture.Stem.VOCALS.row()],
+                                    (int) Math.round(fromSec * StemModel.MODEL_RATE),
+                                    layer[0].length);
+                            Logger.info("transition: DJ edit for {}: {} — carried from {}s of the"
+                                            + " outgoing tail ({} bars on its own grid), played"
+                                            + " back at x{}; the low end hands over at the bridge's"
+                                            + " own start, so nothing the outgoing deck is still"
+                                            + " playing is duplicated",
+                                    request.title(), bridge.describe(),
+                                    String.format(java.util.Locale.US, "%.3f", fromSec),
+                                    StemBridge.BARS + StemBridge.SOURCE_SLACK_BARS,
+                                    speedText(request.speed));
+                        } else {
+                            Logger.info("transition: DJ edit for {}: {} — no layer was built",
+                                    request.title(), bridge.describe());
+                        }
+                    } else {
+                        Logger.info("transition: DJ edit for {} cancelled while separating the"
+                                + " outgoing tail", request.title());
+                        return null;
+                    }
+                } else {
+                    Logger.info("transition: DJ edit for {}: the outgoing track's length could not"
+                            + " be read, so no tail window could be placed; no bridge",
+                            request.title());
+                }
+            } else if (bridge != null) {
+                Logger.info("transition: DJ edit for {}: {} — the boundary blends the outgoing's"
+                        + " low end away the ordinary way", request.title(), bridge.describe());
+            }
+        }
+
+        // 6. The render.
         int[] clipped = new int[1];
-        float[][] edited = DjEdit.renderHead(stems, StemModel.MODEL_RATE, windowSec, plan, clipped);
+        float[][] edited = DjEdit.renderHead(stems, StemModel.MODEL_RATE, windowSec, plan, clipped,
+                layer, layer == null ? 0 : (int) Math.round(bridge.startSec * StemModel.MODEL_RATE));
+        // The acceptance numbers, measured on the material that went into the file: the carried
+        // layer's level against its source, the two contributions at the designed times, the
+        // vocals, the comb test, and the pulse. See StemBridge.Report.
+        if (layer != null) {
+            float[][] incomingVocals = vocalsUnderEdit(stems, plan, layer[0].length);
+            bridgeReport = StemBridge.measure(layer, bridgeSource, edited, incomingVocals,
+                    outgoingVocals, StemModel.MODEL_RATE, bridge, request.speed, beatSecIn,
+                    request.outgoingBeatPeriodMs / 1000.0);
+            Logger.info("transition: DJ edit for {} — {}", request.title(),
+                    bridgeReport.describe());
+            if (!bridgeReport.acceptable) {
+                // ⚠️ The bridge is kept only if it passes its own acceptance measurement, and this
+                // is the whole reason that measurement exists: the material it carries is chosen
+                // by the outgoing track's own ending, and an ending whose last bars have no bass
+                // in them (a fade, a spoken outro, a break) would put two bars of near-silence
+                // under the incoming track's head — a hole in the mix, which is worse than the
+                // fade the bridge was built to replace. So the layer is dropped and the edit is
+                // the round-12 one: exactly the behaviour of a build that has no bridge in it,
+                // with the measurement as the stated reason.
+                Logger.warn("transition: DJ edit for {}: the bridge did not pass its own"
+                                + " measurement, so it is NOT in this edit — the boundary plays"
+                                + " the round-12 edit (vocals out, back on a bar line) and hands"
+                                + " its low end over the way it always did. The measurement: {}",
+                        request.title(), bridgeReport.describe());
+                layer = null;
+                bridgeReport = null;
+                bridgeStartMs = -1L;
+            }
+        }
         float[][] editedForSource = resample(edited, StemModel.MODEL_RATE, format.rate);
         Logger.info("transition: DJ edit for {}: {}; {} of {} samples clamped; separation took"
                         + " {}ms",
                 request.title(), plan.describe(), clipped[0],
                 edited[0].length * edited.length, separateMs);
 
-        // 6. One file: the edited head, then the rest of the track decoded straight through.
+        // 7. One file: the edited head, then the rest of the track decoded straight through.
         //    This is what makes the incoming deck able to open a single source and keep it —
         //    before the blend, through the promotion, and to the end of the track.
         long encodeStart = System.currentTimeMillis();
-        AacFileWriter writer = new AacFileWriter(out, format.rate, 2);
+        // The name carries the two times the boundary cannot recompute. The renderer owns the
+        // name for that reason (StemEditRenderer.Result): the boundary looks a finished edit up
+        // by key and reads the numbers back out of it.
+        File named = new File(request.outBasePath
+                + StemEditRenderer.Result.suffixOf(bridgeStartMs, Math.round(plan.returnEndSec * 1000d))
+                + ".m4a");
+        AacFileWriter writer = new AacFileWriter(named, format.rate, 2);
         boolean wrote = false;
         try {
             writer.start();
@@ -289,66 +399,201 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                     request.stillWanted)) {
                 Logger.info("transition: DJ edit for {} cancelled while writing the body (the"
                         + " queue moved on)", request.title());
-                return false;
+                return null;
             }
             writer.finish();
             wrote = true;
         } finally {
             if (!wrote) {
                 writer.abort();
-                deleteQuietly(out);
+                deleteQuietly(named);
+                if (!out.equals(named)) deleteQuietly(out);
             }
         }
-        long bytes = out.length();
+        long bytes = named.length();
         if (bytes < MIN_EDIT_BYTES) {
             Logger.warn("transition: DJ edit for {} came out at {} bytes, which is not a"
                     + " recording; dropped it", request.title(), bytes);
-            deleteQuietly(out);
-            return false;
+            deleteQuietly(named);
+            return null;
         }
         Logger.info("transition: DJ edit for {} written: {} ({}KB; {}ms of encode, {}ms of render"
                         + " in all) — the boundary plays this file on the incoming deck when it"
                         + " gets there",
-                request.title(), out.getAbsolutePath(), bytes / 1024L,
+                request.title(), named.getAbsolutePath(), bytes / 1024L,
                 System.currentTimeMillis() - encodeStart,
                 System.currentTimeMillis() - startedAt);
-        return true;
+        return new StemEditRenderer.Result(named.getAbsolutePath(), bridgeStartMs,
+                Math.round(plan.returnEndSec * 1000d), bridgeReport != null ? bridgeReport.describe() : "");
     }
 
-    /** The plan for the window: the return ends on the first bar line at or after the
-     *  removal window, and without a grid it ends with the window itself. */
-    private DjEdit.Plan editPlan(float[][][] stems, Request request, double windowSec,
-                                 double removalSec) {
-        if (!(request.beatPeriodMs > 0)) {
-            Logger.info("transition: DJ edit for {}: no beat grid for this track, so there are no"
-                            + " bar lines to land on; the vocals return at the end of the"
-                            + " {}ms window", request.title(), request.removalMs);
-            return DjEdit.plan(removalSec, Double.NaN);
+    /** The incoming's vocal stem under the edit's own gain curve, over the part of the window a
+     *  bridge covers: what the bridge report's "no vocals" clause measures. */
+    private static float[][] vocalsUnderEdit(float[][][] stems, DjEdit.Plan plan, int frames) {
+        float[][] vocals = stems[StemGesture.Stem.VOCALS.row()];
+        int limit = Math.min(frames, vocals[0].length);
+        float[][] out = new float[vocals.length][limit];
+        for (int i = 0; i < limit; i++) {
+            double gain = plan.vocalGainAt(i / (double) StemModel.MODEL_RATE);
+            for (int ch = 0; ch < vocals.length; ch++) {
+                out[ch][i] = (float) (gain * vocals[ch][i]);
+            }
+        }
+        return out;
+    }
+
+    /** A slice of one signal starting at {@code from}, {@code frames} long (silence past its
+     *  end): the reference the carried layer is compared against. */
+    private static float[][] copyOf(float[][] pcm, int from, int frames) {
+        float[][] out = new float[pcm.length][frames];
+        for (int ch = 0; ch < pcm.length; ch++) {
+            int copy = Math.max(0, Math.min(frames, pcm[ch].length - from));
+            if (copy > 0) System.arraycopy(pcm[ch], from, out[ch], 0, copy);
+        }
+        return out;
+    }
+
+    /** How much of the outgoing tail has to be separated for the bridge: its carried bars plus
+     *  one of slack (so the take can be whole bars) and a second, capped the way the head's own
+     *  return span is — a very slow track must not turn a render into a minute-long separation. */
+    static long bridgeTailWindowMs(double beatPeriodMs) {
+        if (!(beatPeriodMs > 0)) return 2_500L;
+        long bars = Math.round(beatPeriodMs * StemBridge.BEATS_PER_BAR)
+                * (StemBridge.BARS + StemBridge.SOURCE_SLACK_BARS + 1);
+        return Math.min(BRIDGE_TAIL_MAX_MS, bars + 1_000L);
+    }
+
+    private static final long BRIDGE_TAIL_MAX_MS = 8_500L;
+
+    /** The bridge's placement, from the outgoing's and the incoming's own bar grids — never the
+     *  beat grid's phase (see {@link StemGesture#barLines}). */
+    private StemBridge.Plan planBridge(Request request, double[] inBars, double beatSecIn,
+                                       double removalSec, double windowSec) {
+        double barSec = beatSecIn > 0 ? beatSecIn * StemBridge.BEATS_PER_BAR : 0d;
+        StemBridge.Plan plan = StemBridge.plan(inBars, barSec, removalSec, windowSec);
+        Logger.info("transition: DJ edit for {}: bridge plan — {}, from the incoming track's own"
+                        + " {}-BPM grid and downbeat offset",
+                request.title(), plan.describe(), Math.round(60d / Math.max(1e-6, beatSecIn)));
+        return plan;
+    }
+
+    /** One track's bar lines over a window, from its separated bass stem's low end: the
+     *  documented extension this platform has instead of a structure pass. Empty when the low
+     *  end gave no offset — then there is no line for anything to land on and the callers say so
+     *  rather than guessing one. */
+    private static double[] barLinesOf(float[][][] stems, int rate, double beatSec,
+                                       double beatPhaseSec, double fromSec, double windowSec,
+                                       String who) {
+        if (!(beatSec > 0)) {
+            Logger.info("transition: DJ edit: no beat grid for {}, so there are no bar lines and"
+                    + " nothing lands on one", who);
+            return new double[0];
         }
         float[] lowBand = StemGesture.envelopeOf(
                 new float[][]{stems[StemGesture.Stem.BASS.row()][0],
                         stems[StemGesture.Stem.BASS.row()][1]},
-                StemModel.MODEL_RATE, StemGesture.CELL_SEC);
-        double beatSec = request.beatPeriodMs / 1000.0;
-        double beatPhaseSec = request.beatPhaseMs / 1000.0;
-        double downbeat = StemGesture.downbeatOffsetSec(lowBand, 0, StemGesture.CELL_SEC,
+                rate, StemGesture.CELL_SEC);
+        Double downbeat = StemGesture.downbeatOffsetSec(lowBand, fromSec, StemGesture.CELL_SEC,
                 beatPhaseSec, beatSec, DjEdit.BEATS_PER_BAR);
-        if (Double.isNaN(downbeat)) {
-            Logger.info("transition: DJ edit for {}: the low end gave no downbeat offset, so the"
-                            + " vocals return at the end of the {}ms window rather than on a line"
-                            + " nobody measured", request.title(), request.removalMs);
+        if (downbeat == null || Double.isNaN(downbeat)) {
+            Logger.info("transition: DJ edit: the low end of {} gave no downbeat offset, so there"
+                    + " is no bar grid for it", who);
+            return new double[0];
+        }
+        double bpm = 60d / beatSec;
+        double[] bars = StemGesture.barLines(bpm, downbeat, DjEdit.BEATS_PER_BAR, fromSec,
+                windowSec);
+        Logger.info("transition: DJ edit: {}BPM for {}, {} bar lines inside the {}ms window",
+                String.format(java.util.Locale.US, "%.1f", bpm), who, bars.length,
+                Math.round(windowSec * 1000d));
+        return bars;
+    }
+
+    /** The plan for the window: the return ends on the first bar line at or after the
+     *  removal window, and without a grid it ends with the window itself. */
+    private DjEdit.Plan editPlan(double[] inBars, Request request, double windowSec,
+                                 double removalSec, long headMs) {
+        if (inBars == null || inBars.length == 0) {
+            Logger.info("transition: DJ edit for {}: no bar grid for this track, so the vocals"
+                            + " return at the end of the {}ms window", request.title(),
+                    request.removalMs);
             return DjEdit.plan(removalSec, Double.NaN);
         }
-        double bpm = 60_000.0 / request.beatPeriodMs;
-        double[] bars = StemGesture.barLines(bpm, downbeat, DjEdit.BEATS_PER_BAR, 0, windowSec);
-        double at = DjEdit.firstBarAtOrAfter(bars, removalSec);
-        Logger.info("transition: DJ edit for {}: {}BPM, downbeat offset estimated from the bass"
-                        + " stem, {} bar lines inside the {}ms window; vocals return {}",
-                request.title(), String.format(java.util.Locale.US, "%.1f", bpm), bars.length,
-                headMsOf(request), Double.isNaN(at)
+        double at = DjEdit.firstBarAtOrAfter(inBars, removalSec);
+        Logger.info("transition: DJ edit for {}: vocals return {}",
+                request.title(), Double.isNaN(at)
                         ? "at the end of the window (no bar line in it)"
                         : "at " + String.format(java.util.Locale.US, "%.3f", at) + "s (a bar line)");
         return DjEdit.plan(removalSec, at);
+    }
+
+    /** A track's file length in ms, or -1 when the container does not say. */
+    private static double probeDurationMs(String path) {
+        MediaExtractor extractor = new MediaExtractor();
+        try {
+            extractor.setDataSource(path);
+            for (int i = 0; i < extractor.getTrackCount(); i++) {
+                MediaFormat f = extractor.getTrackFormat(i);
+                String mime = f.getString(MediaFormat.KEY_MIME);
+                if (mime == null || !mime.startsWith("audio/")) continue;
+                if (f.containsKey(MediaFormat.KEY_DURATION)) {
+                    return f.getLong(MediaFormat.KEY_DURATION) / 1000d;
+                }
+            }
+        } catch (Throwable e) {
+            Logger.warn("transition: DJ edit: cannot read the length of {} ({})", path,
+                    e.toString());
+        } finally {
+            extractor.release();
+        }
+        return -1d;
+    }
+
+    private static String speedText(double speed) {
+        return Math.abs(speed - 1d) < 1e-6d
+                ? "1 (the pair's grids already hold, so the carry is sample-exact)"
+                : String.format(java.util.Locale.US, "%.4f", speed);
+    }
+
+    /**
+     * The outgoing track's tail, separated: the other half of the bridge. Decoded from an
+     * offset (the extractor's own sync seek) and run through the same model and the same proven
+     * configuration as the incoming's head, so the two windows are separated by the same
+     * instrument — which is the only thing that makes "this bar of A against this bar of B" a
+     * meaningful statement.
+     */
+    private float[][][] separateTail(StemModel.Candidate weights, Request request, Format format,
+                                     long fromMs, long windowMs, boolean[] cancelled)
+            throws Exception {
+        long frames = windowMs * format.rate / 1000L;
+        final float[][] tail = new float[2][(int) frames];
+        long[] decoded = new long[1];
+        boolean[] inner = new boolean[1];
+        long started = System.currentTimeMillis();
+        boolean completed = decode(request.outgoingSourcePath, 2, fromMs, tail[0].length,
+                request.stillWanted, inner, (pcm, block) -> {
+                    for (int ch = 0; ch < tail.length && ch < pcm.length; ch++) {
+                        System.arraycopy(pcm[ch], 0, tail[ch], (int) decoded[0], block);
+                    }
+                    decoded[0] += block;
+                });
+        if (inner[0]) {
+            cancelled[0] = true;
+            return null;
+        }
+        if (!completed || decoded[0] < format.rate / 4L) {
+            Logger.warn("transition: DJ edit: the outgoing tail decoded to only {} frames from"
+                    + " {}ms; no bridge", decoded[0], fromMs);
+            return null;
+        }
+        float[][] window = trim(tail, (int) decoded[0]);
+        float[][] forModel = resample(window, format.rate, StemModel.MODEL_RATE);
+        float[][][] stems = separate(weights, forModel, request.stillWanted);
+        if (stems == null) return null;
+        Logger.info("transition: DJ edit: the outgoing tail ({}ms from {}ms of its file)"
+                        + " separated in {}ms", Math.round(decoded[0] * 1000L / format.rate),
+                fromMs, System.currentTimeMillis() - started);
+        return stems;
     }
 
     /** The separated head's length in ms, for the log line above: the removal window plus
@@ -403,7 +648,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                                BooleanSupplier wanted) throws Exception {
         long[] seen = new long[1];
         boolean[] cancelled = new boolean[1];
-        boolean completed = decode(path, 2, -1, wanted, cancelled, (pcm, frames) -> {
+        boolean completed = decode(path, 2, 0L, -1, wanted, cancelled, (pcm, frames) -> {
             int from = 0;
             if (seen[0] < skipFrames) {
                 // A block that straddles the splice: only the part past it is the body.
@@ -421,14 +666,21 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
     }
 
     /**
-     * Decodes a source file from its start, handing blocks to {@code sink} up to
-     * {@code maxFrames} (or to the end of the file when negative).
+     * Decodes a source file, handing blocks to {@code sink} up to {@code maxFrames} (or to the
+     * end of the file when negative), starting at {@code fromMs}.
+     *
+     * <p>{@code fromMs} is for the outgoing track's tail: the bridge's material is that track's
+     * own ending, so the separation starts near the end of its file. The seek is the extractor's
+     * own ({@code SEEK_TO_CLOSEST_SYNC}), so the window may start up to a GOP early — which
+     * costs nothing, because the window is longer than what is taken from it and the take is
+     * anchored on the separated material's own bar grid.
      *
      * @return true when the file was decoded to its end (or to the limit), false when it
      *         was cut short; {@code cancelled} says whether that was the caller's doing.
      */
-    private boolean decode(String path, int channels, long maxFrames, BooleanSupplier wanted,
-                           boolean[] cancelled, Frames sink) throws Exception {
+    private boolean decode(String path, int channels, long fromMs, long maxFrames,
+                           BooleanSupplier wanted, boolean[] cancelled, Frames sink)
+            throws Exception {
         MediaExtractor extractor = new MediaExtractor();
         MediaCodec codec = null;
         try {
@@ -446,6 +698,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
             }
             if (track < 0) return false;
             extractor.selectTrack(track);
+            if (fromMs > 0L) extractor.seekTo(fromMs * 1000L, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
             codec = MediaCodec.createDecoderByType(fmt.getString(MediaFormat.KEY_MIME));
             codec.configure(fmt, null, null, 0);
             codec.start();

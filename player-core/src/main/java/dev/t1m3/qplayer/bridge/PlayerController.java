@@ -2483,26 +2483,102 @@ public final class PlayerController {
         //     all (the rule has teeth — see AI_HANDOFF).
         String pitchNote = null;
         long pitchIdentityAtFileMs = -1L;
+        Track incoming = incomingOfBoundary();
+        // The file offset this boundary's incoming deck starts at, decided once here: the
+        // alignment's own entry when it produced one, otherwise the track's content start —
+        // which is what tickCrossfade arms the player with, so this is the same number the
+        // backend is given.
+        long entry = entryMs >= 0L ? entryMs : contentStartMs(incoming);
+        double speed = nat != null ? nat.speed() : 1d;
+        EditRef edit = djEditFor(incoming);
         if (nat != null && nat.semitones() != 0) {
-            Track incoming = incomingOfBoundary();
-            long entry = entryMs >= 0L ? entryMs : contentStartMs(incoming);
-            boolean edited = djEditFor(incoming) != null;
+            boolean edited = edit != null;
             long vocalIn = vocalInBlendMs(edited, entry);
+            boolean vocalInIsExact = false;
+            if (edit != null && edit.vocalReturnEndMs > 0L && plan != null
+                    && plan.kind().overlapping()) {
+                // ⚠️ When the edit's own name says where its voice comes back, that is a better
+                // answer than the lower bound this used to work from: the return lands on a bar
+                // line the RENDER measured, and the file's timeline is the track's timeline, so
+                // the position is exact and only the deck's ratio has to be undone. The bound
+                // stays the fallback for an edit that says nothing (a round-12 one), and the
+                // rule's margin is applied to the real instant either way.
+                long firstVocalFileMs = edit.vocalReturnEndMs - DjEdit.RETURN_RAMP_MS;
+                long exact = Math.round((firstVocalFileMs - entry) / speed);
+                if (exact >= 0L) {
+                    vocalIn = exact;
+                    vocalInIsExact = true;
+                }
+            }
             long overlap = plan != null && plan.kind().overlapping() ? plan.overlapMs() : 0L;
             if (MixNaturaliser.pitchFitsBeforeVocals(vocalIn, overlap)) {
-                pitchIdentityAtFileMs = entry + vocalIn - MixNaturaliser.VOCAL_PITCH_MARGIN_MS;
-                pitchNote = pitchRuleNote(vocalIn, entry, pitchIdentityAtFileMs, overlap);
+                long deadline = entry + vocalIn - MixNaturaliser.VOCAL_PITCH_MARGIN_MS;
+                // ⚠️ Round 13: the transposition goes back in ONE write, not a sixty-step
+                // glide (the glide was sixty chances for the platform to rebuild the audio
+                // pipeline of the deck the listener is hearing — see AndroidAudioBackend), so
+                // the instant it lands on is now a design choice rather than whatever the
+                // next tick was. It is the last beat of the incoming track's own grid at or
+                // before the rule's deadline: the DJ edit holds that deck's vocals out for
+                // the whole blend, so the loudest thing under the step is the drumkit, and a
+                // beat is where the drumkit is loudest. "At or before" because this is a
+                // deadline — a beat later than it would break the rule rather than merely be
+                // less well hidden. A grid that is not trustworthy is not used at all (the
+                // step then lands exactly on the deadline, which is legal either way).
+                BeatProfile stepGrid = beatProfileOf(incoming);
+                long snapped = deadline;
+                String stepNote = "";
+                if (stepGrid != null && stepGrid.trustworthy()) {
+                    long beat = stepGrid.beatAtOrBefore(deadline);
+                    if (beat > 0L && beat <= deadline) {
+                        snapped = beat;
+                        stepNote = String.format(java.util.Locale.US,
+                                " and it is a beat of the incoming track's grid (%dms later than"
+                                        + " the deadline allows)", deadline - beat);
+                    }
+                }
+                pitchIdentityAtFileMs = snapped;
+                pitchNote = pitchRuleNote(vocalIn, entry, pitchIdentityAtFileMs, overlap)
+                        + stepNote;
                 Logger.info("transition: pitch rule — this pair is transposed {} semitone(s) and"
                                 + " the pitch is back at the incoming track's own by {}ms of its"
-                                + " file (eased back over {}ms from {}ms), {}ms before its vocals"
-                                + " arrive at {}ms; the blend is {}ms",
+                                + " file (in ONE step at that instant, not a {}ms glide), {}ms"
+                                + " before its vocals arrive at {}ms ({}); the blend is {}ms{}",
                         nat.semitones(), pitchIdentityAtFileMs, IncomingMix.RESTORE_MS,
-                        pitchIdentityAtFileMs - IncomingMix.RESTORE_MS,
-                        MixNaturaliser.VOCAL_PITCH_MARGIN_MS, entry + vocalIn, overlap);
+                        MixNaturaliser.VOCAL_PITCH_MARGIN_MS, entry + vocalIn,
+                        vocalInIsExact
+                                ? "the render's own bar line for the return, so this is the real"
+                                        + " instant and not a bound"
+                                : "the lower bound (the edit says nothing about its return)",
+                        overlap, stepNote);
             } else {
                 nat = nat.onlyTempo(dropReason(edited, vocalIn, entry, overlap));
                 Logger.info("transition: pitch rule — no transposition on this pair: {}",
                         dropReason(edited, vocalIn, entry, overlap));
+            }
+        }
+        // ⚠️ The bridge moves the low end's hand-over, and that is not a detail of the log: the
+        // carried passage is the outgoing track's own bass, and the only reason it does not sum
+        // with the outgoing deck's own low end is that the deck has already given that end up
+        // when the carried passage starts. So the swap is the bridge's start — a number the
+        // render baked into the edit's file name — instead of a beat of the outgoing track's
+        // grid. With no bridge, nothing changes: the swap is where it always was.
+        String bridgeSwapNote = null;
+        if (swap != null && edit != null && edit.hasBridge() && plan != null
+                && plan.kind().overlapping()) {
+            long at = Math.round((edit.bridgeStartMs - entry) / speed);
+            long latest = Math.max(0L, plan.overlapMs() - 1L);
+            if (at >= 0L && at <= latest) {
+                long was = swap.bassSwapAtMs();
+                swap = IncomingMix.bassSwapAt(at);
+                bridgeSwapNote = String.format(java.util.Locale.US,
+                        "bass swap at %dms — moved from %dms to the bridge's own start, which is"
+                                + " what makes the carried low end a hand-over rather than a"
+                                + " second copy", at, was);
+            } else {
+                bridgeSwapNote = String.format(java.util.Locale.US,
+                        "bass swap left at %dms (the bridge starts at %dms of the file, which is"
+                                + " %dms into this %dms blend — outside it)",
+                        swap.bassSwapAtMs(), edit.bridgeStartMs, at, plan.overlapMs());
             }
         }
         IncomingMix mix = swap;
@@ -2513,10 +2589,11 @@ public final class PlayerController {
             mix = IncomingMix.of(swap != null ? swap.bassSwapAtMs() : -1L,
                     nat.speed(), nat.semitones(), pitchIdentityAtFileMs, nat.note());
         }
-        String swapNote = swap != null ? "bass swap at " + swap.bassSwapAtMs() + "ms"
-                : (!bassSwapEnabled ? "bass swap off (settings)"
-                        : "no bass swap for this boundary (no beat of A to put it on, or the"
-                                + " overlap is shorter than a beat)");
+        String swapNote = bridgeSwapNote != null ? bridgeSwapNote
+                : (swap != null ? "bass swap at " + swap.bassSwapAtMs() + "ms"
+                        : (!bassSwapEnabled ? "bass swap off (settings)"
+                                : "no bass swap for this boundary (no beat of A to put it on, or"
+                                        + " the overlap is shorter than a beat)"));
         return new BeatAlignment(plan, entryMs,
                 beatLog + "; " + mixFragment(nat, alignment, swapNote, pitchNote), mix);
     }
@@ -3007,15 +3084,19 @@ public final class PlayerController {
         // approximation.
         if (incomingMode == IncomingMode.PARKED && transitionKind != null
                 && transitionKind.overlapping()) {
-            String edit = djEditFor(t);
+            EditRef edit = djEditFor(t);
             if (edit != null) {
                 TransitionPlan plan = transitionPlan;
                 Logger.info("transition: incoming slot {} ({}) is the rendered DJ edit —"
                                 + " vocals out for the first {}ms, back on a bar line, then the"
-                                + " master continues; this boundary blends {}ms",
+                                + " master continues{}; this boundary blends {}ms",
                         nextIndex, t.title, blendDurationMs(),
+                        edit.hasBridge()
+                                ? ", with the outgoing track's low end carried forward from "
+                                        + edit.bridgeStartMs + "ms of its file" : "",
                         plan != null ? plan.overlapMs() : -1L);
-                onMain(() -> armIncoming(generation, nextIndex, edit, incomingStartMs, incomingMode));
+                onMain(() -> armIncoming(generation, nextIndex, edit.path, incomingStartMs,
+                        incomingMode));
                 return;
             }
         }
@@ -3537,15 +3618,88 @@ public final class PlayerController {
         return diskCache.djEditPath(trackKey + "@" + removalMs);
     }
 
-    /** The finished edit for this track at the user's blend length, or null — the
-     *  boundary's own check, and deliberately only a stat: the file's presence is the
-     *  whole answer, because a render that fails deletes what it wrote. */
-    private String djEditFor(Track t) {
+    /** A finished DJ edit and the two times its own file name carries: where the bridge the
+     *  render built starts, and where the track's vocals are back at unity. Both are -1 when the
+     *  edit says nothing about them (a plain round-12 edit), and the boundary then does what it
+     *  always did: the lower bound for the vocal, and the outgoing track's own beat for the
+     *  hand-over. */
+    private static final class EditRef {
+        final String path;
+        /** Where the carried passage starts in the incoming track's own file, ms, or -1. */
+        final long bridgeStartMs;
+        /** Where the incoming track's vocals are back at unity, ms into its own file, or -1. */
+        final long vocalReturnEndMs;
+
+        EditRef(String path, long bridgeStartMs, long vocalReturnEndMs) {
+            this.path = path;
+            this.bridgeStartMs = bridgeStartMs;
+            this.vocalReturnEndMs = vocalReturnEndMs;
+        }
+
+        boolean hasBridge() {
+            return bridgeStartMs >= 0L;
+        }
+    }
+
+    /** The finished edit for this track at the user's blend length, or null — the boundary's own
+     *  check, and deliberately only a stat: the file's presence is the whole answer, because a
+     *  render that fails deletes what it wrote.
+     *
+     *  <p>Two names are looked for, in this order:
+     *  <ol>
+     *    <li><b>the per-pair one</b>, which is what a render that had the outgoing track's own
+     *        audio produces — it has a bridge in it and its name carries the bridge's start and
+     *        the vocal return (see {@link StemEditRenderer.Result});</li>
+     *    <li><b>the plain one</b>, which is the round-12 edit: the incoming's head with its
+     *        vocals held out and handed back on a bar line, and nothing carried.</li>
+     *  </ol>
+     *  The order is the preference: a bridged edit for this exact pair beats a plain edit for
+     *  this track, and a plain edit beats the plain stream. */
+    private EditRef djEditFor(Track t) {
         StemEditRenderer renderer = stemEditRenderer;
         if (renderer == null || t == null) return null;
-        String path = djEditPath(TransitionPlan.trackKey(t), blendDurationMs());
-        if (path == null) return null;
-        return new File(path).isFile() ? path : null;
+        String key = TransitionPlan.trackKey(t);
+        if (key == null || key.isEmpty()) return null;
+        String pairKey = key + "@" + blendDurationMs() + "|" + outgoingKeyOfBoundary();
+        String pairBase = diskCache.djEditBaseName(pairKey);
+        if (pairBase != null) {
+            String dir = diskCache.djEditDir();
+            for (String name : diskCache.djEditNames()) {
+                if (!name.startsWith(pairBase)) continue;
+                File file = new File(dir, name);
+                if (!file.isFile()) continue;
+                return new EditRef(file.getAbsolutePath(), suffixTime(name, "-b", pairBase),
+                        suffixTime(name, "-v", pairBase));
+            }
+        }
+        String plain = djEditPath(key, blendDurationMs());
+        return plain != null && new File(plain).isFile() ? new EditRef(plain, -1L, -1L) : null;
+    }
+
+    /** The number a DJ edit's file name carries after {@code marker}, or -1: the whole reason
+     *  the renderer names the file instead of the caller is that these two numbers are what the
+     *  render learned. */
+    private static long suffixTime(String name, String marker, String base) {
+        int at = name.indexOf(marker, base.length());
+        if (at < 0) return -1L;
+        int from = at + marker.length();
+        int to = from;
+        while (to < name.length() && Character.isDigit(name.charAt(to))) to++;
+        if (to == from) return -1L;
+        try {
+            return Long.parseLong(name.substring(from, to));
+        } catch (NumberFormatException e) {
+            return -1L;
+        }
+    }
+
+    /** The queue slot the boundary in flight is coming FROM, as a track key, or null — the
+     *  outgoing half of a bridged edit's key. */
+    private String outgoingKeyOfBoundary() {
+        int i = transitionKindFrom;
+        if (i < 0 || i >= queue.size()) return null;
+        String key = TransitionPlan.trackKey(queue.get(i));
+        return key == null || key.isEmpty() ? "?" : key;
     }
 
     /**
@@ -3569,31 +3723,67 @@ public final class PlayerController {
                 || sourcePath == null || sourcePath.isEmpty()) {
             return;
         }
-        final long removalMs = blendDurationMs();
-        final String path = djEditPath(TransitionPlan.trackKey(t), removalMs);
-        if (path == null) return;
+        // The outgoing half of the bridge. It is the track that is playing right now, and the
+        // only way its low end can be carried forward is if its own audio is on disk — a track
+        // that was streamed from a URL has nothing to separate, and then there is no bridge and
+        // the edit is the round-12 one (same lane, same moment, documented at requestStemEdit's
+        // header).
+        final Track outgoing = currentTrack();
+        final String outgoingKey = outgoing != null ? TransitionPlan.trackKey(outgoing) : null;
+        final String outgoingAudio = outgoing != null && outgoing.source == Track.Source.NETEASE
+                && outgoing.neteaseId != 0L ? diskCache.getAudio(outgoing.neteaseId) : null;
+        final BeatProfile outgoingGrid = outgoing != null ? beatProfileOf(outgoing) : null;
+        final String key = TransitionPlan.trackKey(t);
+        if (key == null || key.isEmpty()) return;
+        // What already exists, at the name this request would produce. A bridged edit and a plain
+        // one are different names, so a pair that could bridge is not skipped just because a
+        // round-12 edit for the same track is already lying there — and a pair that cannot bridge
+        // is not re-rendered because a bridged edit for a different outgoing exists.
+        final String wanted = outgoingAudio != null && outgoingKey != null
+                ? key + "@" + blendDurationMs() + "|" + outgoingKey
+                : key + "@" + blendDurationMs();
+        final String wantedBase = diskCache.djEditBaseName(wanted);
+        if (wantedBase != null) {
+            for (String name : diskCache.djEditNames()) {
+                if (name.startsWith(wantedBase)) {
+                    Logger.info("transition: the DJ edit for {} is already rendered ({}), so this"
+                            + " boundary plays it", t.title, name);
+                    return;
+                }
+            }
+        }
+        // The ratio the incoming deck will play at, measured here rather than at the boundary:
+        // the carried bass has to be stretched by it to be heard at the outgoing track's own
+        // tempo, and the render happens minutes before the boundary decides anything.
         final BeatProfile grid = beatProfileOf(t);
+        final long removalMs = blendDurationMs();
+        final double speed = MixNaturaliser.between(outgoingGrid, grid, removalMs).speed();
+        final String outBase = wantedBase == null ? null
+                : diskCache.djEditDir() + "/" + wantedBase;
+        if (outBase == null) return;
         final long generation = precacheGeneration.get();
         precacheWorker.submit(() -> {
             if (generation != precacheGeneration.get()) return;      // the queue moved on
-            if (new File(path).isFile()) {
-                Logger.info("transition: the DJ edit for {} is already rendered ({}, vocals out"
-                        + " for the first {}ms)", t.title, path, removalMs);
-                return;
-            }
-            StemEditRenderer.Request request = new StemEditRenderer.Request(sourcePath, path, t,
+            StemEditRenderer.Request request = new StemEditRenderer.Request(sourcePath, outBase, t,
                     removalMs, grid != null ? grid.periodMs() : 0d,
                     grid != null ? grid.firstBeatMs() : 0d,
+                    outgoingAudio,
+                    outgoingGrid != null ? outgoingGrid.periodMs() : 0d,
+                    outgoingGrid != null ? outgoingGrid.firstBeatMs() : 0d,
+                    speed,
                     () -> generation == precacheGeneration.get());
-            if (!renderer.render(request)) {
+            StemEditRenderer.Result result = renderer.render(request);
+            if (result == null) {
                 // Not an error: an inert feature (no model) says so itself, once.
                 Logger.info("transition: no DJ edit for {} this time; the boundary blends the"
                         + " plain stream", t.title);
-            } else {
-                // The renderer wrote the file; the cap on how many of them exist is this
-                // cache's business, not the renderer's.
-                diskCache.evictDjEdits();
+                return;
             }
+            // The renderer wrote the file; the cap on how many of them exist is this cache's
+            // business, not the renderer's.
+            diskCache.evictDjEdits();
+            Logger.info("transition: the DJ edit for {} is ready at {} — {}", t.title, result.path,
+                    result.note.isEmpty() ? "no bridge in it" : result.note);
         });
     }
 

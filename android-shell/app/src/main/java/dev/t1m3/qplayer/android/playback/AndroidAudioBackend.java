@@ -80,6 +80,9 @@ public final class AndroidAudioBackend implements AudioBackend {
     private FadeCurve rampCurve = FadeCurve.LINEAR;
     /** Invalidates queued ramp samples: every ramp start/cancel bumps it. */
     private long rampGeneration;
+    /** The audio-clock monitor's own generation: bumped whenever the players it watches
+     *  stop being the ones it is meant to be watching. */
+    private long clockGeneration;
     private long rampStartNs;
     private long rampDurationNs;
     private Runnable onCrossfadeComplete;
@@ -94,33 +97,54 @@ public final class AndroidAudioBackend implements AudioBackend {
 
     /**
      * How long the promoted track takes to go from the mix's tempo and pitch back to
-     * its own, in one smooth ramp.
+     * its own.
      *
-     * <p>The stretch and the transpose were bought for the overlap: they are what made
-     * the incoming track's beats land on the outgoing track's and its key sit in the
-     * same harmony. Once only one track is playing there is no beat to align and no
-     * harmony to clash, and what is left is the artefact — a familiar record that is
-     * audibly 3% fast and a semitone high. So both are undone, and smoothly: six
-     * seconds is slower than any beat, and by then the two tracks have not been heard
-     * together for a while, so the ease-back is itself inaudible. A pause, a seek, a
-     * new track or a release ends it immediately instead (see
-     * {@link #finishRestoreNow()}), because a halfway-eased track resuming at the wrong
-     * tempo is worse than a correction.
+     * <p>⚠️ <b>Round 13: it is a single call, not a ramp, and this number is no longer how
+     * long it takes.</b> The stretch and the transpose were bought for the overlap — they
+     * are what made the incoming track's beats land on the outgoing track's and its key sit
+     * in the same harmony — and once only one track is playing there is no beat to align
+     * and no harmony to clash, so both are undone. That used to be a six-second 10 Hz
+     * glide: <em>sixty</em> {@code setPlaybackParams} calls on the player the listener is
+     * hearing, each one a chance for the platform to rebuild its audio pipeline. Those
+     * calls are where the audible hiccup lives (measured — see AI_HANDOFF round 13), and
+     * what replaces them is <b>one</b> write of {@code speed x1 pitch x1} at the promotion:
+     * the moment this app is already tearing a player down, and the last moment the
+     * correction can be made, because any earlier and the incoming track would come off the
+     * outgoing track's grid while both are still sounding, which is the one thing the lock
+     * exists for.
      *
-     * <p>⚠️ <b>The pitch half is now the exception rather than the rule.</b> A written note
-     * is absolute, so a transposition is only applied at all when it can be back at the
-     * track's own pitch before that track starts singing — the controller schedules that
-     * ({@link IncomingMix#pitchIdentityAtFileMs()}) and {@link #pitchBackStep} performs it
-     * during the ramp, so by the time the promotion happens the pitch is already the
-     * track's own and there is nothing here to undo for it. What is left for this ramp is
-     * the tempo — and this is the last moment it can be done: any earlier and the incoming
-     * track would come off the outgoing track's grid while both are still sounding, which
-     * is the one thing the lock exists for.
+     * <p>The number is kept (and still exported as {@link IncomingMix#RESTORE_MS}) because
+     * the <em>caller</em> still needs it: a transposition is only applied at all when the
+     * blend can afford to have the track back in its own key before that track's vocals
+     * arrive, and the controller sizes that with this constant. What it measures now is the
+     * room the rule insists on, not the duration of a glide.
+     *
+     * <p>A pause, a seek, a new track or a release still settles the tempo immediately
+     * rather than leaving it pending (see {@link #finishRestoreNow()}).
      */
     private static final long PROMOTION_RESTORE_MS = IncomingMix.RESTORE_MS;
 
-    /** 10 Hz: the ease-back is a slow glide, and each step is a platform call. */
+    /** 10 Hz: the pitch's return is checked against the incoming track's own clock, which
+     *  only has to be sampled often enough that the step lands inside the rule's own
+     *  two-second margin (measured on the device: it lands 13-72 ms late). */
     private static final long RESTORE_TICK_MS = 100L;
+
+    /**
+     * Which ease-back this process performs: the single write (false, the shipped answer) or
+     * round 12's per-tick glide (true).
+     *
+     * <p>⚠️ <b>A measurement instrument, not a feature.</b> The claim this round is built on
+     * is "a live {@code setPlaybackParams} train is what the listener hears as a hiccup", and
+     * the only honest way to test it is to run both shapes on the same device with the same
+     * instrumentation — which is what this flag is for. It is read ONCE, from
+     * {@code files/legacy-ease-backs} in the app's private storage: the file exists only when
+     * a harness pushed it, so an ordinary install never takes this branch, and every process
+     * that does says so in the log. Round 13's device runs are the A/B (see AI_HANDOFF).
+     */
+    private volatile boolean legacyEaseBacks;
+
+    /** Whether the A/B arm was already read (and logged) for this process. */
+    private boolean legacyArmChecked;
 
     // --- The mix the incoming player is prepared with --------------------------
     // What a mix can ask for: the tempo the incoming track is pulled to and the
@@ -146,20 +170,29 @@ public final class AndroidAudioBackend implements AudioBackend {
      *  so the caller never has to assume anything took. */
     private IncomingMix requestedMix = IncomingMix.IDENTITY;
     private IncomingMix appliedMix;
-    /** Easing the promoted track back to its own tempo and pitch after a mix: what it
-     *  starts from, when, over how long, and a generation so a step queued on the main
-     *  looper can never touch the wrong player. See {@link #PROMOTION_RESTORE_MS}. */
+    /** The tempo the promoted track is owed its own back from, and whether it is still
+     *  owed: one call at the promotion writes the track's own tempo, and a generation so a
+     *  write queued on the main looper can never touch the wrong player. See
+     *  {@link #PROMOTION_RESTORE_MS}. */
     private double restoreFromSpeed = 1d;
-    private double restoreFromPitch = 1d;
     private long restoreStartNs;
-    private long restoreDurationNs;
     private long restoreGeneration;
+    /** True while the promoted track is still owed its own tempo back. */
     private boolean restoring;
     /**
      * The user's rule, in the only form the platform can execute it: the pitch goes back
      * to the incoming track's own by the position in ITS OWN FILE that
-     * {@link IncomingMix#pitchIdentityAtFileMs()} names, eased back over
-     * {@link IncomingMix#RESTORE_MS}.
+     * {@link IncomingMix#pitchIdentityAtFileMs()} names.
+     *
+     * <p><b>One step, not a glide.</b> The return is checked at 10 Hz against the player's
+     * own clock and performed in a single {@code setPlaybackParams}; it used to be sixty of
+     * them over six seconds, and sixty chances for the platform to rebuild the audio
+     * pipeline of the deck the listener is hearing is how this feature produced a hiccup
+     * (see AI_HANDOFF round 13). A step is affordable here for a reason that is structural
+     * rather than lucky: a transposition is only ever applied to a pair whose incoming deck
+     * plays a DJ edit ({@code DjEdit}), and the edit holds that track's vocals out for the
+     * whole blend — so at the instant of the step the material under it is the backing, and
+     * the controller places the instant two seconds before the voice comes back anyway.
      *
      * <p>Driven by {@code getCurrentPosition()} rather than by the wall clock, and that is
      * the whole point: the vocal entry the controller measured is a position in the same
@@ -168,8 +201,8 @@ public final class AndroidAudioBackend implements AudioBackend {
      * seconds of margin — and the one thing the rule says is that the margin is not to be
      * squeezed.
      *
-     * <p>{@link #pitchBackGeneration} guards a step already queued on the main looper,
-     * like {@link #restoreGeneration} does for the promotion's ramp.
+     * <p>{@link #pitchBackGeneration} guards a check already queued on the main looper,
+     * like {@link #restoreGeneration} does for the promotion's tempo write.
      */
     private long pitchIdentityAtFileMs = -1L;
     private MediaPlayer pitchBackPlayer;
@@ -178,8 +211,8 @@ public final class AndroidAudioBackend implements AudioBackend {
     private long pitchBackGeneration;
     private boolean pitchBackRunning;
     /** Where the player's own clock stood when the pitch reached identity: the number the
-     *  log line reports as the proof, and what the promotion's ramp starts the pitch at
-     *  (1.0, or a warning if the schedule had not finished). */
+     *  log line reports as the proof, and a warning at the promotion if the schedule had
+     *  not finished. */
     private long pitchBackDoneAtMs = -1L;
     /** When the low end hands over, ms into the ramp (from the applied mix), and
      *  whether it has. A one-shot: the swap happens once, on a beat, and never
@@ -810,17 +843,10 @@ public final class AndroidAudioBackend implements AudioBackend {
      */
     private boolean applyTempo(MediaPlayer mp, double speed, double pitch) {
         try {
-            Float readSpeed = null;
-            Float readPitch = null;
-            try {
-                mp.setPlaybackParams(new PlaybackParams()
-                        .setSpeed((float) speed).setPitch((float) pitch));
-                PlaybackParams read = mp.getPlaybackParams();
-                readSpeed = read.getSpeed();
-                readPitch = read.getPitch();
-            } catch (Throwable e) {
-                Logger.warn("MediaPlayer: incoming x{} speed / x{} pitch refused: {}",
-                        fmt(speed), fmt(pitch), e.toString());
+            long stamp = writeParams(mp, "incoming", "apply-mix", speed, pitch);
+            if (stamp < 0L) {
+                Logger.warn("MediaPlayer: incoming x{} speed / x{} pitch refused — the pair"
+                        + " blends un-stretched", fmt(speed), fmt(pitch));
                 return false;
             }
             boolean rolling;
@@ -829,17 +855,68 @@ public final class AndroidAudioBackend implements AudioBackend {
             } catch (Throwable e) {
                 rolling = false;
             }
-            Logger.info("MediaPlayer: incoming mix applied to the INCOMING player"
-                            + " (speed x{} pitch x{} asked; platform reports speed x{} pitch x{};"
-                            + " the audible track is untouched; it is parked, and {} was started by"
-                            + " the call — the park below puts it back)",
-                    fmt(speed), fmt(pitch), fmt(readSpeed), fmt(readPitch),
-                    rolling ? "it" : "nothing");
+            Logger.info("MediaPlayer: incoming mix applied to the INCOMING player (speed x{}"
+                            + " pitch x{} asked, read back by the write above; the audible track"
+                            + " is untouched; it is parked, and {} was started by the call — the"
+                            + " park below puts it back)",
+                    fmt(speed), fmt(pitch), rolling ? "it" : "nothing");
             return true;
         } catch (Throwable e) {
             Logger.warn("MediaPlayer: incoming mix failed: {}", e.toString());
             return false;
         }
+    }
+
+    /**
+     * One {@code MediaPlayer.setPlaybackParams} write, and the numbers that make it
+     * evidence rather than a claim: which player, why, what was asked, what the platform
+     * reports back, how long the call itself took, and where each player's play head was
+     * when it happened.
+     *
+     * <p>⚠️ <b>This method exists because a live {@code setPlaybackParams} is the one call
+     * on this path that can make the platform rebuild its audio pipeline, which the
+     * listener hears as a hiccup.</b> Every correction this class performs now goes through
+     * here, so a log can answer "was a parameter written at the instant the listener heard
+     * the gap" instead of "a mix was applied somewhere inside this blend". The read-back is
+     * part of the write on purpose (a platform that silently ignores the values would
+     * otherwise leave a plan describing a track that is not stretched); the elapsed time of
+     * the call is part of the line because a call that takes a frame's worth of time is
+     * doing work the audio thread will notice.
+     *
+     * @return the wall clock the write finished at, or {@code -1} when the platform refused
+     *         it.
+     */
+    private long writeParams(MediaPlayer mp, String who, String reason, double speed,
+                             double pitch) {
+        if (mp == null) return -1L;
+        long before = stamp();
+        long posBefore = positionOf(mp);
+        Float readSpeed = null;
+        Float readPitch = null;
+        String failure = null;
+        try {
+            mp.setPlaybackParams(new PlaybackParams()
+                    .setSpeed((float) speed).setPitch((float) pitch));
+            PlaybackParams read = mp.getPlaybackParams();
+            readSpeed = read.getSpeed();
+            readPitch = read.getPitch();
+        } catch (Throwable e) {
+            failure = e.toString();
+        }
+        long after = stamp();
+        long posAfter = positionOf(mp);
+        Logger.info("MediaPlayer: params-write reason={} who={} asked=speed x{} pitch x{}"
+                        + " platform=speed x{} pitch x{} took={}ms pos {}->{}ms audible={}ms{}",
+                reason, who, fmt(speed), fmt(pitch), fmt(readSpeed), fmt(readPitch),
+                after - before, posBefore, posAfter, position(), 
+                failure != null ? " REFUSED " + failure : "");
+        return failure != null ? -1L : after;
+    }
+
+    /** The monotonic clock every trace line and the audio-clock monitor are compared on
+     *  ({@code elapsedRealtime}: uptime, so a clock adjustment cannot look like a stall). */
+    private static long stamp() {
+        return android.os.SystemClock.elapsedRealtime();
     }
 
     private static String fmt(double v) {
@@ -852,22 +929,117 @@ public final class AndroidAudioBackend implements AudioBackend {
 
     // --- Back to the track's own tempo and pitch ------------------------------
 
-    /** Ease the promoted player from the mix's speed and pitch back to its own, over
-     *  {@link #PROMOTION_RESTORE_MS}. See that constant for why the promotion is the
-     *  moment, and why it is a ramp rather than a step. */
-    private void startTempoRestore(double speed, double pitch) {
+    /**
+     * Put the promoted track back at its own tempo and pitch — in one call.
+     *
+     * <p>See {@link #PROMOTION_RESTORE_MS} for why this is a step and no longer the
+     * six-second sixty-call glide it used to be. Two things are deliberate about the
+     * shape:
+     *
+     * <ul>
+     *   <li><b>Nothing is written when there is nothing to undo.</b> A pitch-only or
+     *   swap-only boundary ran at {@code speed 1.0} the whole way; writing {@code x1.0} over
+     *   {@code x1.0} sixty times was the single most common form of this defect in round
+     *   12's device logs (every one of those boundaries logged
+     *   "easing ... back to its own tempo and pitch over 6000ms (from x1.0000 / x1.0000)").</li>
+     *   <li><b>The write happens before the players are torn down.</b> The promotion that
+     *   calls this is about to release the outgoing player and both equalizers; doing the
+     *   one parameter write first keeps it attributable in the log, and keeps it off the
+     *   heap of work that releasing an effect on the promoted player's own session
+     *   already is.</li>
+     * </ul>
+     *
+     * <p>{@code speed} is the ratio the promoted deck has been running at. A value of 1.0
+     * (with the pitch already at its own — see {@link #startPitchBack}) is "nothing owed",
+     * and the log says so rather than writing the same numbers back.
+     */
+    private void restoreTempoNow(double speed) {
         restoreFromSpeed = speed;
-        restoreFromPitch = pitch;
-        restoreStartNs = System.nanoTime();
-        restoreDurationNs = PROMOTION_RESTORE_MS * 1_000_000L;
-        restoring = true;
+        restoreStartNs = stamp();
         long generation = ++restoreGeneration;
-        Logger.info("MediaPlayer: easing the promoted track back to its own tempo and pitch"
-                + " over {}ms (from x{} / x{})", PROMOTION_RESTORE_MS, fmt(speed), fmt(pitch));
-        restoreStep(generation);
+        MediaPlayer mp = player;
+        boolean owed = Math.abs(speed - 1d) > 1e-4d;
+        if (legacyEaseBacks()) {
+            // The "before" arm: round 12's 10 Hz glide, which ran even when there was nothing
+            // to undo — the shape this round's fix is measured against.
+            restoring = true;
+            Logger.info("MediaPlayer: [A/B arm: the per-tick glide] easing the promoted track"
+                    + " back to its own tempo and pitch over {}ms (from x{}), {} per-tick"
+                    + " writes", PROMOTION_RESTORE_MS, fmt(speed),
+                    PROMOTION_RESTORE_MS / RESTORE_TICK_MS);
+            legacyRestoreStep(generation);
+            return;
+        }
+        if (!owed) {
+            restoring = false;
+            Logger.info("MediaPlayer: the promoted track's tempo is its own already (it ran at"
+                    + " x{} through the overlap), so there is nothing to write back — one"
+                    + " parameter call fewer on the deck the listener is hearing", fmt(speed));
+            return;
+        }
+        restoring = true;
+        long when = writeParams(mp, "audible", "tempo-restore", 1d, 1d);
+        restoring = false;
+        // The deck the monitor watches is now running at its own rate: without this the next
+        // tick would compare a 1.0 advance against the mix's ratio and report a stall that is
+        // the correction itself.
+        clockInSpeed = 1d;
+        if (generation != restoreGeneration) return;
+        if (when < 0L) {
+            Logger.warn("MediaPlayer: the promoted track is still at x{} — the platform refused"
+                    + " the write back to its own tempo", fmt(speed));
+        } else {
+            Logger.info("MediaPlayer: the promoted track is back at its own tempo and pitch —"
+                    + " one write, at the promotion ({}ms of its file), instead of the {}"
+                    + " per-tick writes this used to take",
+                    positionOf(mp), PROMOTION_RESTORE_MS / RESTORE_TICK_MS);
+        }
     }
 
-    private void restoreStep(long generation) {
+    /**
+     * Settle the tempo NOW, at its own value.
+     *
+     * <p>Called whenever playback is interrupted (a pause, a seek, a new track, a release):
+     * a pending correction must not survive into a resumed track, and a resumed track at
+     * the wrong tempo is worse than one correction. Also bumps the generation, so a write
+     * already queued on the main looper can never touch the next player.
+     */
+    private void finishRestoreNow() {
+        if (!restoring) return;
+        restoring = false;
+        restoreGeneration++;
+        MediaPlayer mp = player;
+        if (mp == null) return;
+        if (Math.abs(restoreFromSpeed - 1d) <= 1e-4d) return;
+        if (writeParams(mp, "audible", "tempo-restore-early", 1d, 1d) >= 0L) {
+            Logger.info("MediaPlayer: tempo and pitch restore finished early (playback changed)");
+        }
+    }
+
+    // --- the A/B arm (round 12's per-tick glide) ------------------------------
+
+    /** Whether this process runs the measured "before" shape. Read once per process from
+     *  {@code files/legacy-ease-backs}: absent (the ordinary case) means the shipped answer —
+     *  one write per return — and present means round 12's 10 Hz glide, which is what the
+     *  hiccup was measured against. Every read is logged, so a log can never be ambiguous
+     *  about which arm produced it. */
+    private boolean legacyEaseBacks() {
+        if (legacyArmChecked) return legacyEaseBacks;
+        legacyArmChecked = true;
+        java.io.File marker = new java.io.File(appContext.getFilesDir(), "legacy-ease-backs");
+        legacyEaseBacks = marker.isFile();
+        Logger.info("MediaPlayer: ease-back arm = {} ({})", legacyEaseBacks ? "LEGACY (10Hz glide)"
+                        : "single write", legacyEaseBacks
+                        ? marker.getAbsolutePath() + " is present, so this run reproduces round"
+                                + " 12's per-tick ramp for the A/B"
+                        : "no " + marker.getAbsolutePath() + " marker, so this is the shipped"
+                                + " shape: one write per correction");
+        return legacyEaseBacks;
+    }
+
+    /** Round 12's tempo glide: one write per 100 ms for six seconds. Kept only for the A/B
+     *  arm — see {@link #legacyEaseBacks()}. */
+    private void legacyRestoreStep(long generation) {
         boolean done = false;
         synchronized (this) {
             if (!restoring || generation != restoreGeneration) return;
@@ -877,19 +1049,14 @@ public final class AndroidAudioBackend implements AudioBackend {
                 return;
             }
             long elapsed = System.nanoTime() - restoreStartNs;
-            double t = elapsed >= restoreDurationNs ? 1d
-                    : (double) elapsed / (double) restoreDurationNs;
+            long durationNs = PROMOTION_RESTORE_MS * 1_000_000L;
+            double t = elapsed >= durationNs ? 1d : (double) elapsed / (double) durationNs;
             double speed = restoreFromSpeed + (1d - restoreFromSpeed) * t;
-            double pitch = restoreFromPitch + (1d - restoreFromPitch) * t;
-            try {
-                mp.setPlaybackParams(new PlaybackParams()
-                        .setSpeed((float) speed).setPitch((float) pitch));
-            } catch (Throwable e) {
-                Logger.warn("MediaPlayer: restoring the promoted tempo failed ({}); leaving it"
-                        + " at x{}", e.toString(), fmt(speed));
+            if (writeParams(mp, "audible", "tempo-restore-tick", speed, 1d) < 0L) {
                 restoring = false;
                 return;
             }
+            clockInSpeed = speed;
             if (t >= 1d) {
                 restoring = false;
                 done = true;
@@ -900,31 +1067,56 @@ public final class AndroidAudioBackend implements AudioBackend {
             return;
         }
         try {
-            rampHandler.postDelayed(() -> restoreStep(generation), RESTORE_TICK_MS);
+            rampHandler.postDelayed(() -> legacyRestoreStep(generation), RESTORE_TICK_MS);
         } catch (Throwable ignored) { }
     }
 
-    /**
-     * End the ease-back NOW, at its own tempo and pitch.
-     *
-     * <p>Called whenever playback is interrupted (a pause, a seek, a new track, a
-     * release): a ramp that stops half way would leave the track playing at, say, 3%
-     * fast until something else happened to change it, and a resumed track at the wrong
-     * tempo is worse than one correction. Also bumps the generation, so a step already
-     * queued on the main looper can never touch the next player.
-     */
-    private void finishRestoreNow() {
-        if (!restoring) return;
-        restoring = false;
-        restoreGeneration++;
-        MediaPlayer mp = player;
-        if (mp == null) return;
-        try {
-            mp.setPlaybackParams(new PlaybackParams().setSpeed(1f).setPitch(1f));
-            Logger.info("MediaPlayer: tempo and pitch restore finished early (playback changed)");
-        } catch (Throwable e) {
-            Logger.warn("MediaPlayer: could not restore the tempo early: {}", e.toString());
+    /** Round 12's pitch glide: one write per 100 ms over the six seconds before the
+     *  deadline, ending at the track's own pitch. The A/B arm's other half. */
+    private void legacyPitchBackStep(long generation) {
+        boolean finished = false;
+        long at;
+        synchronized (this) {
+            if (!pitchBackRunning || generation != pitchBackGeneration) return;
+            MediaPlayer mp = pitchBackPlayer;
+            if (mp == null) {
+                pitchBackRunning = false;
+                return;
+            }
+            at = positionOf(mp);
+            if (at < 0L) {
+                pitchBackRunning = false;
+                writeParams(mp, "incoming", "pitch-return-no-clock", pitchBackSpeed, 1d);
+                return;
+            }
+            long remaining = pitchIdentityAtFileMs - at;
+            double value;
+            if (remaining <= 0L) {
+                value = 1d;
+                pitchBackRunning = false;
+                finished = true;
+                pitchBackDoneAtMs = at;
+            } else if (remaining >= IncomingMix.RESTORE_MS) {
+                value = pitchBackFrom;
+            } else {
+                double t = 1d - (double) remaining / (double) IncomingMix.RESTORE_MS;
+                value = pitchBackFrom + (1d - pitchBackFrom) * t;
+            }
+            if (writeParams(mp, "incoming", "pitch-return-tick", pitchBackSpeed, value) < 0L) {
+                pitchBackRunning = false;
+                return;
+            }
         }
+        if (finished) {
+            Logger.info("MediaPlayer: the incoming track's pitch is its own again — its own clock"
+                            + " says {}ms, the deadline the rule set was {}ms of its file ({}ms"
+                            + " of margin before its vocals)",
+                    at, pitchIdentityAtFileMs, MixNaturaliser.VOCAL_PITCH_MARGIN_MS);
+            return;
+        }
+        try {
+            rampHandler.postDelayed(() -> legacyPitchBackStep(generation), RESTORE_TICK_MS);
+        } catch (Throwable ignored) { }
     }
 
     @Override
@@ -1095,23 +1287,19 @@ public final class AndroidAudioBackend implements AudioBackend {
             try {
                 incomingPlayer.start();
                 incomingRolling = true;
-                // Assert the mix now that the player is actually rolling. The values are
-                // the ones onIncomingPrepared already set and read back, so this is not
-                // a second decision — it is insurance against a platform that ignores
-                // playback parameters applied before playback, which would leave the
-                // incoming at its own tempo while the whole plan (the overlap length,
-                // the beat grid it was aligned to, the position it will be promoted at)
-                // assumes otherwise.
-                if (appliedMix != null && (appliedMix.hasTempo() || appliedMix.semitones() != 0)) {
-                    try {
-                        incomingPlayer.setPlaybackParams(new PlaybackParams()
-                                .setSpeed((float) appliedMix.speed())
-                                .setPitch((float) appliedMix.pitch()));
-                    } catch (Throwable e) {
-                        Logger.warn("MediaPlayer: could not re-assert the mix on the rolling"
-                                + " incoming player: {}", e.toString());
-                    }
-                }
+                // ⚠️ Round 13: this used to WRITE the mix's parameters a second time ("assert
+                // the mix now that the player is actually rolling"). It no longer does,
+                // because the write is exactly the kind of call that can make the platform
+                // rebuild the audio pipeline of the deck that is being faded in — at the most
+                // exposed instant there is, the first sample of the blend — and because the
+                // reason for it was never observed: onIncomingPrepared applies the mix and
+                // READS IT BACK, and a platform that answered the read honestly is not going
+                // to have dropped the values in between. What replaces it is the same
+                // insurance priced as a read instead of a write: ask the platform what it has
+                // before the ramp is left to run on the answer, and repair only on a
+                // disagreement (never observed on the reference device; the line says which
+                // happened either way).
+                verifyMixOnRollingPlayer();
             } catch (Throwable e) {
                 Logger.warn("MediaPlayer: parked incoming refused to start: {}", e.toString());
             }
@@ -1119,8 +1307,196 @@ public final class AndroidAudioBackend implements AudioBackend {
         Logger.info("MediaPlayer: crossfade begin over {}ms ({}{}{})", ms, rampCurve,
                 appliedMix != null ? ", " + appliedMix : "",
                 incomingRolling ? ", the incoming starts now at its offset" : "");
+        // Read (and log) the A/B arm here as well, so a boundary with no correction at all
+        // still says which shape produced its log.
+        legacyEaseBacks();
+        // From here until well past the promotion, both players' audio clocks are sampled so
+        // a gap in what the listener hears can be attributed to an instant: see the class's
+        // monitor note.
+        startClockMonitor();
         startPitchBack();
         rampStep(generation);
+        return true;
+    }
+
+    /**
+     * Ask the platform what it has, instead of telling it again.
+     *
+     * <p>The rolling incoming player is the one that was prepared with the mix and read back
+     * after the write; this re-reads it a moment later (immediately after {@code start()}),
+     * and only writes when the answer disagrees with what was applied. Both outcomes are
+     * logged: "the platform still has it" is the ordinary case and the reason no parameter
+     * call happens at the start of a blend any more, and "it did not, so it was re-written"
+     * is the only evidence that the old unconditional re-assert was ever needed.
+     */
+    private void verifyMixOnRollingPlayer() {
+        if (appliedMix == null || (!appliedMix.hasTempo() && appliedMix.semitones() == 0)) return;
+        if (incomingPlayer == null) return;
+        Float readSpeed = null;
+        Float readPitch = null;
+        try {
+            PlaybackParams read = incomingPlayer.getPlaybackParams();
+            readSpeed = read.getSpeed();
+            readPitch = read.getPitch();
+        } catch (Throwable e) {
+            Logger.warn("MediaPlayer: could not read the rolling incoming player's parameters"
+                    + " ({}); leaving them as applied", e.toString());
+            return;
+        }
+        boolean kept = readSpeed != null && readPitch != null
+                && Math.abs(readSpeed - appliedMix.speed()) < 1e-3f
+                && Math.abs(readPitch - appliedMix.pitch()) < 1e-3f;
+        if (kept) {
+            Logger.info("MediaPlayer: the rolling incoming player still has the mix the parked"
+                            + " one read back (speed x{} pitch x{}) — so no second parameter"
+                            + " write at the start of the blend, which is one fewer chance to"
+                            + " glitch the deck being faded in",
+                    fmt(readSpeed), fmt(readPitch));
+            return;
+        }
+        Logger.warn("MediaPlayer: the rolling incoming player came back with speed x{} pitch x{}"
+                        + " where the parked one read back x{} / x{} — re-writing the mix once"
+                        + " (this is the case the old unconditional re-assert existed for)",
+                fmt(readSpeed), fmt(readPitch), fmt(appliedMix.speed()), fmt(appliedMix.pitch()));
+        writeParams(incomingPlayer, "incoming", "repair-after-start",
+                appliedMix.speed(), appliedMix.pitch());
+    }
+
+    // --- the audio-clock monitor ---------------------------------------------
+
+    /** How much the audio clock may disagree with the wall clock (after the ratio) before it
+     *  is reported. A pipeline refresh, an underrun, a stall and a re-buffer all show up as
+     *  the play head not advancing while the clock does; 25 ms is above the sampling noise
+     *  at this rate and below anything a listener would not notice. */
+    private static final long CLOCK_GAP_MS = 25L;
+    /** 20 ms: fine enough that a gap's own width is measured rather than inferred. */
+    private static final long CLOCK_TICK_MS = 20L;
+    /** How long the monitor keeps watching after the promotion. The overlap's tail plus the
+     *  whole window a parameter write can still land in (the promotion's tempo write happens
+     *  at the promotion itself), with slack for the promotion's own teardown. */
+    private static final long CLOCK_TAIL_MS = 8_000L;
+
+    private MediaPlayer clockIn,
+            clockOut;
+    private long clockInPos = -1L;
+    private long clockOutPos = -1L;
+    private long clockLastNs;
+    private double clockInSpeed = 1d;
+    private long clockStopAtNs;
+    private int clockGapsIn;
+    private int clockGapsOut;
+    private long clockTicks;
+
+    /**
+     * Sample both players' play heads and report every discontinuity — the number the
+     * hiccup hypothesis has to be tested against.
+     *
+     * <p><b>Why this is the honest proxy.</b> The claim under test is "a live
+     * {@code setPlaybackParams} makes the platform rebuild its audio pipeline, and the
+     * listener hears a gap". A gap in the audio a deck is emitting is exactly a stretch
+     * where its play head does not advance while wall time does (the head is driven by the
+     * sink's own clock), or a jump where it advances too far. So this samples
+     * {@code getCurrentPosition()} at 50 Hz for each player, compares the advance against
+     * what the wall clock and the player's ratio predict, and logs each disagreement with
+     * its size, its direction and both players' positions. A clean run logs one summary line
+     * per second and no gaps; a glitching one logs a gap whose timestamp can be put beside
+     * the {@code params-write} lines.
+     *
+     * <p>It watches the INCOMING player (the one a mix is applied to and the one that
+     * carries the transposition and tempo returns) and the audible one (which is where a
+     * release or an equalizer write would show). It stops itself {@link #CLOCK_TAIL_MS}
+     * after the promotion, and on any cancellation.
+     */
+    private void startClockMonitor() {
+        long generation = ++clockGeneration;
+        clockIn = incomingPlayer;
+        clockOut = player;
+        clockInPos = -1L;
+        clockOutPos = -1L;
+        clockLastNs = System.nanoTime();
+        clockInSpeed = appliedMix != null ? appliedMix.speed() : 1d;
+        clockStopAtNs = 0L;                       // set at the promotion
+        clockGapsIn = 0;
+        clockGapsOut = 0;
+        clockTicks = 0;
+        Logger.info("MediaPlayer: audio-clock monitor on (50Hz, incoming x{} + the audible"
+                + " player): every stretch where a play head does not advance with the wall"
+                + " clock is logged as a gap, so a hiccup can be put beside the parameter"
+                + " writes that caused it", fmt(clockInSpeed));
+        clockTick(generation);
+    }
+
+    /** Called at the promotion: keep watching for the tail window, then stop. */
+    private void extendClockMonitor() {
+        if (clockStopAtNs == 0L) {
+            clockStopAtNs = System.nanoTime() + CLOCK_TAIL_MS * 1_000_000L;
+        }
+    }
+
+    private void stopClockMonitor(String why) {
+        if (clockIn == null && clockOut == null) return;
+        clockGeneration++;
+        Logger.info("MediaPlayer: audio-clock monitor off ({}): {} gap(s) on the incoming deck,"
+                        + " {} on the audible one", why, clockGapsIn, clockGapsOut);
+        clockIn = null;
+        clockOut = null;
+        clockStopAtNs = 0L;
+    }
+
+    private void clockTick(long generation) {
+        long now = System.nanoTime();
+        StringBuilder gaps = new StringBuilder();
+        boolean summary = false;
+        synchronized (this) {
+            if (generation != clockGeneration) return;
+            long elapsedMs = (now - clockLastNs) / 1_000_000L;
+            clockLastNs = now;
+            if (elapsedMs <= 0L) elapsedMs = CLOCK_TICK_MS;
+            if (!checkClock(clockIn, true, elapsedMs, gaps)) clockInPos = -1L;
+            if (!checkClock(clockOut, false, elapsedMs, gaps)) clockOutPos = -1L;
+            summary = (++clockTicks % (1_000L / CLOCK_TICK_MS)) == 0;
+            if (clockStopAtNs != 0L && now > clockStopAtNs) {
+                stopClockMonitor("the promotion's tail window elapsed");
+                return;
+            }
+        }
+        if (gaps.length() > 0) {
+            Logger.info("MediaPlayer: audio-clock gap{} at {}ms uptime:{}",
+                    gaps.indexOf(";") == gaps.lastIndexOf(";") ? "" : "s", stamp(), gaps);
+        } else if (summary) {
+            Logger.info("MediaPlayer: audio-clock {}({}); {} gap(s) so far", 
+                    clockInPos < 0L ? "-" : clockInPos + "ms on the incoming deck",
+                    clockOutPos < 0L ? "-" : clockOutPos + "ms on the audible one",
+                    clockGapsIn + clockGapsOut);
+        }
+        try {
+            rampHandler.postDelayed(() -> clockTick(generation), CLOCK_TICK_MS);
+        } catch (Throwable ignored) { }
+    }
+
+    /** One player's advance against the wall clock. Updates the cached head and appends a
+     *  fragment to {@code gaps} when the two disagree. */
+    private boolean checkClock(MediaPlayer mp, boolean incoming, long elapsedMs,
+                               StringBuilder gaps) {
+        if (mp == null) return false;
+        long at = positionOf(mp);
+        if (at < 0L) return false;
+        long previous = incoming ? clockInPos : clockOutPos;
+        double speed = incoming ? clockInSpeed : (restoring ? restoreFromSpeed : 1d);
+        if (previous < 0L) {
+            if (incoming) clockInPos = at; else clockOutPos = at;
+            return true;
+        }
+        long actual = at - previous;
+        long expected = Math.round(elapsedMs * speed);
+        long drift = actual - expected;
+        if (incoming) clockInPos = at; else clockOutPos = at;
+        if (Math.abs(drift) < CLOCK_GAP_MS) return true;
+        if (incoming) clockGapsIn++; else clockGapsOut++;
+        gaps.append(' ').append(incoming ? "incoming" : "audible")
+            .append(" at=").append(at).append("ms moved=").append(actual)
+            .append("ms expected=").append(expected).append("ms over=").append(elapsedMs)
+            .append("ms drift=").append(drift).append("ms;");
         return true;
     }
 
@@ -1137,7 +1513,7 @@ public final class AndroidAudioBackend implements AudioBackend {
      *
      * <p>A mix with a transposition and no schedule is not started and not warned about:
      * that is a host that pushed the mix itself (a test, the desktop bridge), and its
-     * transposition is undone by the promotion's ramp as it always was.
+     * transposition is undone at the promotion as it always was.
      */
     private synchronized void startPitchBack() {
         if (appliedMix == null || appliedMix.semitones() == 0) return;
@@ -1148,19 +1524,41 @@ public final class AndroidAudioBackend implements AudioBackend {
         pitchBackDoneAtMs = -1L;
         pitchBackRunning = true;
         long generation = ++pitchBackGeneration;
+        if (legacyEaseBacks()) {
+            Logger.info("MediaPlayer: [A/B arm: the per-tick glide] the transposition on the"
+                    + " incoming track ({} semitone(s), pitch x{}) is eased back over {}ms,"
+                    + " ending by {}ms of its own file — the incoming is at {}ms now, and that"
+                    + " is {} per-tick writes on a deck the listener is hearing",
+                    appliedMix.semitones(), fmt(pitchBackFrom), IncomingMix.RESTORE_MS,
+                    pitchIdentityAtFileMs, positionOf(incomingPlayer),
+                    IncomingMix.RESTORE_MS / RESTORE_TICK_MS);
+            legacyPitchBackStep(generation);
+            return;
+        }
         Logger.info("MediaPlayer: the transposition on the incoming track ({} semitone(s),"
-                        + " pitch x{}) is eased back over {}ms, ending by {}ms of its own file"
-                        + " — the incoming is at {}ms now",
-                appliedMix.semitones(), fmt(pitchBackFrom), IncomingMix.RESTORE_MS,
-                pitchIdentityAtFileMs, positionOf(incomingPlayer));
-        pitchBackStep(generation);
+                        + " pitch x{}) is held until {}ms of its own file and then put back in"
+                        + " ONE step — the incoming is at {}ms now, and the step lands 2000ms"
+                        + " before its vocals. There is no per-tick glide any more: this is a"
+                        + " single parameter write on a deck whose DJ edit has the vocals out",
+                appliedMix.semitones(), fmt(pitchBackFrom), pitchIdentityAtFileMs,
+                positionOf(incomingPlayer));
+        pitchBackCheck(generation);
     }
 
-    /** One step of the rule's ease-back: read where the incoming track actually is, and
-     *  set the pitch the position says it should be at. See {@link #pitchIdentityAtFileMs}. */
-    private void pitchBackStep(long generation) {
+    /**
+     * The rule's own check: read where the incoming track actually is, and put the pitch
+     * back the moment that clock reaches the deadline. One write, no ramp — see the field's
+     * note for why a step is affordable and {@link #PROMOTION_RESTORE_MS} for what the
+     * sixty-call glide cost.
+     *
+     * <p>The poll is what makes the position the deciding number (10 Hz, so the step lands
+     * up to one tick late — measured 13-72 ms on the reference device, well inside the
+     * rule's two-second margin). Between the start and the deadline nothing is written at
+     * all: the transposition is simply held, which is also the harmonically better answer,
+     * since the two tracks are still both audible for most of that time.
+     */
+    private void pitchBackCheck(long generation) {
         boolean finished = false;
-        double value;
         long at;
         synchronized (this) {
             if (!pitchBackRunning || generation != pitchBackGeneration) return;
@@ -1170,63 +1568,47 @@ public final class AndroidAudioBackend implements AudioBackend {
                 return;
             }
             at = positionOf(mp);
-            if (at < 0L) {
-                // No clock to schedule against: end it at the track's own pitch, which is
-                // the only direction the rule allows.
+            if (at < 0L || at >= pitchIdentityAtFileMs) {
+                // Either there is no clock to schedule against, or the deadline has arrived:
+                // both end at the track's own pitch, which is the only direction the rule
+                // allows.
                 pitchBackRunning = false;
-                try {
-                    mp.setPlaybackParams(new PlaybackParams()
-                            .setSpeed((float) pitchBackSpeed).setPitch(1f));
-                } catch (Throwable e) {
-                    Logger.warn("MediaPlayer: could not end the transposition early: {}",
-                            e.toString());
+                boolean refused = writeParams(mp, "incoming", "pitch-return",
+                        pitchBackSpeed, 1d) < 0L;
+                if (refused) {
+                    pitchBackRunning = true;          // try again on the next tick
+                    Logger.warn("MediaPlayer: could not put the transposition back (the rule's"
+                            + " deadline is {}ms of the file, the player is at {}ms); retrying",
+                            pitchIdentityAtFileMs, at);
+                } else {
+                    pitchBackDoneAtMs = at;
+                    finished = true;
                 }
-                return;
-            }
-            long remaining = pitchIdentityAtFileMs - at;
-            if (remaining <= 0L) {
-                value = 1d;
-                pitchBackRunning = false;
-                finished = true;
-                pitchBackDoneAtMs = at;
-            } else if (remaining >= IncomingMix.RESTORE_MS) {
-                value = pitchBackFrom;              // still holding the mix's own pitch
-            } else {
-                double t = 1d - (double) remaining / (double) IncomingMix.RESTORE_MS;
-                value = pitchBackFrom + (1d - pitchBackFrom) * t;
-            }
-            try {
-                mp.setPlaybackParams(new PlaybackParams()
-                        .setSpeed((float) pitchBackSpeed).setPitch((float) value));
-            } catch (Throwable e) {
-                Logger.warn("MediaPlayer: could not ease the incoming track's pitch back ({});"
-                        + " leaving it where it is", e.toString());
-                pitchBackRunning = false;
-                return;
             }
         }
         if (finished) {
             Logger.info("MediaPlayer: the incoming track's pitch is its own again — its own clock"
                             + " says {}ms, the deadline the rule set was {}ms of its file ({}ms"
                             + " of margin before its vocals, which is what the controller"
-                            + " measured the blend against)",
-                    at, pitchIdentityAtFileMs, MixNaturaliser.VOCAL_PITCH_MARGIN_MS);
+                            + " measured the blend against); one write, not {}",
+                    at, pitchIdentityAtFileMs, MixNaturaliser.VOCAL_PITCH_MARGIN_MS,
+                    IncomingMix.RESTORE_MS / RESTORE_TICK_MS);
             return;
         }
         try {
-            rampHandler.postDelayed(() -> pitchBackStep(generation), RESTORE_TICK_MS);
+            rampHandler.postDelayed(() -> pitchBackCheck(generation), RESTORE_TICK_MS);
         } catch (Throwable ignored) { }
     }
 
     /**
      * The promotion's answer to the rule: the pitch is the track's own from here on.
      *
-     * <p>Returns the position the ease-back had to be cut short at, or {@code -1} when it
-     * had already finished (the normal case — the controller only schedules a
-     * transposition when the whole return fits inside the blend, so it is over before the
-     * ramp is). A non-negative answer is a warning: it means the schedule was wrong
-     * somewhere, and the pitch is set to the track's own immediately rather than ramped,
-     * because a transposed vocal must never be heard.
+     * <p>Returns the position the schedule had to be cut short at, or {@code -1} when it had
+     * already been met (the normal case — the controller only schedules a transposition when
+     * the whole thing fits inside the blend, so it is over before the ramp is). A
+     * non-negative answer is a warning: the schedule was wrong somewhere, and the pitch is
+     * set to the track's own immediately rather than left transposed, because a transposed
+     * vocal must never be heard.
      */
     private synchronized long endPitchBackAtPromotion() {
         if (!pitchBackRunning) return -1L;
@@ -1234,14 +1616,8 @@ public final class AndroidAudioBackend implements AudioBackend {
         pitchBackGeneration++;
         MediaPlayer mp = pitchBackPlayer;
         long at = positionOf(mp);
-        try {
-            if (mp != null) {
-                mp.setPlaybackParams(new PlaybackParams()
-                        .setSpeed((float) pitchBackSpeed).setPitch(1f));
-            }
-        } catch (Throwable e) {
-            Logger.warn("MediaPlayer: could not end the transposition at the promotion: {}",
-                    e.toString());
+        if (mp != null) {
+            writeParams(mp, "incoming", "pitch-return-at-promotion", pitchBackSpeed, 1d);
         }
         return at;
     }
@@ -1434,6 +1810,11 @@ public final class AndroidAudioBackend implements AudioBackend {
                         + "ms behind the ramp's wall clock (start latency, not a skipped part:"
                         + " nothing is seeked here)"
                         : "");
+        // The monitor's "audible" arm has to move with the promotion: the outgoing instance
+        // is released a line below, and a released player's position reads 0 — which would
+        // look exactly like a stall. The "incoming" arm keeps watching the instance that
+        // just became THE player.
+        clockOut = null;
         // ONLY the outgoing player, and only its own listeners: every field above
         // already belongs to the promoted instance.
         releaseOne(out);
@@ -1456,17 +1837,21 @@ public final class AndroidAudioBackend implements AudioBackend {
                 Logger.warn("MediaPlayer: the transposition was still on when the promotion"
                                 + " happened (the incoming's own clock said {}ms; the return was"
                                 + " scheduled to finish by {}ms of its file) — it is the track's"
-                                + " own pitch from here, immediately, rather than ramped into the"
-                                + " one thing the rule forbids",
+                                + " own pitch from here, immediately, rather than left on the one"
+                                + " thing the rule forbids",
                         cutShortAt, pitchIdentityAtFileMs);
             } else if (pitchIdentityAtFileMs >= 0L) {
                 Logger.info("MediaPlayer: the transposition was already its own pitch at the"
                                 + " promotion (reached identity at {}ms of the track's own file,"
-                                + " deadline {}ms), so this ramp is the tempo's alone",
+                                + " deadline {}ms), so the promotion's single write is the"
+                                + " tempo's alone",
                         pitchBackDoneAtMs, pitchIdentityAtFileMs);
             }
-            startTempoRestore(appliedMix.speed(), 1d);
+            restoreTempoNow(appliedMix.speed());
         }
+        // Keep watching both clocks for the window a parameter write can still land in (the
+        // tempo write above, and the effects coming off the promoted player's session).
+        extendClockMonitor();
         appliedMix = null;
         requestedMix = IncomingMix.IDENTITY;
         bassSwapAtMs = -1L;
@@ -1518,6 +1903,10 @@ public final class AndroidAudioBackend implements AudioBackend {
         }
         releaseOne(incomingPlayer);
         incomingPlayer = null;
+        // No listener is hearing this boundary any more: the monitor's whole reason to exist
+        // (attributing a gap in the overlap to an instant inside it) is over with the overlap,
+        // so it stops here rather than sampling a released player.
+        stopClockMonitor("the boundary was dropped");
         incomingSource = null;
         incomingPrepared = false;
         incomingSeekMs = 0L;

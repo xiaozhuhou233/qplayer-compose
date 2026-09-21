@@ -200,8 +200,33 @@ public final class DiskCache {
      *  AAC in an MP4 and the platform picks its extractor partly by extension, so a name
      *  that lies about the container would be the one thing that stops it playing. */
     public String djEditPath(String key) {
-        if (key == null || key.isEmpty()) return null;
-        return baseDir + "/" + DJEDIT + "/" + Math.abs(key.hashCode()) + ".m4a";
+        String base = djEditBaseName(key);
+        if (base == null) return null;
+        return baseDir + "/" + DJEDIT + "/" + base + ".m4a";
+    }
+
+    /** The name one DJ edit's file is built from, without suffix or extension, or null for a
+     *  key that cannot name one.
+     *
+     * <p>The renderer — not this class — appends the suffix and the extension, because what the
+     * suffix says is what the render <em>learned</em>: where the bridge it built starts, and
+     * where the track's vocals come back (see {@code StemEditRenderer.Result}). A later process
+     * that looks an edit up by key therefore reads those two times back out of the directory
+     * listing, which is why the base name has to be derivable in both places. */
+    public String djEditBaseName(String key) {
+        return key == null || key.isEmpty() ? null : String.valueOf(Math.abs(key.hashCode()));
+    }
+
+    /** The directory the DJ edits live in, so a caller that has to find one by name prefix can
+     *  list it. */
+    public String djEditDir() {
+        return baseDir + "/" + DJEDIT;
+    }
+
+    /** Every file name in the DJ-edit directory (empty when there is none). */
+    public String[] djEditNames() {
+        String[] names = new File(baseDir, DJEDIT).list();
+        return names != null ? names : new String[0];
     }
 
     /** Resolve cache file for a track's silence measurement, keyed by the

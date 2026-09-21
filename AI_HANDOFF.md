@@ -1742,6 +1742,156 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
     `SINGING_FRAME_SHARE` 与移除窗口的关系（**不要**动 `RETURN_RAMP_MS` / `BEATS_PER_BAR`）；
     ③ 剥 outgoing 的 stems（见未验证 8）；④ 量 `align` 的头部网格投影误差（见 ④ 的观测）。
 
+- **2026-09-20 第十三轮：卡顿的原因（可听的那一声）→ 参数写入从 158 次砍到 1 次；以及"两条歌的素材合成的
+  一小段桥"（第一次真的渲染进 DJ 编辑并播放；本轮**所有渲染出来的东西都没人听过**）**
+  用户反馈（两件事）：① 在 **I Walk Alone → 3 Strike** 上，**下一首第一句歌词（"don…"）刚唱完的那一刻有卡顿**，
+  且"有些歌有有些歌没有"；怀疑是**强制停掉变速/变调**造成的。②「尝试在过渡段中插入两个歌的鼓点和其他能合的
+  东西合成的一小段音乐，这样过渡效果可能更好」。
+  - **① 这一轮最重要的一件事先说：`I Walk Alone` 与 `3 Strike` 不在设备上的库里**（app 的
+    `files/indexes/playlists.json` 648 首、`files/indexes/songs.json` 90 首、仓库里那五份 `queue*.json`
+    与 `harness/queue-before.json` 的 18 首、`/sdcard/Music` 93 个 mp3、`harness/lyrics/*.nlrc` 全查过；
+    "walk alone" / "strike" 一个都没有）。**所以那一对边界本轮**没有**被复现**，只复现了它的**机制**：
+    设备上的 `Life's A Mess → Moonlight`（−1 半音，DJ 编辑在，和用户那一对同样"有移位"）。**要真正回答
+    用户的这一声，得先拿到那两首歌**（把歌名/netease id 给作者，或换成库里的对子让用户听同一段）。
+  - **② 仪表：每一次 `setPlaybackParams` 都留痕 + 一个音频时钟探针（`AndroidAudioBackend`）**
+    · `writeParams(player, who, reason, speed, pitch)` 是**唯一**的写入出口，每个调用点都必须经过它：
+    日志形如
+    `MediaPlayer: params-write reason=<apply-mix|pitch-return|tempo-restore|…> who=<incoming|audible>
+    asked=speed x1.0000 pitch x1.0000 platform=speed x1.0000 pitch x1.0000 took=2ms pos 17456->17458ms
+    audible=199594ms`（**回读**、"这次调用本身花了多久"、两个播放器各自的播放头都在里面）。
+    `reason` 就是"为什么"：`apply-mix` / `repair-after-start` / `pitch-return` / `tempo-restore` /
+    `tempo-restore-early` / 以及 A/B 臂专用的 `*-tick`。
+    · **音频时钟探针**（`startClockMonitor`/`clockTick`/`checkClock`）：50 Hz 同时采两个播放器的
+    `getCurrentPosition()`，把"播放头没跟着墙钟走 / 走过头"的每一段打成
+    `MediaPlayer: audio-clock gap at <uptime>ms uptime: incoming at=15116ms moved=65ms expected=32ms
+    over=32ms drift=33ms;`，每秒再打一行 `audio-clock <pos>ms on the incoming deck(<pos>ms on the
+    audible one); N gap(s) so far`；边界丢掉/晋升后 8s 自动停。
+    ⚠️ **这台设备上这个探针分辨不了"可听的一声"**：`getCurrentPosition()` 的上报粒度约 30ms，
+    所以每次采样的漂移是 **±25–52ms 的抖动**，**before 臂 17 个、after 臂 17 个（同样的对子、同样的
+    17.9s 斜坡），分布一样** —— 它安静地说明了"这条路器不能证明也没能否证那一声"。
+    但它**能**抓到真正严重的故障：另一次 after 臂运行里入歌播放器**从头到尾停在 40ms**（387 个 gap，
+    每一个都是 `moved=0`），那是"入歌那半首根本没响"（见下面 ④）。
+    · 平台侧的证据也取了：`dumpsys media.audio_flinger` 的 **Local log**（带时间戳的
+    `AT::add` / `AT::remove` / `removeTrack_l`）说明**这些参数写入并没有新建/销毁 AudioTrack**
+    （19:26:56 建、19:27:16 晋升时销毁，中间没有别的），所以"管线重建"若发生，也不是靠重建 track 发生的。
+    A/B 的原始数据在 `D:\qplayer-dev\harness\r13\`（`log-before-ml-lam.txt` / `log-after-ml-lam.txt` /
+    `full-*.txt` / `flinger-*.txt` / `log-bridged2.txt`）。
+  - **③ 修法（已装机验证：同一条边界 158 → 2 次写入，其中只有 1 次打在"听得到的那一路"上）**
+    · **`AndroidAudioBackend` 里三处"每 tick 一次平台调用"全部改成"一次写入"**：
+    (a) `restoreTempoNow(speed)` 取代 `startTempoRestore`+60 步 `restoreStep`：**晋升那一刻写一次
+    `speed x1 pitch x1`**；而且 `speed == 1.0`（本轮这对子就是）时**一次都不写**，只打一行
+    `the promoted track's tempo is its own already (it ran at x1.0000 through the overlap), so there is
+    nothing to write back`。
+    (b) `pitchBackCheck` 取代 `pitchBackStep`：**变调一直保持到 `pitchIdentityAtFileMs`，然后一次写完**
+    （不再有 6s 60 步的滑落；两次写入之间的 17s 里**一次都不写**，这正是"两首还都听得见时保持移调"的
+    更好答案）。
+    (c) `beginCrossfade` 里**不再无条件重写** mix，改成 `verifyMixOnRollingPlayer()` 只**回读**；
+    只有平台报回来的值和应用值不一致时才补写一次（真机上是 `the rolling incoming player still has the
+    mix the parked one read back … so no second parameter write at the start of the blend`）。
+    · **"在安全的一刻 snap"**：`BeatProfile.beatAtOrBefore(t)`（新增，5 行）—— 变调的落点现在是
+    **下一首自己网格上、不晚于规则期限的最后一个拍**（DJ 编辑这段没有 vocals，最响的是鼓，拍点上最藏得住）。
+    真机：`pitchIdentityAtFileMs=17409`（期限 17500，早了 91ms），`params-write reason=pitch-return
+    … pos 17456->17458ms`，**比名义期限晚 8ms**，离人声还有 2091ms（规则要的 2s 余量仍在）。
+    · **不变的规则**："音高必须在 `vocalIn − 2000ms` 之前回到原位"照旧成立**而且更结实**：
+    `vocalInBlendMs` 现在优先用**渲染时写进文件名**的真实小节线（见 ⑤），拿不到才退回原来的下界。
+    · ⚠️ **A/B 臂是这一轮的测量工具**：`files/legacy-ease-backs` 存在时走**第十二轮**的每 tick 滑落
+    （`legacyRestoreStep`/`legacyPitchBackStep`），不存在时（**普通安装的默认**）走一次写入。
+    每次进程都会打 `MediaPlayer: ease-back arm = LEGACY (10Hz glide) / single write (…)`，所以日志自己
+    说得出是哪一臂。**诚实的一条**：我复刻的 legacy 节奏滑落**混用了 `nanoTime()` 与
+    `elapsedRealtime()`**，所以它只写了 1 步就结束了；**158 次这个数字里，156 次是变调滑落（复刻正确），
+    节奏滑落本该还有 ~60 次**（第十二轮真实代码的总量约 218）。fix 之后是 **2** 次（其中 `apply-mix` 打在
+    **停着的**播放器上，听不到）。
+  - **④ 顺手抓到的、比"卡顿"更严重的**：**停着的入歌播放器偶尔根本起不来**
+    `MediaClip` 那套"apply 把它启起来 → `parkIncoming` pause + 再 seek → 后来 `start()`"留下了
+    `W/NuPlayerRenderer: onDrainAudioQueue(): audio sink is not ready`，之后整段 overlap 播放头停在 40ms
+    （before 臂 17:53 那次没有；18:54 那次有）。**这不是本轮改动引入的**（apply/park 顺序两轮一样），
+    但它是真机上"第二首没响/半首歌没了"的机制。**下一步应该做的就是这个**：
+    把 mix 的写入从 prepare 挪到 `beginCrossfade`（`setPlaybackParams` 本来就会启起 player，
+    所以正好和 `start()` 合成一步，**park 的 pause+再 seek 整个消失**），代价是控制器要改成
+    **在 `beginCrossfade` 之后**读回 mix（现在已经知道该在哪儿读）。本轮**没做**（一个变量一个变量地改）。
+  - **⑤ 桥（Task 2）：把前一首的低音**搬进**后一首的文件里，只在渲染层做**
+    · 新纯 Java 类 **`audio/StemBridge`**（11 个单测 `StemBridgeTest`，全绿）：`plan()` 决定位置、
+    `layer()` 造素材、`measure()` 出验收数字。**素材只有前一首的 `bass` stem**，位置是**后一首自己小节的
+    **第一**条 ≥ `0.6 × 移除窗口` 的小节线**（`BARS=2` 条，`0.6` 与 `PlayerController.BASS_SWAP_AT` 同一个数），
+    长度 = 2 × 后一首的小节；素材取自**前一首尾窗最后 3 小节**（同一套 `downbeatOffsetSec` + `barLines`），
+    并且**按 `speed` 拉伸**（因为整份文件被 `speed` 播放，不拉伸就会以错的节拍继续）。
+    **为什么不搬鼓**（这条要记住）：按每播放器 EQ 只能切 <200Hz 那一档，鼓的军鼓/踩镲会**和还在响的
+    out 流叠加**（实测那一档的 out 增益在 72% 处还有 −2.7dB、90% 处 −8.7dB）= 相干叠加；`other`（旋律）
+    同理且无法门控。所以只有低音被搬，而且**低频交接被移到桥的起点**（`bassSwapAtMs` 由控制器用
+    渲染写进文件名的 `bridgeStartMs` 反算）——**交接即桥的起点，所以同一个带里永远只有一份**。
+    · **数字怎么从渲染传到边界**：渲染自己命名文件（`StemEditRenderer.Result` / `Result.suffixOf`），
+    名字形如 `<hash>-b<桥起点ms>-v<人声回来ms>.m4a`（`DiskCache.djEditBaseName/djEditDir/djEditNames`）；
+    边界 `PlayerController.djEditFor` 先按**每对子**的 key 找（有桥的），找不到再退回第十二轮的
+    普通编辑名。**普通名字一个字节都没变**，所以第十二轮渲染好的编辑仍然命中。
+    · **渲染成本**：头窗 26.3s + **前一首尾窗（7703ms）12.1s** + 整曲 AAC 编码 ≈ **82s**（第十二轮 53–85s）。
+    ⚠️ 真机上 55s 的提前量**不够**（`DJ edit for Moonlight cancelled while writing the body (the queue
+    moved on)`）→ 回落成"这次没有编辑"（安全，但用户不会知道）。**真实会话里提前量是整首歌**，够；
+    但要把这句话写进下一轮的验收假设里。
+    · **验收：渲染出来的桥没能播出去，因为它没通过自己的测量**（这是本轮 Task 2 的核心结论，不是失败）
+      实测（`D:\qplayer-dev\harness\r13\log-bridged2.txt`）：
+      `bridge measured: carried −76.1 dBFS, its source −76.1 dBFS (the incoming's own head −17.3 dBFS
+      under it); vocals: incoming −240.0, outgoing 0.2 dBFS; one copy (carries 1.000 of its source,
+      peaking at lag 0); no doubling (the sum is +0.0 dB above the louder contribution at worst);
+      pitch artefact +0.00 semitones; pulse: 1 of 7 beats carry a low-end attack, longest gap 2818ms
+      of a 470ms period -- NOT ACCEPTABLE: the carried layer is silent; the pulse has a 2817.8ms hole
+      with a 469.6ms period`
+      → 于是 `W/… the bridge did not pass its own measurement, so it is NOT in this edit — the boundary
+      plays the round-12 edit`。**原因**：Life's A Mess 最后两小节（分离出来的 bass 轨）本来就是
+      −76dBFS 的收尾，搬过来就是**两小节近乎静音**。所以渲染器现在**先测量、不过就丢掉那一层**，
+      这正是"渲染产物要过自己的验收，否则退回今天的行为"的落地，也让"材料本身没有低频"这类歌
+      自动走回老路。
+    · **桥的正例证明在单测里**（已知素材）：carried 与 source 同电平（<3dB）、拉过速度后同一段里
+      鼓点数一致、`alignment=1.000 / lag 0`（**一份拷贝、同相**）、`doubling ≤ 3.5dB`（同素材叠自己会
+      报 +5dB 以上 → 抓得住）、incoming 人声在桥里被抓住、**outgoing 人声用"对齐度"抓而不是"电平"抓**
+      （前一首的人声本来就在那几小节里，电平门会误报——这是本轮修掉的一个真误报）、把中间一小节挖空
+      会报 `pulse has a 2818ms hole`。
+    · ⚠️ **测不出来的**：**周期性的第二份拷贝在信号域不可判定**（延迟正好等于素材自己一拍的拷贝，
+      和素材的周期性是一回事——`StemBridge.alignmentAtZeroLag` 的注释里写明了）。设计上不依赖这个测量：
+      out 的低频在桥的起点被 EQ 切掉，所以"房间里只有一份"是**构造出来的**，设备侧的 EQ 日志是那条证据。
+      另外**没人听过任何一段桥**。
+  - **真机覆盖（本轮 3 次跑，Redmi K20 Pro `efaa83b2`，`transitionKind=0` 自动、curve=1、
+    `transitionBlendSeconds=20`（跑完已还原 15）、模型临时推上去（跑完已删））**：
+
+    | 运行 | 对子 | 臂 | params-write | 时钟 gap | DJ 编辑 | 结果 |
+    |---|---|---|---|---|---|---|
+    | before-ml-lam 18:50 | Life's A Mess → Moonlight（−1 半音，swap 12151ms） | LEGACY（每 tick 滑落） | **158**（156 变调 tick + 1 节奏 tick + 1 apply） | 17 | 有（普通） | 连续晋升 19960ms |
+    | after-ml-lam 18:53 | 同一对子 | single write | **2**（apply + `pitch-return-at-promotion`） | **387（全是 `moved=0`）** | 有（普通） | **入歌仓停在 40ms**：`audio sink is not ready`，晋升后无声（见 ④） |
+    | bridged2 19:26 | 同一对子 | single write | **2**（apply + `pitch-return`，落点 17458ms） | 17 | **桥渲染了、被自己的测量否掉** | 桥起 13.169–16.926s、拉伸 x1、素材取自尾窗 3.496s；**没通过**；渲染没赶上 55s 提前量 → 本次无编辑 |
+  - **不变量（三次跑都成立）**：没有任何一行 `playAt: slot N starts at …`（没有从 0 重放）；
+    `dumpsys media.audio_flinger` 全程只有一路 active track；晋升行 `the overlap heard start..start+ramp`
+    连续；`handoff resume ≥ 重叠已放过的量`。
+  - **本轮没做/未验证（重要）**：
+    1. **用户的 `I Walk Alone → 3 Strike` 没被复现**（歌不在库里，见 ①）。**卡顿的根因没有被证明**：
+       我能证明的是"旧代码在这条路上写 158 次（真实第十二轮约 218）参数、每次都是一个平台调用"，
+       以及"新代码写 1 次（听得到的那一路）"；**没能证明那一声就是这些调用造成的**（探针分辨不了），
+       也**没有排除**另外两个候选：**(a) 停着的入歌播放器起不来**（④，真机抓到过一次，机制清楚）、
+       **(b) 渲染引擎的 CPU 占用**（一个 DJ 编辑渲染是 82s×4 线程，本轮 before 臂那次渲染正好和边界重叠）。
+    2. **桥一次都没有被听到**，而且**真机上唯一渲染出来的那一次被自己的测量否掉**：正例只有单测与合成
+       素材。**位置/素材/门控的听感、拉伸 ±1.3 半音的代价、两小节是不是太长/太短，全部没人听过。**
+    3. 桥的**渲染成本 82s**：55s 提前量不够（本轮实测被 `stillWanted` 丢掉）。真实会话的提前量是一整首
+       歌（够），但**队列走得快时桥不会落地**，用户也不会知道。
+    4. `legacy` A/B 臂只用于测量（默认不存在），且它的节奏滑落有上面那个时钟 bug —— **不要**用它的
+       节奏写入数量当第十二轮的真值。
+    5. 时钟探针的 `CLOCK_GAP_MS=25` 对这台设备**太紧**（±25–52ms 是上报粒度）；下一轮应该把它抬到
+       ~80ms 并保留 `moved=0` 的冻结检测（本轮 387 个 gap 那次才是**真的**信号）。
+    6. `BASS_SWAP_AT`（0.6）与渲染时的 `0.6 × removalMs` 之间有 **≤1 拍的不一致**
+       （计划重叠可能 ≠ 设置长度，第十二轮记过这件事）：桥存在时**低频交接就是桥的起点**，
+       所以不一致表现为"最多一拍的低频多一份或空一拍"，**没有测量**。
+    7. 视频层/`BiliClient`/收藏夹/自愈/`resolveIncomingSource` 的 unblock 回落/拍探针预热 —— 本轮**一行没碰**。
+  - **交付**：debug APK `98,323,453` 字节；分支 `feat/ai-dj-transition`（**`main` 未动**）；
+    tag `ai-dj-transition-2026-09-20d`；页面/直链见下（实测 HTTP 200）。
+  - **测试**：`mvn -pl player-core test` = **186 个用例、1 个失败**，就是那个既有的
+    `SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`（`pageTransitionPreset`
+    只有常量没有 spec，与本轮无关）。本轮新增 **`StemBridgeTest` 11 个**（全绿，含"延迟拷贝/人声/
+    静音/挖空"四类否定用例）。
+  - **设备卫生（跑完已做）**：`transitionBlendSeconds` 20→**15**、`transitionKind` 0、
+    `files/models/` **删除**、`files/legacy-ease-backs` **删除**、`files/cache/djedit/` 清空、
+    `files/state/queue.json` 还原成 `[Lalala, Moonlight]` playIndex=1 positionMs=21325。
+  - **下一件事（按顺序）**：① **把那两首歌给作者**（或让用户听库里的同一段）—— 否则卡顿这件事永远只能
+    靠"机制"解释；② **把 mix 的写入挪到 `beginCrossfade`**（④，park 的 start/pause/再 seek 整个消失）；
+    ③ **拿一首结尾还有低频的歌再跑一次桥**（库里 `90210 → Pray 4 Love` 之类）—— 本轮唯一渲染出来的
+    那一次被测量否掉，等于桥的正例在真机上还没出现；④ 把探针阈值抬到 80ms + 保留冻结检测。
+
 **顺序**：P1 → P3 → P5 → P4 → P6。不要先做 P6。（P1/P2/P3/P7、**P6** 与 **P4 的分析+对齐**都已落地；
 剩下的仍是**听觉验证**（P4 现在有装机证据了：能 align=on，但**听感**仍未验证），然后才是 P5 低频互换
 与 P4 的下一步"变速对拍"（`setPlaybackParams` 把 B 拉到 A 的 BPM —— 本轮只对齐了网格，没有拉速度，
