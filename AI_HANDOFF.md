@@ -2160,7 +2160,15 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
     （0.35 那行已经算好）或把 bass swap 从 60% 挪后（`BASS_SWAP_AT`，注意 `StemBridge` 里有一份复制的
     0.6），那是本轮**故意没碰**的另一半（它会让 40% 的 blend 少掉低音）。
     另外本对子**没有低频互换以外的低频问题**、`x1.0212` 的变速在 after 里照旧，没有单独验证。
-  - **⑧ 交付**：debug APK（本轮 ~98.3MB）；分支 `feat/ai-dj-transition`（**`main` 未动**）；tag/release 见本节末尾。
+  - **⑧ 交付**：debug APK **98,330,322 字节**（sha256 `17210c639b29de079575b3f7cfd5a2b79c49286e8d9de963733c84da0a537c46`，
+    与 GitHub 资产自报的 digest 逐位一致；**这个包就是真机上跑出上面 after 数据的那个**，md5 `4d52d55c9d14059e114220b419ff06f0`）；
+    分支 `feat/ai-dj-transition`（代码 commit `0cb5b76`，**`main` 未动**）；tag `ai-dj-transition-2026-09-21`；
+    页面 `https://github.com/xiaozhuhou233/qplayer-compose/releases/tag/ai-dj-transition-2026-09-21`、
+    直链 `https://github.com/xiaozhuhou233/qplayer-compose/releases/download/ai-dj-transition-2026-09-21/app-debug.apk`
+    （实测 HTTP **200**，302 到 CDN）。`release.yml` 照旧失败（既有原因）。
+    本轮 harness：`D:\qplayer-dev\harness\r16\`（`TailTable.java` 曲线候选表、`blend.sh` 一次边界、
+    `devstate.sh` 设备状态、`before.logcat`/`before2.logcat`/`after.logcat` 三份真机日志、
+    `before.apk`/`app-debug.apk`）。**APK 只有这两份，没有多余副本**。
   - **测试**：`mvn -pl player-core test` = **197 个用例、1 个失败**（`Tests run: 197, Failures: 1, Errors: 0,
     Skipped: 0`），仍是既有的
     `SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`（与本轮无关）。
