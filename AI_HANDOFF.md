@@ -2299,3 +2299,19 @@ adb shell "CLASSPATH=/data/local/tmp/probe.jar app_process /system/bin dev.t1m3.
    没被时间上撞到过；闸门在 `performAutoAdvance()` 里，逻辑上覆盖，但没有那一条日志证据。
 4. 每一次焦点丢失都会**丢弃正在进行的重叠**（正确性优先，与既有约定一致）：过渡会因为一次来电
    从头重新 arm（`transition: arming slot N behind slot M`），听感上重叠会重新开始。
+
+### 交付（2026-09-21b）
+
+- debug APK **98,330,171 字节**，sha256 `96ff317195bec68112ea01fabe9770e604349a01847c5eda4d15ce1a39fe1761`
+  （与 GitHub 资产自报的 `digest` 逐位一致）；**这个包就是真机上跑出上面全部焦点日志的那个**。
+- 分支 `feat/ai-dj-transition`（代码 commit `0b0a660`，**`main` 未动**）；tag `ai-dj-transition-2026-09-21b`；
+  页面 `https://github.com/xiaozhuhou233/qplayer-compose/releases/tag/ai-dj-transition-2026-09-21b`、
+  直链 `https://github.com/xiaozhuhou233/qplayer-compose/releases/download/ai-dj-transition-2026-09-21b/app-debug.apk`
+  （经 `127.0.0.1:7890`：`HEAD` → 302 到 CDN，`Range: 0-1048575` → **HTTP 206**、1048576 字节全到；
+  98MB 整包经代理在超时内没下完，**不走代理是被墙的**（`http=000`））。`release.yml` 照旧失败
+  （`android / Build release APK` 与 desktop 的 `Package`，与上四个 tag 同一批既有原因）。
+- 本轮 harness：`D:\qplayer-dev\harness\focusprobe\`（`FocusProbe.java` + `probe.jar`）、
+  `D:\qplayer-dev\harness\focuslogs\final.txt`（上面每条真机证据的原始日志）。
+  **APK 只有仓库 build 目录那一份，没有多余副本；设备上的探针文件已删除。**
+- 真机 `player-core` 测试：197 跑 1 失败，唯一失败是既有的
+  `SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`（与本轮无关）。
