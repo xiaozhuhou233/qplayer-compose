@@ -45,21 +45,23 @@ import java.util.Locale;
 public final class IncomingMix {
 
     /** Nothing to do: no stretch, no transposition, no low-end hand-over. */
-    public static final IncomingMix IDENTITY = new IncomingMix(-1L, 1d, 0, -1L, null);
+    public static final IncomingMix IDENTITY = new IncomingMix(-1L, 1d, 0, -1L, null, null);
 
     /**
-     * How long every ease-back in this app is performed over: the mix's tempo and pitch
-     * going back to the incoming track's own after the promotion, and the pitch's own
-     * scheduled return before that track's vocals arrive ({@link #pitchIdentityAtFileMs}).
+     * How long the promotion's own ease-back is measured over — and, since round 13, nothing
+     * else.
      *
-     * <p>Six seconds is slower than any beat, and by the time the promotion's runs the two
-     * tracks are no longer both sounding, so the glide itself is inaudible — which is what
-     * makes it an ease-back rather than a correction. It is a constant here rather than in
-     * the backend because the <em>caller</em> needs it: a transposition is only applied at
-     * all when the blend can afford this much room (see
-     * {@code MixNaturaliser.pitchFitsBeforeVocals}), and a caller working from a different
-     * number than the backend ramps by would be scheduling something that does not
-     * happen. {@code AndroidAudioBackend.PROMOTION_RESTORE_MS} is this value.
+     * <p>⚠️ <b>Round 14: this is no longer the length of anything a listener hears on the
+     * pitch path, and it is deliberately no longer part of any gate.</b> Until round 12 both
+     * the tempo and the pitch were ramps of this length; round 13 replaced both with a single
+     * write (the per-tick glide was the mechanism behind the hiccup the user reported), and
+     * round 14 gives the pitch its audible travel back as {@link KeyGlide} — a ladder of a few
+     * writes over the blend's own vocals-out window, whose length is the session's blend
+     * length rather than a constant. What is left of six seconds is the window the log quotes
+     * for the promotion's tempo write ({@code AndroidAudioBackend.PROMOTION_RESTORE_MS}) and
+     * the A/B arm's legacy glide. {@code MixNaturaliser.pitchFitsBeforeVocals} used to demand
+     * that this much room exist before a transposition was allowed at all; that was the
+     * squeeze round 14 removed (see its own note).
      */
     public static final long RESTORE_MS = 6_000L;
 
@@ -89,7 +91,7 @@ public final class IncomingMix {
 
     /** Nothing to do: no low-end hand-over. */
     public static IncomingMix bassSwapAt(long ms) {
-        return ms < 0L ? IDENTITY : new IncomingMix(ms, 1d, 0, -1L, null);
+        return ms < 0L ? IDENTITY : new IncomingMix(ms, 1d, 0, -1L, null, null);
     }
 
     /**
@@ -123,29 +125,54 @@ public final class IncomingMix {
      */
     public static IncomingMix of(long bassSwapAtMs, double speed, int semitones,
                                  long pitchIdentityAtFileMs, String note) {
+        return of(bassSwapAtMs, speed, semitones, pitchIdentityAtFileMs, null, note);
+    }
+
+    /**
+     * The same with the key blend's own ladder attached — the few grid-aligned steps the
+     * transposition travels back to the track's own key over, on this deck and on the
+     * outgoing one ({@link KeyGlide}).
+     *
+     * <p>⚠️ It travels <em>inside</em> the mix rather than in a call of its own on purpose.
+     * The ladder is executed against the incoming player's own clock, which only starts
+     * meaning something when the ramp starts that player, and the mix is the one instruction
+     * that is already attached to the prepare and read back afterwards — a separate call
+     * could be lost in the arm/ramp race, or land after the ramp had started on an
+     * instruction the boundary had already given up on. A mix with a ladder but no
+     * transposition is impossible: {@link #semitones()} is the distance the ladder travels.
+     *
+     * @param keyGlide the ladder, or null — null (and a non-gliding {@code KeyGlide}) both
+     *                 mean "round 13's single step at {@code pitchIdentityAtFileMs}".
+     */
+    public static IncomingMix of(long bassSwapAtMs, double speed, int semitones,
+                                 long pitchIdentityAtFileMs, KeyGlide keyGlide, String note) {
         double s = speed > 0d ? speed : 1d;
         int n = Math.max(-MAX_SEMITONES, Math.min(MAX_SEMITONES, semitones));
         // A schedule with nothing to ease back is not a thing: it is only ever set for a
         // transposition that is really applied.
         long back = n != 0 ? pitchIdentityAtFileMs : -1L;
+        KeyGlide glide = n != 0 && keyGlide != null && keyGlide.isGliding() ? keyGlide : null;
         if (bassSwapAtMs < 0L && s == 1d && n == 0) {
-            return note == null ? IDENTITY : new IncomingMix(-1L, 1d, 0, -1L, note);
+            return note == null && glide == null ? IDENTITY
+                    : new IncomingMix(-1L, 1d, 0, -1L, null, note);
         }
-        return new IncomingMix(bassSwapAtMs, s, n, back, note);
+        return new IncomingMix(bassSwapAtMs, s, n, back, glide, note);
     }
 
     private final long bassSwapAtMs;
     private final double speed;
     private final int semitones;
     private final long pitchIdentityAtFileMs;
+    private final KeyGlide keyGlide;
     private final String note;
 
     private IncomingMix(long bassSwapAtMs, double speed, int semitones,
-                        long pitchIdentityAtFileMs, String note) {
+                        long pitchIdentityAtFileMs, KeyGlide keyGlide, String note) {
         this.bassSwapAtMs = bassSwapAtMs;
         this.speed = speed;
         this.semitones = semitones;
         this.pitchIdentityAtFileMs = pitchIdentityAtFileMs;
+        this.keyGlide = keyGlide;
         this.note = note;
     }
 
@@ -197,6 +224,19 @@ public final class IncomingMix {
         return pitchIdentityAtFileMs;
     }
 
+    /**
+     * The key blend's ladder — the steps this transposition travels back to the incoming
+     * track's own key over, on both decks — or <b>null</b> for round 13's shape: the shift
+     * held to {@link #pitchIdentityAtFileMs()} and put back in one write, with the outgoing
+     * deck never touched.
+     *
+     * <p>Non-null only when {@link #semitones()} is non-zero: the ladder's own travel IS the
+     * semitones, so a mix that is not transposed cannot have one.
+     */
+    public KeyGlide keyGlide() {
+        return keyGlide;
+    }
+
     /** What the naturaliser measured, for the log; null when there is nothing. */
     public String note() {
         return note;
@@ -231,6 +271,12 @@ public final class IncomingMix {
         if (pitchIdentityAtFileMs >= 0L) {
             if (sb.length() > "IncomingMix{".length()) sb.append(", ");
             sb.append("pitchIdentityAt=").append(pitchIdentityAtFileMs).append("ms");
+        }
+        if (keyGlide != null) {
+            if (sb.length() > "IncomingMix{".length()) sb.append(", ");
+            sb.append(keyGlide.isGliding()
+                    ? keyGlide.steps() + " key-glide steps on each deck"
+                    : "no key glide (" + keyGlide.note() + ")");
         }
         return sb.append('}').toString();
     }

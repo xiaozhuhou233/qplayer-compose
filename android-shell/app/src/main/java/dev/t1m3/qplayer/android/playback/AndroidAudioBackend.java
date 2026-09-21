@@ -15,6 +15,7 @@ import android.os.PowerManager;
 import dev.t1m3.qplayer.audio.AudioBackend;
 import dev.t1m3.qplayer.audio.FadeCurve;
 import dev.t1m3.qplayer.audio.IncomingMix;
+import dev.t1m3.qplayer.audio.KeyGlide;
 import dev.t1m3.qplayer.audio.MixNaturaliser;
 import dev.t1m3.qplayer.util.Logger;
 
@@ -214,6 +215,47 @@ public final class AndroidAudioBackend implements AudioBackend {
      *  log line reports as the proof, and a warning at the promotion if the schedule had
      *  not finished. */
     private long pitchBackDoneAtMs = -1L;
+
+    /**
+     * The key blend in flight, when the mix carried one: {@link KeyGlide}'s ladder of a few
+     * writes over the blend's modulation section, stepping the INCOMING deck back to its own
+     * key and the AUDIBLE one into it, both at the same instants so the two never leave the
+     * same key (see that class for why both decks have to move — it is not a preference, it is
+     * the only shape that keeps the pair in unison while the tonality travels).
+     *
+     * <p>It replaces {@link #pitchIdentityAtFileMs}'s single step when it is armed, and the two
+     * are mutually exclusive by construction: {@code startPitchBack} picks one. Everything it
+     * writes goes through {@link #writeParams}, so the shape of the whole modulation is in the
+     * log as a sequence of platform read-backs rather than as a claim.
+     *
+     * <p>⚠️ <b>The audible deck is touched here, and that has one hard consequence: every path
+     * that drops the overlap without promoting it must put that deck's pitch back.</b> A deck
+     * left a semitone off its own key keeps playing the rest of the song out of tune, which is
+     * worse than anything the transition was for — see {@link #restoreOutgoingPitch}, called
+     * from {@link #releaseIncoming} (every abandon) and from the cancel paths.
+     */
+    private KeyGlide activeGlide;
+    /** The deck the ladder is stepping back to its own key (the incoming player), and the deck
+     *  it is bending into that key (the audible one), captured when the ladder was armed so a
+     *  promotion cannot make either name mean a different player. */
+    private MediaPlayer glideInPlayer;
+    private MediaPlayer glideOutPlayer;
+    private int glideIndex;
+    private boolean glideRunning;
+    private long glideGeneration;
+    /** Whether any step has written to the audible deck: false means there is nothing to put
+     *  back, and that is the ordinary case for a mix with no ladder. */
+    private boolean glideTouchedOut;
+    /** What the platform read back for each step, semitone ratios, so the run's own log can
+     *  print the curve that was really applied rather than the one that was asked for. */
+    private double[] glideReadBackIn;
+    private double[] glideReadBackOut;
+    private long glideFirstStamp;
+    /** The audible deck's own gain as the ramp last set it (0-1 of its own level). Read by the
+     *  glide's per-step log line: the ladder is monotone, so the largest shift on that deck
+     *  lands latest, and "how loud is it then" is the number that says how much of the effect
+     *  the listener can hear it on. */
+    private double lastOutGain = 1d;
     /** When the low end hands over, ms into the ramp (from the applied mix), and
      *  whether it has. A one-shot: the swap happens once, on a beat, and never
      *  again for this overlap. */
@@ -905,6 +947,10 @@ public final class AndroidAudioBackend implements AudioBackend {
         }
         long after = stamp();
         long posAfter = positionOf(mp);
+        // Kept for the caller that has to report the curve the platform really took rather than
+        // the one it was asked for (the key blend's own summary line).
+        lastReadSpeed = readSpeed;
+        lastReadPitch = readPitch;
         Logger.info("MediaPlayer: params-write reason={} who={} asked=speed x{} pitch x{}"
                         + " platform=speed x{} pitch x{} took={}ms pos {}->{}ms audible={}ms{}",
                 reason, who, fmt(speed), fmt(pitch), fmt(readSpeed), fmt(readPitch),
@@ -912,6 +958,11 @@ public final class AndroidAudioBackend implements AudioBackend {
                 failure != null ? " REFUSED " + failure : "");
         return failure != null ? -1L : after;
     }
+
+    /** What the last {@link #writeParams} call was told, or null when the platform refused it:
+     *  the read-back half of the write, kept for the caller that has to print a curve. */
+    private Float lastReadSpeed;
+    private Float lastReadPitch;
 
     /** The monotonic clock every trace line and the audio-clock monitor are compared on
      *  ({@code elapsedRealtime}: uptime, so a clock adjustment cannot look like a stall). */
@@ -1366,9 +1417,30 @@ public final class AndroidAudioBackend implements AudioBackend {
 
     /** How much the audio clock may disagree with the wall clock (after the ratio) before it
      *  is reported. A pipeline refresh, an underrun, a stall and a re-buffer all show up as
-     *  the play head not advancing while the clock does; 25 ms is above the sampling noise
-     *  at this rate and below anything a listener would not notice. */
-    private static final long CLOCK_GAP_MS = 25L;
+     *  the play head not advancing while the clock does.
+     *
+     *  <p>⚠️ <b>Raised from 25 ms to 80 ms in round 14, on round 13's own evidence.</b> This
+     *  device's {@code getCurrentPosition()} reports at roughly 30 ms granularity, so every
+     *  sample carried ±25-52 ms of quantisation noise: round 13's two arms (same pair, same
+     *  ramp) came out at 17 gaps each with the same distribution, which is a measurement of the
+     *  probe rather than of the audio. What is unambiguous here is a play head that does not
+     *  move AT ALL while wall time does — the frozen case round 13 actually caught (387 gaps,
+     *  every one {@code moved=0}, the incoming deck stuck at 40 ms: "the second track never
+     *  played"). That case is reported whatever this threshold says, see {@link #checkClock}. */
+    private static final long CLOCK_GAP_MS = 80L;
+
+    /** How long a play head has to stay at the SAME position, while the wall clock moves, before
+     *  that is called a freeze.
+     *
+     *  <p>⚠️ <b>A single sample's {@code moved == 0} is not evidence on this device, and round 14's
+     *  first device run proved it:</b> the raised drift threshold (see {@link #CLOCK_GAP_MS}) left
+     *  36 gap lines whose only mark was a "FROZEN" tag, and the {@code moved} values behind them
+     *  were −31…+5 ms per 20 ms sample — a deck that is playing normally, sampled at
+     *  {@code getCurrentPosition()}'s own ~30 ms granularity, looks like that. What round 13
+     *  actually caught was a position that never changed over HUNDREDS of samples (the deck stuck
+     *  at 40 ms for a whole ramp), so the test is a sustained one: the position identical for
+     *  this long, reported once per episode rather than once per tick. */
+    private static final long CLOCK_FREEZE_MS = 250L;
     /** 20 ms: fine enough that a gap's own width is measured rather than inferred. */
     private static final long CLOCK_TICK_MS = 20L;
     /** How long the monitor keeps watching after the promotion. The overlap's tail plus the
@@ -1385,6 +1457,14 @@ public final class AndroidAudioBackend implements AudioBackend {
     private long clockStopAtNs;
     private int clockGapsIn;
     private int clockGapsOut;
+    private int clockFreezesIn;
+    private int clockFreezesOut;
+    /** When each deck's position last CHANGED, and whether its current freeze episode has
+     *  already been reported (one line per episode, not one per tick). */
+    private long clockInStillNs;
+    private long clockOutStillNs;
+    private boolean clockInFreezeTagged;
+    private boolean clockOutFreezeTagged;
     private long clockTicks;
 
     /**
@@ -1418,11 +1498,21 @@ public final class AndroidAudioBackend implements AudioBackend {
         clockStopAtNs = 0L;                       // set at the promotion
         clockGapsIn = 0;
         clockGapsOut = 0;
+        clockFreezesIn = 0;
+        clockFreezesOut = 0;
+        clockInStillNs = System.nanoTime();
+        clockOutStillNs = clockInStillNs;
+        clockInFreezeTagged = false;
+        clockOutFreezeTagged = false;
         clockTicks = 0;
         Logger.info("MediaPlayer: audio-clock monitor on (50Hz, incoming x{} + the audible"
-                + " player): every stretch where a play head does not advance with the wall"
-                + " clock is logged as a gap, so a hiccup can be put beside the parameter"
-                + " writes that caused it", fmt(clockInSpeed));
+                + " player): a drift gap is |drift| >= {}ms (this device reports"
+                + " getCurrentPosition() in ~30ms steps, so that is above its own granularity),"
+                + " and a FREEZE is a play head at the same position for {}ms while the wall"
+                + " clock moves — reported once per episode, because a single sample's"
+                + " `moved=0` is this device's quantisation and not a stall; so a hiccup can be"
+                + " put beside the parameter writes that caused it",
+                fmt(clockInSpeed), CLOCK_GAP_MS, CLOCK_FREEZE_MS);
         clockTick(generation);
     }
 
@@ -1437,7 +1527,11 @@ public final class AndroidAudioBackend implements AudioBackend {
         if (clockIn == null && clockOut == null) return;
         clockGeneration++;
         Logger.info("MediaPlayer: audio-clock monitor off ({}): {} gap(s) on the incoming deck,"
-                        + " {} on the audible one", why, clockGapsIn, clockGapsOut);
+                        + " {} on the audible one{}", why, clockGapsIn, clockGapsOut,
+                clockFreezesIn + clockFreezesOut > 0
+                        ? " — of which FROZEN (no advance at all): " + clockFreezesIn + " on the"
+                                + " incoming deck, " + clockFreezesOut + " on the audible one"
+                        : " (no frozen samples on either deck)");
         clockIn = null;
         clockOut = null;
         clockStopAtNs = 0L;
@@ -1464,10 +1558,12 @@ public final class AndroidAudioBackend implements AudioBackend {
             Logger.info("MediaPlayer: audio-clock gap{} at {}ms uptime:{}",
                     gaps.indexOf(";") == gaps.lastIndexOf(";") ? "" : "s", stamp(), gaps);
         } else if (summary) {
-            Logger.info("MediaPlayer: audio-clock {}({}); {} gap(s) so far", 
+            Logger.info("MediaPlayer: audio-clock {}({}); {} gap(s) so far{}", 
                     clockInPos < 0L ? "-" : clockInPos + "ms on the incoming deck",
                     clockOutPos < 0L ? "-" : clockOutPos + "ms on the audible one",
-                    clockGapsIn + clockGapsOut);
+                    clockGapsIn + clockGapsOut,
+                    clockFreezesIn + clockFreezesOut > 0
+                            ? " (" + (clockFreezesIn + clockFreezesOut) + " FROZEN)" : "");
         }
         try {
             rampHandler.postDelayed(() -> clockTick(generation), CLOCK_TICK_MS);
@@ -1491,12 +1587,46 @@ public final class AndroidAudioBackend implements AudioBackend {
         long expected = Math.round(elapsedMs * speed);
         long drift = actual - expected;
         if (incoming) clockInPos = at; else clockOutPos = at;
-        if (Math.abs(drift) < CLOCK_GAP_MS) return true;
-        if (incoming) clockGapsIn++; else clockGapsOut++;
+        // Freeze: the position identical for CLOCK_FREEZE_MS of wall clock, reported once per
+        // episode. Anything else — including the ±30ms excursions this device's position
+        // reporter produces on a deck that is playing perfectly well — is not evidence, and a
+        // single `moved=0` sample is explicitly NOT a freeze (see CLOCK_FREEZE_MS).
+        long now = System.nanoTime();
+        if (actual != 0L) {
+            if (incoming) {
+                clockInStillNs = now;
+                clockInFreezeTagged = false;
+            } else {
+                clockOutStillNs = now;
+                clockOutFreezeTagged = false;
+            }
+        }
+        boolean frozen = false;
+        if (actual == 0L) {
+            long still = now - (incoming ? clockInStillNs : clockOutStillNs);
+            boolean tagged = incoming ? clockInFreezeTagged : clockOutFreezeTagged;
+            if (still < CLOCK_FREEZE_MS * 1_000_000L) return true;   // not yet a freeze
+            if (tagged) return true;                                 // already reported
+            frozen = true;
+            if (incoming) {
+                clockInFreezeTagged = true;
+                clockFreezesIn++;
+            } else {
+                clockOutFreezeTagged = true;
+                clockFreezesOut++;
+            }
+        } else if (Math.abs(drift) < CLOCK_GAP_MS) {
+            return true;
+        }
+        if (!frozen) {
+            if (incoming) clockGapsIn++; else clockGapsOut++;
+        }
         gaps.append(' ').append(incoming ? "incoming" : "audible")
             .append(" at=").append(at).append("ms moved=").append(actual)
             .append("ms expected=").append(expected).append("ms over=").append(elapsedMs)
-            .append("ms drift=").append(drift).append("ms;");
+            .append("ms drift=").append(drift).append("ms")
+            .append(frozen ? " FROZEN(same position for " + CLOCK_FREEZE_MS + "ms)" : "")
+            .append(';');
         return true;
     }
 
@@ -1535,14 +1665,306 @@ public final class AndroidAudioBackend implements AudioBackend {
             legacyPitchBackStep(generation);
             return;
         }
+        // ⚠️ Round 14: the return has two shapes and the mix picks which. A mix carrying a
+        // {@link KeyGlide} glides — a few writes, on the grid, on BOTH decks, over the blend's
+        // whole modulation section — and one that does not keeps round 13's single write at the
+        // deadline. Nothing else about this path changed: the clock the schedule runs on is
+        // still the incoming player's own position, because that is the clock the vocal entry
+        // was measured in.
+        KeyGlide glide = appliedMix.keyGlide();
+        if (glide != null && glide.isGliding()) {
+            startKeyGlide(glide);
+            return;
+        }
         Logger.info("MediaPlayer: the transposition on the incoming track ({} semitone(s),"
                         + " pitch x{}) is held until {}ms of its own file and then put back in"
                         + " ONE step — the incoming is at {}ms now, and the step lands 2000ms"
                         + " before its vocals. There is no per-tick glide any more: this is a"
-                        + " single parameter write on a deck whose DJ edit has the vocals out",
+                        + " single parameter write on a deck whose DJ edit has the vocals out{}",
                 appliedMix.semitones(), fmt(pitchBackFrom), pitchIdentityAtFileMs,
-                positionOf(incomingPlayer));
+                positionOf(incomingPlayer),
+                glide != null ? " (no key blend for this pair: " + glide.note() + ")" : "");
         pitchBackCheck(generation);
+    }
+
+    /**
+     * Arm the key blend's ladder: the plan {@link KeyGlide} built for this boundary, executed
+     * against the incoming player's own clock.
+     *
+     * <p>The instants are positions in the incoming track's own file, so the deck's own
+     * {@code getCurrentPosition()} decides when a step happens — the same clock the controller
+     * measured the vocal entry in, and therefore the same clock the rule's two-second margin is
+     * defined in. Each step writes BOTH decks at once (the incoming one to its own key, the
+     * audible one into it): separately they would drift into two different keys between steps,
+     * which is the one thing a parallel move cannot afford.
+     */
+    private void startKeyGlide(KeyGlide glide) {
+        activeGlide = glide;
+        glideInPlayer = incomingPlayer;
+        glideOutPlayer = player;
+        glideIndex = 0;
+        glideRunning = true;
+        glideTouchedOut = false;
+        glideReadBackIn = new double[glide.steps()];
+        glideReadBackOut = new double[glide.steps()];
+        for (int i = 0; i < glide.steps(); i++) {
+            glideReadBackIn[i] = Double.NaN;
+            glideReadBackOut[i] = Double.NaN;
+        }
+        glideFirstStamp = stamp();
+        long generation = ++glideGeneration;
+        Logger.info("MediaPlayer: key blend armed — {}. The incoming is at {}ms of its own file"
+                        + " now, the audible deck at {}ms; every step is written to BOTH decks at"
+                        + " the same instant, so the two never leave the same key, and the audible"
+                        + " deck's own gain is printed with each step",
+                glide.describe(), positionOf(glideInPlayer), positionOf(glideOutPlayer));
+        glideCheck(generation);
+    }
+
+    /**
+     * The ladder's own check: read the incoming deck's clock and take every step whose instant
+     * that clock has reached. Polled like the rule's single step (10 Hz — a step therefore lands
+     * up to one tick late, which is why the last step is placed at the rule's deadline rather
+     * than on it, and why the number it really landed at is logged).
+     *
+     * <p>A clock that cannot be read ({@code < 0}) takes the step now rather than never: the
+     * ladder is a parallel move with a deadline at its end, and finishing late is a rule
+     * violation while finishing a tick early is not.
+     */
+    private void glideCheck(long generation) {
+        boolean refused = false;
+        synchronized (this) {
+            if (!glideRunning || generation != glideGeneration) return;
+            KeyGlide glide = activeGlide;
+            MediaPlayer in = glideInPlayer;
+            if (glide == null || in == null) {
+                stopGlide();
+                return;
+            }
+            long at = positionOf(in);
+            while (glideRunning && glideIndex < glide.steps()
+                    && (at < 0L || at >= glide.atFileMs(glideIndex))) {
+                if (!applyGlideStep(glideIndex, at)) {
+                    refused = true;
+                    break;
+                }
+                glideIndex++;
+                if (glideIndex >= glide.steps()) {
+                    glideRunning = false;
+                    pitchBackDoneAtMs = at;
+                }
+            }
+        }
+        if (refused) {
+            abortKeyGlide("the platform refused one of its parameter writes");
+            return;
+        }
+        if (!glideRunning) {
+            logGlideDone();
+            return;
+        }
+        try {
+            rampHandler.postDelayed(() -> glideCheck(generation), RESTORE_TICK_MS);
+        } catch (Throwable ignored) { }
+    }
+
+    /**
+     * One step of the ladder, on both decks. Called with the lock held.
+     *
+     * <p>The order is the incoming deck first, and it is deliberate: that write is the one the
+     * rule needs (the transposition has to be off before the vocals), so if only one of the two
+     * can be made the pair is that much closer to the state that is always safe, and the abort
+     * below then completes the job on both.
+     *
+     * @return false when the platform refused either write.
+     */
+    private boolean applyGlideStep(int i, long atFileMs) {
+        KeyGlide glide = activeGlide;
+        double pIn = glide.incomingPitch(i);
+        double pOut = glide.outgoingPitch(i);
+        long stampIn = writeParams(glideInPlayer, "incoming", "key-glide", pitchBackSpeed, pIn);
+        if (stampIn < 0L) {
+            Logger.warn("MediaPlayer: the platform refused key-glide step {}/{} on the incoming"
+                    + " deck (pitch x{} asked); the ladder is abandoned rather than left half"
+                    + " climbed", i + 1, glide.steps(), fmt(pIn));
+            return false;
+        }
+        glideReadBackIn[i] = readBackPitch(pIn);
+        double outGain = lastOutGain;
+        long stampOut = writeParams(glideOutPlayer, "audible", "key-glide-out", 1d, pOut);
+        if (stampOut < 0L) {
+            Logger.warn("MediaPlayer: the platform refused key-glide step {}/{} on the AUDIBLE"
+                    + " deck (pitch x{} asked) — that deck does not glide in this build, so the"
+                    + " ladder cannot keep the two in one key; abandoned", i + 1, glide.steps(),
+                    fmt(pOut));
+            return false;
+        }
+        glideTouchedOut = true;
+        glideReadBackOut[i] = readBackPitch(pOut);
+        Logger.info("MediaPlayer: key-glide step {}/{} at {}ms of the incoming's file (planned"
+                        + " for {}ms): incoming {} st, pitch x{} read back x{}; audible {} st,"
+                        + " pitch x{} read back x{}; the audible deck's own gain is {} of unity"
+                        + " — the largest shift lands on the quietest moment, and the two decks"
+                        + " are {} st apart, which is this pair's key distance",
+                i + 1, glide.steps(), atFileMs, glide.atFileMs(i),
+                fmt(glide.incomingSemitones(i)), fmt(pIn), fmt(lastReadPitchOf(i, true)),
+                fmt(glide.outgoingSemitones(i)), fmt(pOut), fmt(lastReadPitchOf(i, false)),
+                fmt(outGain),
+                fmt(glide.incomingSemitones(i) - glide.outgoingSemitones(i)));
+        return true;
+    }
+
+    /** The platform's own read-back for step {@code i}, or what was asked for when it would not
+     *  answer — never NaN, so a log line can print a number either way. */
+    private double lastReadPitchOf(int i, boolean incoming) {
+        double[] read = incoming ? glideReadBackIn : glideReadBackOut;
+        double value = read != null && i < read.length ? read[i] : Double.NaN;
+        return Double.isNaN(value)
+                ? (incoming && activeGlide != null ? activeGlide.incomingPitch(i)
+                        : activeGlide != null ? activeGlide.outgoingPitch(i) : 1d)
+                : value;
+    }
+
+    /** The read-back of the write that just happened, as a ratio, or what was asked for when the
+     *  platform answered nothing (a refused write is handled by the caller, so this is only ever
+     *  the "accepted but silent" case). */
+    private double readBackPitch(double asked) {
+        Float read = lastReadPitch;
+        return read == null || read <= 0f ? asked : read;
+    }
+
+    /**
+     * The ladder finished: the measured curve, and the two numbers the user's request is about —
+     * how far the mix's tonality travelled, and where the incoming deck's clock stood when it
+     * got there.
+     *
+     * <p>Printed from the platform's own read-backs rather than from the plan, because the plan
+     * is what was asked for: a platform that accepted every write and every value is the thing
+     * this line has to be evidence for.
+     */
+    private void logGlideDone() {
+        KeyGlide glide = activeGlide;
+        if (glide == null) return;
+        StringBuilder curve = new StringBuilder();
+        for (int i = 0; i < glide.steps(); i++) {
+            curve.append(' ').append(loc(12d * log2(lastReadPitchOf(i, true)))).append('/')
+                    .append(loc(12d * log2(lastReadPitchOf(i, false))));
+        }
+        Logger.info("MediaPlayer: key blend done — {} write(s) on each deck over {}ms ({}ms"
+                        + " wall clock): the incoming deck's offset from its own key went from"
+                        + " {} to {} semitones and the audible deck's from {} to {}, so the pair"
+                        + " stayed {} semitone(s) apart (in ONE key) at every step while the"
+                        + " tonality travelled from the outgoing track's key into the incoming"
+                        + " track's own. Platform read-back, incoming/audible semitones per step:{}",
+                glide.steps(), glide.sectionFileMs(), stamp() - glideFirstStamp,
+                loc(glide.semitones()), "0.00",
+                loc(0d), loc(-glide.semitones()), loc((double) glide.semitones()), curve);
+        // The rule's own margin, MEASURED rather than asserted: where the deck's clock stood at
+        // the last step against the instant the controller scheduled it for. `pitchIdentityAtFileMs`
+        // is the last beat at or before the rule's deadline, so the incoming track's vocals are due
+        // back at (that + the margin) — which makes the number below a lower bound on the real
+        // margin (the beat snap can only have moved the deadline later, never earlier).
+        long late = Math.max(0L, pitchBackDoneAtMs - pitchIdentityAtFileMs);
+        Logger.info("MediaPlayer: key blend's last step landed at {}ms of the incoming's own"
+                        + " file, against the {}ms it was planned for ({}ms late, inside one"
+                        + " {}ms poll tick) — so the transposition was off at least {}ms before"
+                        + " the incoming track's vocals are due back, where the rule asks for"
+                        + " {}ms",
+                pitchBackDoneAtMs, glide.atFileMs(glide.steps() - 1), late, RESTORE_TICK_MS,
+                Math.max(0L, pitchIdentityAtFileMs + MixNaturaliser.VOCAL_PITCH_MARGIN_MS
+                        - pitchBackDoneAtMs),
+                MixNaturaliser.VOCAL_PITCH_MARGIN_MS);
+        stopGlide();
+    }
+
+    /**
+     * Abandon the ladder and put BOTH decks back at their own pitch, in one write each.
+     *
+     * <p>This is the shape every failure takes (see the callers: a refused write, a clock that
+     * cannot be read, the promotion arriving early), and it is chosen for the same reason the
+     * ladder is parallel in the first place: a half-climbed ladder is a pair sitting in a key
+     * that is neither track's, so the only safe direction to finish in is the one the rule
+     * already demands — the incoming track's own. What the listener is left with is then
+     * exactly the boundary this build would have played without a key blend at all: no
+     * transposition, everything else untouched.
+     */
+    private synchronized void abortKeyGlide(String why) {
+        KeyGlide glide = activeGlide;
+        if (glide == null && !glideRunning) return;
+        int done = glideIndex;
+        int steps = glide != null ? glide.steps() : 0;
+        MediaPlayer in = glideInPlayer;
+        MediaPlayer out = glideOutPlayer;
+        boolean touched = glideTouchedOut;
+        long at = positionOf(in);
+        stopGlide();
+        pitchBackRunning = false;
+        pitchBackGeneration++;
+        if (in != null) {
+            writeParams(in, "incoming", "key-glide-abandoned", pitchBackSpeed, 1d);
+        }
+        if (out != null && touched) {
+            writeParams(out, "audible", "key-glide-abandoned", 1d, 1d);
+        }
+        pitchBackDoneAtMs = at;
+        Logger.warn("MediaPlayer: the key blend stopped after {} of {} steps ({}), at {}ms of the"
+                        + " incoming's file — both decks are back at their own pitch in one write"
+                        + " each, so the boundary is the one this build plays without a key blend"
+                        + " and the outgoing track is never left off its own key",
+                done, steps, why, at);
+    }
+
+    /** Stop the ladder's bookkeeping without writing anything: the caller is doing the writes,
+     *  or the players are going away. */
+    private void stopGlide() {
+        glideRunning = false;
+        glideGeneration++;
+        activeGlide = null;
+        glideInPlayer = null;
+        glideOutPlayer = null;
+        glideTouchedOut = false;
+    }
+
+    /**
+     * Put the AUDIBLE deck back at its own pitch if the ladder had already bent it.
+     *
+     * <p>Called from every path that drops an overlap without promoting it. Without it, a
+     * boundary abandoned in the middle of a modulation would leave the track the listener keeps
+     * hearing a semitone or two off its own key <em>for the rest of the song</em> — a far worse
+     * outcome than the blend being cut short, and the one thing this feature must never be able
+     * to do.
+     */
+    private synchronized void restoreOutgoingPitch(String why) {
+        MediaPlayer out = glideOutPlayer;
+        boolean touched = glideTouchedOut;
+        boolean current = out != null && out == player;
+        stopGlide();
+        if (out == null) return;
+        if (!current) {
+            // The deck the ladder bent is no longer the audible one (the backend has replaced
+            // it with another source, or a promotion made the incoming player THE player), so
+            // its pitch has already gone with it and there is nothing to write.
+            Logger.info("MediaPlayer: {} — the deck the key blend had bent is no longer the"
+                    + " audible one, so its pitch went with it", why);
+            return;
+        }
+        if (!touched) {
+            Logger.info("MediaPlayer: {} — the key blend had not written to the audible deck, so"
+                    + " there is nothing to put back", why);
+            return;
+        }
+        boolean ok = writeParams(out, "audible", "key-glide-restore", 1d, 1d) >= 0L;
+        Logger.info("MediaPlayer: {} — the audible deck's own pitch is back ({})", why,
+                ok ? "one write" : "the platform refused the write, and the deck keeps the pitch"
+                        + " the last step gave it");
+    }
+
+    private static double log2(double v) {
+        return v > 0d ? Math.log(v) / Math.log(2d) : 0d;
+    }
+
+    private static String loc(double v) {
+        return String.format(java.util.Locale.US, "%+.2f", v);
     }
 
     /**
@@ -1611,6 +2033,34 @@ public final class AndroidAudioBackend implements AudioBackend {
      * vocal must never be heard.
      */
     private synchronized long endPitchBackAtPromotion() {
+        if (glideRunning) {
+            // The ladder's last step is planned at or before the rule's deadline, and the
+            // deadline is inside the blend, so this is an anomaly rather than a case: a step was
+            // missed (a refused write, a clock that never advanced, or a ramp shorter than the
+            // plan). The incoming deck — which IS the audible one from this line on — goes to
+            // the track's own pitch immediately, and the outgoing deck is already released (the
+            // promotion released it a few lines above), so its last step's pitch goes with it.
+            MediaPlayer mp = glideInPlayer;
+            KeyGlide glide = activeGlide;
+            long at = positionOf(mp);
+            int missed = glide != null ? glide.steps() - glideIndex : 0;
+            long plannedLast = glide != null ? glide.atFileMs(glide.steps() - 1) : -1L;
+            stopGlide();
+            pitchBackRunning = false;
+            pitchBackGeneration++;
+            if (mp != null) {
+                writeParams(mp, "incoming", "pitch-return-at-promotion", pitchBackSpeed, 1d);
+            }
+            pitchBackDoneAtMs = at;
+            Logger.warn("MediaPlayer: the key blend still had {} of its steps to take when the"
+                            + " promotion happened (the incoming's own clock said {}ms; the last"
+                            + " step was planned for {}ms of its file) — the promoted track is at"
+                            + " its own pitch from here, immediately, rather than left" 
+                            + " transposed, and the outgoing deck went with the pitch its last"
+                            + " step gave it",
+                    missed, at, plannedLast);
+            return at >= 0L ? at : 0L;
+        }
         if (!pitchBackRunning) return -1L;
         pitchBackRunning = false;
         pitchBackGeneration++;
@@ -1662,6 +2112,10 @@ public final class AndroidAudioBackend implements AudioBackend {
                     out.setVolume(outGain, outGain);
                     in.setVolume(inGain, inGain);
                 } catch (Throwable ignored) { }
+                // Recorded for the key blend's per-step log line: "the audible deck's own gain
+                // when its biggest shift landed". Nothing here reads it back — MediaPlayer has no
+                // volume getter, and the gain is ours to know.
+                lastOutGain = outGain / Math.max(1e-6f, base);
                 // The low end changes hands once, on the beat the controller picked
                 // (a beat of both tracks, since the incoming is running at the
                 // outgoing's tempo). A level write, so it costs nothing to do it here
@@ -1887,6 +2341,12 @@ public final class AndroidAudioBackend implements AudioBackend {
     }
 
     private void releaseIncoming() {
+        // ⚠️ First, before anything is released: if the key blend had already bent the deck the
+        // listener KEEPS hearing, that pitch has to come back (see restoreOutgoingPitch). This
+        // method is every path that drops an overlap without promoting it — a pause, a seek, a
+        // focus loss, an incoming error, a queue change — and the audible deck is the one player
+        // none of them is allowed to leave out of tune.
+        restoreOutgoingPitch("the overlap was dropped before the key blend finished");
         // How far it had got, before the player is gone: a rolling incoming that is
         // dropped mid-overlap is the case where the next track has already been partly
         // heard, and the caller has to resume it from there rather than from its

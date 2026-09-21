@@ -75,12 +75,25 @@ public final class MixNaturaliser {
     /**
      * Whether this boundary may be transposed at all.
      *
-     * <p>The rule above has to be affordable: the ease-back takes
-     * {@link IncomingMix#RESTORE_MS} and the margin takes
-     * {@link #VOCAL_PITCH_MARGIN_MS}, and both have to fit inside the blend, before the
-     * incoming track's vocals arrive. When they do not, the answer is <b>no
-     * transposition at all</b> — the restoration is never squeezed into less room than
-     * it needs, because a squeezed restoration is exactly the artefact the rule is about.
+     * <p>The rule above has to be affordable: the modulation section — the part of the blend
+     * the pitch travels over, which is also the part before the incoming track's vocals — has
+     * to exist and to end inside the blend the boundary will really run. When it cannot, the
+     * answer is <b>no transposition at all</b>: the return is never squeezed into a
+     * non-section, because a modulation crammed into a fraction of a second is exactly the
+     * artefact the rule is about.
+     *
+     * <p>⚠️ <b>Round 14 removed six seconds from this gate, and that was the squeeze the user
+     * asked to have removed.</b> Until round 13 the transposition was eased back over
+     * {@link IncomingMix#RESTORE_MS} (six seconds), so a boundary whose deadline was closer
+     * than six seconds got no transposition — the requirement follows from the shape of a
+     * <em>glide</em>. Round 13 replaced that glide with a single write, which needs no room at
+     * all, and left the gate demanding the six seconds anyway: every pair with less than
+     * eight seconds of vocals-out window was silently refused a transposition it could have
+     * had, and the modulation section was capped at {@code overlap − margin − 6s} for the
+     * pairs that did get one. What the gate asks now is only what is really needed — the
+     * rule's own deadline ({@code VOCAL_PITCH_MARGIN_MS} before the vocals arrive) must fall
+     * inside this blend — and {@link KeyGlide} decides separately whether the room that is
+     * left is enough for a ladder rather than for a single step.
      *
      * @param vocalInMs  how far into the blend's own ramp the incoming track's vocals are
      *                   first heard, ms. {@code 0} is not "unknown" — it is the case where
@@ -93,7 +106,7 @@ public final class MixNaturaliser {
      */
     public static boolean pitchFitsBeforeVocals(long vocalInMs, long overlapMs) {
         long deadlineMs = vocalInMs - VOCAL_PITCH_MARGIN_MS;
-        return deadlineMs - IncomingMix.RESTORE_MS >= 0L && deadlineMs <= overlapMs;
+        return deadlineMs >= 0L && deadlineMs <= overlapMs;
     }
 
     /**
