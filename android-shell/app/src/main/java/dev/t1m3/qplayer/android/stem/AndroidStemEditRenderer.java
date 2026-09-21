@@ -107,6 +107,11 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
      * (~1 s), so it happens on the preload lane the first time a render is asked for and
      * never again. A feature that silently switched weights mid-session would be worse
      * than one that needs a restart.
+     *
+     * <p>The lane runs at the lowest priority the process has and the caller sits behind
+     * the controller's startup gate, so this hash — the one piece of startup work that is
+     * pure CPU over a large file — never lands inside the first frames. How long it took
+     * is in the line below, so a slow device can be told apart from a cold disk.
      */
     private StemModel.Candidate model() {
         if (modelChecked) return model;
@@ -116,17 +121,19 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 File file = new File(modelsDir, candidate.fileName);
                 if (!file.isFile()) continue;
                 long bytes = file.length();
+                long hashStartedAt = System.nanoTime();
                 String digest = StemModel.sha256(file);
+                long hashMs = (System.nanoTime() - hashStartedAt) / 1_000_000L;
                 StemModel.Candidate accepted =
                         StemModel.recognise(candidate.fileName, bytes, digest);
                 if (accepted != null) {
                     model = accepted;
                     modelChecked = true;
                     Logger.info("transition: stem DJ edits are ON — {} verified in {} ({} bytes,"
-                                    + " sha256 {}); the separation runs on {} CPU threads with the"
-                                    + " arena allocator off, off the playback path",
+                                    + " sha256 {} hashed in {}ms); the separation runs on {} CPU"
+                                    + " threads with the arena allocator off, off the playback path",
                             accepted.fileName, modelsDir.getAbsolutePath(), bytes,
-                            accepted.sha256, StemModel.INTRA_OP_THREADS);
+                            accepted.sha256, hashMs, StemModel.INTRA_OP_THREADS);
                     return model;
                 }
                 Logger.warn("transition: {} is present but does not match the manifest ({} bytes,"

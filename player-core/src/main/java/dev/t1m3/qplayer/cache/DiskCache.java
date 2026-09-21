@@ -123,8 +123,22 @@ public final class DiskCache {
         this.maxSizeBytes = maxSizeMB * 1024L * 1024L;
     }
 
+    /**
+     * Set the budget. The walk that enforces it is deliberately <em>not</em> run here:
+     * the caller schedules it (see {@link #evictIfOverBudget}), because the one caller
+     * is the settings store applying 最大缓存 as it loads — which is inside the app's
+     * first frames — and the walk is a stat per cached file (several hundred on a used
+     * phone, across nine sub-directories) followed, when the budget is exceeded, by a
+     * sort of every file and a delete for each one that has to go.
+     */
     public void setMaxSizeMB(long mb) {
         this.maxSizeBytes = mb * 1024L * 1024L;
+    }
+
+    /** Enforce the budget now, on the calling thread. Everything that writes into the
+     *  cache calls this from its own worker; the settings path hands it to one (see
+     *  {@code PlayerController.setCacheMaxSizeMB}). */
+    public void evictIfOverBudget() {
         evictIfNeeded();
     }
 

@@ -200,6 +200,12 @@ public final class PlayerController {
     private final ExecutorService probeWorker = Executors.newFixedThreadPool(2, r -> {
         Thread t = new Thread(r, "qplayer-silence");
         t.setDaemon(true);
+        // Deliberately NOT lowered to the minimum like the beat and pre-cache lanes: this
+        // is the one probe a boundary can be waiting on (SILENCE_TRIM only happens if the
+        // measurement lands inside the 9 s window, see SILENCE_TRIM_DECIDE_MS), so it
+        // keeps the process default and yields to nothing but the audio thread itself.
+        // What keeps it out of the launch's way is the startup gate instead: none of the
+        // warm-ups that ask for a measurement start before the UI is up and quiet.
         return t;
     });
     // Beat grids (BeatProfiler) for the overlap alignment: its own single thread,
@@ -212,6 +218,12 @@ public final class PlayerController {
     private final ExecutorService beatWorker = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "qplayer-beat");
         t.setDaemon(true);
+        // Nothing waits on a grid: the boundary uses what is ready. The thread is
+        // therefore deliberately the lowest priority one in the process, so a decode
+        // that would otherwise be running on a core the first frames want gets out of
+        // the way (and the ART native threads the separation render spawns inherit it,
+        // which is what keeps an ORT session from taking four cores at launch).
+        t.setPriority(Thread.MIN_PRIORITY);
         return t;
     });
     // The NEXT track's audio, fetched while the current one plays (see
@@ -228,6 +240,12 @@ public final class PlayerController {
     private final ExecutorService precacheWorker = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "qplayer-precache");
         t.setDaemon(true);
+        // The lane that carries a whole track's download, the model's 98 MB verification
+        // and (with a model in place) the separation render — all of it work the user
+        // never waits on, so it runs at the lowest priority the process has, below the
+        // first frames and below every probe. The render's own threads are native
+        // threads created from here and inherit this.
+        t.setPriority(Thread.MIN_PRIORITY);
         return t;
     });
     // Which pre-cache is still wanted. Bumped on every track start, so a pre-cache
@@ -248,6 +266,93 @@ public final class PlayerController {
                 t.setDaemon(true);
                 return t;
             });
+
+    // ---- the startup gate ---------------------------------------------------
+    //
+    // The first seconds after the app starts are the one time the user is certain to be
+    // looking at the screen while several never-waited-on jobs all try to start at once:
+    // a whole track's download, a 30 s decode for a beat grid, a silence measurement, an
+    // AI prefetch, and — with a model in place — a separation render that hashes 98 MB
+    // and then occupies four cores for over a minute. None of them is on the playback
+    // path, none is ever waited on, and each has minutes of margin before anything reads
+    // its answer, so all of them can wait for the UI instead of competing with the first
+    // frames. The gate only ever DELAYS (see runAfterStartup) and always opens: on the
+    // host's first-frames signal plus a quiet interval, or on the fallback deadline below
+    // for hosts that never send one (the desktop host, tests).
+    //
+    // It gates exactly the warm-ups that start from preloadAdjacent()/playAt() — never
+    // the resolve, the playback start, the cover or the lyrics the user is looking at,
+    // and never a probe a boundary is waiting on (armIncoming's own measurements).
+    private static final long STARTUP_QUIET_MS = 3_000L;
+    private static final long STARTUP_FALLBACK_MS = 15_000L;
+    private final Object startupLock = new Object();
+    private boolean startupGateOpen;
+    private final java.util.List<Runnable> startupBacklog = new java.util.ArrayList<>();
+
+    /**
+     * The host's "the app is on screen" signal: called once the first frames have been
+     * drawn (Android: from the first frame after the first composition). The gate then
+     * opens {@link #STARTUP_QUIET_MS} later — long enough for the launch's own
+     * animations, the first cover decodes and the restored queue's own work to finish,
+     * short enough that a boundary's pre-cache still has its minutes.
+     */
+    public void notifyUiInteractive() {
+        try {
+            profileWarmWorker.schedule(this::openStartupGate, STARTUP_QUIET_MS,
+                    TimeUnit.MILLISECONDS);
+        } catch (Throwable e) {
+            openStartupGate();
+        }
+    }
+
+    /** Whether the deferred warm-ups may start; the launcher of the trace line below is
+     *  also the gate itself, so a test can assert it opened. */
+    public boolean startupGateIsOpen() {
+        synchronized (startupLock) {
+            return startupGateOpen;
+        }
+    }
+
+    /** Open the gate and run everything that was waiting for it. Idempotent. */
+    private void openStartupGate() {
+        java.util.List<Runnable> backlog;
+        synchronized (startupLock) {
+            if (startupGateOpen) return;
+            startupGateOpen = true;
+            backlog = new java.util.ArrayList<>(startupBacklog);
+            startupBacklog.clear();
+        }
+        Logger.info("startup: the UI is up and quiet — releasing {} deferred transition warmup(s)"
+                        + " (nothing on the playback path was ever waiting on them)", backlog.size());
+        for (Runnable r : backlog) {
+            try {
+                r.run();
+            } catch (Throwable e) {
+                Logger.warn("startup: a deferred warmup failed: {}", e.toString());
+            }
+        }
+    }
+
+    /**
+     * Run {@code submission} once the gate is open, or at once if it already is.
+     *
+     * <p>{@code submission} is expected to be the cheap hand-off to the lane that does
+     * the work (a {@code submit}, not the download/decode itself): it may run on the
+     * scheduler thread that opened the gate. Everything routed through here must be
+     * safe to run later — the pre-cache and the beat probe are, because both re-check
+     * their generation/keys when they actually start (see precacheNextAudio and
+     * probeBeatProfile), and a warm-up for a track the queue has left is simply a
+     * wasted measurement, never a wrong one.
+     */
+    private void runAfterStartup(Runnable submission) {
+        synchronized (startupLock) {
+            if (!startupGateOpen) {
+                startupBacklog.add(submission);
+                return;
+            }
+        }
+        submission.run();
+    }
     // offlinePlaylistFallback's background retry (Thread.sleep-and-retry-online)
     // needs its own queue for the same reason as the three above: it deliberately
     // blocks its own thread for the whole retry interval, and doing that on
@@ -1361,18 +1466,56 @@ public final class PlayerController {
         // ordinary end-of-track path takes over at once.
         backend.setOnCrossfadeComplete(() -> onMain(this::onCrossfadeComplete));
         backend.setOnCrossfadeAbandoned(() -> onMain(this::onCrossfadeAbandoned));
+        // This constructor runs on the host's main thread, before the first frame is
+        // composed, so every step here is a cost the user watches: each one is timed and
+        // they go out as a single line, which is the only way a startup hitch can be
+        // attributed from a frame trace (the deferred warmups below are the other half —
+        // see the startup gate). The heavy ones that used to start with the first track
+        // (a download, two decodes, an AI question, and a separation render) now wait
+        // until the UI reports its first frames.
+        long tStart = System.nanoTime();
         worker.submit(this::loadSearchHistory);
         loadLyricOffsets();
+        long tLyricOffsets = System.nanoTime();
         songMetaIndex.load();
+        long tSongMeta = System.nanoTime();
         playlistCacheIndex.load();
+        long tPlaylistCache = System.nanoTime();
         loadQueue();
+        long tQueue = System.nanoTime();
         loadCustomPlaylist();
+        long tCustomPlaylist = System.nanoTime();
         togetherWorker.scheduleAtFixedRate(this::listenTogetherTick,
                 1L, 1L, TimeUnit.SECONDS);
         if (netease.isLoggedIn()) {
             loggedIn.set(true);
             refreshLogin();
         }
+        // The gate opens on the host's first-frames signal plus a quiet interval, and on
+        // this deadline regardless: a host without a screen is the desktop one, and it has
+        // no first frame to report — the warmups must not be held for the whole session.
+        try {
+            profileWarmWorker.schedule(this::openStartupGate, STARTUP_FALLBACK_MS,
+                    TimeUnit.MILLISECONDS);
+        } catch (Throwable ignored) {
+        }
+        Logger.info("startup: controller ready in {}ms (lyric offsets {}ms, song meta {}ms,"
+                        + " playlist cache {}ms, queue {}ms, custom playlist {}ms; search history and"
+                        + " the cache-size walks are on workers; transition warmups wait for the"
+                        + " first frames)",
+                msSince(tStart), msSince(tStart, tLyricOffsets), msSince(tStart, tSongMeta),
+                msSince(tStart, tPlaylistCache), msSince(tStart, tQueue),
+                msSince(tStart, tCustomPlaylist));
+    }
+
+    /** Milliseconds between two {@link System#nanoTime()} readings, for the one startup
+     *  line above. */
+    private static long msSince(long t0) {
+        return (System.nanoTime() - t0) / 1_000_000L;
+    }
+
+    private static long msSince(long t0, long t1) {
+        return (t1 - t0) / 1_000_000L;
     }
 
     private void showCredentialNotice(NeteaseClient.CredentialEvent event) {
@@ -3611,21 +3754,29 @@ public final class PlayerController {
             // ... and its DJ edit, if the stem path is on and this one has not been made
             // yet. Same lane, same moment, same reasoning as the pre-cache below: a
             // separation is tens of seconds of CPU (measured: 15-35s for a head window on
-            // the reference device), which nothing on a playback path may wait for.
+            // the reference device), which nothing on a playback path may wait for. And
+            // for the same reason as every other warm-up here, not before the UI is up:
+            // this is the path that verifies the 98 MB model and then renders.
             precacheGeneration.incrementAndGet();
-            requestStemEdit(t, diskCache.getAudio(songId));
-            return;
-        }
-        long limitMb = diskCache.getMaxSizeMB();
-        if (limitMb > 0L && diskCache.totalSize() >= limitMb * 1024L * 1024L) {
-            Logger.info("transition: not pre-caching {}: the audio cache is at its {}MB budget",
-                    t.title, limitMb);
+            final String cachedPath = diskCache.getAudio(songId);
+            runAfterStartup(() -> requestStemEdit(t, cachedPath));
             return;
         }
         final long generation = precacheGeneration.incrementAndGet();
         final long durationMs = t.durationMs;
-        precacheWorker.submit(() -> {
+        final long limitMb = diskCache.getMaxSizeMB();
+        runAfterStartup(() -> precacheWorker.submit(() -> {
             if (generation != precacheGeneration.get()) return;   // the queue moved on
+            // The budget check walks every sub-cache (a stat per cached file), so it runs
+            // here rather than on the caller's thread — the caller is the main thread at
+            // the end of playAt, where that walk is a startup cost with no user waiting on
+            // the answer. After the generation check on purpose: a pre-cache the queue has
+            // moved past should not spend the walk either.
+            if (limitMb > 0L && diskCache.totalSize() >= limitMb * 1024L * 1024L) {
+                Logger.info("transition: not pre-caching {}: the audio cache is at its {}MB budget",
+                        t.title, limitMb);
+                return;
+            }
             String url;
             try {
                 url = resolveProbeSource(t);
@@ -3665,7 +3816,7 @@ public final class PlayerController {
             // requestStemEdit). The generation this render was asked for is the one above,
             // so a queue that moved on while the download was running also cancels it.
             requestStemEdit(t, diskCache.audioPath(songId));
-        });
+        }));
     }
 
     // --- the stem DJ edit ----------------------------------------------------
@@ -5979,7 +6130,13 @@ public final class PlayerController {
     /** After the current track settles, warm the next + previous tracks' lyrics and
      *  cover bytes on the worker so switching to them is instant (no load-in stutter).
      *  Runs on the main thread; submits per-track work that queues behind the current
-     *  track's own fetches (single worker), so the current song always loads first. */
+     *  track's own fetches (single worker), so the current song always loads first.
+     *
+     *  <p>The three transition warm-ups below are the ones routed through the startup
+     *  gate: on a launch that resumes playback they would otherwise be a whole track's
+     *  download, two decodes and an AI question all starting in the first frame's
+     *  window. The lyrics/cover preload above them is not gated — that is what makes
+     *  hitting "next" instant, and it is the small end of the work. */
     private void preloadAdjacent() {
         int n = queue.size();
         if (n <= 1) return;
@@ -5989,19 +6146,19 @@ public final class PlayerController {
         Track prev = queue.get((cur - 1 + n) % n);
         preloadTrack(next);
         if (prev != next) preloadTrack(prev);
-        warmCurrentSilenceProfile();
+        runAfterStartup(this::warmCurrentSilenceProfile);
         // ... and the NEXT track's grid even when its audio is not on disk. The
         // cached case above has already been asked for by preloadTrack; this is the
         // streamed case (see requestEarlyBeatProfile for why the preload is the last
         // moment early enough), and it is deliberately the next track only — a
         // transition only ever overlaps into the slot that follows this one, so a grid
         // for prev would be a resolve and a decode nobody ever asks for.
-        requestEarlyBeatProfile(next);
-        prefetchAiTransition(cur, next);
+        runAfterStartup(() -> requestEarlyBeatProfile(next));
+        runAfterStartup(() -> prefetchAiTransition(cur, next));
         // ... and its audio, long before the boundary needs it (see precacheNextAudio):
         // a library that plays through the unblock sources spends 1-9s resolving one,
         // which is later than the boundary can wait for it.
-        precacheNextAudio(next);
+        runAfterStartup(() -> precacheNextAudio(next));
     }
 
     /**
@@ -6080,18 +6237,25 @@ public final class PlayerController {
     private void warmCurrentTrackProfilesSoon(final Track t, final String src, final int index) {
         if (!transitionEnabled || t == null || !crossfadeStreamable(t)) return;
         final long generation = profileWarmGeneration.incrementAndGet();
-        try {
-            profileWarmWorker.schedule(() -> {
-                // A warm belongs to the playback start that asked for it: after a
-                // track change (the normal case for anyone skipping) the track it
-                // would measure is not the one playing any more.
-                if (generation != profileWarmGeneration.get()) return;
-                if (playIndex != index) return;
-                warmTrackProfiles(t, src);
-            }, PROFILE_WARM_DELAY_MS, TimeUnit.MILLISECONDS);
-        } catch (Throwable e) {
-            Logger.warn("profile warm could not be scheduled: {}", e.toString());
-        }
+        // The delay is measured from the moment the startup gate opens, not from the
+        // play: both decodes (a silence window read to the tail and a 30 s grid) are
+        // exactly the kind of work the gate exists for, and on a launch that resumes
+        // playback this would otherwise be the third decoder starting inside the first
+        // frame. Nothing is lost by it — the answers are read by the NEXT boundary.
+        runAfterStartup(() -> {
+            try {
+                profileWarmWorker.schedule(() -> {
+                    // A warm belongs to the playback start that asked for it: after a
+                    // track change (the normal case for anyone skipping) the track it
+                    // would measure is not the one playing any more.
+                    if (generation != profileWarmGeneration.get()) return;
+                    if (playIndex != index) return;
+                    warmTrackProfiles(t, src);
+                }, PROFILE_WARM_DELAY_MS, TimeUnit.MILLISECONDS);
+            } catch (Throwable e) {
+                Logger.warn("profile warm could not be scheduled: {}", e.toString());
+            }
+        });
     }
 
     private void preloadTrack(Track t) {
@@ -10710,16 +10874,38 @@ public final class PlayerController {
 
     // --- Disk cache management (called from QML settings page) -------------
 
-    /** Update the {@link #cacheSizeMB} property from the actual disk usage. */
+    /**
+     * Update the {@link #cacheSizeMB} property from the actual disk usage.
+     *
+     * <p>The answer comes from a walk of every cache sub-directory — a stat per cached
+     * file — and it is published when that walk is done, on a worker. Both callers are
+     * inside the app's first frames (the settings store applies 最大缓存 as it loads,
+     * and the row that shows 当前占用 is refreshed on every change), and nothing waits
+     * on either number: the row reads {@code cacheSizeMB} as ordinary state.
+     */
     public void refreshCacheSize() {
-        long bytes = diskCache.totalSize();
-        cacheSizeMB.set(bytes / (1024 * 1024));
+        worker.submit(() -> {
+            long bytes = diskCache.totalSize();
+            cacheSizeMB.set(bytes / (1024 * 1024));
+        });
     }
 
-    /** Change the max cache size and trigger eviction if needed. */
+    /**
+     * Change the max cache size and enforce it.
+     *
+     * <p>The budget is stored on the spot (it is one field, and a boundary's pre-cache
+     * check reads it) and the eviction — the walk above, plus a sort of every cached
+     * file and a delete per file over budget — runs on a worker, in the order the user
+     * would expect it: the budget first, then the cache brought under it, then the
+     * 当前占用 row.
+     */
     public void setCacheMaxSizeMB(long mb) {
         diskCache.setMaxSizeMB(mb);
-        refreshCacheSize();
+        worker.submit(() -> {
+            diskCache.evictIfOverBudget();
+            long bytes = diskCache.totalSize();
+            cacheSizeMB.set(bytes / (1024 * 1024));
+        });
     }
 
     /** Clear all disk cache (audio + lyrics + images). */
