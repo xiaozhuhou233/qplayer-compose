@@ -2104,6 +2104,78 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
     第 4 节那条"一个常驻 Surface 永不重建"的架构要重做，风险高，别先做）；
     ③ 仍然**没有人听过任何一次过渡**（第五/八/九/十/十一/十二/十三/十四轮都没听过）。
 
+- **2026-09-21 第十六轮：DJ 式的"出口"变成一段真正的淡出（上一首歌不再戛然而止）——一次只改形状的修复，
+  前后都在真机上测了**
+  用户原话：「现在给人的感觉是过渡时上一首歌戛然而止了，请在短时间内修复，可能你的过渡有问题」。
+  任务书给了两个嫌疑：① 晋升时把还在出声的 outgoing 播放器释放了；② 尾巴是"掉下去"不是"淡出去"。
+  - **① 结论（真机数据，不是推断）：真正的原因是 ②，① 被数据否掉。**
+    同一对歌（Moonlight → Lalala）、同一个决策（CROSSFADE / 重叠 14971ms、mix x1.0212 + bass swap 8930ms）、
+    两次都从 95090ms 起播（剩 40s），`transitionKind` 临时强制成 2（CROSSFADE）以免 AI 每次选别的。
+    **before（= 今天出厂的曲线，只多了本轮埋点）**，ramp 14906ms，outgoing 自己的电平：
+    | t | 0.8577 | 0.9357 | 0.9701 | 0.9859 | 0.9935 | 0.9967 | 0.9991 | 1.0000 |
+    |---|---|---|---|---|---|---|---|---|
+    | dB | −6.12 | −12.16 | −18.51 | −24.89 | −31.56 | −37.52 | −48.62 | 恰好 0 |
+    每档之间 1162/513/234/113/48/35ms —— **两秒多一点里从 −6 dB 掉到听不见，而且这两秒正好贴在结尾**。
+    释放那一下的断言行：`the ramp's last write for it was 0.0000 of unity (−60 dB) written 2ms before
+    the release. The last write above that floor was 0.0037 (−48.6 dB), 35ms before it` ——
+    **释放本身已经在静音上，嫌疑 ① 不成立**（而且那次 promotion 的 tick 只晚了 19ms，不是主线程卡住）。
+    加剧因素是低频：`bass swap done: … (the outgoing track's 1 band(s) below 200Hz are at −1500mB from
+    here on, 8957ms into a 14906ms ramp — its level is unchanged, its bottom is gone)` —— 从 60% 开始，
+    仍然在响的那首歌**低音被 ban 掉 15 dB**，剩下 40% 是"人声在飘"，听感上很容易读成"这首歌结束了"。
+  - **② 改法（最小、只有形状）**：`FadeCurve.DJ_BLEND` 的 outgoing 现在 = 原来的 hold 形状
+    × **一段 raised-cosine 出口窗**（`OUT_RELEASE_FRACTION = 0.25`，最后一个四分之一），
+    并且最后 `OUT_SILENT_TAIL = 0.01`（1%）**恒等于 0**。hold 指数 2.6 一个字没动
+    （那是第 12 轮为"别太早淡出"定的，本轮的问题不在它）。新增 `FadeCurve.INAUDIBLE_DB = −60f`
+    与 `outSilentTail()`；`gainDb()` 把 ≤0 的增益折到地板上，好让日志能印数。
+  - **③ after 真机（同一对歌、同一决策，ramp 14873ms）**，逐档电平：
+    | t | 0.8174 | 0.8698 | 0.9016 | 0.9249 | 0.9408 | 0.9534 | 0.9646 | 0.9713 | 0.9792 | 0.9817 | 0.9865 | 0.9887 | 0.9910→1.0 |
+    |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+    | dB | −6.07 | −12.22 | −18.29 | −24.60 | −30.40 | −36.36 | −43.31 | −48.70 | −56.94 | −60.33 | −68.15 | −72.77 | **恰好 0** |
+    释放行：`…the last write above that floor was 0.0002 of unity (−72.77 dB), 198ms before it, and this
+    curve (DJ_BLEND) holds the last 149ms of the ramp — 1 percent of it — at exactly zero` ——
+    **出口提前了约 1.3s 开始，在 ramp 结束前 272ms 就已经到 −60 dB 地板**，并且最后 149ms 恒为 0，
+    所以"释放一个还在响的播放器"在这个形状下不可能发生（任何 tick 落在那 149ms 里写的都是 0）。
+    同一时刻的对照（dB）：t=0.85: −6.1→约 −10；t=0.90: 约 −9.7→−18.3；t=0.9357: −12.2→约 −27；
+    t=0.97: −18.5→约 −47；t=0.986: −24.9→−68。
+  - **④ 代价（说清楚）**：`both tracks audible` 10732ms/14906ms（72%）→ **10114ms/14873ms（68%）**
+    —— 出口一开始（t=0.75）就压电平，6 dB 那条线自然提前到。对称曲线仍是 41%。峰值功率 2.34→2.34 dB。
+    出口的**dB/s 速率几乎没变**（约 20→22 dB/s）：变的是出口**更早开始、绝对电平更低、
+    并且结束在释放之前**。旋钮只有 `OUT_RELEASE_FRACTION` 一个；更平滑的一档是 0.35
+    （`TailTable` 里那行：out@85 −14.0、out@90 −23.2、both6dB 64%），**要不要换成它取决于听感**。
+  - **⑤ 不变量（两轮都核过）**：`audio-clock monitor off … 0 gap(s) on the incoming deck, 0 on the audible
+    one (no frozen samples on either deck)`；`transition: promoted queue slot 0` 之后照常播（P0）；
+    新歌从 blend 起点连续被听到、没有重播（`handoff resume` 与 `overlap heard` 两行）；本对子没有
+    pitch/glide（`no pitch: the key for B is not trustworthy`），所以 round-13 的写次数经济性没有被碰到；
+    参数写只有 promotion 那一次 `tempo-restore`（asked x1.0000）。
+  - **⑥ 新增的、以后能看见回归的两条日志**（本轮的意义一半在这里）：
+    (a) **尾巴轨迹**：outgoing 每跨 6 dB 一行 `the outgoing track is at −12.2 dB (0.2448 of unity) at
+    t=0.8698 of the ramp (12936ms of 14873ms, 779ms after the previous step); the incoming is at 0.9933`
+    —— 一次 blend 约 10 行，形状是"淡出还是悬崖"从日志就能判；
+    (b) **释放断言**：promotion 释放 outgoing 之前一定打的那行（静音→INFO，**高于 −60 dB 就 WARN**
+    并直说 `上一首歌戛然而止`），带"最后一次写是多少 dB / 隔了多久 / 上一次高于地板是多少 dB / 曲线承诺
+    末尾多少 ms 恒为 0"。`rampStep` 里 `setVolume` 的 `catch (Throwable ignored)` 也改成 WARN 了
+    （写被平台拒绝时，断言看到的"我们请求的值"和真实值会不一致，这条日志是唯一线索）。
+  - **⑦ 未验证 / 直说**：**这个改动只被日志证明，没有被耳朵证明** —— 没有人听过 before 或 after。
+    "现在听起来还会不会像戛然而止"只有用户能判；如果还像，下一步动 `OUT_RELEASE_FRACTION`
+    （0.35 那行已经算好）或把 bass swap 从 60% 挪后（`BASS_SWAP_AT`，注意 `StemBridge` 里有一份复制的
+    0.6），那是本轮**故意没碰**的另一半（它会让 40% 的 blend 少掉低音）。
+    另外本对子**没有低频互换以外的低频问题**、`x1.0212` 的变速在 after 里照旧，没有单独验证。
+  - **⑧ 交付**：debug APK（本轮 ~98.3MB）；分支 `feat/ai-dj-transition`（**`main` 未动**）；tag/release 见本节末尾。
+  - **测试**：`mvn -pl player-core test` = **197 个用例、1 个失败**（`Tests run: 197, Failures: 1, Errors: 0,
+    Skipped: 0`），仍是既有的
+    `SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`（与本轮无关）。
+    `FadeCurveTest` 7→**8** 个（全绿；新增 `theDjShapeEndsInAHeldZeroSoTheReleaseCannotBeHeardAsACut`：
+    末段恒 0、进入恒 0 的那一步已在 −60 dB 以下、出口单调不升、`outSilentTail()` 与曲线一致、
+    对称曲线不承诺恒 0；原"0.9 处 ≤ −8.7 dB / 0.98 处 ≤ −18.5 dB"两条按新形状改成 ≤0.15 / ≤−30 dB）。
+  - **设备卫生（跑完已做）**：`transitionKind` 2→**0**、`transitionBlendSeconds` 仍是 15、
+    `files/state/queue.json` 还原成 `[Lalala, Moonlight]` playIndex=1 positionMs=21325（600）、
+    `/data/local/tmp/` 的临时文件删掉、`files/models/` 与 `files/cache/djedit/` 本来就没有（本轮没推模型，
+    日志里那句 `stem DJ edits are OFF — no verified model` 就是证据）。
+  - **下一件事（按顺序）**：① **让人听一遍**（这一轮的唯一判据；听 `Lalala → Moonlight` 或库里任何一对，
+    同一段 15s）；② 若还嫌"戛然而止"，换 `OUT_RELEASE_FRACTION = 0.35` 再听；③ 若听出"低音先没了"，
+    再把 `BASS_SWAP_AT` 与 `StemBridge` 里那份 0.6 一起往后挪；④ 第 15 轮欠的启动帧测量
+    （`r15/measure.sh` + `before-1f3520d.apk`）与 B站内联预览圆角截图仍未做。
+
 
 ## 八、工作方式（为了省上下文，请遵守）
 

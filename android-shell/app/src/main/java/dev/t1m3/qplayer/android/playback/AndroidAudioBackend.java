@@ -256,6 +256,30 @@ public final class AndroidAudioBackend implements AudioBackend {
      *  lands latest, and "how loud is it then" is the number that says how much of the effect
      *  the listener can hear it on. */
     private double lastOutGain = 1d;
+    /** The last gain the ramp asked the OUTGOING player for, and when — read by the release
+     *  assertion in {@link #promoteIncoming}, which is the one place a player is torn down
+     *  while the two decks are still being ramped against each other. Releasing a player
+     *  discards whatever it still has buffered, so its gain at that instant IS the sound of
+     *  the release: the outgoing track must be at or below {@link FadeCurve#INAUDIBLE_DB}
+     *  or the listener hears the previous song stop. Kept as the asked-for value, because
+     *  that is all there is — {@code MediaPlayer} has no volume getter. */
+    private double rampOutGain = 1d;
+    /** {@code System.nanoTime()} of that write, for the "how long before the release was it"
+     *  half of the same line. */
+    private long rampOutGainNs;
+    /** The last tick whose outgoing gain was above zero. The head of the silent stretch the
+     *  user's ear is owed before the release is measured from here. A tick that lands on a
+     *  refused write does not move it, so the number is a lower bound on the silence. */
+    private long rampOutLastAudibleNs;
+    /** The last above-zero gain and its dB, printed at the release: "the ramp asked it for X
+     *  and it has been at zero since" says more than the zero alone does. */
+    private double rampOutLastAudibleGain = 1d;
+    /** How many 6 dB steps below unity the tail trace has already reported (see
+     *  {@link #traceOutgoingGain}), so one blend's exit costs about ten lines rather than
+     *  one per 32 ms tick — and when the previous step was reported, so the line can carry
+     *  the gap between steps. */
+    private int rampOutTraceStep;
+    private long rampOutTraceNs;
     /** When the low end hands over, ms into the ramp (from the applied mix), and
      *  whether it has. A one-shot: the swap happens once, on a beat, and never
      *  again for this overlap. */
@@ -1274,8 +1298,20 @@ public final class AndroidAudioBackend implements AudioBackend {
         if (bassSwapped || equalizerIn == null) return;
         bassSwapped = true;
         setLowBands(equalizerIn, lowBands(equalizerIn), (short) 0);
-        setLowBands(equalizerOut, lowBands(equalizerOut), minLevel(equalizerOut));
-        Logger.info("MediaPlayer: bass swap done: the incoming track owns the low end now");
+        short[] outBands = lowBands(equalizerOut);
+        short outLevel = minLevel(equalizerOut);
+        setLowBands(equalizerOut, outBands, outLevel);
+        // The outgoing track's own low end is what this takes away, and the number is the
+        // whole of the hand-over as far as that track is concerned: from this instant until
+        // it is released, the song the listener is still following has no bottom to it. Logged
+        // with where in the ramp it happened and what level the device's own limit allows,
+        // because "the previous song sounds like it ended" has been reported at points where
+        // the level was still near full and it was the foundation that had gone.
+        Logger.info("MediaPlayer: bass swap done: the incoming track owns the low end now (the"
+                        + " outgoing track's {} band(s) below {}Hz are at {}mB from here on,"
+                        + " {}ms into a {}ms ramp — its level is unchanged, its bottom is gone)",
+                outBands.length, (int) BASS_SWAP_HZ, outLevel,
+                (System.nanoTime() - rampStartNs) / 1000000L, rampDurationNs / 1000000L);
     }
 
     private void releaseEqualizers() {
@@ -1314,6 +1350,15 @@ public final class AndroidAudioBackend implements AudioBackend {
         long generation = ++rampGeneration;
         rampStartNs = System.nanoTime();
         rampDurationNs = Math.max(1L, ms) * 1000000L;
+        // The outgoing track's own gain, from the start of the ramp: unity until the first
+        // tick says otherwise. Re-armed here so a previous blend's tail can never be the
+        // thing a release assertion reports on (see logOutgoingRelease).
+        rampOutGain = 1d;
+        rampOutLastAudibleGain = 1d;
+        rampOutGainNs = rampStartNs;
+        rampOutLastAudibleNs = rampStartNs;
+        rampOutTraceStep = 0;
+        rampOutTraceNs = 0L;
         // The hand-over has to land inside the overlap that is really being run, and
         // the ramp can be shorter than the plan's overlap (a boundary that arrived
         // early caps it, and a refused mix shortens it back to the plan's own
@@ -2108,14 +2153,36 @@ public final class AndroidAudioBackend implements AudioBackend {
                 // stays at one (no dip in the middle of the overlap).
                 float outGain = base * clampGain(rampCurve.outGain(t));
                 float inGain = base * clampGain(rampCurve.inGain(t));
+                // The outgoing track's level of its own (the curve's value, without the user's
+                // volume or a duck folded in): this is the number the release assertion and the
+                // tail trace below are about, and the only one comparable across boundaries.
+                float normalizedOut = outGain / Math.max(1e-6f, base);
                 try {
                     out.setVolume(outGain, outGain);
                     in.setVolume(inGain, inGain);
-                } catch (Throwable ignored) { }
+                } catch (Throwable e) {
+                    // Reported, not swallowed: a refused write leaves the outgoing track at the
+                    // value its last accepted write set, which is exactly the state the release
+                    // assertion below cannot see (it holds the value we ASKED for). If this ever
+                    // appears next to a release that is not silent, this is the reason.
+                    Logger.warn("MediaPlayer: the blend's gain write was refused ({}); the outgoing"
+                                    + " track stays at the {} of unity its last accepted write set,"
+                                    + " not the {} this tick asked for (t={})",
+                            e.toString(), fmt(lastOutGain), fmt(normalizedOut), fmt((double) t));
+                }
                 // Recorded for the key blend's per-step log line: "the audible deck's own gain
                 // when its biggest shift landed". Nothing here reads it back — MediaPlayer has no
                 // volume getter, and the gain is ours to know.
-                lastOutGain = outGain / Math.max(1e-6f, base);
+                lastOutGain = normalizedOut;
+                // ... and for the release assertion, which has to answer "was the outgoing track
+                // audible when the promotion tore its player down?" from a log.
+                rampOutGain = normalizedOut;
+                rampOutGainNs = System.nanoTime();
+                if (normalizedOut > 0f) {
+                    rampOutLastAudibleGain = normalizedOut;
+                    rampOutLastAudibleNs = rampOutGainNs;
+                }
+                traceOutgoingGain(normalizedOut, t, elapsed);
                 // The low end changes hands once, on the beat the controller picked
                 // (a beat of both tracks, since the incoming is running at the
                 // outgoing's tempo). A level write, so it costs nothing to do it here
@@ -2153,6 +2220,100 @@ public final class AndroidAudioBackend implements AudioBackend {
         try {
             rampHandler.postDelayed(() -> rampStep(generation), RAMP_TICK_MS);
         } catch (Throwable ignored) { }
+    }
+
+    /** The outgoing track's own level, once per 6 dB of its exit — the trace that answers
+     *  "is the tail a fade or a cliff" from a log instead of from a memory of the sound.
+     *
+     *  <p>The complaint this exists for is 「上一首歌戛然而止」 — the previous song stopping
+     *  abruptly during the blend — and it is a statement about the SHAPE of the last seconds:
+     *  a shape that holds the outgoing track at its own level and then falls out of hearing
+     *  inside a second reads as a cut, however smooth the arithmetic. One line per 6 dB
+     *  (rather than one per 32 ms tick) is enough to see it and cheap enough to leave on: a
+     *  15 s blend's exit is about nine lines, and the gap between them is printed so the rate
+     *  is readable without a spreadsheet.
+     *
+     *  <p>Called with the lock held, from the ramp, with the gain the platform was just asked
+     *  for — the same value the release assertion reads.
+     */
+    private void traceOutgoingGain(float gain, float t, long elapsedNs) {
+        // 1 = first line below -6 dB, 2 = below -12 dB, ... and Integer.MAX_VALUE for the
+        // exact zero of the silent tail, which is a one-shot like the rest.
+        int step = gain <= 0f ? Integer.MAX_VALUE : (int) Math.floor(-FadeCurve.gainDb(gain) / 6d);
+        if (step <= rampOutTraceStep) return;
+        long sinceLast = rampOutTraceNs > 0L ? (elapsedNs - rampOutTraceNs) / 1000000L : -1L;
+        rampOutTraceStep = step;
+        rampOutTraceNs = elapsedNs;
+        if (gain <= 0f) {
+            Logger.info("MediaPlayer: the outgoing track is at silence (the curve asks it for"
+                            + " exactly zero from here to the end of the ramp) at t={} of the ramp"
+                            + " ({}ms of {}ms); the incoming is at {} of unity — the promotion may"
+                            + " release the outgoing player from this instant on without a sound",
+                    fmt((double) t), elapsedNs / 1000000L, rampDurationNs / 1000000L,
+                    fmt(rampCurve.inGain(t)));
+            return;
+        }
+        Logger.info("MediaPlayer: the outgoing track is at {} dB ({} of unity) at t={} of the"
+                        + " ramp ({}ms of {}ms, {}); the incoming is at {} of unity — {}",
+                fmt(FadeCurve.gainDb(gain)), fmt((double) gain), fmt((double) t),
+                elapsedNs / 1000000L, rampDurationNs / 1000000L,
+                sinceLast >= 0L ? sinceLast + "ms after the previous step" : "the first step",
+                fmt(rampCurve.inGain(t)), rampCurve);
+    }
+
+    /**
+     * The promotion's release assertion, logged before the outgoing player is torn down.
+     *
+     * <p>What it is for: a released {@code MediaPlayer} drops whatever it still had buffered,
+     * so the gain the outgoing track was at when the release happens IS the sound of the
+     * release — and "the ramp faded it out, so it must be silent" is precisely the assumption
+     * behind the reported 「上一首歌戛然而止」. Two numbers make it a fact rather than an
+     * assumption: the gain the last tick asked for (and how long before the release it was
+     * written), and how long the outgoing track has been at exactly zero. The levels come from
+     * the curve, which is where the promise is made: {@link FadeCurve} guarantees the DJ shape
+     * is at exactly zero for the last {@code OUT_SILENT_TAIL} of the ramp, so a tick-timing
+     * accident cannot release a player that is still audible.
+     *
+     * <p>A release above the floor is not silently tolerated: it is a WARN that names the
+     * defect, because that is the only way a future regression in the curve — or in whatever
+     * ends the blend — is visible before it is heard.
+     */
+    private void logOutgoingRelease() {
+        double db = FadeCurve.gainDb((float) rampOutGain);
+        long sinceWrite = (System.nanoTime() - rampOutGainNs) / 1000000L;
+        long sinceAudible = rampOutLastAudibleNs > 0L
+                ? (System.nanoTime() - rampOutLastAudibleNs) / 1000000L : 0L;
+        long silentTailMs = Math.round(rampCurve.outSilentTail() * rampDurationNs / 1000000d);
+        if (db <= FadeCurve.INAUDIBLE_DB) {
+            Logger.info("MediaPlayer: releasing the outgoing player at silence — the ramp's last"
+                            + " write for it was {} of unity ({} dB; the floor a release may happen"
+                            + " at is {} dB), written {}ms before the release. The last write above"
+                            + " that floor was {} of unity ({} dB), {}ms before it, and this curve"
+                            + " ({}) holds the last {}ms of the ramp — {} of it — at exactly zero,"
+                            + " so the promotion cannot land on a player that is still being heard",
+                    fmt(rampOutGain), fmt(db), fmt((double) FadeCurve.INAUDIBLE_DB), sinceWrite,
+                    fmt(rampOutLastAudibleGain),
+                    fmt(FadeCurve.gainDb((float) rampOutLastAudibleGain)), sinceAudible,
+                    rampCurve, silentTailMs,
+                    Math.round(rampCurve.outSilentTail() * 100f) + " percent");
+            return;
+        }
+        Logger.warn("MediaPlayer: RELEASING THE OUTGOING PLAYER WHILE IT IS STILL AUDIBLE — the"
+                        + " ramp's last write for it was {} of unity ({} dB; the floor a release may"
+                        + " happen at is {} dB), written {}ms before the release, {}ms into a {}ms"
+                        + " {} ramp. Releasing a player drops what it still had buffered, so this is"
+                        + " the 「上一首歌戛然而止」 the curve's exit exists to prevent: the outgoing"
+                        + " track is being cut off at an audible level",
+                fmt(rampOutGain), fmt(db), fmt((double) FadeCurve.INAUDIBLE_DB), sinceWrite,
+                Math.round(rampProgressNow() * rampDurationNs / 1000000d), rampDurationNs / 1000000L,
+                rampCurve);
+    }
+
+    /** How far into its own ramp the last gain write was, as {@code t} — for the one log line
+     *  a release asserts silence. Derived from the same two fields the ramp uses. */
+    private double rampProgressNow() {
+        long elapsed = System.nanoTime() - rampStartNs;
+        return elapsed >= rampDurationNs ? 1d : (double) elapsed / rampDurationNs;
     }
 
     /** The ramp finished: the incoming player becomes THE player, and the outgoing
@@ -2269,6 +2430,10 @@ public final class AndroidAudioBackend implements AudioBackend {
         // look exactly like a stall. The "incoming" arm keeps watching the instance that
         // just became THE player.
         clockOut = null;
+        // ... and THEN the outgoing one, with the numbers that say it was not making a sound
+        // when it went. Logged immediately before the release, on the same lock, so the two
+        // are the same instant as far as a log reader is concerned.
+        logOutgoingRelease();
         // ONLY the outgoing player, and only its own listeners: every field above
         // already belongs to the promoted instance.
         releaseOne(out);
