@@ -904,6 +904,29 @@ public final class PlayerController {
      *  back yet (see {@link #crossfadeIncomingSpeed}). */
     private boolean incomingMixChecked;
     private boolean incomingMixRefused;
+    /**
+     * The length the incoming deck's file <em>should</em> have, ms: the queued track's own
+     * {@code durationMs} when the source armed for it is a rendered DJ edit, or -1 when the source
+     * is the track's own audio (or nothing has been armed yet).
+     *
+     * <p>⚠️ <b>The one guard that proves the incoming deck got the right file.</b> An edit is the
+     * incoming track's whole audio, found by name in a directory listing, so a file that belongs to
+     * another track would be played as this one — the listener hears a different song out of a
+     * transition that otherwise sounds normal, and the controller cannot tell from the name alone.
+     * The platform can: {@link #checkEditDuration} compares the armed player's own length with this
+     * number just before the first gain is written, and gives the boundary up rather than play it.
+     * Read from the queue at the arm (see {@link #resolveIncomingSource}) and dropped with the
+     * boundary ({@link #armCrossfade}).
+     */
+    private volatile long editExpectedDurationMs = -1L;
+    /** Whether {@link #checkEditDuration} has had its one look at this boundary's incoming
+     *  file. Once per arm: the answer cannot change while the player is prepared. */
+    private boolean editDurationChecked;
+    /** How far the armed file's length may differ from its track's own before it is refused, ms.
+     *  The render writes the whole track with the same decoder the player uses, so the two agree to
+     *  well under a second; a second of slack is there for a container's own priming trim, not for
+     *  a different track (the shortest track in this library is 96.8 s). */
+    private static final long EDIT_DURATION_TOLERANCE_MS = 1_000L;
     /** How much of a transition's incoming track the listener had already heard when
      *  that transition was given up, and the queue slot it belongs to (-1 = none).
      *
@@ -2343,6 +2366,12 @@ public final class PlayerController {
                     FadeCurve.FUSION, FadeCurve.DJ_BLEND);
             curve = FadeCurve.DJ_BLEND;
         }
+        // ⚠️ The last gate before a single gain is written, and the only one that can prove the
+        // incoming deck was handed THIS track's file: a rendered edit is the track's whole audio,
+        // so the prepared player's own length has to be the track's. A refusal here gives the
+        // boundary up rather than play a foreign file over a transition that would otherwise sound
+        // normal (see checkEditDuration).
+        if (!checkEditDuration()) return;
         // Settle any controller-side fade before handing the volume to the backend:
         // both write the same gain, and the fade's last target is silence.
         cancelFadeAtGain(1f);
@@ -2384,6 +2413,54 @@ public final class PlayerController {
                 incomingMixRefused ? "; the mix was refused, so this ramp runs un-stretched" : "",
                 curve.bothAudibleText(rampMs), FadeCurve.EQUAL_POWER,
                 FadeCurve.EQUAL_POWER.bothAudibleMs(rampMs) + "ms", rampMs);
+    }
+
+    /**
+     * Whether the file the incoming deck has open is this track's own length — i.e. whether the
+     * rendered edit it was armed with is really the edit for this track.
+     *
+     * <p>⚠️ <b>Why this exists.</b> The reported 「A 还没结束的时候正常，到 B 的时候变成其他歌了」 is
+     * exactly what an edit belonging to another track sounds like, and an edit is the incoming
+     * track's <em>whole</em> audio: the boundary finds it by name (a hash in a directory listing),
+     * so nothing about the name can prove the file is the right one. Only the platform can say how
+     * long the file it opened is, and only the queue says how long this track is; the renderer
+     * writes the track it was asked for, so the two agree to well under a second.
+     *
+     * <p>Asked once per arm, and only when the source IS an edit ({@link #editExpectedDurationMs});
+     * a backend that cannot measure answers -1, which is not evidence about the file, so the
+     * boundary then proceeds exactly as it always did. A real mismatch gives the boundary up: the
+     * incoming player is dropped and the ordinary switch opens the track itself, so the listener
+     * gets the right song late instead of the wrong song on time.
+     *
+     * @return false when the boundary has been given up and the caller must stop
+     */
+    private boolean checkEditDuration() {
+        long expected = editExpectedDurationMs;
+        if (expected <= 0L || editDurationChecked) return true;   // not an edit (or already asked)
+        editDurationChecked = true;
+        long armed = backend.incomingDuration();
+        if (armed <= 0L) {
+            Logger.info("transition: this backend cannot report the incoming file's length, so the"
+                    + " edit-identity guard cannot run for this boundary — the deck plays the file it"
+                    + " was armed with, as it always did (the edit should be {}ms, the track's own"
+                    + " length)", expected);
+            return true;
+        }
+        if (Math.abs(armed - expected) <= EDIT_DURATION_TOLERANCE_MS) {
+            Logger.info("transition: the incoming deck's file is this track's own audio ({}ms against"
+                    + " the track's {}ms, within {}ms) — the edit-identity guard passed",
+                    armed, expected, EDIT_DURATION_TOLERANCE_MS);
+            return true;
+        }
+        Logger.warn("transition: THE INCOMING DECK WAS HANDED THE WRONG FILE — the prepared source is"
+                        + " {}ms long and the track about to play is {}ms, so it is not that track's"
+                        + " edit (a hash collision or a stale file in files/cache/djedit). Refusing it"
+                        + " and giving this boundary up rather than playing another song over the"
+                        + " hand-over; the ordinary switch opens the track itself",
+                armed, expected);
+        abandonTransition("the incoming source is not this track's audio (a " + armed + "ms file for a "
+                + expected + "ms track), so this boundary takes the ordinary switch instead");
+        return false;
     }
 
     /**
@@ -3737,6 +3814,11 @@ public final class PlayerController {
         incomingMixChecked = false;
         incomingMixRefused = false;
         crossfadeIncomingSpeed = 1d;
+        // ... and so does the previous boundary's expected file length: a boundary that arms an
+        // edit sets it below (resolveIncomingSource), and one that arms the track's own audio
+        // leaves it -1, so the guard has nothing to compare and does not run at all.
+        editExpectedDurationMs = -1L;
+        editDurationChecked = false;
         Logger.info("transition: arming slot {} behind slot {} (incoming starts at {}ms{})",
                 nextIndex, playIndex, incomingStartMs,
                 incomingStartMs > 0L ? ", its own content start" : "");
@@ -3833,6 +3915,13 @@ public final class PlayerController {
                 // exactly `start + ramp` of it by then. A fusion's start is the render's entry,
                 // so the count is in the file's own timeline either way.
                 crossfadeIncomingStartMs = deckStart;
+                // ⚠️ This deck is being handed a rendered edit — the whole track as a file — so the
+                // boundary owes itself one check that the file really is this track: the track's own
+                // length is what the armed player's length has to match, and it is remembered here
+                // because this is the last place the queue slot is in hand (see checkEditDuration,
+                // which asks the platform just before the first gain is written).
+                editExpectedDurationMs = t.durationMs;
+                editDurationChecked = false;
                 onMain(() -> armIncoming(generation, nextIndex, edit.path, deckStart,
                         incomingMode));
                 return;
@@ -4554,7 +4643,7 @@ public final class PlayerController {
                     // contract. The better file has to win, or a re-render would be invisible.
                     for (int pass = 0; pass < 2; pass++) {
                         for (String name : diskCache.djEditNames()) {
-                            if (!name.startsWith(base)) continue;
+                            if (!djEditNameBelongsTo(base, name)) continue;
                             if (name.contains("-e") != (pass == 0)) continue;
                             File file = new File(dir, name);
                             if (!file.isFile()) continue;
@@ -4563,11 +4652,27 @@ public final class PlayerController {
                             // the vocal return (round 12), plus — only on a fusion render — the
                             // entry, the junction and the fusion's end. A name with none of the last
                             // three is today's edit, and the boundary behaves as it always did.
-                            return new EditRef(file.getAbsolutePath(), suffixTime(name, "-b", base),
-                                    suffixTime(name, "-v", base),
-                                    suffixTime(name, "-e", base),
-                                    suffixTime(name, "-j", base),
+                            EditRef ref = new EditRef(file.getAbsolutePath(),
+                                    suffixTime(name, "-b", base), suffixTime(name, "-v", base),
+                                    suffixTime(name, "-e", base), suffixTime(name, "-j", base),
                                     suffixTime(name, "-f", base));
+                            // ⚠️ And the identity check a hash cannot answer: an edit is this
+                            // track's own audio, and the times in its name are positions in that
+                            // track's file, so an anchor outside this track's length says the file
+                            // describes another track. Cheap, and it catches what the name alone
+                            // cannot (see editAnchorsFitDuration).
+                            if (!editAnchorsFitDuration(t, ref.bridgeStartMs, ref.vocalReturnEndMs,
+                                    ref.entryMs, ref.junctionMs, ref.fusionEndMs)) {
+                                Logger.warn("transition: the DJ edit {} is not usable for {} — the"
+                                                + " times in its name (bridge {}ms, vocal {}ms, entry"
+                                                + " {}ms, junction {}ms, fusion end {}ms) do not fit"
+                                                + " the track's own {}ms, so this file describes"
+                                                + " another track; the boundary will not play it",
+                                        name, t.title, ref.bridgeStartMs, ref.vocalReturnEndMs,
+                                        ref.entryMs, ref.junctionMs, ref.fusionEndMs, t.durationMs);
+                                continue;
+                            }
+                            return ref;
                         }
                     }
                 }
@@ -4637,6 +4742,54 @@ public final class PlayerController {
         } catch (NumberFormatException e) {
             return -1L;
         }
+    }
+
+    /**
+     * Whether a name in the DJ-edit directory is one this pair's own render wrote: {@code base}
+     * followed by the renderer's own suffix grammar — nothing at all, or a run of {@code -marker}
+     * parts, then an extension.
+     *
+     * <p>⚠️ <b>Why a prefix test is not enough, and why this exists.</b> {@code base} is
+     * {@code abs(hashCode)} rendered as DIGITS (see {@code DiskCache.djEditBaseName}), and the
+     * lookup used to accept any file whose name merely <em>started</em> with those digits. A pair
+     * whose hash is a prefix of another pair's — ten digits, and this directory holds a name per
+     * pair per window — would then be handed the other pair's file, and because an edit is the
+     * incoming track's <em>whole</em> audio, the listener hears a different song emerge from a
+     * transition that otherwise sounds normal. That is the reported 「到B的时候变成其他歌了」. The
+     * grammar is what tells two hashes apart: after the digits a marker must begin with {@code -}
+     * (or the name must end there).
+     */
+    static boolean djEditNameBelongsTo(String base, String name) {
+        if (base == null || base.isEmpty() || name == null || !name.startsWith(base)) return false;
+        String rest = name.substring(base.length());
+        return rest.isEmpty() || rest.charAt(0) == '-';
+    }
+
+    /**
+     * Whether every time an edit's name carries could be a position in <em>this</em> track's own
+     * file: the anchors are ms into the incoming track (the render writes the track it was asked
+     * for, so its timeline is the track's timeline), and a number at or past the track's length
+     * cannot describe it.
+     *
+     * <p>Cheap, needs no decoder, and it is the second half of the edit's identity: the name's hash
+     * says which pair asked for it, and these numbers say whether the file can be that track at
+     * all. A track whose length is unknown (0) answers true — nothing to check against, and the
+     * decisive check is the platform's own reading of the armed file
+     * ({@link #checkEditDuration}, {@code AudioBackend.incomingDuration}).
+     */
+    static boolean editAnchorsFitDuration(Track t, long bridgeStartMs, long vocalReturnEndMs,
+                                          long entryMs, long junctionMs, long fusionEndMs) {
+        if (t == null) return true;
+        long duration = t.durationMs;
+        if (duration <= 0L) return true;                 // nothing to check against
+        return fitsInside(duration, bridgeStartMs) && fitsInside(duration, vocalReturnEndMs)
+                && fitsInside(duration, entryMs) && fitsInside(duration, junctionMs)
+                && fitsInside(duration, fusionEndMs);
+    }
+
+    /** An anchor is "inside" when it is unset (-1) or strictly before the track's end, ms. */
+    private static boolean fitsInside(long durationMs, long anchorMs) {
+        return anchorMs < 0L || anchorMs < durationMs;
     }
 
     /** The queue slot the boundary in flight is coming FROM, as a track key, or null — the

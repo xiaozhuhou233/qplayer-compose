@@ -2628,6 +2628,27 @@ public final class AndroidAudioBackend implements AudioBackend {
     }
 
     @Override
+    public synchronized long incomingDuration() {
+        // ⚠️ The one thing in the whole transition the controller cannot check for itself: what file
+        // the incoming deck was actually handed (see AudioBackend.incomingDuration). Readable only
+        // on a prepared player, and only this player can be asked — the platform's own number for
+        // the source it opened. -1 (not 0) when there is nothing to ask, so a caller can tell "this
+        // platform cannot measure" from "this file measures as empty": only the second is evidence
+        // about the file.
+        if (incomingPlayer == null || !incomingPrepared) return -1L;
+        try {
+            long ms = incomingPlayer.getDuration();
+            return ms > 0L ? ms : -1L;
+        } catch (Throwable e) {
+            // A platform that throws here has refused to answer; that is not evidence about the
+            // file either, and the caller's guard is documented to run only on a real number.
+            Logger.info("MediaPlayer: the incoming file's length could not be read ({}), so the"
+                    + " edit-identity guard cannot run for this boundary", e.toString());
+            return -1L;
+        }
+    }
+
+    @Override
     public synchronized long droppedIncomingPosition() {
         return droppedIncomingMs;
     }

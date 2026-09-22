@@ -209,6 +209,25 @@ public interface AudioBackend {
     default long incomingPosition() { return -1L; }
 
     /**
+     * The length of the source the prepared incoming player has open, ms, or -1 when there is no
+     * incoming player, it has not finished preparing, or this platform cannot say.
+     *
+     * <p>⚠️ <b>This exists to prove the incoming deck was handed the RIGHT file.</b> A rendered DJ
+     * edit is the incoming track's <em>whole</em> audio, and the boundary finds it by name (an
+     * {@code abs(hash(key))} string in a directory listing), so a file belonging to another track
+     * would be played as this one: the listener hears a different song emerge from a transition
+     * that otherwise sounds normal, and nothing in the controller can tell the difference — only
+     * the platform can read a file's length. The renderer writes the track it was asked for, so the
+     * two lengths have to agree within a second or so, and a caller that compares them can refuse
+     * the file before a single gain is written.
+     *
+     * <p>-1 is "no answer", deliberately not 0: a caller has to be able to tell a platform that
+     * cannot measure (the desktop host, a test's fake) from a file that measures as empty, because
+     * only the second one is evidence about the file.
+     */
+    default long incomingDuration() { return -1L; }
+
+    /**
      * The {@link #incomingPosition()} of the incoming player the backend last
      * DROPPED while it was rolling, or -1 if that never happened.
      *

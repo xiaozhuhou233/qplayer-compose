@@ -3,6 +3,7 @@ package dev.t1m3.qplayer.bridge;
 import dev.t1m3.qplayer.audio.AudioBackend;
 import dev.t1m3.qplayer.audio.BeatProfile;
 import dev.t1m3.qplayer.audio.FadeCurve;
+import dev.t1m3.qplayer.audio.IncomingMix;
 import dev.t1m3.qplayer.audio.StemEditRenderer;
 import dev.t1m3.qplayer.customapi.CustomSong;
 import dev.t1m3.qplayer.model.Track;
@@ -650,6 +651,137 @@ public class PlayerControllerPlaybackTest {
     }
 
     /**
+     * The first of the three edit-identity guards, and the one that needs no platform: the base a
+     * pair looks its edit up by is {@code abs(hashCode)} as DIGITS, the lookup is a directory scan,
+     * and a plain prefix test therefore hands a pair whose hash is a prefix of another pair's the
+     * OTHER pair's file — which, since an edit is the incoming track's whole audio, is the reported
+     * 「到B的时候变成其他歌了」 heard as a different song.
+     */
+    @Test
+    public void aFileNameIsThisPairsEditOnlyWhenTheHashEndsThere() {
+        assertTrue(PlayerController.djEditNameBelongsTo("123456", "123456-v16000.m4a"));
+        assertTrue(PlayerController.djEditNameBelongsTo("123456", "123456-e1-j2-f3.m4a"));
+        assertTrue("the bare name is the plain edit's own",
+                PlayerController.djEditNameBelongsTo("123456", "123456"));
+        assertFalse("a LONGER hash that begins with these digits is another pair's file",
+                PlayerController.djEditNameBelongsTo("123456", "1234567-v16000.m4a"));
+        assertFalse(PlayerController.djEditNameBelongsTo("123456", "123456.m4a"));
+        assertFalse(PlayerController.djEditNameBelongsTo("123456", "12345-v16000.m4a"));
+        assertFalse(PlayerController.djEditNameBelongsTo("123456", "654321-v16000.m4a"));
+        assertFalse(PlayerController.djEditNameBelongsTo(null, "123-v16000.m4a"));
+        assertFalse(PlayerController.djEditNameBelongsTo("123", null));
+    }
+
+    /** The second guard: the times an edit's name carries are positions in the incoming track's
+     *  own file, so an anchor at or past this track's length says the file describes another track. */
+    @Test
+    public void anEditsAnchorsHaveToFitInsideTheTrackTheyClaim() {
+        Track track = new Track();
+        track.source = Track.Source.NETEASE;
+        track.neteaseId = 22L;
+        track.title = "incoming";
+        track.durationMs = 120_000L;
+        assertTrue("the anchors a render writes for this track are inside it",
+                PlayerController.editAnchorsFitDuration(track, 3_000L, 16_000L, 1_200L, 100_000L,
+                        106_000L));
+        assertTrue("a plain edit carries no anchors at all (-1), which is not a mismatch",
+                PlayerController.editAnchorsFitDuration(track, -1L, -1L, -1L, -1L, -1L));
+        assertFalse("a vocal return past the end belongs to a longer track",
+                PlayerController.editAnchorsFitDuration(track, -1L, 130_000L, -1L, -1L, -1L));
+        assertFalse("... and so does a junction one millisecond past it",
+                PlayerController.editAnchorsFitDuration(track, -1L, -1L, -1L, 120_001L, -1L));
+        Track unmeasured = new Track();
+        unmeasured.title = "no length known";
+        assertTrue("a track whose length nobody knows checks nothing (the platform's own reading of"
+                        + " the armed file is the decisive guard)",
+                PlayerController.editAnchorsFitDuration(unmeasured, -1L, 999_999L, -1L, -1L, -1L));
+    }
+
+    /**
+     * The decisive guard, end to end through the running controller: the incoming deck is armed with
+     * a rendered edit, the platform reports the armed file's length, and a file that is not this
+     * track's is refused <b>before a single gain is written</b> — no ramp, the incoming player
+     * dropped, and the boundary given up so the ordinary switch opens the right track.
+     */
+    @Test
+    public void anEditThatIsNotThisTracksAudioIsRefusedBeforeTheRamp() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        try {
+            String wrong = boundaryWithFusionEdit(60_000L, 10_000L);
+            assertTrue("the wrong file must be named with both numbers: " + wrong,
+                    wrong.contains("WRONG FILE") && wrong.contains("60000")
+                            && wrong.contains("120000"));
+            assertTrue("... and the boundary given up rather than faded: " + wrong,
+                    wrong.contains("so this boundary takes the ordinary switch"));
+            assertFalse("... with no gain written at all: " + wrong, wrong.contains("ramping"));
+
+            String right = boundaryWithFusionEdit(120_000L, 10_000L);
+            assertTrue("a file that IS this track's audio passes: " + right,
+                    right.contains("the edit-identity guard passed"));
+            assertTrue("... and the ramp runs: " + right, right.contains("ramping"));
+        } finally {
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
+    /**
+     * One boundary, driven to the ramp, with the incoming deck armed from the pair's fusion edit and
+     * the fake platform reporting {@code armedDurationMs} for the file it opened. Returns the whole
+     * log so a test can assert on what was said (and on what was not: no ramp line means no gain was
+     * ever handed to the backend).
+     */
+    private String boundaryWithFusionEdit(long armedDurationMs, long fromEndMs) throws Exception {
+        Path base = temporaryFolder.newFolder("identity-" + armedDurationMs + "-" + fromEndMs).toPath();
+        AppDirs.setBase(base.toString());
+        AppDirs.setCacheBase(base.resolve("cache").toString());
+        Files.write(base.resolve("queue.json"), ("{\"playIndex\":0,\"positionMs\":0,\"playMode\":0,"
+                + "\"tracks\":["
+                + "{\"source\":\"NETEASE\",\"neteaseId\":11,\"title\":\"outgoing\","
+                + "\"durationMs\":120000},"
+                + "{\"source\":\"NETEASE\",\"neteaseId\":22,\"title\":\"incoming\","
+                + "\"durationMs\":120000}]}").getBytes(StandardCharsets.UTF_8));
+        Logger.clear();
+        FakeAudioBackend backend = new FakeAudioBackend();
+        PlayerController controller =
+                new PlayerController(backend, track -> { }, NeteaseClient.INSTANCE);
+        try {
+            controller.setStemEditRenderer(new FakeStemEditRenderer());
+            writeBeatProfile(controller, 11L, 120.0d);
+            writeBeatProfile(controller, 22L, 145.0d);
+            writeCachedAudio(controller, 11L);
+            writeCachedAudio(controller, 22L);
+            writeFusionEdit(controller, 11L, 22L);
+            controller.playQueueIndex(0);
+            backend.prepareIncomingOk = true;
+            backend.incomingDurationMs = armedDurationMs;
+            backend.position = backend.duration() - fromEndMs;
+            // ⚠️ Wait for the LAST line of the sequence the case is about, not the first: Logger
+            // drains on its own thread, so a snapshot taken the instant a line appears can be
+            // missing the line that was written immediately after it (the give-up that follows the
+            // refusal), which is exactly what a test asserts on.
+            String wanted = armedDurationMs == backend.duration()
+                    ? "ramping" : "the ordinary switch";
+            long deadline = System.currentTimeMillis() + 5_000L;
+            while (System.currentTimeMillis() < deadline) {
+                controller.pump();
+                boolean done = false;
+                for (String line : Logger.snapshot()) {
+                    if (line.contains(wanted)) done = true;
+                }
+                if (done) break;
+                Thread.sleep(20L);
+            }
+            StringBuilder all = new StringBuilder();
+            for (String line : Logger.snapshot()) all.append(line).append('\n');
+            return all.toString();
+        } finally {
+            controller.shutdown();
+        }
+    }
+
+    /**
      * One boundary's decision line, decided by the running controller, with or without a rendered
      * FUSION edit for the incoming track — the whole path the change lives on: the controller
      * stats the edit ({@code capWithoutEdit} already did, at this same instant), hands the fact to
@@ -767,6 +899,16 @@ public class PlayerControllerPlaybackTest {
         Runnable onStarted;
         volatile float volume = 0.8f;
         volatile int volumeWrites;
+        /** Whether a second player can be prepared at all; false is the interface's own default, so
+         *  every test that does not set this behaves exactly as before the edit-identity work. */
+        volatile boolean prepareIncomingOk;
+        /** What {@link #incomingDuration()} answers: -1 (the default) is "this platform cannot
+         *  measure", which is what the guard is documented to skip on. A test that means to catch a
+         *  wrong file sets it to the length the fake's prepared player reports. */
+        volatile long incomingDurationMs = -1L;
+        /** How many times the ramp was handed to the backend — the guard test asserts this stays 0
+         *  when the armed file is refused. */
+        volatile int crossfadeCalls;
 
         @Override public void play(String source, long startMs) {
             playCalls++;
@@ -792,6 +934,20 @@ public class PlayerControllerPlaybackTest {
         @Override public void setOnComplete(Runnable callback) { }
         @Override public void setOnStarted(Runnable callback) { onStarted = callback; }
         @Override public void release() { playing = false; }
+
+        /** Only when a test asks for it: the arm's own "the backend accepted the source" answer. */
+        @Override public boolean prepareIncoming(String source, long startMs, boolean startMuted,
+                                                 IncomingMix mix) {
+            return prepareIncomingOk;
+        }
+
+        /** What a real platform reads off the file it opened; -1 here means "cannot measure". */
+        @Override public long incomingDuration() { return incomingDurationMs; }
+
+        @Override public boolean beginCrossfade(long ms, FadeCurve curve) {
+            crossfadeCalls++;
+            return true;
+        }
 
         void fireStarted() {
             if (onStarted != null) onStarted.run();
