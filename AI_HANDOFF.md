@@ -5,6 +5,44 @@
 >
 > 约定：**行号会漂移，按名字定位**（`grep -n "名字" 文件`），下面括号里的行号只是线索。
 
+## 零、接手须知（新会话先读这一段，约 45 行，够开工）
+
+**状态**：分支 `feat/ai-dj-transition`（**`main` 一直没动**，仍是 `5efc1ba`）。
+最近一次发布：tag `ai-dj-transition-2026-09-21c`，
+`https://github.com/xiaozhuhou233/qplayer-compose/releases/download/ai-dj-transition-2026-09-21c/app-debug.apk`
+（能装的是 **debug** 包；release 是未签名的）。发布用 `gh`，`github.com:443` 在本机被拦，
+**必须走本地代理 `127.0.0.1:7890`**；资产 URL 要**从 `gh` 输出里原样复制**（前几轮手打错过账号名）。
+
+**做完一件事就发版**：`mvn -pl player-core install` + `:app:assembleDebug`（命令见第二节），
+然后 push 分支 + `gh release create` 把 debug APK 作为资产，并核对 HTTP 200。
+
+**这个功能是什么**：切歌时的 AI 过渡（DJ 式融合）。已实现并**在真机上验证过机制**的部分：
+双播放器交叉淡化；按配对选择过渡方式（CROSSFADE / SILENCE_TRIM / FADE_OUT_IN / QUICK_FADE / CUT 五种都出现过，
+按你曲库 1260 个有序配对统计为 CROSSFADE 76% / FADE_OUT_IN 24%）；出曲压成 −10dB 垫底、82% 处 −66dB；
+入曲人声**等到融合结束+1 秒的小节线**才回来；调性过渡是**两侧相向的阶梯**（每步一个整调，读到平台确认）；
+低频在 15% 处交接；节拍对齐；`过渡时长` 滑块 4–30 秒（默认 15）。
+
+**已知缺陷 / 未验证（下一轮优先）**：
+1. **渲染文件的"去人声"会在某些文件上失效**：计划是压到 16.7 秒，实测**从 13.4 秒起压制塌到 3~4dB**
+   （同一构建的另一个文件完全符合计划）。原因未定 —— 这是"人声等到融合之后"这条承诺**尚未逐文件成立**的地方。
+2. **17% 双可闻**（从 68% 砍下来的）可能**过头了**：出曲退得太早会显得过渡太短/太淡。要拧就拧 `FadeCurve` 的 dB 表。
+3. **卡顿的根因未证明**（用户报的 I Walk Alone → 3 Strike 那一下）：参数写入已从 ~218 次降到 12 次，
+   但根因只剩两个候选（parked 入曲通道未就绪 / 渲染抢 CPU），那对歌不在开发机曲库里。
+4. **桥（StemBridge）从未在真机上播放过**：一次判定素材不合格放弃，一次 82 秒渲染装不进提前量。
+5. **启动掉帧**：改动有代码依据（缓存遍历内联、主线程 totalSize、后台通道立刻开工、启动闸门），
+   但**一帧都没测**。现成脚本：`D:\qplayer-dev\harness15\measure.sh`。
+6. **B站 视频预览圆角**：机制取自 AOSP（outline + clipToOutline），**没有截图确认**。
+7. **测试有 1 个长期失败**（不是我们的）：`SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`
+   —— 另一个并行工作区留下的 `pageTransitionPreset` 半成品。
+
+**硬约束**：① **不能新增依赖**（本机 Google Maven 不通；Maven Central 可以）——唯一例外是已批准的
+`onnxruntime-android`；② **C 盘只剩 ~13G**，大文件（模型/渲染/scratch）一律放 `D:\qplayer-dev\`，
+不要复制仓库；③ 开发机只有 **Redmi K20 Pro（`efaa83b2`）**，8e 那台不能常连；④ 大文件是
+`ComposeQPlayerActivity.kt`（7700+ 行，**永远别整读**，用 `sed -n` + `grep -n`）；⑤ 编辑前重读目标区域。
+
+**工作方式**：把"找/验"类活**派子代理**（它们有自己的上下文，只回结论）；**一轮只推一个能编译的步骤**；
+每轮结束更新本文档（§7 是流水账日志，按需翻，别通读）。**目前所有过渡效果都还没有被人耳验证过。**
+
 ## 一、这是什么
 
 `C:\Users\xiaoz\Desktop\SkidTime\qplayer` —— Android 音乐播放器 qplayer（原 QML 桌面端，
