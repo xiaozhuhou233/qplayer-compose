@@ -69,7 +69,40 @@ public final class StemFusion {
     /** How many bars of the incoming's grid the fusion lasts — the window the whole table lives
      *  in. Three, because the table has three states (both backings, the drums swapped, the low
      *  end swapped) and each one needs a bar to be heard as a state rather than as an edit. */
-    public static final int FUSION_BARS = 3;
+    public static final int FUSION_BARS = 4;
+
+    /** How many steps of the table the outgoing's rows hold at <b>unity</b> before they start to
+     *  recede (round 6). The hold is what keeps the file continuous with the outgoing's live deck
+     *  for the whole of the deck-level handover — the boundary's own changeover is about a bar (see
+     *  {@code FadeCurve.JUNCTION_XFADE_MS}) — so the two fades do not stack and A is never heard
+     *  being cut. The full gesture is {@link #A_HOLD_STEPS} plus the low end's own fade; a pair
+     *  whose bar is so long that four steps do not fit the separation budget gets one step of hold
+     *  (still: A recedes, never cuts), which is what {@link #plan} decides. */
+    public static final int A_HOLD_STEPS = 2;
+
+    /** How many steps of the table the outgoing's <b>drums</b> take to fade to the floor (round 6:
+     *  「可以加淡出」 — a fade is allowed, a cut is not). One step: a drum fade shorter than a bar
+     *  still reads as the drummer stopping at a phrase's end rather than as a switch. */
+    public static final int A_DRUMS_FADE_STEPS = 1;
+
+    /** How many steps the outgoing's <b>low end and melodic row</b> take to fade to the floor. Two,
+     *  because the low end is what carries the groove across the handover and it is the part the
+     *  incoming's own low end rises underneath. */
+    public static final int A_LOW_END_FADE_STEPS = 2;
+
+    /** How many steps the incoming's <b>drums and low end</b> take to rise to unity (round 6: the
+     *  outgoing's departure is what must not be a stop; the incoming's arrival is a rise because a
+     *  step into an otherwise continuous backing is a click). One step, starting where the
+     *  outgoing's hold ends, so both backings are near unity across that whole step. */
+    public static final int B_ARRIVAL_FADE_STEPS = 1;
+
+    /** How many steps a <b>SLAM</b> lasts: one (round 5). A pair whose grids are in no relation has
+     *  no common bar to lay three states of a table on, so the slam gets the one gesture that needs
+     *  no beat matching at all — the outgoing's rows play for one bar of the incoming's own grid and
+     *  everything changes hands on that bar line, which is where the incoming's grid is solid. The
+     *  one cost of no relation is that this cut lands wherever it lands in the outgoing's own bar;
+     *  that is what a DJ's slam mix does, and it is why the gesture is still a cut and not a fade. */
+    public static final int SLAM_STEPS = 1;
 
     /** How long each unity/0 change takes. 80 ms: long enough not to click, short enough that the
      *  change is heard as an edit on the line rather than as a fade — the whole point of the
@@ -237,9 +270,103 @@ public final class StemFusion {
      * carried rows are still there right up to {@code bassMs}.
      */
     public static long sourceSpanMs(double bBeatMs, double speed) {
-        if (!(bBeatMs > 0d)) return 0L;
-        double ratio = speed > 0d ? speed : 1d;
-        return (long) Math.ceil((2d * bBeatMs * BEATS_PER_BAR + CUT_MS) / ratio);
+        return sourceSpanFor(bBeatMs * BEATS_PER_BAR, speed);
+    }
+
+    /** The material one take needs from the outgoing's own file, ms: two steps of the table
+     *  ({@code barStepMs} each) plus the last splice, divided by the ratio the material is read at
+     *  ({@code stretch}). For a relation 1 pair that is {@code (2*bBar + CUT)/speed} — round 18's
+     *  own number — and for a relative one {@code barStepMs} is {@code p} bars of the incoming's
+     *  and {@code stretch} is what makes the outgoing's bar exactly {@code p/q} of it. */
+    public static long sourceSpanFor(double barStepMs, double stretch) {
+        if (!(barStepMs > 0d)) return 0L;
+        double ratio = stretch > 0d ? stretch : 1d;
+        return (long) Math.ceil((2d * barStepMs + CUT_MS) / ratio);
+    }
+
+    /**
+     * The relation two grids are in, snapped to {@link #RELATIONS} within {@link
+     * #RELATION_TOLERANCE}, or null when they are in none.
+     *
+     * <p>The unison case ({@code p = q = 1}) is round 18's: the deck's own ratio is the relation's
+     * residual and the carry is stretched by it, so a pair whose grids hold keeps its sample-exact
+     * carry and its {@link #LOCK_TOLERANCE} of 2%. A relative pair plays at the deck's ratio too
+     * ({@link Relation#stretch} for it is the deck's own {@code speed}, which is 1.0 for a pair the
+     * tempo lock does not touch) and its residual is absorbed by the carry's stretch instead.
+     */
+    public static Relation relationOf(double aBeatMs, double bBeatMs, double speed) {
+        if (!(aBeatMs > 0d) || !(bBeatMs > 0d)) return null;
+        double ratio = aBeatMs / bBeatMs;
+        Relation best = null;
+        for (int[] relation : RELATIONS) {
+            int p = relation[0];
+            int q = relation[1];
+            double target = p / (double) q;
+            double error = Math.abs(ratio - target) / target;
+            if (best == null || error < best.error) best = new Relation(p, q, error, speed);
+        }
+        if (best == null || best.error > RELATION_TOLERANCE + 1e-12) return null;
+        // A pair within LOCK_TOLERANCE of the unison is the pair round 18 fused, and it keeps that
+        // case's bargain exactly (the deck's own ratio as the carry's stretch, LOCK_TOLERANCE's own
+        // report); a pair outside it but inside RELATION_TOLERANCE is a relative whose residual the
+        // stretch absorbs, and one outside every relation is a SLAM.
+        return best;
+    }
+
+    /** A tempo relation the two grids are in: {@code p} bars of the incoming's grid are {@code q}
+     *  bars of the outgoing's, so one step of the fusion's table is {@code p*bBar}. */
+    public static final class Relation {
+        public final int p;
+        public final int q;
+        /** How far the measured ratio sits from {@code p/q}, as a fraction. */
+        public final double error;
+
+        Relation(int p, int q, double error, double speed) {
+            this.p = p;
+            this.q = q;
+            this.error = error;
+            this.speed = speed > 0d ? speed : 1d;
+        }
+
+        private final double speed;
+
+        /** Whether this is the unison relation as round 18 knew it: the same bar count AND the
+         *  grids inside {@link #LOCK_TOLERANCE}. Only this case keeps the deck's own ratio as its
+         *  carry's stretch, which is what makes it bit-for-bit round 18's; a unison pair further out
+         *  than that is a relative whose stretch absorbs the difference like any other. */
+        public boolean locked() {
+            return p == q && error <= LOCK_TOLERANCE + 1e-12;
+        }
+
+        /** How much of the incoming's file one step of the table is, ms. */
+        public double barStepMs(double bBeatMs) {
+            return p * bBeatMs * BEATS_PER_BAR;
+        }
+
+        /** The ratio the outgoing's carried material is read at: {@code p} bars of the incoming's
+         *  over {@code q} of the outgoing's. It is {@code 1} by construction when the two bars are
+         *  equal, and for a relative pair it absorbs the relation's own residual ({@link #error}) so
+         *  that the outgoing's bar boundaries land on the swap lines. */
+        public double stretch(double aBeatMs, double bBeatMs) {
+            double aBar = aBeatMs * BEATS_PER_BAR;
+            double bBar = bBeatMs * BEATS_PER_BAR;
+            if (!(aBar > 0d) || !(bBar > 0d)) return speed;
+            double natural = barStepMs(bBeatMs) / (q * aBar);
+            if (locked()) {
+                // Round 18's bargain, exactly: the carry is pre-lengthened by the ratio the deck
+                // itself plays the file at, so playback returns it to the outgoing's tempo and
+                // pitch. (Taking the natural ratio here would nudge a unison pair's carried rows by
+                // up to LOCK_TOLERANCE — 0.84% on the huai->owa pair — which round 18 does not.)
+                return speed;
+            }
+            return natural > 0d ? natural : 1d;
+        }
+
+        /** One line for the log. */
+        public String describe() {
+            return String.format(Locale.US, "%d:%d (%.2f%% out of it, the carry stretched by the"
+                    + " bar ratio)", p, q, error * 100d);
+        }
     }
 
     /** The smallest window one render has to SEPARATE for a fusion, ms: {@link #sourceSpanMs}'s
@@ -275,6 +402,91 @@ public final class StemFusion {
      *  first bar line at or after the content start rather than being placed on a match that is
      *  not one. */
     public static final long PHASE_MATCH_MS = 120L;
+
+    // --- round 5: relatives, the outgoing's body, and the incoming's intro ---------------------
+
+    /**
+     * The tempo relations two tracks may be in and still be fused, as {@code {p, q}} — the ratio
+     * families {@link BeatProfile#relatedTempo} and {@code IncomingMix.MAX_SPEED_STEP} already use:
+     * unisons, octaves, the third, the fourth, and 3:2.
+     *
+     * <p><b>Why.</b> {@link #LOCK_TOLERANCE} alone refused every pair whose periods are not equal —
+     * measured on real material, {@code audio_owa} at 125.9 BPM against {@code audio_paradise} at
+     * 64.0 BPM is 49% out on the beat period and was refused, although their <em>bar</em> grids
+     * coincide exactly (one bar of paradise is two of owa). The user asked for the widening
+     * (「融合过渡太少」), and the arithmetic was always there: what has to line up is the bar line
+     * the cuts land on, not the beat.
+     *
+     * <p>{@code p} is the integer one <em>incoming</em> bar is multiplied by to reach the common
+     * line — the swaps are at {@code entry + k*p*bBar} — and {@code q} the same for one outgoing
+     * bar, so one step of the table is the smallest interval that is a whole number of both
+     * grids' bars: {@code p} bars of the incoming's = {@code q} bars of the outgoing's. The pair
+     * above is {@code {1, 2}}: one step is one bar of the incoming's (the slow) track and two of
+     * the outgoing's, so the outgoing's own bar boundaries land on every swap line.
+     */
+    public static final int[][] RELATIONS = {{1, 1}, {2, 1}, {1, 2}, {3, 1}, {1, 3}, {4, 1}, {1, 4},
+            {3, 2}, {2, 3}};
+
+    /** How far from one of {@link #RELATIONS} the measured ratio may sit and still count as that
+     *  relation, as a fraction of the relation — the same 8% {@code IncomingMix.MAX_SPEED_STEP}
+     *  clamps the incoming deck's own stretch by. The residual is absorbed by the carry's stretch
+     *  ({@link Relation#stretch}), not left to slide: the outgoing's material is read at a ratio
+     *  that makes its own bar exactly {@code p/q} of the incoming's, so its bar boundaries land on
+     *  the swap lines and the ≤ 8% comes out as a small tempo nudge of the carried rows (reported
+     *  in the plan's own evidence). The relation 1 case keeps {@link #LOCK_TOLERANCE} (2%) and the
+     *  deck's own ratio as its stretch, which is what keeps it bit-for-bit round 18's. */
+    public static final double RELATION_TOLERANCE = 0.08d;
+
+    /** How far behind the junction target the search may reach, ms, for a bar line the outgoing
+     *  track is still <em>playing</em> on — the answer to 「如果一首歌结尾有十秒声音很小的部分智能
+     *  过渡貌似会给他融合进来，导致听感平淡」 (a track whose own last seconds are a fade must not
+     *  have the fusion sit in it). The junction prefers an earlier line over refusing; the refusal
+     *  only stands when nothing in this reach has body level. */
+    public static final long QUIET_SEARCH_MAX_MS = 12_000L;
+
+    /** The most the passage's own level may sit below the outgoing track's <b>body</b> — the level
+     *  it plays at when it is playing — and still be a bar line a fusion may be cut on, dB.
+     *
+     *  <p>Measured on the outgoing's separated backing (its drums, bass and melodic row: what a
+     *  fusion can carry) as the loud tenth of {@link #BODY_WINDOW_MS} windows — the body over the
+     *  material the render holds, the passage over the candidate's own span. The four tracks of the
+     *  device run, body against a passage at the very end of the file: {@code 1460801818} −18.0 vs
+     *  −23.8 (<b>5.8 dB</b>), {@code 34364062} −8.6 vs −10.6 (<b>2.0</b>),
+     *  {@code 1410815174} −21.8 vs −69.9 (<b>48.1</b>), {@code 2700280437} (Hurt You) −7.8 vs −37.3
+     *  (<b>29.5</b>). The gap is 5.8 → 29.5 dB, so anything in 7–9 separates every measured case;
+     *  <b>7</b> is the tightest end of that gap, which is the side that keeps a passage that is
+     *  merely a quieter chorus (a few dB) fusable. Too loose delivers the flatness the user
+     *  reported; too tight costs a fusion that the round-17 edit would then play instead. */
+    public static final double QUIET_PASSAGE_DB = 7d;
+
+    /** How long one window of the body/passage measurement is, ms. A second rather than the whole
+     *  window because the window is what may BE the fade: a fade ten seconds long drags any average
+     *  down with it, while the loudest second of the same material is what the track sounded like
+     *  when it was still playing. */
+    public static final long BODY_WINDOW_MS = 1_000L;
+
+    /** How much material behind the junction target the outgoing's body is measured over, ms. A
+     *  long reach on purpose: a fade fills the seconds immediately before the passage, so a
+     *  reference read there measures the fade and calls it the body. 30 s is what the renderer's
+     *  decode window can hold (see {@code AndroidStemEditRenderer.probeWindow}). */
+    public static final long QUIET_BODY_REACH_MS = 30_000L;
+
+    /** How long the incoming's voice may be absent at the start before its intro is skipped and the
+     *  deck is started later instead, ms (round 5, the user's 「在某些情况下你也可以直接跳过下一首歌
+     *  的无关紧要前奏 比如某些说唱歌曲，直接词接词」).
+     *
+     *  <p>Measured on the four tracks of the device run — the first <em>sustained</em> second of
+     *  the separated vocal row over each track's head: {@code 1460801818} 0 ms, {@code 34364062}
+     *  <b>12 125 ms</b>, {@code 1410815174} 0 ms, {@code 2700280437} 0 ms. One of the four has an
+     *  intro worth skipping and it is 12.1 s of vocal-free bars (a rap track: the 「词接词」 case
+     *  exactly); the other three have their voice within a few hundred ms. 8 000 ms sits in that
+     *  gap, and an intro shorter than one runway bar or two is not worth skipping anyway. */
+    public static final long VOCAL_SKIP_MIN_MS = 8_000L;
+
+    /** How many common-grid bars of runway the deck keeps before the incoming's first vocal, when
+     *  its intro is skipped: the deck starts a bar or two early so the voice lands on a beat of a
+     *  track that is already playing, never after the voice itself. */
+    public static final int VOCAL_SKIP_RUNWAY_BARS = 1;
 
     /** How far either side of the junction target the search may look, in bars of the outgoing's
      *  own grid (round 3: it was ±1 bar, i.e. "the nearest line, with a ±1 s preference").
@@ -328,6 +540,197 @@ public final class StemFusion {
      *  the 673 ms this clause allows — so the verdict is the same either way and the change was not
      *  made. A reader changing this should start from those two numbers. */
     public static final double PULSE_ATTACK_DB = 6d;
+
+    /**
+     * The outgoing track's own <b>body</b> — the level it plays at when it is playing — and how far
+     * below it the passage a fusion would carry sits (round 5, {@link #QUIET_PASSAGE_DB}).
+     *
+     * <p>One instrument for both sides ({@link #bodyLevelDb}): the loud tenth of the
+     * {@link #BODY_WINDOW_MS} windows of the outgoing track's own <em>carried rows</em> — its
+     * drums, its bass and its melodic row, i.e. what a fusion can put in the file, never its voice
+     * — over the body's reach for one and over the passage itself for the other. Comparing a
+     * percentile of the same signal against a percentile of the same signal is what makes the
+     * difference mean "this passage is quieter than this track" rather than "these two windows were
+     * measured differently".
+     */
+    public interface BodyLevel {
+        /** The outgoing's body level, dBFS, or NaN when it could not be measured. */
+        double bodyDb();
+
+        /** How far below {@link #bodyDb()} the outgoing's own material over the passage starting at
+         *  {@code atMs} of its own file sits, dB — negative when the passage is above the body.
+         *  NaN when either side is unmeasured. */
+        double passageDropDb(long atMs, long passageMs);
+
+        /** Whether that passage is a bar line a fusion may be cut on: within
+         *  {@link #QUIET_PASSAGE_DB} of the body. <b>True when nothing was measured</b> — an
+         *  unmeasured clause is not a refusal. */
+        default boolean atBodyLevel(long atMs, long passageMs) {
+            double drop = passageDropDb(atMs, passageMs);
+            return !(drop > QUIET_PASSAGE_DB);
+        }
+
+        /** True when the body itself was measured at all. */
+        default boolean measured() {
+            return !Double.isNaN(bodyDb());
+        }
+    }
+
+    /** No measurement: every bar line is usable and the ranking is round 3's and round 4's — the
+     *  preference declining, which is what a caller with no decode gets. */
+    public static final BodyLevel NO_BODY_MEASUREMENT = new BodyLevel() {
+        @Override
+        public double bodyDb() {
+            return Double.NaN;
+        }
+
+        @Override
+        public double passageDropDb(long atMs, long passageMs) {
+            return Double.NaN;
+        }
+    };
+
+    /**
+     * A {@link BodyLevel} over the outgoing track's own master, {@code [ch][sample]} at {@code rate}
+     * starting at {@code startMs} of the outgoing's file — the decoded window the renderer already
+     * holds, so the clause costs no separation.
+     *
+     * <p>The body's reach is {@code [max(0, target - QUIET_BODY_REACH_MS), target)} and a passage is
+     * the material from a candidate bar line for {@code passageMs} — the same {@link #bodyLevelDb}
+     * both times. {@link #NO_BODY_MEASUREMENT} when the signal is empty or the reach is not inside
+     * it: a body measured over material the decode does not hold would be a number nobody measured.
+     *
+     * @param pcm        the outgoing track's decoded master
+     * @param rate       its sample rate
+     * @param startMs    where that material starts in the outgoing's own file, ms
+     * @param targetMs   the junction target ({@code aDur - CUT_BACK_MS - blendMs})
+     * @param probeEndMs where the decoded window ends in the outgoing's own file, ms
+     */
+    public static BodyLevel bodyLevelOf(float[][] pcm, int rate, long startMs, long targetMs,
+                                        long probeEndMs) {
+        if (pcm == null || pcm.length == 0 || pcm[0] == null || !(rate > 0)) {
+            return NO_BODY_MEASUREMENT;
+        }
+        long bodyFrom = Math.max(startMs, targetMs - QUIET_BODY_REACH_MS);
+        long bodyTo = Math.max(bodyFrom, Math.min(targetMs, probeEndMs));
+        if (bodyFrom < startMs || bodyTo - bodyFrom < BODY_WINDOW_MS) return NO_BODY_MEASUREMENT;
+        final float[][] music = carriedRows(pcm);
+        if (music == null) return NO_BODY_MEASUREMENT;
+        final double body = bodyLevelDb(music, rate, startMs, bodyFrom, bodyTo - bodyFrom);
+        if (Double.isNaN(body)) return NO_BODY_MEASUREMENT;
+        final long from = startMs;
+        return new BodyLevel() {
+            @Override
+            public double bodyDb() {
+                return body;
+            }
+
+            @Override
+            public double passageDropDb(long atMs, long passageMs) {
+                double passage = bodyLevelDb(music, rate, from, atMs, passageMs);
+                return Double.isNaN(passage) ? Double.NaN : body - passage;
+            }
+        };
+    }
+
+    /** The outgoing's carried rows ({@code drums}, {@code bass}, {@code other}) summed — the
+     *  material a fusion can actually put in the file, and the subject of every level question this
+     *  class asks about the outgoing track. */
+    public static float[][] carriedRows(float[][] pcm) {
+        if (pcm == null || pcm.length == 0 || pcm[0] == null) return null;
+        return new float[][]{pcm[0].clone(), pcm.length > 1 && pcm[1] != null ? pcm[1].clone()
+                : pcm[0].clone()};
+    }
+
+    /**
+     * The loud tenth of the {@link #BODY_WINDOW_MS} windows of a signal over
+     * {@code [fromMs, fromMs + spanMs)} of the track it starts at {@code startMs}, dBFS — the one
+     * number both halves of the quiet-passage clause are measured in. NaN when that span holds no
+     * full window.
+     */
+    public static double bodyLevelDb(float[][] pcm, int rate, long startMs, long fromMs,
+                                     long spanMs) {
+        if (pcm == null || pcm.length == 0 || pcm[0] == null || !(rate > 0) || !(spanMs > 0L)) {
+            return Double.NaN;
+        }
+        int from = (int) Math.round((fromMs - startMs) * rate / 1000d);
+        int span = (int) Math.round(spanMs * rate / 1000d);
+        int window = (int) Math.round(BODY_WINDOW_MS * rate / 1000d);
+        int length = pcm[0].length;
+        if (from < 0 || span < window || from + span > length) return Double.NaN;
+        int count = span / window;
+        double[] levels = new double[count];
+        for (int w = 0; w < count; w++) {
+            double energy = 0d;
+            int samples = 0;
+            for (float[] channel : pcm) {
+                if (channel == null) continue;
+                for (int i = from + w * window; i < from + (w + 1) * window; i++) {
+                    energy += channel[i] * (double) channel[i];
+                    samples++;
+                }
+            }
+            levels[w] = samples == 0 ? -240d
+                    : 20d * Math.log10(Math.sqrt(energy / samples));
+        }
+        java.util.Arrays.sort(levels);
+        return DjEdit.db(Math.pow(10d, levels[Math.min(count - 1, (int) (count * 0.9d))] / 20d));
+    }
+
+    /**
+     * The level the junction's step is measured against, dBFS: the outgoing master's own last
+     * {@link #STEP_WINDOW_MS}, <b>clamped up to the body</b> — a fading tail may not be the
+     * reference a fusion is levelled to (round 5, {@link #QUIET_PASSAGE_DB}).
+     *
+     * <p>The clamp is what stops the make-up gain from "answering" a fade: with the tail as the
+     * reference the step is near zero for any passage, so a fusion written inside a ten-second fade
+     * passed the step clause by being as quiet as the fade — exactly the flat transition the user
+     * reported. Clamped, the reference is {@code body - QUIET_PASSAGE_DB}: the passage is lifted
+     * towards the track's own body by the make-up gain (bounded by {@link #MAKEUP_MAX_DB}), and one
+     * that cannot reach it is refused by the step clause as it always could be. Measured on the
+     * device's tracks, the master's last 500 ms sits <b>-53.5 / -11.1 / -95.2 / -90.1 dBFS</b>
+     * against bodies of -18.0 / -8.6 / -21.8 / -7.8: tens of dB, on exactly the fades.
+     */
+    /** The level of a signal over a window, dBFS — the renderer needs the same instrument the
+     *  clause uses to log what the reference clamp did ({@link StemBridge#levelDb}). */
+    public static double levelOf(float[][] pcm, int rate, double windowSec) {
+        return StemBridge.levelDb(pcm, rate, windowSec);
+    }
+
+    public static double referenceDb(float[][] outgoingMaster, int rate, double bodyDb) {
+        double master = outgoingMaster == null || outgoingMaster.length == 0
+                ? Double.NaN
+                : StemBridge.levelDb(outgoingMaster, rate, STEP_WINDOW_MS / 1000d);
+        if (Double.isNaN(bodyDb)) return master;
+        if (Double.isNaN(master)) return bodyDb - QUIET_PASSAGE_DB;
+        return Math.max(master, bodyDb - QUIET_PASSAGE_DB);
+    }
+
+    /**
+     * Where the incoming track's voice first comes in, ms of its own file, or -1 when it never does
+     * inside the material — the measurement the intro skip is written in (round 5, {@link
+     * #VOCAL_SKIP_MIN_MS}).
+     *
+     * <p>Not the first frame above the floor: a breath, a bleed or a stray consonant is one frame,
+     * and skipping an intro on the strength of one is worse than not skipping. The answer is the
+     * first {@link #VOCAL_SUSTAIN_MS} of the vocal row whose <em>median</em> frame is above it — a
+     * sustained voice, which is what a voice arriving is.
+     */
+    public static long vocalStartMs(float[][] vocals, int rate, long startMs, double floorDbfs) {
+        if (vocals == null || vocals.length == 0 || vocals[0] == null || !(rate > 0)) return -1L;
+        double[] levels = StemBridge.frameLevelsDb(vocals, rate, vocals[0].length / (double) rate);
+        int frameMs = Math.max(1, (int) Math.round(StemBridge.FRAME_SEC * 1000d));
+        int frames = (int) Math.max(1L, Math.round(VOCAL_SUSTAIN_MS / frameMs));
+        for (int i = 0; i + frames <= levels.length; i++) {
+            double median = StemBridge.median(java.util.Arrays.copyOfRange(levels, i, i + frames));
+            if (median > floorDbfs) return startMs + (long) i * frameMs;
+        }
+        return -1L;
+    }
+
+    /** How long a stretch of the incoming's vocal row has to be above the floor before it counts as
+     *  the voice arriving, ms (see {@link #vocalStartMs}). */
+    public static final long VOCAL_SUSTAIN_MS = 1_000L;
 
     /** The floor a decoded window's low band has to be above for its downbeat to be estimated at
      *  all, dBFS. Under it there is nothing for the estimate to find, and the four candidate
@@ -520,6 +923,12 @@ public final class StemFusion {
         public final VocalQuiet quiet;
         /** The outgoing's separated drums + low end, for the junction preference; never null. */
         public final Groove groove;
+        /** The outgoing's own body level and the drop of a passage below it, for the quiet-passage
+         *  clause (round 5); never null, and {@link #NO_BODY_MEASUREMENT} when unmeasured. */
+        public final BodyLevel body;
+        /** Where the incoming track's voice first comes in, ms of its own file, or -1 when unknown
+         *  — the measurement the intro skip is written in (round 5). */
+        public final long firstVocalMs;
 
         public Input(long aDurMs, long blendMs, long removalMs, long contentStartMs,
                      double aBeatMs, double aPhaseMs, double bBeatMs, double bPhaseMs, double speed,
@@ -531,6 +940,14 @@ public final class StemFusion {
         public Input(long aDurMs, long blendMs, long removalMs, long contentStartMs,
                      double aBeatMs, double aPhaseMs, double bBeatMs, double bPhaseMs, double speed,
                      double[] aBarLinesMs, double[] bBarLinesMs, VocalQuiet quiet, Groove groove) {
+            this(aDurMs, blendMs, removalMs, contentStartMs, aBeatMs, aPhaseMs, bBeatMs, bPhaseMs,
+                    speed, aBarLinesMs, bBarLinesMs, quiet, groove, NO_BODY_MEASUREMENT, -1L);
+        }
+
+        public Input(long aDurMs, long blendMs, long removalMs, long contentStartMs,
+                     double aBeatMs, double aPhaseMs, double bBeatMs, double bPhaseMs, double speed,
+                     double[] aBarLinesMs, double[] bBarLinesMs, VocalQuiet quiet, Groove groove,
+                     BodyLevel body, long firstVocalMs) {
             this.aDurMs = aDurMs;
             this.blendMs = blendMs;
             this.removalMs = removalMs;
@@ -544,6 +961,8 @@ public final class StemFusion {
             this.bBarLinesMs = bBarLinesMs;
             this.quiet = quiet == null ? NO_VOICE_MEASUREMENT : quiet;
             this.groove = groove == null ? NO_GROOVE_MEASUREMENT : groove;
+            this.body = body == null ? NO_BODY_MEASUREMENT : body;
+            this.firstVocalMs = firstVocalMs;
         }
     }
 
@@ -556,30 +975,48 @@ public final class StemFusion {
         /** Why not, for the log. Empty when {@link #valid}. */
         public final String reason;
 
+        /** True when this is a <b>SLAM</b> (round 5): the two grids are in no relation, so the
+         *  passage is ONE bar of the incoming's grid and every element changes hands on the same
+         *  line — the gesture a DJ's slam mix makes, needing no beat matching at all. On a slam
+         *  {@link #swapMs} and {@link #bassMs} are the same instant and {@link #windowMs} is one
+         *  step; its name carries the same {@code -e/-j/-f} markers as a fusion's, and the signature
+         *  a reader can rely on is {@code fusionEndMs - entryMs} being one bar instead of three. */
+        public final boolean slam;
+
         /** One bar of each grid, ms. */
         public final double aBarMs;
         public final double bBarMs;
+        /** One step of the table: {@code p} bars of the incoming's grid for a relation, one bar for
+         *  a slam — the interval every element swap lands on. */
+        public final double barStepMs;
+        /** The ratio the outgoing's carried material is read at (see {@link Relation#stretch}); for
+         *  a slam and a unison pair it is the deck's own {@link #speed}. */
+        public final double stretch;
+        /** The relation the two grids are in, or null for a slam. */
+        public final Relation relation;
 
         /** The outgoing's bar line its deck is cut on, its own file ms. */
         public final long junctionMs;
         /** The incoming's bar line its deck starts playing on — where the fusion begins, its own
          *  file ms. */
         public final long entryMs;
-        /** {@code entryMs + 1*bBar}: the outgoing's drums out and the incoming's in. */
+        /** {@code entryMs + barStep}: the outgoing's drums out and the incoming's in. */
         public final long swapMs;
-        /** {@code entryMs + 2*bBar}: the low end changes hands. */
+        /** {@code entryMs + 2*barStep}: the low end changes hands. The same instant as
+         *  {@link #swapMs} on a slam. */
         public final long bassMs;
-        /** {@code entryMs + 3*bBar}: the last of the outgoing's material is gone. */
+        /** {@code entryMs + windowMs}: the last of the outgoing's material is gone. */
         public final long fusionEndMs;
-        /** Where the incoming's own bed has arrived at unity: {@code entryMs + bBar}, which is
-         *  {@link #swapMs} — the bar the outgoing's drums leave on. */
+        /** Where the incoming's own bed has arrived at unity: {@code entryMs + barStep}, which is
+         *  {@link #swapMs} — the line the outgoing's drums leave on. */
         public final long bedFadeMs;
 
-        /** The fusion window's length in the file, ms ({@code 3*bBar}). */
+        /** The fusion window's length in the file, ms ({@code 3} steps of the table, or one on a
+         *  slam). */
         public final long windowMs;
         /** The outgoing's own timeline the carried passage covers, ms
-         *  ({@code 2*bBar/speed + CUT_MS/speed}), rounded up: the material A's rows occupy in the
-         *  file, from the junction to its last cut. */
+         *  ({@code steps*barStep/stretch + CUT/stretch}), rounded up: the material A's rows occupy
+         *  in the file, from the junction to its last cut. */
         public final long sourceSpanMs;
 
         /** Where the outgoing's material is taken from in its own file (= {@link #junctionMs}). */
@@ -589,19 +1026,21 @@ public final class StemFusion {
          *  timeline this is the window for one {@code separateTail} call. */
         public final long materialFromMs;
         public final long materialWindowMs;
-        /** How far either side of the target the junction was searched, ms: {@link
+        /** How far forward of the target the junction was searched, ms ({@link
          *  #JUNCTION_SEARCH_BARS} bars of the outgoing's grid, narrowed to what
-         *  {@link #FUSION_TAIL_MAX_MS} has left after the carry's own material. */
+         *  {@link #FUSION_TAIL_MAX_MS} had left) and how far back ({@link #QUIET_SEARCH_MAX_MS},
+         *  narrowed the same way) for a line the outgoing is still playing on. */
         public final long searchBandMs;
+        public final long searchBackMs;
         /** {@code junctionMs} minus the target ({@code aDur − 250 − blendMs}), ms: negative when
          *  the deck is cut earlier than distance alone would put it, which lengthens the ramp by
          *  the same amount. Reported, never a requirement. */
         public final long junctionShiftMs;
 
-        /** The ratio the incoming deck plays this file at — and the ratio the outgoing's carried
-         *  material was stretched by on the way in, which is the same number by construction (see
-         *  {@link #carried}): playback at this ratio returns the carry to the outgoing track's own
-         *  tempo and pitch.
+        /** The ratio the incoming deck plays this file at — and, for a unison pair and a slam, the
+         *  ratio the outgoing's carried material was stretched by on the way in, which is the same
+         *  number by construction (see {@link #carried}): playback at this ratio returns the carry
+         *  to the outgoing track's own tempo and pitch.
          *
          *  <p>A field because it is what a log line has to quote, and quoting something else is
          *  how the round-3 line came to print a ratio of 1.4649 for a pair whose deck played at
@@ -611,7 +1050,8 @@ public final class StemFusion {
         public final double speed;
 
         /** How far the two grids are apart as heard, as a fraction of the incoming's beat
-         *  ({@link #lockError}); at most {@link #LOCK_TOLERANCE} in every valid plan. */
+         *  ({@link #lockError}); at most {@link #LOCK_TOLERANCE} on a unison pair, and on a
+         *  relative one the grid is one the two share ({@link #relation}). */
         public final double lockError;
 
         /** The junction's own bar was at least a beat without the outgoing's voice. */
@@ -619,70 +1059,151 @@ public final class StemFusion {
         /** The junction's own bar had the outgoing's drums or low end playing — the preference that
          *  decides whether the fusion carries a groove or a pad. */
         public final boolean grooveAtJunction;
+        /** Round 5: the junction has the outgoing track's own body level (within
+         *  {@link #QUIET_PASSAGE_DB}), so the passage is the track playing rather than its fade.
+         *  False when the body was measured and no line in the band had it — which refuses. */
+        public final boolean bodyLevelAtJunction;
+        /** True when the body/passage measurement was made at all; false makes the clause decline
+         *  (every line usable), which is what a caller with no decode gets. */
+        public final boolean bodyMeasured;
+        /** The outgoing's body level and the chosen passage's own level, dBFS (NaN unmeasured), and
+         *  how far the passage sits below the body, dB. */
+        public final double bodyLevelDb;
+        public final float junctionPassageLevelDb;
+        public final float junctionPassageDropDb;
         /** The entry was the phase-matched bar line rather than the fallback. */
         public final boolean phaseMatched;
         /** The worst wall-clock phase difference at the seam, ms. */
         public final double phaseErrorMs;
+        /** How much of the incoming's intro the deck skips, ms (0 when it starts where it always
+         *  did) — round 5's 「词接词」, with {@link #firstVocalMs} it was skipped for. */
+        public final long skippedIntroMs;
+        /** Where the incoming's voice first comes in, ms of its own file, or -1 when unknown. */
+        public final long firstVocalMs;
 
-        Plan(boolean valid, String reason, double aBarMs, double bBarMs, long junctionMs,
-             long entryMs, long swapMs, long bassMs, long fusionEndMs, long windowMs,
-             long sourceSpanMs, long materialFromMs, long materialWindowMs, long searchBandMs,
+        /** Round 6's gesture instants, in the file's own timeline: the outgoing's rows hold at
+         *  unity until {@link #holdEndMs}, its drums reach the floor at {@link #drumsEndMs} and its
+         *  low end (with its melodic row) at {@link #lowEndEndMs} = {@link #fusionEndMs}; the
+         *  incoming's drums and low end rise from {@link #arriveStartMs} (its own drums' swap) to
+         *  unity at {@link #arriveEndMs}. All equal-power, all monotone. */
+        public final long holdEndMs;
+        public final long drumsEndMs;
+        public final long lowEndEndMs;
+        public final long arriveStartMs;
+        public final long arriveEndMs;
+
+        Plan(boolean valid, String reason, boolean slam, double aBarMs, double bBarMs,
+             double barStepMs, double stretch, Relation relation, long junctionMs, long entryMs,
+             long swapMs, long bassMs, long fusionEndMs, long windowMs, long sourceSpanMs,
+             long materialFromMs, long materialWindowMs, long searchBandMs, long searchBackMs,
              long junctionShiftMs, double lockError, double speed, boolean quietAtJunction,
-             boolean grooveAtJunction, boolean phaseMatched, double phaseErrorMs) {
+             boolean grooveAtJunction, boolean bodyLevelAtJunction, boolean bodyMeasured,
+             double bodyLevelDb, double passageLevelDb, double passageDropDb, boolean phaseMatched,
+             double phaseErrorMs, long skippedIntroMs, long firstVocalMs, long holdEndMs,
+             long drumsEndMs, long lowEndEndMs, long arriveStartMs, long arriveEndMs) {
             this.valid = valid;
             this.reason = reason == null ? "" : reason;
+            this.slam = slam;
             this.aBarMs = aBarMs;
             this.bBarMs = bBarMs;
+            this.barStepMs = barStepMs;
+            this.stretch = stretch > 0d ? stretch : 1d;
+            this.relation = relation;
             this.junctionMs = junctionMs;
             this.entryMs = entryMs;
             this.swapMs = swapMs;
             this.bassMs = bassMs;
             this.fusionEndMs = fusionEndMs;
-            this.bedFadeMs = valid ? swapMs : -1L;
+            // The bed's rise is one bar of the INCOMING's own grid (BED_FADE_BARS), which is a
+            // different instant from the outgoing's hold for every gesture except a one-step slam.
+            this.bedFadeMs = valid && bBarMs > 0d
+                    ? entryMs + (long) BED_FADE_BARS * Math.round(bBarMs) : -1L;
             this.windowMs = windowMs;
             this.sourceSpanMs = sourceSpanMs;
             this.sourceFromMs = junctionMs;
             this.materialFromMs = materialFromMs;
             this.materialWindowMs = materialWindowMs;
             this.searchBandMs = searchBandMs;
+            this.searchBackMs = searchBackMs;
             this.junctionShiftMs = junctionShiftMs;
             this.lockError = lockError;
             this.speed = speed > 0d ? speed : 1d;
             this.quietAtJunction = quietAtJunction;
             this.grooveAtJunction = grooveAtJunction;
+            this.bodyLevelAtJunction = bodyLevelAtJunction;
+            this.bodyMeasured = bodyMeasured;
+            this.bodyLevelDb = bodyLevelDb;
+            this.junctionPassageLevelDb = (float) passageLevelDb;
+            this.junctionPassageDropDb = (float) passageDropDb;
             this.phaseMatched = phaseMatched;
             this.phaseErrorMs = phaseErrorMs;
+            this.skippedIntroMs = skippedIntroMs;
+            this.firstVocalMs = firstVocalMs;
+            this.holdEndMs = holdEndMs;
+            this.drumsEndMs = drumsEndMs;
+            this.lowEndEndMs = lowEndEndMs;
+            this.arriveStartMs = arriveStartMs;
+            this.arriveEndMs = arriveEndMs;
         }
 
         /** How many 80 ms splices the table contains: three at {@link #swapMs} (the outgoing's
-         *  drums out and the incoming's in, one pair) and three at {@link #bassMs}. The incoming's
-         *  bed is deliberately NOT one of them — it is the one arrival the design ramps, over
+         *  drums out and the incoming's in, one pair) and three at {@link #bassMs} — which on a slam
+         *  is the same instant, so a slam's six splices are all on its one line. The incoming's bed
+         *  is deliberately NOT one of them — it is the one arrival the design ramps, over
          *  {@code BED_FADE_BARS} bar, and it is counted separately in {@link #describe()}. */
         public int splices() {
-            return 2 * 3;
+            return slam ? 2 * 3 : 0;
+        }
+
+        /** The outgoing's own recede, ms, as the report quotes it: [the hold at unity, the drums'
+         *  fade, the low end's fade]. Round 6 replaced the 80 ms splices with these (see
+         *  {@link #A_HOLD_STEPS}); a slam keeps its one cut line and reports none of them. */
+        public long[] recedeMs() {
+            return slam ? new long[0]
+                    : new long[]{holdEndMs - entryMs, drumsEndMs - holdEndMs, lowEndEndMs - holdEndMs};
         }
 
         /** The evidence, in one line. */
         public String describe() {
             if (!valid) return "no fusion (" + reason + ")";
+            long[] recede = recedeMs();
+            String shapes = slam
+                    ? "A's rows cut on its one line (a slam is the cut gesture)"
+                    : String.format(Locale.US, "A recedes, never cut: %dms at unity, then its drums"
+                            + " fade over %dms and its low end and melodic row over %dms; the"
+                            + " incoming's drums and low end rise over %dms from %dms",
+                    recede.length > 0 ? recede[0] : 0L, recede.length > 1 ? recede[1] : 0L,
+                    recede.length > 2 ? recede[2] : 0L, arriveEndMs - arriveStartMs, arriveStartMs);
+            String head = slam
+                    ? String.format(Locale.US, "SLAM (the grids are in no relation, so nothing is"
+                            + " beat-matched: one bar of the incoming's grid, every element changing"
+                            + " hands on the same line at %dms)", swapMs)
+                    : String.format(Locale.US, "fusion %s: drums swap at %dms, low end at %dms, all"
+                            + " A gone at %dms (%dms = %d steps of %.0fms)",
+                    relation == null ? "(no relation)" : relation.describe(), swapMs, bassMs,
+                    fusionEndMs, windowMs, slam ? SLAM_STEPS : FUSION_BARS, barStepMs);
             return String.format(Locale.US,
-                    "fusion: A cut on its bar line at %dms (%+dms from the distance alone; the"
-                            + " search covered +/-%dms), B starts at %dms (%.0f ms of wall-clock"
-                            + " phase difference %s, the grids locked to %.2f%%); drums swap at %dms,"
-                            + " low end at %dms, all A gone at %dms (%dms = %d bars of %.0fms); B's"
-                            + " bed fades in over one bar, from %dms to unity at %dms; the"
-                            + " junction's bar is %s and %s; the deck plays this file at x%.4f and"
-                            + " the outgoing's carry was stretched by that same x%.4f inside it, so"
-                            + " %dms of A taken from %dms fills %.0fms of the file's %dms window,"
-                            + " separated over %dms from %dms",
-                    junctionMs, junctionShiftMs, searchBandMs, entryMs, phaseErrorMs,
-                    phaseMatched ? "matched to A's grid" : "NOT matched (the plain bar line)",
-                    lockError * 100d, swapMs, bassMs, fusionEndMs, windowMs, FUSION_BARS, bBarMs,
+                    "%s; %s; the outgoing deck is cut on its bar line at %dms (%+dms from the"
+                            + " distance alone; the search"
+                            + " covered %dms back and %dms forward), B starts at %dms%s (%.0f ms of"
+                            + " wall-clock phase difference %s); B's bed fades in over one bar, from"
+                            + " %dms to unity at %dms; the junction's bar is %s%s; the deck plays"
+                            + " this file at x%.4f and the outgoing's carry was read at x%.4f inside"
+                            + " it, so %dms of A taken from %dms fills %.0fms of the file's %dms"
+                            + " window, separated over %dms from %dms",
+                    head, shapes, junctionMs, junctionShiftMs, searchBackMs, searchBandMs, entryMs,
+                    skippedIntroMs > 0L ? String.format(Locale.US, " (skipping %dms of its intro:"
+                            + " its voice first comes in at %dms)", skippedIntroMs, firstVocalMs)
+                            : "",
+                    phaseErrorMs, phaseMatched ? "matched to A's grid"
+                            : "NOT matched (the plain bar line)",
                     entryMs, bedFadeMs,
-                    quietAtJunction ? "voice-free for a beat" : "not measured voice-free",
-                    grooveAtJunction ? "carrying the outgoing's groove"
-                            : "NOT measured carrying a groove",
-                    speed, speed, sourceSpanMs, sourceFromMs, sourceSpanMs * speed, windowMs,
+                    bodyMeasured
+                            ? String.format(Locale.US, "at the track's own body level (%.2f dBFS"
+                                    + " against a body of %.2f)", junctionPassageLevelDb, bodyLevelDb)
+                            : "not measured against a body",
+                    grooveAtJunction ? " and carrying its groove" : "",
+                    speed, stretch, sourceSpanMs, sourceFromMs, sourceSpanMs * stretch, windowMs,
                     materialWindowMs, materialFromMs);
         }
     }
@@ -692,8 +1213,10 @@ public final class StemFusion {
     }
 
     private static Plan invalid(String reason, double aBarMs, double bBarMs, double lockError) {
-        return new Plan(false, reason, aBarMs, bBarMs, -1L, -1L, -1L, -1L, -1L, 0L, 0L, 0L, 0L, 0L,
-                0L, lockError, 1d, false, false, false, Double.NaN);
+        return new Plan(false, reason, false, aBarMs, bBarMs, bBarMs, 1d, null, -1L, -1L, -1L, -1L,
+                -1L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, lockError, 1d, false, false, false, false,
+                Double.NaN, Double.NaN, Double.NaN, false, Double.NaN, 0L, -1L, -1L, -1L, -1L, -1L,
+                -1L);
     }
 
     /**
@@ -736,16 +1259,21 @@ public final class StemFusion {
         if (!(aDurMs > 0d)) return "the outgoing track's length could not be read";
         if (!(blendMs > 0L)) return "the boundary's blend length is not known";
         if (contentStartMs < 0L) return "the incoming deck's own start is not known";
-        if (!locked(aBeatMs, bBeatMs, speed)) {
-            return lockReason(aBeatMs, bBeatMs, speed);
-        }
-        long window = materialWindowMs(bBeatMs, speed);
+        // ⚠️ Round 5: a pair in no relation is no longer refused — it gets a SLAM (one bar of the
+        // incoming's grid, no beat matching), so this clause only refuses the pair whose grids
+        // cannot be read at all.
+        Relation relation = relationOf(aBeatMs, bBeatMs, speed);
+        double stepMs = relation == null ? bBeatMs * BEATS_PER_BAR : relation.barStepMs(bBeatMs);
+        double stretch = relation == null ? speed : relation.stretch(aBeatMs, bBeatMs);
+        long window = (long) Math.ceil(((relation == null ? SLAM_STEPS : FUSION_BARS - 1) * stepMs
+                + CUT_MS) / (stretch > 0d ? stretch : 1d)) + 2L * A_TAIL_SLACK_MS;
         if (!(window <= FUSION_TAIL_MAX_MS)) {
             return String.format(Locale.US,
-                    "the passage is %.1fms of the incoming's file (%d bars of %.1fms), so the"
+                    "the passage is %.1fms of the incoming's file (%d steps of %.1fms), so the"
                             + " material A's rows need from A is %dms — over the %.0fms one render"
                             + " may separate before the junction search's own band is paid for",
-                    2d * bBeatMs * BEATS_PER_BAR, FUSION_BARS, bBeatMs * BEATS_PER_BAR, window,
+                    (relation == null ? SLAM_STEPS : FUSION_BARS) * stepMs,
+                    relation == null ? SLAM_STEPS : FUSION_BARS, stepMs, window,
                     (double) FUSION_TAIL_MAX_MS);
         }
         if (!(Math.round(aDurMs - CUT_BACK_MS - blendMs) > 0L)) {
@@ -938,50 +1466,93 @@ public final class StemFusion {
         if (!(in.blendMs > 0L)) {
             return invalid("the boundary's blend length is not known", aBar, bBar);
         }
-        // The tempo lock, before anything else that could be true while the grids slide: see
-        // LOCK_TOLERANCE. A pair that does not lock gets no fusion however good its material is.
-        if (!(in.speed > 0d) || !locked(in.aBeatMs, in.bBeatMs, in.speed)) {
-            return invalid(lockReason(in.aBeatMs, in.bBeatMs, in.speed), aBar, bBar, lock);
+        // ⚠️ Round 5: the tempo relation, and the SLAM for a pair in none. A unison pair is the
+        // lock clause's (LOCK_TOLERANCE, the deck's own ratio as the carry's stretch — bit-for-bit
+        // round 18's); a relative pair is one whose BAR grids coincide and whose residual the
+        // carry's stretch absorbs; a pair in no relation at all is still fused — as a SLAM, a
+        // one-bar cut-based passage needing no beat matching at all, which is what the user asked
+        // for in as many words (「速度无关的也要接，不要淡入淡出」).
+        Relation relation = relationOf(in.aBeatMs, in.bBeatMs, in.speed);
+        if (!(in.speed > 0d)) {
+            return invalid("the ratio the incoming deck plays at is not known", aBar, bBar, lock);
         }
-        // The material the take needs, from `bassMs` and not from a bar count: see sourceSpanMs.
-        long windowMs = Math.round(FUSION_BARS * bBar);
-        long sourceSpan = sourceSpanMs(in.bBeatMs, in.speed);
-        // The junction search's own band, paid for out of the separation budget: the search may
-        // look JUNCTION_SEARCH_BARS bars either way, and the window has to hold the whole passage
-        // from any line in that band that is still a candidate. A slow track (or a long passage)
-        // gets a narrower band rather than a longer separation — the budget is the clause.
+        boolean slam = relation == null;
+        // One step of the table: `p` bars of the incoming's grid for a relation, one bar for a
+        // slam (the only line of the incoming's own grid the gesture needs), and the gesture lasts
+        // FUSION_BARS of them (one for a slam).
+        double stepMs = slam ? bBar : relation.barStepMs(in.bBeatMs);
+        double stretch = slam ? in.speed : relation.stretch(in.aBeatMs, in.bBeatMs);
+        // ⚠️ Round 6's shape, and the budget decides how much of it fits: the full gesture is a
+        // hold at unity plus the low end's own fade, and all of it has to be separated out of the
+        // outgoing's own file like anything else. A pair whose step is so long that the full shape
+        // does not fit gets ONE step of hold rather than no fusion at all — still a recede.
+        int holdSteps = A_HOLD_STEPS;
+        if (!slam) {
+            long full = (long) Math.ceil((A_HOLD_STEPS + A_LOW_END_FADE_STEPS) * stepMs
+                    / (stretch > 0d ? stretch : 1d)) + 2L * A_TAIL_SLACK_MS;
+            if (full > FUSION_TAIL_MAX_MS) holdSteps = 1;
+        }
+        int steps = slam ? SLAM_STEPS : holdSteps + A_LOW_END_FADE_STEPS;
+        // How many steps of the table carry the outgoing's own rows: all of them, for a slam (its
+        // one cut is the window's own end) and for a fusion too (its rows reach the floor ON the
+        // window's last step, so the material has to last that far).
+        int cutSteps = slam ? SLAM_STEPS : steps;
+        long windowMs = Math.round(steps * stepMs);
+        // The material the take needs: the rows are cut at `swapMs` (which for a slam is the
+        // window's own end) plus the splice, in the outgoing's own file.
+        long sourceSpan = (long) Math.ceil((cutSteps * stepMs + CUT_MS)
+                / (stretch > 0d ? stretch : 1d));
+        // ⚠️ The window the render will separate, paid for out of the cost bound:
+        // QUIET_SEARCH_MAX_MS back of the target (the quiet-passage search) and
+        // JUNCTION_SEARCH_BARS bars forward of it (the groove preference), plus the lead the take's
+        // alignment wants. A slow track's search is shorter rather than its separation longer — the
+        // budget is the clause.
         long budget = FUSION_TAIL_MAX_MS - sourceSpan - 2L * A_TAIL_SLACK_MS;
         if (budget < 0L) {
             return invalid(String.format(Locale.US,
                     "the passage is %.1fms of the incoming's file and the material A's rows need"
                             + " from A is %dms, so the window to separate is at least %dms — over"
                             + " the %.0fms one render may separate",
-                    2d * bBar, sourceSpan, sourceSpan + 2L * A_TAIL_SLACK_MS,
+                    steps * stepMs, sourceSpan, sourceSpan + 2L * A_TAIL_SLACK_MS,
                     (double) FUSION_TAIL_MAX_MS), aBar, bBar, lock);
         }
-        long searchBand = Math.min(Math.round(JUNCTION_SEARCH_BARS * aBar), budget / 2L);
-        long materialFrom = Math.max(0L, target - searchBand - A_TAIL_SLACK_MS);
-        long materialWindow = sourceSpan + 2L * searchBand + 2L * A_TAIL_SLACK_MS;
+        long forward = Math.min(Math.round(JUNCTION_SEARCH_BARS * aBar), Math.max(0L, budget / 2L));
+        long back = Math.min(QUIET_SEARCH_MAX_MS, Math.max(0L, budget - forward));
+        long materialFrom = Math.max(0L, target - back - A_TAIL_SLACK_MS);
+        long materialWindow = sourceSpan + back + forward + 2L * A_TAIL_SLACK_MS;
         if (in.contentStartMs < 0L) {
             return invalid("the incoming deck's own start is not known", aBar, bBar, lock);
         }
 
-        // The junction: the bar line the deck is cut on, searched within ±JUNCTION_SEARCH_BARS
-        // bars of the target and preferred in the order the design names — one where the outgoing's
-        // own groove is playing (so the fusion carries a rhythm out of the handover rather than a
-        // pad), then one where its voice is quiet for a beat (so the cut is not mid-word), then
-        // simply the nearest line. A line whose passage does not fit the material window is not a
-        // candidate at all, however good its own bar looks.
-        boolean[] quiet = new boolean[1];
-        boolean[] groove = new boolean[1];
-        long junction = nearestBar(in.aBarLinesMs, target, aBar, materialFrom,
-                materialFrom + materialWindow, sourceSpan, quiet, groove, in.quiet, in.groove);
-        if (!(junction > 0L)) {
+        // The junction: the bar line the deck is cut on, searched from `back` before the target to
+        // `forward` after it and preferred in the design's order — first a line the outgoing track
+        // is still PLAYING on (a track whose own last seconds are a fade must not have the fusion
+        // sit in that fade), then one where its groove is playing, then one where its voice is quiet
+        // for a beat, then the nearest. A line whose passage does not fit the material window is not
+        // a candidate at all.
+        Choice choice = nearestBar(in.aBarLinesMs, target, aBar, materialFrom,
+                materialFrom + materialWindow, sourceSpan, back, forward, in.quiet, in.groove,
+                in.body);
+        if (choice == null) {
             return invalid(String.format(Locale.US,
                     "no line of the outgoing's grid is inside the %dms the passage can be taken"
-                            + " from (the search covers %dms either side of %d outside it)",
-                    materialWindow, searchBand, target), aBar, bBar, lock);
+                            + " from (the search covers %dms back and %dms forward of %d outside"
+                            + " it)",
+                    materialWindow, back, forward, target), aBar, bBar, lock);
         }
+        if (choice.measured && choice.usable == 0) {
+            return invalid(String.format(Locale.US,
+                    "every bar line of the outgoing's grid the search reached (from %dms back of"
+                            + " the target to %dms forward of it) is a passage more than %.1f dB"
+                            + " below the track's own body: the body is %.2f dBFS and the best line"
+                            + " in the band (%dms, %+dms from the target) carries a passage of"
+                            + " %.2f dBFS, %+.2f dB down — that passage is the track's own fade, and"
+                            + " fusing it is the flatness this clause exists for",
+                    back, forward, QUIET_PASSAGE_DB, choice.bodyDb, choice.bestAt,
+                    choice.bestAt - target, choice.bestAtLevel, choice.bestAtDrop), aBar, bBar,
+                    lock);
+        }
+        long junction = choice.atMs;
         if (junction + sourceSpan > in.aDurMs) {
             return invalid(String.format(Locale.US,
                     "the outgoing file ends %dms into the %dms the fusion's carried rows need from"
@@ -990,10 +1561,11 @@ public final class StemFusion {
                     in.aDurMs - junction, sourceSpan, junction), aBar, bBar, lock);
         }
 
-        // The entry: the incoming's bar line in its own two-bar window whose beat phase, played
-        // back at `speed`, lands closest to the outgoing's beat phase at the junction.
-        long[] entryChoice = entry(in.bBarLinesMs, in.contentStartMs, bBar, junction, in.aBeatMs,
-                in.aPhaseMs, in.bBeatMs, in.bPhaseMs, in.speed);
+        // The entry: the incoming's own bar line the deck starts on — on the COMMON grid (every
+        // `p` of its bars) whose phase, played back at `speed`, lands closest to the outgoing's at
+        // the junction, or, when the incoming's voice comes in long after its content starts, the
+        // line a runway before that voice (round 5's intro skip: 「直接词接词」).
+        long[] entryChoice = entry(in, junction, stepMs, slam ? 1 : relation.p);
         long entry = entryChoice[0];
         if (entry < 0L) {
             return invalid("no bar line of the incoming track inside its own two-bar window",
@@ -1005,10 +1577,24 @@ public final class StemFusion {
                     "the fusion would run %dms past the %dms the incoming's vocals are out for",
                     fusionEnd - in.removalMs, in.removalMs), aBar, bBar, lock);
         }
-        return new Plan(true, "", aBar, bBar, junction, entry, entry + Math.round(bBar),
-                entry + 2L * Math.round(bBar), fusionEnd, windowMs, sourceSpan, materialFrom,
-                materialWindow, searchBand, junction - target, lock, in.speed, quiet[0],
-                groove[0], entryChoice[1] == 1L, entryChoice[2] / 1000d);
+        long barStep = Math.round(stepMs);
+        // The gesture's own instants (round 6): the incoming's drums and low end rise over one step
+        // starting where the outgoing's hold ends, and the outgoing's rows recede from that same
+        // instant — its drums over one step, its low end and its melodic row over two.
+        long holdEnd = entry + (long) holdSteps * barStep;
+        long arriveEnd = entry + (long) (holdSteps + B_ARRIVAL_FADE_STEPS) * barStep;
+        long drumsEnd = entry + (long) (holdSteps + A_DRUMS_FADE_STEPS) * barStep;
+        long lowEndEnd = entry + (long) (holdSteps + A_LOW_END_FADE_STEPS) * barStep;
+        long swap = slam ? entry + barStep : holdEnd;
+        long bass = slam ? swap : holdEnd;
+        long drawEnd = slam ? entry + barStep : lowEndEnd;
+        return new Plan(true, "", slam, aBar, bBar, stepMs, stretch, relation, junction, entry, swap,
+                bass, drawEnd, windowMs, sourceSpan, materialFrom, materialWindow, forward, back,
+                junction - target, lock, in.speed, choice.quiet, choice.groove, choice.bodyAtLine,
+                choice.measured, choice.bodyDb, choice.passageDb, choice.dropDb,
+                entryChoice[1] == 1L, entryChoice[2] / 1000d,
+                entryChoice.length > 3 ? entryChoice[3] : 0L, in.firstVocalMs, holdEnd, drumsEnd,
+                lowEndEnd, swap, arriveEnd);
     }
 
     /** The lock clause's own words, so {@link #refusal} and {@link #plan} refuse a pair for the
@@ -1038,31 +1624,80 @@ public final class StemFusion {
      * @param quietOut   single-element out: whether the chosen line had a quiet beat
      * @param grooveOut  single-element out: whether the chosen line had the groove playing
      */
-    private static long nearestBar(double[] bars, long target, double aBarMs, long fitsFrom,
-                                   long fitsTo, long spanMs, boolean[] quietOut, boolean[] grooveOut,
-                                   VocalQuiet quiet, Groove groove) {
-        if (quietOut != null && quietOut.length > 0) quietOut[0] = false;
-        if (grooveOut != null && grooveOut.length > 0) grooveOut[0] = false;
-        long best = -1L;
+    private static Choice nearestBar(double[] bars, long target, double aBarMs, long fitsFrom,
+                                     long fitsTo, long spanMs, long backMs, long forwardMs,
+                                     VocalQuiet quiet, Groove groove, BodyLevel body) {
+        boolean measured = body != null && body.measured();
+        double bodyDb = body == null ? Double.NaN : body.bodyDb();
+        Choice best = null;
         int bestRank = Integer.MAX_VALUE;
         double bestDistance = Double.MAX_VALUE;
+        int usable = 0;
+        long bestAt = -1L;
+        double bestAtLevel = Double.NaN;
+        double bestAtDrop = Double.NaN;
         for (double bar : bars) {
             long at = Math.round(bar);
-            if (Math.abs(at - target) > JUNCTION_SEARCH_BARS * aBarMs + 1e-6d) continue;
+            double offset = at - target;
+            if (offset < -(double) backMs - 1e-6d || offset > forwardMs + 1e-6d) continue;
             if (at < fitsFrom || at + spanMs > fitsTo) continue;
+            double drop = body == null ? Double.NaN : body.passageDropDb(at, spanMs);
+            double level = Double.isNaN(drop) ? Double.NaN : bodyDb - drop;
+            boolean atBody = body == null || Double.isNaN(drop) || drop <= QUIET_PASSAGE_DB;
+            if (atBody) usable++;
+            if (Double.isNaN(bestAtDrop) || (!Double.isNaN(drop) && drop < bestAtDrop)) {
+                bestAt = at;
+                bestAtLevel = level;
+                bestAtDrop = drop;
+            }
             boolean hasGroove = groove.presentAround(at, aBarMs / BEATS_PER_BAR);
             boolean isQuiet = quiet.quietBeatAround(at, aBarMs / BEATS_PER_BAR);
-            int rank = hasGroove ? 0 : (isQuiet ? 1 : 2);
-            double distance = Math.abs(at - target);
-            if (rank < bestRank || (rank == bestRank && distance < bestDistance)) {
-                best = at;
+            int rank = (atBody ? 0 : 3) + (hasGroove ? 0 : (isQuiet ? 1 : 2));
+            double distance = Math.abs(offset);
+            if (best == null || rank < bestRank || (rank == bestRank && distance < bestDistance)) {
+                best = new Choice(at, isQuiet, hasGroove, atBody, level, drop);
                 bestRank = rank;
                 bestDistance = distance;
             }
         }
-        if (quietOut != null && quietOut.length > 0) quietOut[0] = best >= 0L && bestRank == 1;
-        if (grooveOut != null && grooveOut.length > 0) grooveOut[0] = best >= 0L && bestRank == 0;
+        if (best == null) return null;
+        best.usable = usable;
+        best.measured = measured;
+        best.bodyDb = bodyDb;
+        best.bestAt = bestAt;
+        best.bestAtLevel = bestAtLevel;
+        best.bestAtDrop = bestAtDrop;
         return best;
+    }
+
+    /** One candidate's choice: where it is, what its own bar offered, and the numbers the refusal
+     *  quotes when nothing in the band had the outgoing track's body level. */
+    private static final class Choice {
+        final long atMs;
+        final boolean quiet;
+        final boolean groove;
+        /** The chosen line's passage has the outgoing's body level (true when unmeasured). */
+        final boolean bodyAtLine;
+        /** The chosen line's passage level, dBFS, and its drop below the body, dB (NaN unmeasured). */
+        final double passageDb;
+        final double dropDb;
+        int usable;
+        boolean measured;
+        double bodyDb = Double.NaN;
+        /** The band's own best line (the smallest drop): where, its level and its drop. */
+        long bestAt = -1L;
+        double bestAtLevel = Double.NaN;
+        double bestAtDrop = Double.NaN;
+
+        Choice(long atMs, boolean quiet, boolean groove, boolean bodyAtLine, double passageDb,
+               double dropDb) {
+            this.atMs = atMs;
+            this.quiet = quiet;
+            this.groove = groove;
+            this.bodyAtLine = bodyAtLine;
+            this.passageDb = passageDb;
+            this.dropDb = dropDb;
+        }
     }
 
     /**
@@ -1078,31 +1713,73 @@ public final class StemFusion {
      * @return {@code {entryMs, phaseMatched ? 1 : 0, phaseErrorUs}} — entryMs is -1 when there is
      *         no bar line to place the deck on
      */
-    private static long[] entry(double[] bBars, long contentStartMs, double bBarMs, long junctionMs,
-                                double aBeatMs, double aPhaseMs, double bBeatMs, double bPhaseMs,
-                                double speed) {
+    private static long[] entry(Input in, long junctionMs, double stepMs, int p) {
+        double bBarMs = in.bBeatMs * BEATS_PER_BAR;
+        // The lines the deck may start on: the COMMON grid's — every `p` bars of the incoming's own
+        // grid (every bar for a unison pair and a slam, which is bit-for-bit round 18's and round
+        // 4's candidate set), spaced `stepMs` apart.
+        long gridStep = Math.max(1L, Math.round(stepMs));
+        long from = in.contentStartMs;
+        long to = in.contentStartMs + 2L * gridStep;
+        long skipped = 0L;
+        // ⚠️ Round 5: the intro skip. When the incoming's voice comes in long after its content
+        // starts, the deck starts at the common line a runway BEFORE that voice instead of at the
+        // beginning — the intro is never played, and the voice lands a bar or two into a track that
+        // is already playing (「直接词接词」). Only the lines up to the voice's own line are
+        // candidates, and the whole move is bounded by the removal window below.
+        if (!(in.firstVocalMs > 0L) || in.firstVocalMs - in.contentStartMs < VOCAL_SKIP_MIN_MS
+                || in.bBarLinesMs == null) {
+            return search(in, junctionMs, gridStep, from, to, 0L);
+        }
+        long line = -1L;
+        for (double bar : in.bBarLinesMs) {
+            long at = Math.round(bar);
+            if (at > in.firstVocalMs) continue;
+            if (line < 0L || at > line) line = at;
+        }
+        if (line < 0L || line <= in.contentStartMs) {
+            return search(in, junctionMs, gridStep, from, to, 0L);
+        }
+        long start = Math.max(in.contentStartMs, line - (long) VOCAL_SKIP_RUNWAY_BARS * gridStep);
+        long[] skip = search(in, junctionMs, gridStep, start, line + 1L, in.firstVocalMs);
+        if (skip[0] < 0L) return search(in, junctionMs, gridStep, from, to, 0L);
+        skipped = line - skip[0];
+        return new long[]{skip[0], skip[1], skip[2], skipped};
+    }
+
+    /** The entry search itself: the candidate line in {@code [from, to)} whose beat phase, on the
+     *  grid the two tracks share, lands closest to the outgoing's at the junction. */
+    private static long[] search(Input in, long junctionMs, long gridStep, long from, long to,
+                                 long firstVocalMs) {
         long first = -1L;
         long best = -1L;
         double bestError = Double.MAX_VALUE;
-        double phaseA = phaseWall(junctionMs - aPhaseMs, aBeatMs);
-        for (double bar : bBars) {
+        // The modulus the two phases are compared on: the coarsest interval that is a whole number
+        // of both grids' beats — `1` on a unison pair (round 18's own comparison), and the shared
+        // grid's beat on a relative one, where the outgoing's odd beats fall BETWEEN the incoming's
+        // and comparing them modulo one incoming beat would report a half-beat error for two grids
+        // that in fact coincide (round 5).
+        double sharedBeat = Math.min(in.aBeatMs, in.bBeatMs);
+        double phaseA = phaseWall(junctionMs - in.aPhaseMs, sharedBeat);
+        for (double bar : in.bBarLinesMs) {
             long at = Math.round(bar);
-            if (at < contentStartMs || at >= contentStartMs + Math.round(2d * bBarMs)) continue;
+            if (at < from || at >= to) continue;
+            if (firstVocalMs > 0L && at > firstVocalMs) continue;
             if (first < 0L || at < first) first = at;
-            double phaseB = phaseWall(at - bPhaseMs, bBeatMs) / speed;
-            double error = phaseDistance(phaseA, phaseB, aBeatMs);
+            double phaseB = phaseWall(at - in.bPhaseMs, sharedBeat) / in.speed;
+            double error = phaseDistance(phaseA, phaseB, sharedBeat);
             if (error < bestError) {
                 bestError = error;
                 best = at;
             }
         }
-        if (best < 0L) return new long[]{-1L, 0L, 0L};
+        if (best < 0L) return new long[]{-1L, 0L, 0L, 0L};
         if (bestError > PHASE_MATCH_MS) {
             // The fallback is the fallback, and it is logged as one: a match that is not a match
             // would put the two grids together by a number nobody measured.
-            return new long[]{first, 0L, Math.round(bestError * 1000d)};
+            return new long[]{first, 0L, Math.round(bestError * 1000d), 0L};
         }
-        return new long[]{best, 1L, Math.round(bestError * 1000d)};
+        return new long[]{best, 1L, Math.round(bestError * 1000d), 0L};
     }
 
     /** The distance from the nearest beat of a grid, ms, in {@code [0, period)}. */
@@ -1189,24 +1866,80 @@ public final class StemFusion {
         }
         double other = linear(A_OTHER_DB);
         double unity = linear(BED_DB);
+        if (plan.slam) {
+            // A SLAM is the one gesture that still cuts, and deliberately: with no relation to hang
+            // a bar on, the element change on its single line IS the gesture (the user's
+            // 「速度无关的也要接」 asks for it, and a DJ's slam mix is a cut).
+            switch (row) {
+                case DRUMS:
+                case BASS:
+                    return fromOutgoing
+                            ? splice(fileMs, plan.swapMs, unity, 0d)
+                            : splice(fileMs, plan.swapMs, 0d, unity);
+                case OTHER:
+                    return fromOutgoing ? splice(fileMs, plan.swapMs, other, 0d)
+                            : bedGain(plan, fileMs);
+                default:
+                    return fromOutgoing ? 0d : unity;
+            }
+        }
+        // ⚠️ Round 6, from listening: A RECEDES, IT DOES NOT CUT. The user, after hearing the
+        // splices: 「你似乎给前一首歌强制停止了，不要这么干，让它放完并不要让它戛然而止，可以加淡出，但不要抢整体效果」
+        // — do not force-stop the outgoing track, let it play out; an 80 ms splice on a bar line is
+        // exactly the "stopped" they heard. So the outgoing's rows hold at unity through
+        // {@link #A_HOLD_STEPS} steps and then fade out over their own spans — the drums over one
+        // step, the low end and the melodic row over two, equal-power and monotone, so no element
+        // comes back and the sum only ever falls. The hold is what keeps the FILE continuous with
+        // A's live deck for the whole of the deck-level handover (which the boundary stretch to
+        // about a bar), so the two fades do not stack.
         switch (row) {
             case DRUMS:
                 return fromOutgoing
-                        ? splice(fileMs, plan.swapMs, unity, 0d)
-                        : splice(fileMs, plan.swapMs, 0d, unity);
+                        ? fade(fileMs, plan.holdEndMs, plan.drumsEndMs, unity, 0d)
+                        : fadeIn(fileMs, plan.arriveStartMs, plan.arriveEndMs, unity);
             case BASS:
                 return fromOutgoing
-                        ? splice(fileMs, plan.bassMs, unity, 0d)
-                        : splice(fileMs, plan.bassMs, 0d, unity);
+                        ? fade(fileMs, plan.holdEndMs, plan.lowEndEndMs, unity, 0d)
+                        : fadeIn(fileMs, plan.arriveStartMs, plan.arriveEndMs, unity);
             case OTHER:
-                // A's melodic row leaves by the same 80 ms cut as its low end; B's bed arrives
-                // over a whole bar instead — the one ramp in the table (see bedGain).
-                return fromOutgoing ? splice(fileMs, plan.bassMs, other, 0d) : bedGain(plan, fileMs);
+                // A's melodic row recedes with the low end (they are the same instrument group);
+                // B's bed still arrives over its own first bar (see bedGain).
+                return fromOutgoing ? fade(fileMs, plan.holdEndMs, plan.lowEndEndMs, other, 0d)
+                        : bedGain(plan, fileMs);
             default:
                 // The outgoing's vocal row is never carried, and the incoming's is the edit's own
                 // gate — see incomingGains.
                 return fromOutgoing ? 0d : unity;
         }
+    }
+
+    /** A row that holds {@code from} until {@code fromMs}, fades equal-power to {@code to} at
+     *  {@code toMs}, and is {@code to} for the rest of the window — the leaving side of round 6's
+     *  gesture ({@link #gainAt}). Chosen over a splice because a splice is a stop: one step for the
+     *  drums and two for the low end and the melodic row (see {@link #A_HOLD_STEPS}). */
+    static double fade(double tMs, long fromMs, long toMs, double from, double to) {
+        if (tMs <= fromMs) return from;
+        if (tMs >= toMs) return to;
+        double frac = toMs > fromMs ? (tMs - fromMs) / (double) (toMs - fromMs) : 1d;
+        if (to == 0d) {
+            // A decline to the floor is the COSINE of the arrival's sine: at the half-way point each
+            // side is at sin(pi/4) = cos(pi/4), so the two sides of a hand-over sum to a constant
+            // power. (A sine from 1 to 0 would sit at 0.29 half way — the wrong shape, and the
+            // measurement of the fixture is what caught it.)
+            return from * Math.cos(frac * Math.PI / 2d);
+        }
+        return from + (to - from) * Math.sin(frac * Math.PI / 2d);
+    }
+
+    /** The arriving side of the same shape: silence before {@code fromMs}, {@code level} from
+     *  {@code toMs} — round 6's incoming, which arrives by a rise rather than by a cut. (The
+     *  outgoing's departure is what must not be a stop; a step into an otherwise continuous
+     *  backing is a click, so the arrival is a rise too, over the incoming's own bar.) */
+    static double fadeIn(double tMs, long fromMs, long toMs, double level) {
+        if (tMs <= fromMs) return 0d;
+        if (tMs >= toMs) return level;
+        double frac = toMs > fromMs ? (tMs - fromMs) / (double) (toMs - fromMs) : 1d;
+        return level * Math.sin(frac * Math.PI / 2d);
     }
 
     /** The incoming's own rows: the fusion's table, and today's vocal gate on the voice. */
@@ -1371,11 +2104,28 @@ public final class StemFusion {
          *  {@link Plan#junctionMs} of its own file — the level the junction has to sit at. Null
          *  when the caller has not decoded it, with the same consequence as {@link #head}. */
         public final float[][] outgoingMaster;
+        /** The level the step clause is measured against, dBFS, or NaN to use the master's own
+         *  level ({@link #outgoingMaster}).
+         *
+         *  <p>Round 5: the renderer clamps it up to the outgoing track's body
+         *  ({@link StemFusion#referenceDb}) so that a fading tail cannot be the reference a fusion
+         *  is levelled to — with the tail as the reference the step is near zero for any passage,
+         *  and a passage written inside a ten-second fade passed this clause by being as quiet as
+         *  the fade, which is the flat transition the user reported. */
+        public final double referenceDb;
 
         public Material(int rate, int frames, double speed, double makeupDb, float[][][] carried,
                         float[][][] carriedSource, float[][][] incoming,
                         float[][][] incomingVocals, float[][] outgoingVocals, float[][] head,
                         float[][] outgoingMaster) {
+            this(rate, frames, speed, makeupDb, carried, carriedSource, incoming, incomingVocals,
+                    outgoingVocals, head, outgoingMaster, Double.NaN);
+        }
+
+        public Material(int rate, int frames, double speed, double makeupDb, float[][][] carried,
+                        float[][][] carriedSource, float[][][] incoming,
+                        float[][][] incomingVocals, float[][] outgoingVocals, float[][] head,
+                        float[][] outgoingMaster, double referenceDb) {
             this.rate = rate;
             this.frames = frames;
             this.speed = speed > 0d ? speed : 1d;
@@ -1387,6 +2137,7 @@ public final class StemFusion {
             this.outgoingVocals = outgoingVocals;
             this.head = head;
             this.outgoingMaster = outgoingMaster;
+            this.referenceDb = referenceDb;
         }
 
         public Material(int rate, int frames, double speed, float[][][] carried,
@@ -1446,6 +2197,10 @@ public final class StemFusion {
          *  and of the rendered head's first {@link #STEP_WINDOW_MS}: the junction's step is the
          *  difference, and it has to be inside {@link #JUNCTION_STEP_MAX_DB}. */
         public double outgoingMasterDb;
+        /** The level the step was actually measured against (the master's own, or the caller's
+         *  body-clamped reference) and how far that clamp lifted it, dB. */
+        public double referenceDb;
+        public double referenceClampedDb;
         public double fusionHeadDb;
         public double junctionStepDb;
         /** The make-up gain that was applied to the outgoing's carried rows, dB (0 when none) —
@@ -1608,7 +2363,11 @@ public final class StemFusion {
             r.fusionHeadDb = StemBridge.levelDb(headStart, rate, headFrames / (double) rate);
             r.outgoingMasterDb = StemBridge.levelDb(m.outgoingMaster, rate,
                     masterFrames / (double) rate);
-            r.junctionStepDb = r.fusionHeadDb - r.outgoingMasterDb;
+            // Round 5: the reference the step is measured against — the master's own level, or the
+            // caller's (the renderer clamps it up to the outgoing's body, see referenceDb).
+            r.referenceDb = Double.isNaN(m.referenceDb) ? r.outgoingMasterDb : m.referenceDb;
+            r.referenceClampedDb = r.referenceDb - r.outgoingMasterDb;
+            r.junctionStepDb = r.fusionHeadDb - r.referenceDb;
             r.stepMeasured = true;
         }
 
@@ -1653,12 +2412,15 @@ public final class StemFusion {
         float[][] rhythm = add(add(carried(m, StemGesture.Stem.DRUMS.row()),
                         carried(m, StemGesture.Stem.BASS.row())),
                 add(inDrums, inBass));
-        double period = Math.max(beatSecA > 0d ? beatSecA : 0d, beatSecB > 0d ? beatSecB : 0d);
+        double period = plan.slam ? 0d
+                : Math.max(beatSecA > 0d ? beatSecA : 0d, beatSecB > 0d ? beatSecB : 0d);
         r.judgedPeriodMs = period * 1000d;
         if (period > 0d) {
             double[] levels = StemBridge.frameLevelsDb(rhythm, rate, windowSec);
             double median = StemBridge.median(levels);
-            int perBeat = Math.max(1, (int) Math.round(period / StemBridge.FRAME_SEC));
+            // ⚠️ A SLAM's window is ONE bar and its gesture is a cut, so there is no passage pulse to
+        // judge: the clause is skipped for it (round 5) and the carried-row and voice clauses stand.
+        int perBeat = Math.max(1, (int) Math.round(period / StemBridge.FRAME_SEC));
             r.beats = Math.max(1, levels.length / perBeat);
             int attacks = 0;
             double longest = 0d;

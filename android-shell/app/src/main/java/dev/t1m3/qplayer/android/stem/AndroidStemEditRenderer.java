@@ -549,10 +549,22 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         }
         long probeMs = System.currentTimeMillis() - probeStarted;
 
+        // ⚠️ Round 5: the outgoing's body level and where the incoming's voice first comes in are
+        // both measurable BEFORE the separation — the body off the decoded probe window, the voice
+        // off the head's own vocal stem, which was separated in step 2 — so the first plan can
+        // already cut the deck back out of a fade and start it after a dead intro.
+        StemFusion.BodyLevel body = StemFusion.bodyLevelOf(decoded, format.rate, probeStart[0],
+                Math.round(aDurMs - StemFusion.CUT_BACK_MS - request.blendMs),
+                probeStart[0] + decoded[0].length * 1000L / format.rate);
+        final double bodyDb = body.bodyDb();
+        long firstVocalMs = StemFusion.vocalStartMs(
+                headStems[StemGesture.Stem.VOCALS.row()], StemModel.MODEL_RATE, 0L,
+                DjEdit.SILENT_FRAME_DBFS);
         StemFusion.Plan plan = StemFusion.plan(new StemFusion.Input(aDurMs, request.blendMs,
                 request.removalMs, request.incomingContentStartMs, aBeatMs,
                 request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
-                headBars, StemFusion.NO_VOICE_MEASUREMENT));
+                headBars, StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT, body,
+                firstVocalMs));
         if (!plan.valid) {
             Logger.info("transition: DJ edit for {}: no fusion — {}. The render is today's edit",
                     request.title(), plan.reason);
@@ -583,7 +595,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         StemFusion.Plan chosen = StemFusion.plan(new StemFusion.Input(aDurMs, request.blendMs,
                 request.removalMs, request.incomingContentStartMs, aBeatMs,
                 request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
-                headBars, quiet, groove));
+                headBars, quiet, groove, body, firstVocalMs));
         if (!chosen.valid) {
             Logger.info("transition: DJ edit for {}: no fusion — the junction could not be placed"
                     + " on the separated material ({}). The render is today's edit",
@@ -646,7 +658,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
             return null;
         }
         Fusion fusion = fusionWithMakeup(request, headStems, plan, edit, windowSec, clipped,
-                tail, melody, separateMs, outgoingMaster);
+                tail, melody, separateMs, outgoingMaster, bodyDb);
         if (fusion.report.acceptable) return fusion;
         if (melody && fusion.report.voiceAlignmentMelody > StemFusion.VOICE_CARRY_LIMIT) {
             // The melodic carry is the outgoing's voice. That is not a reason to abandon the
@@ -658,7 +670,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                     request.title(), String.format(java.util.Locale.US, "%.2f",
                             fusion.report.voiceAlignmentMelody));
             fusion = fusionWithMakeup(request, headStems, plan, edit, windowSec, clipped,
-                    tail, false, separateMs, outgoingMaster);
+                    tail, false, separateMs, outgoingMaster, bodyDb);
             if (fusion.report.acceptable) return fusion;
         }
         Logger.warn("transition: DJ edit for {}: the fusion did not pass its own measurement, so"
@@ -692,9 +704,10 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
      */
     private Fusion fusionWithMakeup(Request request, float[][][] headStems, StemFusion.Plan plan,
                                     DjEdit.Plan edit, double windowSec, int[] clipped, Tail tail,
-                                    boolean melody, long separateMs, float[][] outgoingMaster) {
+                                    boolean melody, long separateMs, float[][] outgoingMaster,
+                                    double bodyDb) {
         Fusion first = renderFusion(request, headStems, plan, edit, windowSec, clipped, tail,
-                melody, separateMs, outgoingMaster, 0d);
+                melody, separateMs, outgoingMaster, 0d, bodyDb);
         double makeup = StemFusion.makeupDb(
                 first.report.stepMeasured ? first.report.junctionStepDb : Double.NaN);
         if (!(makeup > 0d)) {
@@ -708,7 +721,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
             return first;
         }
         Fusion lifted = renderFusion(request, headStems, plan, edit, windowSec, clipped, tail,
-                melody, separateMs, outgoingMaster, makeup);
+                melody, separateMs, outgoingMaster, makeup, bodyDb);
         Logger.info("transition: DJ edit for {}: the fusion's junction measured {} dB against the"
                         + " outgoing track's own last {}ms — the voice the fusion removes was that"
                         + " much of the energy — so the outgoing's carried rows are lifted {} dB"
@@ -764,7 +777,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
     private Fusion renderFusion(Request request, float[][][] headStems, StemFusion.Plan plan,
                                 DjEdit.Plan edit, double windowSec, int[] clipped, Tail tail,
                                 boolean melody, long separateMs, float[][] outgoingMaster,
-                                double makeupDb) {
+                                double makeupDb, double bodyDb) {
         int rate = StemModel.MODEL_RATE;
         int startFrame = (int) Math.round(plan.entryMs * (double) rate / 1000d);
         int frames = (int) Math.round(plan.windowMs * (double) rate / 1000d);
@@ -791,11 +804,28 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         // The head as it will be written, over the window: what the junction's own step is measured
         // on (its first 500 ms), with the limiter already in it.
         float[][] head = copyOf(edited, startFrame, frames);
+        // ⚠️ Round 5: the level the junction's step is measured against, clamped up to the
+        // outgoing track's own body so that a fading tail cannot be the reference this fusion is
+        // levelled to (a passage written inside a ten-second fade used to pass the step clause by
+        // being as quiet as the fade — the flat transition the user reported).
+        double reference = StemFusion.referenceDb(outgoingMaster, rate, bodyDb);
+        if (!Double.isNaN(bodyDb) && !Double.isNaN(reference)
+                && reference > StemFusion.levelOf(outgoingMaster, rate,
+                        StemFusion.STEP_WINDOW_MS / 1000d) + 0.05d) {
+            Logger.info("transition: DJ edit for {}: the outgoing master's last {}ms measures {}"
+                            + " dBFS but the track's own body is {} dBFS, so the junction's"
+                            + " reference is the body less the {} dB the clause allows ({} dBFS) —"
+                            + " the passage is levelled to the track, not to its fade",
+                    request.title(), StemFusion.STEP_WINDOW_MS,
+                    fmtDb(StemFusion.levelOf(outgoingMaster, rate,
+                            StemFusion.STEP_WINDOW_MS / 1000d)), fmtDb(bodyDb),
+                    (int) StemFusion.QUIET_PASSAGE_DB, fmtDb(reference));
+        }
         StemFusion.Report report = StemFusion.measure(plan, edit,
                 new StemFusion.Material(rate, frames, request.speed, makeupDb, carried, source,
                         incoming, incomingVocals,
                         copyOf(tail.stems[StemGesture.Stem.VOCALS.row()], takeFrame, spanFrames),
-                        head, outgoingMaster),
+                        head, outgoingMaster, reference),
                 melody, request.outgoingBeatPeriodMs / 1000d, request.beatPeriodMs / 1000d, guard);
         Logger.info("transition: DJ edit for {} — {}", request.title(), report.describe());
         return new Fusion(plan, edited, report, separateMs);
