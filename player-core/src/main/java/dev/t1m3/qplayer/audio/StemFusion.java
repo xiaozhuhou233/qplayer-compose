@@ -994,6 +994,32 @@ public final class StemFusion {
      *  playing, and under that what the measurement reads may be an intro's two hits. */
     public static final double INCOMING_TRUST_SHARE = 0.5d;
 
+    /**
+     * How many extra steps of hold the renderer's retry loop may ask for, in all: two.
+     *
+     * <p>What the loop is for, in one line: on a stem whose rows cannot be read (see
+     * {@link #rowStartMs}) the measurement cannot ask for the wait, so the renderer extends the hold
+     * itself, one step at a time, and keeps the extension only if {@link #measure} — the judge that
+     * is reliable, because it measures the passage that was produced — says the pulse hole closed.
+     * Two steps is the bound the cost allows: each one is a step of the passage, so it is a step of
+     * the outgoing's file that has to be separated (on the device's pairs a 2 180-2 305 ms step,
+     * i.e. a few seconds of audio and roughly 1.5-3x that in model time), and it is spent only on a
+     * fusion the acceptance would otherwise have refused outright. The measurement's own
+     * {@link #rowHitShare} stays as the cheap predictor that usually saves the loop a pass.
+     */
+    public static final int FUSION_WAIT_EXTRA_STEPS = 2;
+
+    /** Which of two measured passages is better, the rule the retry loop keeps its best by: one
+     *  that passes beats any that does not, and between two that fail the smaller hole wins — a
+     *  longer hold that does not close the hole is not an improvement, and the loop must not prefer
+     *  it just for being later. A null candidate is never better. */
+    public static boolean betterPulse(Report candidate, Report best) {
+        if (candidate == null) return false;
+        if (best == null) return true;
+        if (candidate.acceptable != best.acceptable) return candidate.acceptable;
+        return candidate.longestGapMs < best.longestGapMs;
+    }
+
     /** One row's per-beat peaks (the beat's own quarter-frames, so a hit between samples is still
      *  found), over the array's own timeline up to {@code toMs}; null when there is nothing to
      *  measure. The one implementation {@link #rowStartMs} and {@link #rowHitShare} share, so the
@@ -1281,6 +1307,20 @@ public final class StemFusion {
          *  {@link #NO_INCOMING_MEASUREMENT} — the measurement round 6's second pass added: the
          *  recede waits for the row that replaces A's (see {@link #rowStartMs}). */
         public final IncomingOn incoming;
+        /**
+         * Extra steps of hold at unity the CALLER wants, on top of whatever the design and the
+         * measurement ask for (0 by default). The knob the renderer's retry loop turns: the hold is
+         * the only lever this file has over whether the passage's pulse survives the incoming's
+         * intro, and on a stem whose rows cannot be read (see {@link #rowStartMs}) the measurement
+         * cannot ask for the extension itself — so the caller extends it one step at a time and
+         * lets {@link #measure} judge each result, which is the reliable judge.
+         *
+         * <p>Never a way to break a clause: the steps are counted like the design's own, so a hold
+         * the budget or the incoming's vocal-free window cannot pay for is refused by the same
+         * messages ({@link #plan}'s own), and the renderer's loop simply stops extending when a plan
+         * comes back invalid.
+         */
+        public final int extraHoldSteps;
 
         public Input(long aDurMs, long blendMs, long removalMs, long contentStartMs,
                      double aBeatMs, double aPhaseMs, double bBeatMs, double bPhaseMs, double speed,
@@ -1309,6 +1349,14 @@ public final class StemFusion {
                      double aBeatMs, double aPhaseMs, double bBeatMs, double bPhaseMs, double speed,
                      double[] aBarLinesMs, double[] bBarLinesMs, VocalQuiet quiet, Groove groove,
                      BodyLevel body, long firstVocalMs, IncomingOn incoming) {
+            this(aDurMs, blendMs, removalMs, contentStartMs, aBeatMs, aPhaseMs, bBeatMs, bPhaseMs,
+                    speed, aBarLinesMs, bBarLinesMs, quiet, groove, body, firstVocalMs, incoming, 0);
+        }
+
+        public Input(long aDurMs, long blendMs, long removalMs, long contentStartMs,
+                     double aBeatMs, double aPhaseMs, double bBeatMs, double bPhaseMs, double speed,
+                     double[] aBarLinesMs, double[] bBarLinesMs, VocalQuiet quiet, Groove groove,
+                     BodyLevel body, long firstVocalMs, IncomingOn incoming, int extraHoldSteps) {
             this.aDurMs = aDurMs;
             this.blendMs = blendMs;
             this.removalMs = removalMs;
@@ -1324,6 +1372,7 @@ public final class StemFusion {
             this.groove = groove == null ? NO_GROOVE_MEASUREMENT : groove;
             this.body = body == null ? NO_BODY_MEASUREMENT : body;
             this.incoming = incoming == null ? NO_INCOMING_MEASUREMENT : incoming;
+            this.extraHoldSteps = Math.max(0, extraHoldSteps);
             this.firstVocalMs = firstVocalMs;
         }
     }
@@ -1902,6 +1951,11 @@ public final class StemFusion {
         int[] shape = shapeFor(stepMs, stretch, cap);
         int holdSteps = shape[0];
         int lowEndFadeSteps = shape[1];
+        // The caller's own steps (round 6, sixth pass: the renderer's loop asks for one more step at
+        // a time and lets the acceptance judge each result). Counted exactly like the design's, so
+        // the budget and the vocal window bound them by the same arithmetic.
+        holdSteps += in.extraHoldSteps;
+        int shortestHoldForCaller = holdSteps;
         // ⚠️ Round 6's second pass: the recede WAITS for the row that replaces it. A row of A's may
         // not start to fade before the incoming's own row of the same kind is playing, or the passage
         // hands the pulse to nobody — the device's own pair faded A's drums at 5260ms into a track
@@ -1972,7 +2026,8 @@ public final class StemFusion {
         // third), then the hold — never below the wait the incoming's own rows ask for — and only a
         // pair whose bar is wider than every affordable band is refused, by the search's own
         // message, which now says the gesture was already at its shortest.
-        int shortestHold = Math.max(1, holdForIncomingSteps);
+        int shortestHold = Math.max(shortestHoldForCaller,
+                Math.max(1, holdForIncomingSteps));
         boolean shortenedForBand = false;
         if (!slam) {
             // The question is the direct one — would the search have a candidate at all — and not
@@ -2823,6 +2878,14 @@ public final class StemFusion {
         public boolean acceptable;
         /** Which clause did not, when one did not. */
         public String failures = "";
+
+        /** The pulse clause's own number, in one line: what the retry loop is judged by, so every
+         *  log about it quotes the same measurement the acceptance does. */
+        public String pulseLine() {
+            return String.format(Locale.US, "pulse: %d of %d beats carry an attack, longest gap"
+                            + " %.0fms of a %.0fms period", beatsWithAttack, beats, longestGapMs,
+                    judgedPeriodMs);
+        }
 
         /** The evidence, in one line. */
         public String describe() {

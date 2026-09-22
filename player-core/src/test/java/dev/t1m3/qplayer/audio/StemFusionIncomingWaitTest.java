@@ -295,6 +295,93 @@ public class StemFusionIncomingWaitTest {
         return out;
     }
 
+    /**
+     * ⚠️ <b>The loop's lever: {@code Input.extraHoldSteps}.</b> The measurement cannot read every
+     * stem (see the test above), so the renderer does not ask it to: it extends the hold one step at
+     * a time and lets the acceptance judge each attempt (the loop is in the renderer; the planner's
+     * half is this knob). The steps are counted like the design's own, so every clause applies to
+     * them — which is what makes the worst case (no extension is kept) today's behaviour.
+     */
+    @Test
+    public void theCallerCanExtendTheHoldOneStepAtATime() {
+        StemFusion.Plan base = StemFusion.plan(input(StemFusion.NO_INCOMING_MEASUREMENT, 15_240L));
+        assertTrue(base.describe(), base.valid);
+        long step = Math.round(base.barStepMs);
+        assertEquals("the design's own hold", 2L * step, base.holdEndMs - base.entryMs);
+        for (int extra = 1; extra <= StemFusion.FUSION_WAIT_EXTRA_STEPS; extra++) {
+            StemFusion.Plan more = StemFusion.plan(withExtra(extra, 15_240L));
+            assertTrue(more.describe(), more.valid);
+            assertEquals("the caller's step is one more step of the same recede",
+                    (2L + extra) * step, more.holdEndMs - more.entryMs);
+            assertEquals("and the shape after it is unchanged", step,
+                    more.drumsEndMs - more.holdEndMs);
+            assertEquals("the low end's two as well", 2L * step, more.lowEndEndMs - more.holdEndMs);
+            assertEquals("the passage grows with it", (4L + extra) * step, more.fusionEndMs
+                    - more.entryMs);
+        }
+        // A step the incoming's own vocal-free window cannot pay for is refused by the same clause
+        // the design's steps are — the loop stops extending there rather than breaking a rule.
+        StemFusion.Plan tooFar = StemFusion.plan(withExtra(StemFusion.FUSION_WAIT_EXTRA_STEPS + 3,
+                15_240L));
+        assertFalse(tooFar.describe(), tooFar.valid);
+        assertTrue(tooFar.reason, tooFar.reason.contains("the incoming's vocals are out for")
+                || tooFar.reason.contains("one render may separate"));
+        // And the wait still cannot be shortened away by the band rule: the caller's steps are the
+        // floor for the shortening, exactly as the measurement's own are.
+        StemFusion.Plan withWait = StemFusion.plan(withExtra(1, 15_240L, DEVICE));
+        assertTrue(withWait.describe(), withWait.valid);
+        assertTrue("the wait's own step (4) is at least the caller's (3)",
+                withWait.holdEndMs - withWait.entryMs >= 4L * step);
+    }
+
+    /**
+     * The loop's own rule, pinned: a passing measurement beats any failing one, and between two that
+     * fail the smaller hole wins — so a longer hold that does not close the hole is never kept
+     * just for being later (the renderer keeps the best and, if none passes, discards the fusion
+     * exactly as it does today).
+     */
+    @Test
+    public void theLoopKeepsTheBestPulseAndAPassingOneWins() {
+        StemFusion.Report hole = pulse(false, 3_965d);
+        StemFusion.Report smaller = pulse(false, 2_832d);
+        StemFusion.Report passing = pulse(true, 0d);
+        assertTrue(StemFusion.betterPulse(passing, hole));
+        assertFalse(StemFusion.betterPulse(hole, passing));
+        assertTrue("between two that fail, the smaller hole wins", StemFusion.betterPulse(smaller,
+                hole));
+        assertFalse(StemFusion.betterPulse(hole, smaller));
+        assertFalse("a tie is not an improvement", StemFusion.betterPulse(hole, hole));
+        assertTrue("and the first candidate is always the best so far",
+                StemFusion.betterPulse(hole, null));
+        assertFalse("nothing beats nothing", StemFusion.betterPulse(null, hole));
+    }
+
+    private static StemFusion.Report pulse(boolean acceptable, double gapMs) {
+        StemFusion.Report report = new StemFusion.Report();
+        report.acceptable = acceptable;
+        report.longestGapMs = gapMs;
+        report.judgedPeriodMs = 566.4d;
+        report.beats = 15;
+        report.beatsWithAttack = acceptable ? 15 : 10;
+        return report;
+    }
+
+    private static StemFusion.Input withExtra(int extra, long removalMs) {
+        return withExtra(extra, removalMs, StemFusion.NO_INCOMING_MEASUREMENT);
+    }
+
+    private static StemFusion.Input withExtra(int extra, long removalMs,
+                                             StemFusion.IncomingOn incoming) {
+        double[] aBars = new double[60];
+        for (int i = 0; i < aBars.length; i++) aBars[i] = 1_185.6d + i * 2_265.6d;
+        double[] bBars = new double[9];
+        for (int i = 0; i < bBars.length; i++) bBars[i] = 900d + i * BAR_MS;
+        return new StemFusion.Input(96_816L, 15_000L, removalMs, 240L, 566.4d, 0d, BEAT_MS, 355d,
+                1d, aBars, bBars, StemFusion.NO_VOICE_MEASUREMENT,
+                StemFusion.NO_GROOVE_MEASUREMENT, StemFusion.NO_BODY_MEASUREMENT, -1L, incoming,
+                extra);
+    }
+
     /** A kit on every beat of the window from {@code fromMs}, at {@code amp}. */
     private static float[][] kicks(double sec, long fromMs, long toMs, double amp) {
         float[][] out = new float[2][(int) (sec * RATE)];

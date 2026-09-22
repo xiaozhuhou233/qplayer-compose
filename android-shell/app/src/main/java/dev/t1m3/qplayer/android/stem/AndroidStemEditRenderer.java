@@ -643,7 +643,19 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                                     + " where they always did");
         }
 
+        // ⚠️ The material is separated for the LOOP's longest plan, not for the first one: the
+        // retry below extends the hold a step at a time (StemFusion.FUSION_WAIT_EXTRA_STEPS), each
+        // step is a step of the passage and so a step more of the outgoing's own file, and the
+        // separation is the one thing here that cannot be done again cheaply. The extra is exactly
+        // the steps the loop may ask for — a few seconds of audio on the device's pairs — and it is
+        // spent only on a pair whose fusion the acceptance would otherwise refuse outright.
         long[] material = StemFusion.materialWindow(plan);
+        long waitExtraMs = (long) StemFusion.FUSION_WAIT_EXTRA_STEPS * Math.round(chosenStepMs(plan));
+        if (waitExtraMs > 0L) {
+            long fileEnd = Math.round(probeDurationMs(request.outgoingSourcePath));
+            long room = fileEnd > 0L ? Math.max(0L, fileEnd - material[0]) : Long.MAX_VALUE;
+            material[1] = Math.min(room, material[1] + waitExtraMs);
+        }
         long separateStarted = System.currentTimeMillis();
         Tail tail = separateTail(weights, request, format, material[0], material[1], cancelled);
         if (tail == null || cancelled[0]) return null;
@@ -726,29 +738,69 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                     probe[0]);
             return null;
         }
-        Fusion fusion = fusionWithMakeup(request, headStems, plan, edit, windowSec, clipped,
-                tail, melody, separateMs, outgoingMaster, bodyDb);
-        if (fusion.report.acceptable) return fusion;
-        if (melody && fusion.report.voiceAlignmentMelody > StemFusion.VOICE_CARRY_LIMIT) {
-            // The melodic carry is the outgoing's voice. That is not a reason to abandon the
-            // fusion: the row is dropped, the drums and the low end stay, and the passage is
-            // measured again — the degradation this design names in advance.
-            Logger.warn("transition: DJ edit for {}: the melodic carry measures as the outgoing's"
-                            + " voice (it aligns {} with its vocal stem), so it is DROPPED and the"
-                            + " fusion is re-measured without it",
-                    request.title(), String.format(java.util.Locale.US, "%.2f",
-                            fusion.report.voiceAlignmentMelody));
-            fusion = fusionWithMakeup(request, headStems, plan, edit, windowSec, clipped,
-                    tail, false, separateMs, outgoingMaster, bodyDb);
-            if (fusion.report.acceptable) return fusion;
+        // ⚠️ Round 6, sixth pass: the wait becomes an ITERATION AGAINST THE JUDGE. The
+        // measurement cannot read every stem (see StemFusion.rowStartMs), so instead of predicting
+        // whether the incoming's intro will swallow the passage's pulse, the hold is extended one
+        // step at a time and this render's own acceptance — which measures the passage that was
+        // actually produced, and is reliable there — judges each attempt. Attempt 0 is the
+        // design's own plan, so the worst case is exactly today's behaviour; each retry costs one
+        // render of material already in memory plus one step of it, separated above.
+        Fusion best = null;
+        int bestExtra = 0;
+        boolean melodyFor = melody;
+        for (int extra = 0; extra <= StemFusion.FUSION_WAIT_EXTRA_STEPS; extra++) {
+            StemFusion.Plan attempt = extra == 0 ? plan
+                    : extendHold(request, extra, headStems, body, firstVocalMs, incomingOn, aBeatMs,
+                            bBeatMs, aBars, headBarsMs, aDurMs, quiet, groove);
+            if (attempt == null) break;
+            Fusion made = fusionWithMakeup(request, headStems, attempt, edit, windowSec, clipped,
+                    tail, melodyFor, separateMs, outgoingMaster, bodyDb);
+            if (made == null) break;
+            if (!made.report.acceptable && melodyFor
+                    && made.report.voiceAlignmentMelody > StemFusion.VOICE_CARRY_LIMIT) {
+                // The melodic carry is the outgoing's voice. Not a reason to abandon the fusion: the
+                // row is dropped, the drums and the low end stay, and the passage is measured again
+                // — the degradation this design names in advance. Decided once, for every step.
+                Logger.warn("transition: DJ edit for {}: the melodic carry measures as the"
+                                + " outgoing's voice (it aligns {} with its vocal stem), so it is"
+                                + " DROPPED and the fusion is re-measured without it",
+                        request.title(), String.format(java.util.Locale.US, "%.2f",
+                                made.report.voiceAlignmentMelody));
+                melodyFor = false;
+                made = fusionWithMakeup(request, headStems, attempt, edit, windowSec, clipped,
+                        tail, false, separateMs, outgoingMaster, bodyDb);
+                if (made == null) break;
+            }
+            if (made.report.acceptable) {
+                if (extra > 0) {
+                    Logger.info("transition: DJ edit for {}: the passage's pulse needed the wait —"
+                                    + " the hold extended by {} step{} and the acceptance passes"
+                                    + " ({}; without it {})",
+                            request.title(), extra, extra == 1 ? "" : "s",
+                            made.report.pulseLine(), best == null ? "it was refused"
+                                    : best.report.pulseLine());
+                }
+                return made;
+            }
+            if (StemFusion.betterPulse(made.report, best == null ? null : best.report)) {
+                best = made;
+                bestExtra = extra;
+            }
         }
+        if (best == null) return null;
+        Fusion fusion = best;
         refusedWhy[0] = WHY_ACCEPTANCE;
         Logger.warn("transition: DJ edit for {}: the fusion did not pass its own measurement, so"
                         + " it is NOT in this edit — the render falls back to today's (the bridge"
                         + " if it passes its own measurement, the plain edit-with-vocal-gate"
                         + " otherwise), and {}ms of the outgoing track were separated for"
-                        + " nothing. The measurement: {}",
-                request.title(), separateMs, fusion.report.describe());
+                        + " nothing{}. The measurement: {}",
+                request.title(), separateMs,
+                bestExtra > 0 ? String.format(java.util.Locale.US, " — the hold was extended %d"
+                        + " step%s against the acceptance and the pulse is still short (its own"
+                        + " number: %s), so the extension was NOT kept", bestExtra,
+                        bestExtra == 1 ? "" : "s", best.report.pulseLine()) : "",
+                fusion.report.describe());
         return null;
     }
 
@@ -808,6 +860,30 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 lifted.report.stepMeasured ? fmtDb(lifted.report.junctionStepDb) : "not measurable",
                 fmtDb(StemFusion.JUNCTION_STEP_MAX_DB));
         return lifted;
+    }
+
+    /**
+     * One more step of hold, re-planned from the same material: the junction and the incoming's
+     * entry are re-derived by {@link StemFusion#plan} with {@code extraHoldSteps}, so every clause
+     * still applies — a step the budget or the incoming's vocal-free window cannot pay for comes
+     * back invalid and the caller's loop stops there.
+     */
+    private static StemFusion.Plan extendHold(Request request, int extra,
+                                              float[][][] headStems, StemFusion.BodyLevel body,
+                                              long firstVocalMs, StemFusion.IncomingOn incomingOn,
+                                              double aBeatMs, double bBeatMs, double[] aBars,
+                                              double[] headBarsMs, long aDurMs,
+                                              StemFusion.VocalQuiet quiet, StemFusion.Groove groove) {
+        StemFusion.Plan attempt = StemFusion.plan(new StemFusion.Input(aDurMs, request.blendMs,
+                request.removalMs, request.incomingContentStartMs, aBeatMs,
+                request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
+                headBarsMs, quiet, groove, body, firstVocalMs, incomingOn, extra));
+        return attempt != null && attempt.valid ? attempt : null;
+    }
+
+    /** The step one plan's table uses, ms. */
+    private static double chosenStepMs(StemFusion.Plan plan) {
+        return plan == null || plan.barStepMs <= 0d ? 0d : plan.barStepMs;
     }
 
     /** Two decimals, for a log line. */
