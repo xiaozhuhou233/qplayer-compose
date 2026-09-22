@@ -161,6 +161,52 @@ public class StemBridgeTest {
         carriedBeats = countBursts(layer[0], 0, layer[0].length);
         ok(Math.abs(sourceBeats - carriedBeats) <= 1,
                 "source beats " + sourceBeats + " vs carried " + carriedBeats);
+        // And the spacing says the same thing exactly: in the FILE the carried beats are a
+        // beat-of-the-outgoing times the speed apart (the second burst, which the source puts at
+        // 0.5s, lands at 0.53s), so the deck playing the file at that speed hands them back at the
+        // outgoing track's own 0.5s. The opposite sense would leave them at 0.472s apart, which is
+        // the speed² the round-17 defect played at.
+        assertEquals(beatSec * speed, secondBurstAtSec(layer[0]), 0.02d);
+    }
+
+    /** The same stems with one signal LENGTHENED by a ratio: the direction
+     *  {@link StemBridge#stretch} is documented in, and the one the deck's own playback undoes. */
+    @Test
+    public void theCarryIsLengthenedByTheSpeedNotShortenedByIt() {
+        double beatSec = 0.5d;
+        double speed = 1.06d;
+        float[][] tail = bassline(beatSec, 12d, 60d, 0.4d);
+        float[][] stretched = StemBridge.stretch(tail, 0, RATE, speed);
+        // One second of source comes back as 1.06 s, with its beats 6% further apart: lengthened,
+        // which is what the doc says and what the fusion's own carry does.
+        assertEquals((int) Math.floor(RATE * speed), stretched[0].length);
+        assertEquals(beatSec * speed, secondBurstAtSec(stretched[0]), 0.02d);
+        assertEquals(RATE, StemBridge.stretch(tail, 0, RATE, 1d)[0].length);
+        // The fusion's carry and the bridge's stretch are the same arithmetic: the same source
+        // read at the same ratio gives the same length (see StemFusion.carried).
+        float[][] fused = StemFusion.carried(tail, 0, RATE, speed, (int) Math.round(RATE * speed));
+        assertEquals(stretched[0].length, fused[0].length);
+        for (int i = 0; i < Math.min(2000, fused[0].length); i++) {
+            assertEquals(stretched[0][i], fused[0][i], 1e-7f);
+        }
+    }
+
+    /** The onset of the second decaying burst in a signal, seconds — where the material's own beat
+     *  is, as the file holds it. */
+    private static double secondBurstAtSec(float[] pcm) {
+        int frame = (int) Math.round(0.01d * RATE);
+        int seen = 0;
+        boolean quiet = true;
+        for (int i = 0; i + frame < pcm.length; i += frame) {
+            double peak = 0;
+            for (int j = 0; j < frame; j++) peak = Math.max(peak, Math.abs(pcm[i + j]));
+            if (peak > 0.25d && quiet) {
+                seen++;
+                if (seen == 2) return i / (double) RATE;
+            }
+            quiet = peak <= 0.02d;
+        }
+        return -1d;
     }
 
     /** How many bursts start in a slice: a frame above a quarter of full scale, after silence. */

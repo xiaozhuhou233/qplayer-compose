@@ -224,11 +224,22 @@ public final class StemBridge {
      * ({@code periodB/periodA} — the tempo lock of {@link MixNaturaliser}), so everything inside
      * it is heard that much faster. Carrying the outgoing's bass at unity would carry it at the
      * wrong tempo and the "continuation" would be a flam. Stretching it by {@code speed} inside
-     * the file makes it heard at the outgoing track's own tempo — and because the stretch is a
-     * plain resample it moves the bass's pitch by the same ratio, which at the ±8% the tempo lock
-     * allows is ±1.3 semitones. That is a real artefact and it is reported as one
-     * ({@link Report#pitchOffsetSemitones}). When no tempo was applied ({@code speed == 1.0} — a
-     * pair whose grids already hold, the ordinary case) the carried bass is sample-exact.
+     * the file makes it heard at the outgoing track's own tempo <em>and its own pitch</em>: the
+     * plain resample drops the pitch by {@code speed} (which is what {@link
+     * Report#pitchOffsetSemitones} records about the material <em>as written</em>) and the deck's
+     * own playback rate puts it back, exactly, because the two ratios are the same number.
+     *
+     * <p>⚠️ <b>The stretch lengthens; it does not shorten</b> ({@link #stretch}'s ratio is the
+     * factor the signal is lengthened by, and the two must agree or the carry is heard at
+     * {@code speed²}). Reading the material <em>faster</em> on the way in — which this method did
+     * until round 18, against its own javadoc — would be the flam this stretch exists to remove,
+     * doubled: at the ±8% the tempo lock allows, a carried bar would land up to 16.6% early and
+     * up to 1.3 semitones sharp. No device has ever played a bridge (see AI_HANDOFF §零: the one
+     * bridge that was ever rendered was never played), so nothing about the legacy path is
+     * preserved by keeping the old sense — the change is named here rather than made silently.
+     *
+     * <p>When no tempo was applied ({@code speed == 1.0} — a pair whose grids already hold, the
+     * ordinary case) the carried bass is sample-exact either way.
      *
      * @param outgoingBass  the outgoing tail's bass stem, {@code [channel][sample]}
      * @param rate          its sample rate
@@ -265,18 +276,27 @@ public final class StemBridge {
      *
      * <p>A plain resample: it changes the tempo and the pitch together, which is what is wanted
      * here (the carried bass has to be heard at the outgoing track's tempo, and the pitch error
-     * that buys is reported rather than hidden). {@code ratio} is the factor the signal is
-     * <em>lengthened</em> by: 1.0752 stretches it by 7.5% and drops it by 1.3 semitones.
+     * that buys <em>inside the file</em> is reported rather than hidden). {@code ratio} is the
+     * factor the signal is <em>lengthened</em> by: 1.0752 stretches it by 7.5% and drops it by
+     * 1.3 semitones — and the deck, which plays this file at that same 1.0752, hands the material
+     * to the listener at its own tempo and its own pitch again.
+     *
+     * <p>Reads {@code frames} samples of the source from the first one at or after {@code from} and
+     * returns {@code frames * ratio} of them (the interpolator runs out of source at the end of the
+     * array, so a take that reaches the source's own end is simply shorter). The sense is
+     * {@code StemFusion.carried}'s, which is the same bargain the fusion's carry makes; the two
+     * are pinned together by {@code StemBridgeTest.aStretchedCarryLengthensByTheSpeed...} and
+     * {@code StemFusionTest}.
      */
     static float[][] stretch(float[][] pcm, int from, int frames, double ratio) {
         int channels = pcm.length;
         double r = ratio > 0d ? ratio : 1d;
-        int target = Math.max(1, (int) Math.floor(frames / r));
+        int target = Math.max(1, (int) Math.floor(frames * r));
         float[][] out = new float[channels][target];
         for (int ch = 0; ch < channels; ch++) {
             float[] src = pcm[ch];
             for (int i = 0; i < target; i++) {
-                double at = from + i * r;
+                double at = from + i / r;
                 int lo = (int) at;
                 if (lo >= src.length) continue;
                 int hi = Math.min(lo + 1, src.length - 1);
@@ -337,7 +357,11 @@ public final class StemBridge {
         /** The largest amount by which the sum measured above the louder of its two contributions
          *  in any 100 ms block of the bridge, dB: the doubling measurement. */
         public double doublingDb;
-        /** The pitch error the stretch buys, semitones (0 when no tempo was applied). */
+        /** The pitch the carried layer sits at INSIDE the file, semitones (0 when no tempo was
+         *  applied). It is the plain resample's own artefact and it is exactly what the deck's
+         *  playback rate puts back: the file is played at the ratio the material was stretched by,
+         *  so what the listener hears is the outgoing track's own pitch. Reported rather than
+         *  hidden, which is all the number has ever been for. */
         public double pitchOffsetSemitones;
         /** Beats of the slower of the two grids that carry a low-end attack, over all of them. */
         public int beatsWithAttack;

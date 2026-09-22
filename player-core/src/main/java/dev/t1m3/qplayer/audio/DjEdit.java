@@ -328,30 +328,261 @@ public final class DjEdit {
     public static float[][] renderHead(float[][][] stems, int sampleRate, double windowSec,
                                        Plan plan, int[] clipped, float[][] layer,
                                        int layerStartSample) {
+        return renderHead(stems, sampleRate, windowSec, plan, clipped, null, null, 0, null,
+                layer, layerStartSample, null);
+    }
+
+    /** The gain of one stem row at one position in the edit's own timeline, seconds. */
+    public interface RowGain {
+        double gainOf(StemGesture.Stem row, double atSec);
+    }
+
+    /**
+     * What the head had to clamp, over the part of it that matters.
+     *
+     * <p>The edit is the master, so nothing limits it (see {@link #renderHead}): samples past
+     * full scale are hard-clamped, and the count says whether that ever fired. The window is for
+     * the fusion, where two backings sum and "how much of the <em>passage</em> is at full scale"
+     * is a different question from "how much of the whole head is" — a run of consecutive clamped
+     * samples is a passage mixed too loud, a single one is a splice landing on a peak.
+     */
+    public static final class ClipGuard {
+        /** First and one-past-last sample of the window being watched, in the head's own
+         *  samples. */
+        public final int fromFrame;
+        public final int toFrame;
+        /** How many (channel, sample) pairs inside the window the clamp touched. */
+        public int clipped;
+        /** The longest run of consecutive frames inside the window with a clamped sample. */
+        public int longestRunFrames;
+        /** How many sample pairs the window holds (channels × frames), for the share. */
+        public int pairs;
+
+        public ClipGuard(int fromFrame, int toFrame) {
+            this.fromFrame = Math.max(0, fromFrame);
+            this.toFrame = Math.max(this.fromFrame, toFrame);
+        }
+
+        /** The share of the window's sample pairs that were clamped. */
+        public double share() {
+            return pairs > 0 ? clipped / (double) pairs : 0d;
+        }
+
+        /** The longest clamped run, ms, at the rate the head was rendered at. */
+        public double longestRunMs() {
+            return longestRunFrames * 1000d / rate;
+        }
+
+        /** The run being counted at the frame currently under the loop. */
+        private int run;
+        private int rate = 1;
+    }
+
+    /**
+     * The head's peak limiter — the other half of the fusion's junction (round 18).
+     *
+     * <p><b>Why a limiter and not a divisor.</b> The outgoing track's own master already peaks at
+     * about full scale (measured: 1.00204 on one of the prototype's pairs), so <em>any</em> bed
+     * added under it is over: the first prototype divided the whole head by the peak it found
+     * (1.6878 on that pair, −4.55 dB), and that step — not the music — is what the junction
+     * sounded like to the listener (measured −2.81 / −4.10 / −11.46 dB at 100 / 500 / 2000 ms).
+     * A limiter takes the same peaks without pulling the music down with them: only the frames
+     * that need holding are held, and the level the listener was already at is left alone.
+     *
+     * <p><b>The numbers.</b> Attack {@link #ATTACK_MS} (the gain can travel its whole range in
+     * that time, so no frame waits longer than that for a reduction it needs), release
+     * {@link #RELEASE_MS} (a one-pole back to unity, the slow direction), ceiling {@link #CEILING}
+     * and <b>no makeup gain</b> — the gain is never above 1, so the limiter can only lower a
+     * passage, never raise it. Both channels share one gain (a linked limiter), because a linked
+     * gain is what keeps the image still.
+     *
+     * <p>What it does not do is promise anything about the <em>loudest sample</em>: the attack is a
+     * 1 ms ramp, so a peak that arrives inside that ramp is still over full scale by a little, and
+     * such samples are hard-clamped by {@link #renderHead} and <b>counted</b> — the "last resort"
+     * of the acceptance. A passage that needs many of them is refused by {@link
+     * StemFusion#measure}, not hidden by the limiter.
+     */
+    public static final class Limiter {
+        /** How long the gain may take to reach a reduction it needs. */
+        public static final double ATTACK_MS = 1d;
+        /** The time constant of the gain's return to unity. */
+        public static final double RELEASE_MS = 150d;
+        /** The ceiling the head is held under: full scale, and there is no makeup gain. */
+        public static final double CEILING = 1d;
+
+        /** How much the gain may fall per frame to reach a reduction within {@link #ATTACK_MS}. */
+        private final double attackStep;
+        /** The one-pole's per-frame coefficient for the {@link #RELEASE_MS} return. */
+        private final double releaseStep;
+        private double gain = 1d;
+
+        /** Frames the head was held below unity at all. */
+        public int heldFrames;
+        /** Frames the limiter passed, for the share. */
+        public int frames;
+        /** The deepest gain it went to — 1.0 when it never held anything. */
+        public double deepestGain = 1d;
+
+        public Limiter(int rate) {
+            int attackFrames = Math.max(1, (int) Math.round(ATTACK_MS * Math.max(1, rate) / 1000d));
+            attackStep = 1d / attackFrames;
+            releaseStep = 1d - Math.exp(-1d / Math.max(1d, RELEASE_MS * rate / 1000d));
+        }
+
+        /**
+         * The gain one frame is rendered at, from the peak of that frame's own channels.
+         *
+         * <p>A reduction is taken at up to {@link #ATTACK_MS}'s rate down and a return at
+         * {@link #RELEASE_MS}'s; a frame that needs no reduction is answered with the gain the
+         * release has climbed back to, never with more than unity.
+         */
+        double gainFor(double peak) {
+            frames++;
+            double desired = peak > CEILING ? CEILING / peak : 1d;
+            if (desired < gain) {
+                gain = Math.max(desired, gain - attackStep);
+            } else {
+                gain = Math.min(1d, gain + (desired - gain) * releaseStep);
+            }
+            if (gain < 1d) {
+                heldFrames++;
+                if (gain < deepestGain) deepestGain = gain;
+            }
+            return gain;
+        }
+
+        /** How far the deepest reduction sat below unity, dB (0 when nothing was held). */
+        public double deepestReductionDb() {
+            return deepestGain >= 1d ? 0d : -20d * Math.log10(deepestGain);
+        }
+
+        /** The evidence, for the log line that records the render. */
+        public String describe() {
+            return String.format(java.util.Locale.US,
+                    "the head's peak limiter (attack %.0fms, release %.0fms, no makeup gain) held"
+                            + " %d of %d frames, deepest %.2f dB below unity",
+                    ATTACK_MS, RELEASE_MS, heldFrames, frames, deepestReductionDb());
+        }
+    }
+
+    /**
+     * The same render with the fusion's own gesture: per-row gains for the incoming's own rows,
+     * and the outgoing's carried rows mixed in beside them.
+     *
+     * <p>This is the round-18 shape. {@code incomingGains} replaces the edit's default (unity
+     * except the gate on the voice) with the fusion's table — the incoming's drums and low end
+     * silent until their own bar lines, its melodic bed under them — and {@code carried} is the
+     * outgoing track's material, placed at {@code carriedStartSample} and given its own table.
+     * The voice rule survives untouched: the incoming's vocal row is still
+     * {@link Plan#vocalGainAt}, and the carried material is never the outgoing's voice (the
+     * caller does not carry it — see {@link StemFusion#carry}).
+     *
+     * <p>With both schedules null and an empty carry this is <em>exactly</em> the render above,
+     * statement for statement, which is the point: the non-fusion edit is unchanged by the
+     * fusion's existence.
+     *
+     * @param incomingGains     per-row gains for the incoming's own stems, or null for the
+     *                          default (unity, with the gate on the voice)
+     * @param carried           {@code [stemRow][channel][sample]} of the outgoing's material, or
+     *                          null; rows that were not carried are empty
+     * @param carriedStartSample where {@code carried} starts in the window, samples
+     * @param carriedGains      per-row gains for {@code carried}, or null for unity
+     * @param guard             counted clamps over a window of the render, or null
+     */
+    public static float[][] renderHead(float[][][] stems, int sampleRate, double windowSec,
+                                       Plan plan, int[] clipped, RowGain incomingGains,
+                                       float[][][] carried, int carriedStartSample,
+                                       RowGain carriedGains, float[][] layer, int layerStartSample,
+                                       ClipGuard guard) {
+        return renderHead(stems, sampleRate, windowSec, plan, clipped, incomingGains, carried,
+                carriedStartSample, carriedGains, layer, layerStartSample, guard, null);
+    }
+
+    /**
+     * The same render with the fusion's own peak limiter over it: every frame is summed exactly as
+     * above, the frame's own peak is handed to {@link Limiter#gainFor}, and the sum is scaled by
+     * the gain that comes back <em>before</em> the clamp — so the clamp counts what is past full
+     * scale after the limiter, which is the "last resort" the acceptance measures.
+     *
+     * <p>{@code limiter == null} is the whole-head render of every other path and is bit-for-bit
+     * the statement above it (a gain of exactly 1 scales nothing).
+     *
+     * @param limiter the fusion's limiter, or null for no limiter at all
+     */
+    public static float[][] renderHead(float[][][] stems, int sampleRate, double windowSec,
+                                       Plan plan, int[] clipped, RowGain incomingGains,
+                                       float[][][] carried, int carriedStartSample,
+                                       RowGain carriedGains, float[][] layer, int layerStartSample,
+                                       ClipGuard guard, Limiter limiter) {
         int channels = stems[0].length;
         int length = stems[0][0].length;
         float[][] out = new float[channels][length];
         int clippedCount = 0;
+        double[] sums = new double[channels];
         StemGesture.Stem[] all = StemGesture.Stem.ALL;
         int layerFrames = layer != null && layer.length > 0 && layer[0] != null
                 ? layer[0].length : 0;
+        if (guard != null) {
+            guard.rate = sampleRate;
+            guard.pairs = channels * Math.max(0, Math.min(guard.toFrame, length) - guard.fromFrame);
+        }
         for (int i = 0; i < length; i++) {
             double t = i / (double) sampleRate;
             double vocalGain = plan.vocalGainAt(t);
             int layerAt = i - layerStartSample;
             boolean fromLayer = layerFrames > 0 && layerAt >= 0 && layerAt < layerFrames;
+            boolean watched = guard != null && i >= guard.fromFrame && i < guard.toFrame;
+            boolean thisFrameClamped = false;
+            int carriedAt = i - carriedStartSample;
+            double peak = 0d;
             for (int ch = 0; ch < channels; ch++) {
                 double sum = 0;
                 for (StemGesture.Stem stem : all) {
-                    double gain = stem == StemGesture.Stem.VOCALS ? vocalGain : 1.0;
+                    double gain = incomingGains != null
+                            ? incomingGains.gainOf(stem, t)
+                            : (stem == StemGesture.Stem.VOCALS ? vocalGain : 1.0);
                     if (gain != 0) sum += gain * stems[stem.row()][ch][i];
+                }
+                if (carried != null && carriedAt >= 0) {
+                    for (StemGesture.Stem stem : all) {
+                        int row = stem.row();
+                        if (row >= carried.length || carried[row] == null
+                                || carried[row].length == 0 || ch >= carried[row].length
+                                || carriedAt >= carried[row][ch].length) {
+                            continue;
+                        }
+                        double gain = carriedGains == null ? 1.0 : carriedGains.gainOf(stem, t);
+                        if (gain != 0) sum += gain * carried[row][ch][carriedAt];
+                    }
                 }
                 if (fromLayer && ch < layer.length && layer[ch] != null) {
                     sum += layer[ch][layerAt];
                 }
-                if (sum > 1.0) { sum = 1.0; clippedCount++; }
-                else if (sum < -1.0) { sum = -1.0; clippedCount++; }
+                sums[ch] = sum;
+                double magnitude = Math.abs(sum);
+                if (magnitude > peak) peak = magnitude;
+            }
+            double limit = limiter == null ? 1d : limiter.gainFor(peak);
+            for (int ch = 0; ch < channels; ch++) {
+                double sum = sums[ch] * limit;
+                if (sum > 1.0) {
+                    sum = 1.0;
+                    clippedCount++;
+                    thisFrameClamped = true;
+                } else if (sum < -1.0) {
+                    sum = -1.0;
+                    clippedCount++;
+                    thisFrameClamped = true;
+                }
                 out[ch][i] = (float) sum;
+            }
+            if (watched) {
+                if (thisFrameClamped) {
+                    guard.clipped++;
+                    guard.longestRunFrames = Math.max(guard.longestRunFrames, ++guard.run);
+                } else {
+                    guard.run = 0;
+                }
             }
         }
         if (clipped != null && clipped.length > 0) clipped[0] = clippedCount;

@@ -16,6 +16,7 @@ import ai.onnxruntime.TensorInfo;
 import dev.t1m3.qplayer.audio.DjEdit;
 import dev.t1m3.qplayer.audio.StemBridge;
 import dev.t1m3.qplayer.audio.StemEditRenderer;
+import dev.t1m3.qplayer.audio.StemFusion;
 import dev.t1m3.qplayer.audio.StemGesture;
 import dev.t1m3.qplayer.audio.StemModel;
 import dev.t1m3.qplayer.util.Logger;
@@ -283,7 +284,20 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 request.beatPhaseMs / 1000.0, 0d, windowSec, request.title());
         DjEdit.Plan plan = editPlan(inBars, request, windowSec, removalSec, headMs);
 
-        // 5. The bridge: the outgoing track's low end, carried forward inside this same file.
+        // 5. The fusion (round 18): the two backgrounds combined into ONE passage instead of two
+        //    decks ramping against each other. Attempted before the bridge and instead of it —
+        //    the fusion carries the outgoing's low end itself, on its own bar lines — and every
+        //    way it can fail leaves the render below exactly where it was.
+        //    The clamp count is the render's own: whichever render happens, it is the one in here.
+        int[] clipped = new int[1];
+        Fusion fusion = null;
+        if (request.canFuse()) {
+            fusion = attemptFusion(weights, request, format, stems, inBars, plan, windowSec,
+                    clipped, cancelled);
+            if (cancelled[0]) return null;
+        }
+
+        // 6. The bridge: the outgoing track's low end, carried forward inside this same file.
         //    Everything about it is measured before it is written — see StemBridge, and the
         //    acceptance block below.
         StemBridge.Plan bridge = null;
@@ -292,15 +306,16 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         float[][] bridgeSource = null;
         float[][] outgoingVocals = null;
         long bridgeStartMs = -1L;
-        if (request.canBridge()) {
+        if (fusion == null && request.canBridge()) {
             bridge = planBridge(request, inBars, beatSecIn, removalSec, windowSec);
             if (bridge != null && bridge.fits) {
                 long tailMs = bridgeTailWindowMs(request.outgoingBeatPeriodMs);
                 double durationMs = probeDurationMs(request.outgoingSourcePath);
                 if (durationMs > 0d) {
                     long fromMs = Math.max(0L, Math.round(durationMs - tailMs));
-                    float[][][] tail = separateTail(weights, request, format, fromMs,
+                    Tail separated = separateTail(weights, request, format, fromMs,
                             Math.round(tailMs), cancelled);
+                    float[][][] tail = separated == null ? null : separated.stems;
                     if (tail != null && !cancelled[0]) {
                         double tailSec = tail[0][0].length / (double) StemModel.MODEL_RATE;
                         double outBeatSec = request.outgoingBeatPeriodMs > 0
@@ -352,10 +367,17 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
             }
         }
 
-        // 6. The render.
-        int[] clipped = new int[1];
-        float[][] edited = DjEdit.renderHead(stems, StemModel.MODEL_RATE, windowSec, plan, clipped,
-                layer, layer == null ? 0 : (int) Math.round(bridge.startSec * StemModel.MODEL_RATE));
+        // 7. The render.
+        float[][] edited;
+        if (fusion != null) {
+            // The fusion rendered its own head inside the attempt (its per-row schedule and its
+            // carried material are on it), and the count in `clipped` is that render's.
+            edited = fusion.edited;
+        } else {
+            edited = DjEdit.renderHead(stems, StemModel.MODEL_RATE, windowSec, plan, clipped,
+                    layer, layer == null ? 0
+                            : (int) Math.round(bridge.startSec * StemModel.MODEL_RATE));
+        }
         // The acceptance numbers, measured on the material that went into the file: the carried
         // layer's level against its source, the two contributions at the designed times, the
         // vocals, the comb test, and the pulse. See StemBridge.Report.
@@ -395,11 +417,17 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         //    This is what makes the incoming deck able to open a single source and keep it —
         //    before the blend, through the promotion, and to the end of the track.
         long encodeStart = System.currentTimeMillis();
-        // The name carries the two times the boundary cannot recompute. The renderer owns the
-        // name for that reason (StemEditRenderer.Result): the boundary looks a finished edit up
-        // by key and reads the numbers back out of it.
+        // The name carries the times the boundary cannot recompute — and, for a fusion, WHICH
+        // times they are (StemEditRenderer.Result.suffixOf): `-e`, `-j` and `-f` present mean the
+        // boundary must start the incoming deck at `-e`, cut the outgoing one at `-j` and leave
+        // both low ends to the file. The renderer owns the name for that reason: the boundary
+        // looks a finished edit up by key and reads the numbers back out of it.
         File named = new File(request.outBasePath
-                + StemEditRenderer.Result.suffixOf(bridgeStartMs, Math.round(plan.returnEndSec * 1000d))
+                + StemEditRenderer.Result.suffixOf(bridgeStartMs,
+                        Math.round(plan.returnEndSec * 1000d),
+                        fusion != null ? fusion.plan.entryMs : -1L,
+                        fusion != null ? fusion.plan.junctionMs : -1L,
+                        fusion != null ? fusion.plan.fusionEndMs : -1L)
                 + ".m4a");
         AacFileWriter writer = new AacFileWriter(named, format.rate, 2);
         boolean wrote = false;
@@ -430,18 +458,386 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         }
         Logger.info("transition: DJ edit for {} written: {} ({}KB; {}ms of encode, {}ms of render"
                         + " in all) — the boundary plays this file on the incoming deck when it"
-                        + " gets there",
+                        + " gets there{}",
                 request.title(), named.getAbsolutePath(), bytes / 1024L,
                 System.currentTimeMillis() - encodeStart,
-                System.currentTimeMillis() - startedAt);
-        return new StemEditRenderer.Result(named.getAbsolutePath(), bridgeStartMs,
-                Math.round(plan.returnEndSec * 1000d), bridgeReport != null ? bridgeReport.describe() : "");
+                System.currentTimeMillis() - startedAt,
+                fusion != null ? String.format(java.util.Locale.US,
+                        "; the FUSION: A is cut at %dms of its own file, B starts at %dms of this"
+                                + " one, all of A is gone by %dms of it (%dms of the outgoing"
+                                + " track separated for it in %dms)",
+                        fusion.plan.junctionMs, fusion.plan.entryMs, fusion.plan.fusionEndMs,
+                        fusion.plan.materialWindowMs, fusion.separateMs) : "");
+        return fusion != null
+                ? new StemEditRenderer.Result(named.getAbsolutePath(), -1L,
+                        Math.round(plan.returnEndSec * 1000d), fusion.plan.entryMs,
+                        fusion.plan.junctionMs, fusion.plan.fusionEndMs, fusion.report.describe())
+                : new StemEditRenderer.Result(named.getAbsolutePath(), bridgeStartMs,
+                        Math.round(plan.returnEndSec * 1000d),
+                        bridgeReport != null ? bridgeReport.describe() : "");
+    }
+
+    // --- the fusion ----------------------------------------------------------
+
+    /** What one fusion attempt produced: the head it rendered (with the outgoing's material in
+     *  it), the anchors the boundary reads back out of the file name, and the measurement that
+     *  let it through. */
+    private static final class Fusion {
+        final StemFusion.Plan plan;
+        final float[][] edited;
+        final StemFusion.Report report;
+        final long separateMs;
+
+        Fusion(StemFusion.Plan plan, float[][] edited, StemFusion.Report report, long separateMs) {
+            this.plan = plan;
+            this.edited = edited;
+            this.report = report;
+            this.separateMs = separateMs;
+        }
+    }
+
+    /**
+     * The round-18 attempt: both tracks' backgrounds fused into ONE passage, three bars long,
+     * inside the incoming track's own file — or nothing at all.
+     *
+     * <p><b>Why the shape is what it is.</b> The fusion's anchors are bar lines of the outgoing
+     * track's own grid, and the outgoing track's grid comes from its low end — so the order has to
+     * be: find where its deck can be cut, decide whether a fusion fits there at all, and only then
+     * pay for the separation. That is why the junction is estimated from the low band of a
+     * <em>decoded</em> window ({@link StemFusion#barLinesOfLowBand}) and not from separated
+     * stems: a decode is a tenth of a second, a separation is seconds, and the separation is
+     * exactly what the estimate has to tell the window of.
+     *
+     * <p><b>What "or nothing at all" means.</b> Every failure — no duration for the outgoing file,
+     * a grid that cannot carry the passage, no bar line to cut on, a window the cost bound refuses,
+     * a short separation, a measurement the passage does not pass — returns null. The caller then
+     * renders today's edit from the same material it always did: the bridge when the bridge passes
+     * its own measurement, the plain edit-with-vocal-gate otherwise. Nothing about those paths is
+     * touched by the attempt, and the log says which of them it was and why.
+     */
+    private Fusion attemptFusion(StemModel.Candidate weights, Request request, Format format,
+                                 float[][][] headStems, double[] headBars, DjEdit.Plan edit,
+                                 double windowSec, int[] clipped, boolean[] cancelled)
+            throws Exception {
+        double aBeatMs = request.outgoingBeatPeriodMs;
+        double bBeatMs = request.beatPeriodMs;
+        long aDurMs = Math.round(probeDurationMs(request.outgoingSourcePath));
+        String refused = StemFusion.refusal(aDurMs, request.blendMs, request.removalMs,
+                request.incomingContentStartMs, aBeatMs, bBeatMs, request.speed);
+        if (refused != null) {
+            Logger.info("transition: DJ edit for {}: no fusion — {}. The render is today's edit"
+                            + " (the outgoing's grid {}, the incoming's {}, a {}ms blend starting"
+                            + " the incoming at {}ms of its own file, played at x{})",
+                    request.title(), refused, gridText(aBeatMs), gridText(bBeatMs),
+                    request.blendMs, request.incomingContentStartMs, speedText(request.speed));
+            return null;
+        }
+        long[] probe = StemFusion.probeWindow(aDurMs, aBeatMs, bBeatMs, request.speed,
+                request.blendMs);
+        long[] probeStart = new long[1];
+        long probeStarted = System.currentTimeMillis();
+        float[][] decoded = decodeWindow(request.outgoingSourcePath, format, probe[0], probe[1],
+                request.stillWanted, cancelled, probeStart);
+        if (decoded == null) return null;
+        double[] aBars = StemFusion.barLinesOfLowBand(decoded, format.rate, probeStart[0], aBeatMs,
+                request.outgoingBeatPhaseMs);
+        if (aBars.length == 0) {
+            Logger.info("transition: DJ edit for {}: no fusion — the outgoing track's low end"
+                            + " gave no downbeat, so there is no bar line of its own to cut it on",
+                    request.title());
+            return null;
+        }
+        long probeMs = System.currentTimeMillis() - probeStarted;
+
+        StemFusion.Plan plan = StemFusion.plan(new StemFusion.Input(aDurMs, request.blendMs,
+                request.removalMs, request.incomingContentStartMs, aBeatMs,
+                request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
+                headBars, StemFusion.NO_VOICE_MEASUREMENT));
+        if (!plan.valid) {
+            Logger.info("transition: DJ edit for {}: no fusion — {}. The render is today's edit",
+                    request.title(), plan.reason);
+            return null;
+        }
+        Logger.info("transition: DJ edit for {}: the two backgrounds can be fused — {}. Its own"
+                        + " bar grid came from {} of the outgoing track's low end decoded in"
+                        + " {}ms",
+                request.title(), plan.describe(), gridText(aBeatMs), probeMs);
+
+        long[] material = StemFusion.materialWindow(plan);
+        long separateStarted = System.currentTimeMillis();
+        Tail tail = separateTail(weights, request, format, material[0], material[1], cancelled);
+        if (tail == null || cancelled[0]) return null;
+        long separateMs = System.currentTimeMillis() - separateStarted;
+
+        // Now that the outgoing's voice and its kit have both been separated, the junction's own
+        // bar can be asked the two questions the estimate cannot answer: is the outgoing's groove
+        // playing there (so the fusion carries a rhythm out of the handover rather than a pad), and
+        // is its voice quiet for a beat? Either answer may move the junction, by up to the search
+        // band the material window was widened for.
+        StemFusion.VocalQuiet quiet = StemFusion.quietnessOf(
+                tail.stems[StemGesture.Stem.VOCALS.row()], StemModel.MODEL_RATE, tail.startMs,
+                DjEdit.SILENT_FRAME_DBFS);
+        StemFusion.Groove groove = StemFusion.grooveOf(
+                tail.stems[StemGesture.Stem.DRUMS.row()], tail.stems[StemGesture.Stem.BASS.row()],
+                StemModel.MODEL_RATE, tail.startMs, StemFusion.GROOVE_FLOOR_DBFS);
+        StemFusion.Plan chosen = StemFusion.plan(new StemFusion.Input(aDurMs, request.blendMs,
+                request.removalMs, request.incomingContentStartMs, aBeatMs,
+                request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
+                headBars, quiet, groove));
+        if (!chosen.valid) {
+            Logger.info("transition: DJ edit for {}: no fusion — the junction could not be placed"
+                    + " on the separated material ({}). The render is today's edit",
+                    request.title(), chosen.reason);
+            return null;
+        }
+        if (chosen.junctionMs != plan.junctionMs) {
+            Logger.info("transition: DJ edit for {}: the outgoing deck is cut {}ms {} than the"
+                            + " distance alone would put it, at {}ms — the bar line there is {} —"
+                            + " and the ramp is %dms long as a result",
+                    request.title(), Math.abs(chosen.junctionMs - plan.junctionMs),
+                    chosen.junctionMs > plan.junctionMs ? "later" : "earlier", chosen.junctionMs,
+                    chosen.grooveAtJunction
+                            ? (chosen.quietAtJunction
+                                    ? "one where its groove is playing and its voice is quiet for a"
+                                            + " beat"
+                                    : "one where its groove is playing")
+                            : chosen.quietAtJunction
+                                    ? "one where its voice is quiet for a beat"
+                                    : "no better than the nearest line (no candidate had a groove"
+                                            + " or a quiet voice)",
+                    aDurMs - StemFusion.CUT_BACK_MS - chosen.junctionMs);
+        } else if (chosen.grooveAtJunction) {
+            Logger.info("transition: DJ edit for {}: the junction at {}ms is the nearest bar line"
+                            + " and it is one the outgoing's own groove is playing on (its voice"
+                            + " {}, so the cut lands {})",
+                    request.title(), chosen.junctionMs,
+                    chosen.quietAtJunction ? "is quiet for a beat there" : "is not measured quiet",
+                    chosen.quietAtJunction ? "between phrases" : "wherever the bar puts it");
+        } else {
+            Logger.info("transition: DJ edit for {}: the junction at {}ms is the nearest bar line"
+                            + " and no candidate bar within {}ms of the target had the outgoing's"
+                            + " groove playing (the passage is %s); the make-up gain below is what"
+                            + " answers a junction like this",
+                    request.title(), chosen.junctionMs, chosen.searchBandMs,
+                    chosen.quietAtJunction ? "voice-free for a beat" : "not measured voice-free");
+        }
+        plan = chosen;
+
+        boolean melody = !melodyIsTheVoice(tail, plan);
+        if (!melody) {
+            Logger.info("transition: DJ edit for {}: the outgoing's melodic row over this passage"
+                            + " measures as its VOICE, so it is not carried at all — the fusion is"
+                            + " its drums and its low end, which is what the groove needs",
+                    request.title());
+        }
+        // The level the listener is already at when the fusion's first sample arrives: the outgoing
+        // track's own master over the last 500 ms before the junction. Measured off the decoded
+        // probe window, and it is what the fusion's own step is judged against (see
+        // StemFusion.JUNCTION_STEP_MAX_DB) — a fusion that cannot sit at this level is refused.
+        float[][] outgoingMaster = masterBefore(decoded, format.rate, probeStart[0], plan.junctionMs);
+        if (outgoingMaster == null) {
+            Logger.info("transition: DJ edit for {}: no fusion — the outgoing master's last {}ms"
+                            + " before the junction at {}ms is not inside the {}ms of its file this"
+                            + " render decoded from {}ms, so the junction's own step cannot be"
+                            + " measured, and a fusion whose level nobody measured is not one this"
+                            + " render will write",
+                    request.title(), StemFusion.STEP_WINDOW_MS, plan.junctionMs, probe[1],
+                    probe[0]);
+            return null;
+        }
+        Fusion fusion = fusionWithMakeup(request, headStems, plan, edit, windowSec, clipped,
+                tail, melody, separateMs, outgoingMaster);
+        if (fusion.report.acceptable) return fusion;
+        if (melody && fusion.report.voiceAlignmentMelody > StemFusion.VOICE_CARRY_LIMIT) {
+            // The melodic carry is the outgoing's voice. That is not a reason to abandon the
+            // fusion: the row is dropped, the drums and the low end stay, and the passage is
+            // measured again — the degradation this design names in advance.
+            Logger.warn("transition: DJ edit for {}: the melodic carry measures as the outgoing's"
+                            + " voice (it aligns {} with its vocal stem), so it is DROPPED and the"
+                            + " fusion is re-measured without it",
+                    request.title(), String.format(java.util.Locale.US, "%.2f",
+                            fusion.report.voiceAlignmentMelody));
+            fusion = fusionWithMakeup(request, headStems, plan, edit, windowSec, clipped,
+                    tail, false, separateMs, outgoingMaster);
+            if (fusion.report.acceptable) return fusion;
+        }
+        Logger.warn("transition: DJ edit for {}: the fusion did not pass its own measurement, so"
+                        + " it is NOT in this edit — the render falls back to today's (the bridge"
+                        + " if it passes its own measurement, the plain edit-with-vocal-gate"
+                        + " otherwise), and {}ms of the outgoing track were separated for"
+                        + " nothing. The measurement: {}",
+                request.title(), separateMs, fusion.report.describe());
+        return null;
+    }
+
+    /**
+     * One fusion, rendered at the level its own junction asks for (round 3).
+     *
+     * <p>The make-up gain is measured, not designed: the first render is made with none, the step
+     * it reports ({@link StemFusion#STEP_WINDOW_MS} of the fusion against {@link
+     * StemFusion#STEP_WINDOW_MS} of the outgoing's own master) is the reduction the outgoing's
+     * carried rows are lifted by — clamped to {@link StemFusion#MAKEUP_MAX_DB} and only ever a
+     * lift — and the head is then rendered again with them lifted, before its limiter, so what the
+     * limiter holds is the passage at the level it is actually played at. The acceptance re-checks
+     * the step clause on the result as it always did, which is what refuses a fusion needing more
+     * than the clamp.
+     *
+     * <p>A second render costs a few milliseconds of arithmetic on material already in memory; a
+     * separate separation would not, which is why the make-up is solved this way and not by
+     * re-planning.
+     *
+     * <p>Only the outgoing's rows move: {@link StemFusion#applyMakeup} scales the carried material
+     * and nothing else, so the incoming's rows are untouched and nothing outside the fusion window
+     * changes by a sample.
+     */
+    private Fusion fusionWithMakeup(Request request, float[][][] headStems, StemFusion.Plan plan,
+                                    DjEdit.Plan edit, double windowSec, int[] clipped, Tail tail,
+                                    boolean melody, long separateMs, float[][] outgoingMaster) {
+        Fusion first = renderFusion(request, headStems, plan, edit, windowSec, clipped, tail,
+                melody, separateMs, outgoingMaster, 0d);
+        double makeup = StemFusion.makeupDb(
+                first.report.stepMeasured ? first.report.junctionStepDb : Double.NaN);
+        if (!(makeup > 0d)) {
+            if (first.report.stepMeasured && first.report.junctionStepDb > 0d) {
+                Logger.info("transition: DJ edit for {}: the fusion's first {}ms measures %+.2f dB"
+                                + " against the outgoing track's own last {}ms — it is already at"
+                                + " (or above) the listener's level, so no make-up gain is applied",
+                        request.title(), StemFusion.STEP_WINDOW_MS,
+                        first.report.junctionStepDb, StemFusion.STEP_WINDOW_MS);
+            }
+            return first;
+        }
+        Fusion lifted = renderFusion(request, headStems, plan, edit, windowSec, clipped, tail,
+                melody, separateMs, outgoingMaster, makeup);
+        Logger.info("transition: DJ edit for {}: the fusion's junction measured {} dB against the"
+                        + " outgoing track's own last {}ms — the voice the fusion removes was that"
+                        + " much of the energy — so the outgoing's carried rows are lifted {} dB"
+                        + " (the most is {} dB; the incoming's rows are untouched and nothing"
+                        + " outside the fusion window is moved). The step is now {} dB, against the"
+                        + " {} dB the clause allows",
+                request.title(), fmtDb(first.report.junctionStepDb), StemFusion.STEP_WINDOW_MS,
+                fmtDb(makeup), (int) StemFusion.MAKEUP_MAX_DB,
+                lifted.report.stepMeasured ? fmtDb(lifted.report.junctionStepDb) : "not measurable",
+                fmtDb(StemFusion.JUNCTION_STEP_MAX_DB));
+        return lifted;
+    }
+
+    /** Two decimals, for a log line. */
+    private static String fmtDb(double db) {
+        return String.format(java.util.Locale.US, "%+.2f", db);
+    }
+
+    /**
+     * The outgoing track's own master over the {@link StemFusion#STEP_WINDOW_MS} before the
+     * junction, at the model's rate — the level the listener is already at when the fusion's first
+     * sample arrives, and the other half of the junction's step measurement.
+     *
+     * <p>Read off the decoded probe window: that decode is the only material of the outgoing track
+     * this render holds that is not separated (and the junction's own bar grid was estimated from
+     * it), so it is also the cheapest place the level can come from. Null when the window does not
+     * reach the junction's own 500 ms — and then the fusion is refused, because a step nobody
+     * measured is the one thing this round is about.
+     */
+    private static float[][] masterBefore(float[][] decoded, int rate, long decodedStartMs,
+                                          long junctionMs) {
+        if (decoded == null || decoded.length == 0 || decoded[0] == null) return null;
+        long from = Math.max(0L, junctionMs - StemFusion.STEP_WINDOW_MS);
+        if (decodedStartMs > from) return null;
+        int fromFrame = (int) Math.round((from - decodedStartMs) * rate / 1000d);
+        int frames = (int) Math.round((junctionMs - from) * rate / 1000d);
+        if (frames <= 0 || fromFrame < 0 || fromFrame + frames > decoded[0].length) return null;
+        float[][] out = new float[decoded.length][frames];
+        for (int ch = 0; ch < decoded.length; ch++) {
+            System.arraycopy(decoded[ch], fromFrame, out[ch], 0, frames);
+        }
+        return resample(out, rate, StemModel.MODEL_RATE);
+    }
+
+    /** One fusion render and its measurement. Called twice at most: once as planned, and once
+     *  without the melodic carry when that carry measured as the outgoing's voice.
+     *
+     *  <p>The head is rendered with the fusion's own {@link DjEdit.Limiter} over it (1 ms attack,
+     *  150 ms release, no makeup gain): the outgoing's master already peaks at about full scale, so
+     *  a bed under it clips, and the round's measurement of a static divisor is what a limiter is
+     *  here instead of. What the clamp still has to touch is counted by the guard and is the
+     *  acceptance's last resort. */
+    private Fusion renderFusion(Request request, float[][][] headStems, StemFusion.Plan plan,
+                                DjEdit.Plan edit, double windowSec, int[] clipped, Tail tail,
+                                boolean melody, long separateMs, float[][] outgoingMaster,
+                                double makeupDb) {
+        int rate = StemModel.MODEL_RATE;
+        int startFrame = (int) Math.round(plan.entryMs * (double) rate / 1000d);
+        int frames = (int) Math.round(plan.windowMs * (double) rate / 1000d);
+        float[][][] carried = StemFusion.applyMakeup(StemFusion.gate(
+                StemFusion.carry(tail.stems, rate, tail.startMs, plan, request.speed, melody),
+                plan, melody, rate), makeupDb);
+        DjEdit.ClipGuard guard = new DjEdit.ClipGuard(startFrame, startFrame + frames);
+        DjEdit.Limiter limiter = new DjEdit.Limiter(rate);
+        float[][] edited = DjEdit.renderHead(headStems, rate, windowSec, edit, clipped,
+                StemFusion.incomingGains(plan, edit), carried, startFrame, null, null, 0, guard,
+                limiter);
+        Logger.info("transition: DJ edit for {}: {}", request.title(), limiter.describe());
+        float[][][] incoming = new float[4][][];
+        float[][][] source = new float[4][][];
+        int takeFrame = (int) Math.round((plan.sourceFromMs - tail.startMs) * (double) rate / 1000d);
+        int spanFrames = referenceFrames(plan, request.speed, rate);
+        for (StemGesture.Stem stem : StemGesture.Stem.ALL) {
+            incoming[stem.row()] = copyOf(headStems[stem.row()], startFrame, frames);
+            source[stem.row()] = copyOf(tail.stems[stem.row()], takeFrame, spanFrames);
+        }
+        float[][][] incomingVocals = new float[4][][];
+        incomingVocals[StemGesture.Stem.VOCALS.row()] = copyOf(
+                vocalsUnderEdit(headStems, edit, startFrame + frames), startFrame, frames);
+        // The head as it will be written, over the window: what the junction's own step is measured
+        // on (its first 500 ms), with the limiter already in it.
+        float[][] head = copyOf(edited, startFrame, frames);
+        StemFusion.Report report = StemFusion.measure(plan, edit,
+                new StemFusion.Material(rate, frames, request.speed, makeupDb, carried, source,
+                        incoming, incomingVocals,
+                        copyOf(tail.stems[StemGesture.Stem.VOCALS.row()], takeFrame, spanFrames),
+                        head, outgoingMaster),
+                melody, request.outgoingBeatPeriodMs / 1000d, request.beatPeriodMs / 1000d, guard);
+        Logger.info("transition: DJ edit for {} — {}", request.title(), report.describe());
+        return new Fusion(plan, edited, report, separateMs);
+    }
+
+    /**
+     * The window the acceptance's carried rows are measured against, samples: the material the
+     * gesture needs, derived from {@code bassMs} — {@code (bassMs + CUT_MS - entryMs)/speed} — and
+     * never from the plan's own {@code sourceSpanMs}.
+     *
+     * <p>Deliberately not {@code sourceSpanMs}: a plan whose span came out shorter than the gesture
+     * needs (round 18's bar-count derivation, which was 1.8 s short on one real pairing) would
+     * otherwise be measured against its own mistake and the "the carry is still there at its own
+     * last cut" clause could never fire. The reference is what the outgoing track's file holds, so
+     * it does not inherit the take's error. What it cannot see is a separation that itself stopped
+     * early — then both sides are short — which is what the plan's own cost clause is for.
+     */
+    private static int referenceFrames(StemFusion.Plan plan, double speed, int rate) {
+        double ratio = speed > 0d ? speed : 1d;
+        double needMs = (plan.bassMs - plan.entryMs + StemFusion.CUT_MS) / ratio;
+        return (int) Math.round(Math.max(plan.sourceSpanMs, needMs) * rate / 1000d);
+    }
+
+    /** Whether the outgoing's melodic row, over the passage the fusion would carry, IS the
+     *  outgoing's voice — measured on the separated stems, before anything is placed. */
+    private static boolean melodyIsTheVoice(Tail tail, StemFusion.Plan plan) {
+        if (tail == null || tail.stems == null) return false;
+        double alignment = StemFusion.voiceAlignment(tail.stems[StemGesture.Stem.OTHER.row()],
+                tail.stems[StemGesture.Stem.VOCALS.row()], StemModel.MODEL_RATE,
+                plan.sourceFromMs - tail.startMs, plan.sourceSpanMs);
+        return alignment > StemFusion.VOICE_CARRY_LIMIT;
+    }
+
+    /** A beat grid for a log line, or "none measured". */
+    private static String gridText(double beatMs) {
+        return beatMs > 0d
+                ? String.format(java.util.Locale.US, "%.1fBPM", 60_000d / beatMs) : "no grid";
     }
 
     /** The incoming's vocal stem under the edit's own gain curve, over the part of the window a
      *  bridge covers: what the bridge report's "no vocals" clause measures. */
-    private static float[][] vocalsUnderEdit(float[][][] stems, DjEdit.Plan plan, int frames) {
-        float[][] vocals = stems[StemGesture.Stem.VOCALS.row()];
+    private static float[][] vocalsUnderEdit(float[][][] stems, DjEdit.Plan plan, int frames) {        float[][] vocals = stems[StemGesture.Stem.VOCALS.row()];
         int limit = Math.min(frames, vocals[0].length);
         float[][] out = new float[vocals.length][limit];
         for (int i = 0; i < limit; i++) {
@@ -579,23 +975,41 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 : String.format(java.util.Locale.US, "%.4f", speed);
     }
 
+    /** A separated window of the outgoing track, and where it really starts in that track's file.
+     *
+     *  <p>The start is not the offset that was asked for: the extractor's sync seek lands on the
+     *  sample it can start from, which is at or before it. A bridge does not care (it takes the
+     *  last whole bars of whatever it was given), but a fusion does — the material it carries has
+     *  to begin on the exact bar line the outgoing deck is cut on, and that is a position inside
+     *  this window. */
+    private static final class Tail {
+        final float[][][] stems;
+        final long startMs;
+
+        Tail(float[][][] stems, long startMs) {
+            this.stems = stems;
+            this.startMs = startMs;
+        }
+    }
+
     /**
-     * The outgoing track's tail, separated: the other half of the bridge. Decoded from an
-     * offset (the extractor's own sync seek) and run through the same model and the same proven
+     * The outgoing track's tail, separated: the other half of the bridge. Decoded from an offset
+     * (the extractor's own sync seek) and run through the same model and the same proven
      * configuration as the incoming's head, so the two windows are separated by the same
      * instrument — which is the only thing that makes "this bar of A against this bar of B" a
      * meaningful statement.
      */
-    private float[][][] separateTail(StemModel.Candidate weights, Request request, Format format,
-                                     long fromMs, long windowMs, boolean[] cancelled)
+    private Tail separateTail(StemModel.Candidate weights, Request request, Format format,
+                              long fromMs, long windowMs, boolean[] cancelled)
             throws Exception {
         long frames = windowMs * format.rate / 1000L;
         final float[][] tail = new float[2][(int) frames];
         long[] decoded = new long[1];
+        long[] firstPtsUs = new long[1];
         boolean[] inner = new boolean[1];
         long started = System.currentTimeMillis();
         boolean completed = decode(request.outgoingSourcePath, 2, fromMs, tail[0].length,
-                request.stillWanted, inner, (pcm, block) -> {
+                request.stillWanted, inner, firstPtsUs, (pcm, block) -> {
                     for (int ch = 0; ch < tail.length && ch < pcm.length; ch++) {
                         System.arraycopy(pcm[ch], 0, tail[ch], (int) decoded[0], block);
                     }
@@ -607,18 +1021,84 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         }
         if (!completed || decoded[0] < format.rate / 4L) {
             Logger.warn("transition: DJ edit: the outgoing tail decoded to only {} frames from"
-                    + " {}ms; no bridge", decoded[0], fromMs);
+                    + " {}ms; nothing is carried from it", decoded[0], fromMs);
             return null;
         }
         float[][] window = trim(tail, (int) decoded[0]);
         float[][] forModel = resample(window, format.rate, StemModel.MODEL_RATE);
         float[][][] stems = separate(weights, forModel, request.stillWanted);
         if (stems == null) return null;
-        Logger.info("transition: DJ edit: the outgoing tail ({}ms from {}ms of its file)"
-                        + " separated in {}ms", Math.round(decoded[0] * 1000L / format.rate),
-                fromMs, System.currentTimeMillis() - started);
-        return stems;
+        long startMs = windowStartMs(firstPtsUs[0], fromMs);
+        Logger.info("transition: DJ edit: the outgoing tail ({}ms from {}ms of its file, actually"
+                        + " starting at {}ms) separated in {}ms",
+                Math.round(decoded[0] * 1000L / format.rate), fromMs, startMs,
+                System.currentTimeMillis() - started);
+        return new Tail(stems, startMs);
     }
+
+    /**
+     * Where a decoded window really starts, ms: the first decoded sample's timestamp when the
+     * codec gave one that can be this window's start, and the offset that was asked for when it
+     * did not.
+     *
+     * <p>The seek is the extractor's own {@code SEEK_TO_CLOSEST_SYNC}, so the truth is at or
+     * before the request — a timestamp after it, or implausibly far before it, is not this
+     * window's start and is refused rather than believed (the offset is then the best available
+     * answer, and a fusion measured against a start it is not sure of is a fusion that can be
+     * refused by its own acceptance rather than placed on a guess).
+     */
+    private static long windowStartMs(long firstPtsUs, long requestedFromMs) {
+        long ptsMs = firstPtsUs / 1000L;
+        if (firstPtsUs <= 0L || ptsMs > requestedFromMs + 200L
+                || ptsMs < requestedFromMs - WINDOW_START_LIMIT_MS) {
+            return requestedFromMs;
+        }
+        return ptsMs;
+    }
+
+    /** How far before the requested offset a decoded window's first timestamp may still be taken
+     *  for its start: past this the timestamp belongs to another window. */
+    private static final long WINDOW_START_LIMIT_MS = 5_000L;
+
+    /** The decoded audio of a window of the outgoing track, without separating it — the material a
+     *  fusion's junction estimate is measured on (its low band), which costs a decode instead of a
+     *  separation. Null when the render was cancelled or the decode gave nothing. */
+    private float[][] decodeWindow(String path, Format format, long fromMs, long windowMs,
+                                   BooleanSupplier wanted, boolean[] cancelled, long[] startMsOut)
+            throws Exception {
+        long want = windowMs * format.rate / 1000L;
+        long frames = Math.max(1L, Math.min(want, PROBE_MAX_SEC * format.rate));
+        final float[][] out = new float[2][(int) frames];
+        long[] decoded = new long[1];
+        long[] firstPtsUs = new long[1];
+        boolean[] inner = new boolean[1];
+        boolean completed = decode(path, 2, fromMs, out[0].length, wanted, inner, firstPtsUs,
+                (pcm, block) -> {
+                    for (int ch = 0; ch < out.length && ch < pcm.length; ch++) {
+                        System.arraycopy(pcm[ch], 0, out[ch], (int) decoded[0], block);
+                    }
+                    decoded[0] += block;
+                });
+        if (inner[0]) {
+            cancelled[0] = true;
+            Logger.info("transition: DJ edit cancelled while decoding the outgoing track's window"
+                    + " (the queue moved on)");
+            return null;
+        }
+        if (!completed || decoded[0] < 1L) {
+            Logger.info("transition: DJ edit: the outgoing track's window from {}ms decoded to"
+                    + " nothing; no fusion", fromMs);
+            return null;
+        }
+        if (startMsOut != null && startMsOut.length > 0) {
+            startMsOut[0] = windowStartMs(firstPtsUs[0], fromMs);
+        }
+        return trim(out, (int) decoded[0]);
+    }
+
+    /** A cap on the window the junction estimate decodes, seconds: the estimate is over the low
+     *  band of a few bars and a decode is cheap, but nothing here should be unbounded. */
+    private static final long PROBE_MAX_SEC = 40L;
 
     /** The separated head's length in ms, for the log line above: the removal window plus
      *  one bar of this track and a second of slack, capped. */
@@ -706,6 +1186,21 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
     private boolean decode(String path, int channels, long fromMs, long maxFrames,
                            BooleanSupplier wanted, boolean[] cancelled, Frames sink)
             throws Exception {
+        return decode(path, channels, fromMs, maxFrames, wanted, cancelled, null, sink);
+    }
+
+    /**
+     * The same decode, reporting where the window it handed out really starts.
+     *
+     * <p>{@code firstPtsUs} (single-element, may be null) receives the timestamp of the first
+     * decoded sample: the sync sample the seek landed on, which is at or before {@code fromMs}.
+     * The bridge does not need it — it takes the last whole bars of whatever it was given — but a
+     * fusion does: the material it carries has to begin on the exact position the outgoing deck is
+     * cut at, and that position is inside this window.
+     */
+    private boolean decode(String path, int channels, long fromMs, long maxFrames,
+                           BooleanSupplier wanted, boolean[] cancelled, long[] firstPtsUs,
+                           Frames sink) throws Exception {
         MediaExtractor extractor = new MediaExtractor();
         MediaCodec codec = null;
         try {
@@ -764,6 +1259,9 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                         int take = frames;
                         if (maxFrames >= 0) take = (int) Math.min(frames, maxFrames - decoded);
                         if (take > 0) {
+                            if (firstPtsUs != null && firstPtsUs.length > 0 && decoded == 0L) {
+                                firstPtsUs[0] = info.presentationTimeUs;
+                            }
                             float[][] pcm = new float[channels][take];
                             for (int i = 0; i < take; i++) {
                                 for (int ch = 0; ch < channels; ch++) {

@@ -46,8 +46,8 @@ public interface StemEditRenderer {
      */
     Result render(Request request);
 
-    /** What one render produced. The renderer names the file, and the name carries the two
-     *  times the boundary needs; {@link #path} and the parsed fields are the same facts. */
+    /** What one render produced. The renderer names the file, and the name carries the times
+     *  the boundary needs; {@link #path} and the parsed fields are the same facts. */
     final class Result {
         /** The finished edit. */
         public final String path;
@@ -56,22 +56,55 @@ public interface StemEditRenderer {
         /** Where the incoming track's vocals are back at unity, ms into its own file, or -1
          *  when the render could not say. */
         public final long vocalReturnEndMs;
+        /** A FUSION edit only, else -1: the position in the incoming's own file where the deck
+         *  starts playing and the fusion begins — the boundary seeks the deck here instead of
+         *  its own beat entry, so the deck provably starts where this render planned it. */
+        public final long entryMs;
+        /** A FUSION edit only, else -1: the position in the OUTGOING track's own file of the bar
+         *  line the outgoing live deck is cut on. The ramp starts when that deck's own position
+         *  reaches it, and the file carries the outgoing's material from exactly there. */
+        public final long junctionMs;
+        /** A FUSION edit only, else -1: the position in the incoming's own file where the last
+         *  of the outgoing's material is gone (A's elements leave on bar lines before this). */
+        public final long fusionEndMs;
         /** The renderer's own account of what it did, for the caller's log line. */
         public final String note;
 
         public Result(String path, long bridgeStartMs, long vocalReturnEndMs, String note) {
+            this(path, bridgeStartMs, vocalReturnEndMs, -1L, -1L, -1L, note);
+        }
+
+        public Result(String path, long bridgeStartMs, long vocalReturnEndMs,
+                      long entryMs, long junctionMs, long fusionEndMs, String note) {
             this.path = path;
             this.bridgeStartMs = bridgeStartMs;
             this.vocalReturnEndMs = vocalReturnEndMs;
+            this.entryMs = entryMs;
+            this.junctionMs = junctionMs;
+            this.fusionEndMs = fusionEndMs;
             this.note = note == null ? "" : note;
+        }
+
+        /** Whether this edit carries the two backgrounds fused, i.e. the boundary must cut the
+         *  outgoing deck on {@link #junctionMs} and start the incoming deck on {@link #entryMs}. */
+        public boolean isFusion() {
+            return junctionMs >= 0L && entryMs >= 0L;
         }
 
         /** The suffix the file name carries — the same facts as the fields above, in the form
          *  a later process can read them back from a directory listing. */
         public static String suffixOf(long bridgeStartMs, long vocalReturnEndMs) {
+            return suffixOf(bridgeStartMs, vocalReturnEndMs, -1L, -1L, -1L);
+        }
+
+        public static String suffixOf(long bridgeStartMs, long vocalReturnEndMs,
+                                      long entryMs, long junctionMs, long fusionEndMs) {
             StringBuilder sb = new StringBuilder();
             if (bridgeStartMs >= 0L) sb.append("-b").append(bridgeStartMs);
             if (vocalReturnEndMs >= 0L) sb.append("-v").append(vocalReturnEndMs);
+            if (entryMs >= 0L) sb.append("-e").append(entryMs);
+            if (junctionMs >= 0L) sb.append("-j").append(junctionMs);
+            if (fusionEndMs >= 0L) sb.append("-f").append(fusionEndMs);
             return sb.toString();
         }
 
@@ -118,6 +151,18 @@ public interface StemEditRenderer {
         /** The outgoing track's beat-grid phase in the file, ms. */
         public final double outgoingBeatPhaseMs;
         /**
+         * The blend length the boundary will use for this pair, ms — the ramp the incoming deck
+         * plays inside ({@code removalMs} minus the incoming's own start position).
+         *
+         * <p>Only a fusion needs it: the fusion's window is a whole number of the incoming's bars
+         * and has to fit inside the blend. A non-positive value means "not known", and then the
+         * render is exactly today's edit.
+         */
+        public final long blendMs;
+        /** Where the incoming deck will start playing in its own file today, ms — the reference
+         *  the fusion's own {@code entryMs} is chosen around. Negative means "not known". */
+        public final long incomingContentStartMs;
+        /**
          * The ratio the incoming deck will play at — {@code MixNaturaliser.speed()} for this
          * pair, i.e. what the tempo lock pulls the incoming track by.
          *
@@ -141,6 +186,15 @@ public interface StemEditRenderer {
                        double beatPeriodMs, double beatPhaseMs, String outgoingSourcePath,
                        double outgoingBeatPeriodMs, double outgoingBeatPhaseMs, double speed,
                        BooleanSupplier stillWanted) {
+            this(sourcePath, outBasePath, track, removalMs, beatPeriodMs, beatPhaseMs,
+                    outgoingSourcePath, outgoingBeatPeriodMs, outgoingBeatPhaseMs, speed,
+                    -1L, -1L, stillWanted);
+        }
+
+        public Request(String sourcePath, String outBasePath, Track track, long removalMs,
+                       double beatPeriodMs, double beatPhaseMs, String outgoingSourcePath,
+                       double outgoingBeatPeriodMs, double outgoingBeatPhaseMs, double speed,
+                       long blendMs, long incomingContentStartMs, BooleanSupplier stillWanted) {
             this.sourcePath = sourcePath;
             this.outBasePath = outBasePath;
             this.track = track;
@@ -151,12 +205,22 @@ public interface StemEditRenderer {
             this.outgoingBeatPeriodMs = outgoingBeatPeriodMs;
             this.outgoingBeatPhaseMs = outgoingBeatPhaseMs;
             this.speed = speed > 0d ? speed : 1d;
+            this.blendMs = blendMs;
+            this.incomingContentStartMs = incomingContentStartMs;
             this.stillWanted = stillWanted != null ? stillWanted : () -> true;
         }
 
         /** Whether this request can carry a bridge at all (the outgoing side is available). */
         public boolean canBridge() {
             return outgoingSourcePath != null && !outgoingSourcePath.isEmpty();
+        }
+
+        /** Whether this request can fuse the two backgrounds: the outgoing side is available and
+         *  the boundary's own numbers (blend length, incoming start) came with it — without them
+         *  the fusion's window and its anchor cannot be placed inside the blend the deck will
+         *  really play. */
+        public boolean canFuse() {
+            return canBridge() && blendMs > 0L && incomingContentStartMs >= 0L;
         }
 
         public String title() {

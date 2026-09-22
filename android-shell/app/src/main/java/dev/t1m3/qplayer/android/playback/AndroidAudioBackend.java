@@ -2199,8 +2199,19 @@ public final class AndroidAudioBackend implements AudioBackend {
                 // The curve decides how the two levels cross: LINEAR is the plain
                 // 1-t / t pair, EQUAL_POWER the cos/sin pair whose sum of squares
                 // stays at one (no dip in the middle of the overlap).
-                float outGain = base * clampGain(rampCurve.outGain(t));
-                float inGain = base * clampGain(rampCurve.inGain(t));
+                //
+                // ⚠️ Asked WITH the ramp's length. Every shape but FUSION is written in terms
+                // of `t` alone and answers the same either way; FUSION's whole change-over is a
+                // fixed JUNCTION_XFADE_MS (300ms) hand-over at the TOP of the ramp — linear and
+                // equal-gain, because the two decks carry the same material across it — whose
+                // share of a window this length is only knowable from the length itself (see
+                // FadeCurve.outGain(float, long)). Its outgoing track is at unity for that first
+                // 300ms and at exactly zero from then on, held there for the rest of the ramp
+                // (rampMs − 300), so the release assertion below is looking at a deck that has
+                // been silent for seconds by the time the promotion tears its player down.
+                long rampMs = rampDurationNs / 1000000L;
+                float outGain = base * clampGain(rampCurve.outGain(t, rampMs));
+                float inGain = base * clampGain(rampCurve.inGain(t, rampMs));
                 // The outgoing track's level of its own (the curve's value, without the user's
                 // volume or a duck folded in): this is the number the release assertion and the
                 // tail trace below are about, and the only one comparable across boundaries.
@@ -2298,7 +2309,7 @@ public final class AndroidAudioBackend implements AudioBackend {
                             + " ({}ms of {}ms); the incoming is at {} of unity — the promotion may"
                             + " release the outgoing player from this instant on without a sound",
                     fmt((double) t), elapsedNs / 1000000L, rampDurationNs / 1000000L,
-                    fmt(rampCurve.inGain(t)));
+                    fmt(rampCurve.inGain(t, rampDurationNs / 1000000L)));
             return;
         }
         Logger.info("MediaPlayer: the outgoing track is at {} dB ({} of unity) at t={} of the"
@@ -2306,7 +2317,7 @@ public final class AndroidAudioBackend implements AudioBackend {
                 fmt(FadeCurve.gainDb(gain)), fmt((double) gain), fmt((double) t),
                 elapsedNs / 1000000L, rampDurationNs / 1000000L,
                 sinceLast >= 0L ? sinceLast + "ms after the previous step" : "the first step",
-                fmt(rampCurve.inGain(t)), rampCurve);
+                fmt(rampCurve.inGain(t, rampDurationNs / 1000000L)), rampCurve);
     }
 
     /**
@@ -2331,7 +2342,8 @@ public final class AndroidAudioBackend implements AudioBackend {
         long sinceWrite = (System.nanoTime() - rampOutGainNs) / 1000000L;
         long sinceAudible = rampOutLastAudibleNs > 0L
                 ? (System.nanoTime() - rampOutLastAudibleNs) / 1000000L : 0L;
-        long silentTailMs = Math.round(rampCurve.outSilentTail() * rampDurationNs / 1000000d);
+        long silentTailMs = Math.round(
+                rampCurve.outSilentTail(rampDurationNs / 1000000L) * rampDurationNs / 1000000d);
         if (db <= FadeCurve.INAUDIBLE_DB) {
             Logger.info("MediaPlayer: releasing the outgoing player at silence — the ramp's last"
                             + " write for it was {} of unity ({} dB; the floor a release may happen"
@@ -2343,7 +2355,8 @@ public final class AndroidAudioBackend implements AudioBackend {
                     fmt(rampOutLastAudibleGain),
                     fmt(FadeCurve.gainDb((float) rampOutLastAudibleGain)), sinceAudible,
                     rampCurve, silentTailMs,
-                    Math.round(rampCurve.outSilentTail() * 100f) + " percent");
+                    Math.round(rampCurve.outSilentTail(rampDurationNs / 1000000L) * 100f)
+                            + " percent");
             return;
         }
         Logger.warn("MediaPlayer: RELEASING THE OUTGOING PLAYER WHILE IT IS STILL AUDIBLE — the"

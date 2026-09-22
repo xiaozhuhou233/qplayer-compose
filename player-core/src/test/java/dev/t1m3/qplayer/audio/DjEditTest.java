@@ -255,4 +255,153 @@ public class DjEditTest {
         assertTrue(clipped[0] > 0);
         for (float v : head[0]) assertTrue(Math.abs(v) <= 1.0f);
     }
+
+    // --- the fusion's shape of the same render (round 18) ---------------------
+
+    /**
+     * ⚠️ The invariant the whole fusion rests on: with no fusion schedule and nothing carried,
+     * the general render IS the round-17 render, sample for sample. Every byte of the non-fusion
+     * edit therefore comes out of the same statements it always did.
+     */
+    @Test
+    public void withNoFusionTheRenderIsByteForByteTheOldOne() {
+        float[][][] s = stems(tone(3.0, 0.3, 90), tone(3.0, 0.25, 45), tone(3.0, 0.2, 220),
+                tone(3.0, 0.4, 440));
+        DjEdit.Plan plan = DjEdit.plan(1.5, 2.0);
+        float[][] layer = new float[][]{tone(1.0, 0.5, 60), tone(1.0, 0.5, 60)};
+        int[] oldClipped = new int[1];
+        int[] newClipped = new int[1];
+        float[][] oldWay = DjEdit.renderHead(s, RATE, 3.0, plan, oldClipped, layer, RATE / 10);
+        float[][] newWay = DjEdit.renderHead(s, RATE, 3.0, plan, newClipped, null, null, 0, null,
+                layer, RATE / 10, null);
+        assertEquals(oldClipped[0], newClipped[0]);
+        assertEquals(oldWay[0].length, newWay[0].length);
+        for (int ch = 0; ch < oldWay.length; ch++) {
+            for (int i = 0; i < oldWay[ch].length; i++) {
+                assertEquals("sample " + i + " of channel " + ch,
+                        oldWay[ch][i], newWay[ch][i], 0.0f);
+            }
+        }
+    }
+
+    @Test
+    public void thePeakGuardCountsTheWindowItIsGivenAndItsLongestRun() {
+        // The fusion's window is a slice of the head, and what matters is what the clamp did
+        // inside THAT slice: a long run of clamped samples there is the passage mixed too loud,
+        // where the same run elsewhere is a splice landing on a peak.
+        float[] loud = tone(3.0, 0.9, 100);
+        float[][][] s = stems(loud, loud, loud, zeros(3.0));
+        DjEdit.Plan plan = DjEdit.plan(2.4, 3.0);
+        int[] clipped = new int[1];
+        DjEdit.ClipGuard guard = new DjEdit.ClipGuard(RATE / 2, RATE / 2 + RATE / 4);
+        float[][] head = DjEdit.renderHead(s, RATE, 3.0, plan, clipped, null, null, 0, null, null,
+                0, guard);
+        println("clamped %d of %d pairs in the guarded quarter, longest run %d frames (%.1fms);"
+                        + " %d in the whole window",
+                guard.clipped, guard.pairs, guard.longestRunFrames, guard.longestRunMs(),
+                clipped[0]);
+        assertTrue(guard.clipped > 0);
+        assertEquals(2 * (RATE / 4), guard.pairs);
+        assertTrue("the guarded slice is part of the window", guard.clipped < clipped[0]);
+        // A 100 Hz tone at 2.7x full scale is past the clamp on 76% of every half cycle, so the
+        // clamped part of one cycle is a run of some 170 samples — 3.8 ms, which is exactly the
+        // kind of run the fusion's "no long clipping" clause is a limit on.
+        assertTrue("a clamped run of " + guard.longestRunFrames + " frames",
+                guard.longestRunMs() > 1d);
+        assertTrue(guard.share() > StemFusion.CLIP_SHARE_MAX);
+        for (float v : head[0]) assertTrue(Math.abs(v) <= 1.0f);
+        // And a silent window is watched without anything being counted.
+        DjEdit.ClipGuard quiet = new DjEdit.ClipGuard(0, RATE / 4);
+        DjEdit.renderHead(stems(zeros(3.0), zeros(3.0), zeros(3.0), zeros(3.0)), RATE, 3.0, plan,
+                new int[1], null, null, 0, null, null, 0, quiet);
+        assertEquals(0, quiet.clipped);
+        assertEquals(0, quiet.longestRunFrames);
+        assertEquals(0d, quiet.longestRunMs(), 1e-9);
+    }
+
+    // --- the fusion's limiter (round 18) --------------------------------------
+
+    /**
+     * ⚠️ What the junction's peak guard is now: the outgoing master already peaks at about full
+     * scale, so a bed under it is over — and dividing the whole head by the peak (the first
+     * prototype's guard) pulls the music down with it, which the listener heard as a 卡顿. The
+     * limiter takes the same peaks without touching the level elsewhere, and its own arithmetic is
+     * what this test pins: the reduction a frame needs arrives within
+     * {@link DjEdit.Limiter#ATTACK_MS}, the return to unity takes {@link
+     * DjEdit.Limiter#RELEASE_MS}, and the gain is never above unity (there is no makeup gain).
+     */
+    @Test
+    public void theLimiterAttacksWithinAMillisecondAndReleasesSlowly() {
+        DjEdit.Limiter limiter = new DjEdit.Limiter(RATE);
+        // A frame that needs 6 dB off: the gain walks down one attack step per frame.
+        int attacked = 0;
+        while (limiter.gainFor(2d) > 0.5d + 1e-9) attacked++;
+        int attackLimit = (int) Math.round(DjEdit.Limiter.ATTACK_MS * RATE / 1000d);
+        println("the reduction to half gain arrived in %d frames; ATTACK_MS is %d frames",
+                attacked, attackLimit);
+        assertTrue("the attack must be inside ATTACK_MS: " + attacked + " frames",
+                attacked <= attackLimit);
+        assertTrue("...and it is a ramp, not a jump: " + attacked, attacked > 1);
+
+        // Nothing is being held any more: the gain climbs back, and it takes far longer than the
+        // attack did (150 ms, not 1 ms) -- a fast hold and a slow give-back.
+        int released = 0;
+        while (limiter.gainFor(0.5d) < 0.9d) released++;
+        println("the gain came back to 0.9 in %d frames (%.0fms)", released,
+                released * 1000d / RATE);
+        assertTrue("the release must be the slow direction: " + released,
+                released > 4 * attackLimit);
+        assertTrue("...and it arrives at unity, not past it: " + limiter.gainFor(0.5d),
+                limiter.gainFor(0.5d) <= 1d);
+        assertEquals("the deepest hold is what the 2x peak needed (6 dB), not more", 6.02d,
+                limiter.deepestReductionDb(), 0.02d);
+    }
+
+    /**
+     * The limiter in the render: the head stays under full scale, the clamp count falls by orders
+     * of magnitude (so it is the last resort the fusion's acceptance counts rather than the
+     * mechanism), and the level it costs is nowhere near a static divisor's.
+     */
+    @Test
+    public void theLimiterKeepsTheHeadOffFullScaleAndCostsFarLessThanADivisor() {
+        float[] loud = tone(2.0, 0.9, 100);
+        float[][][] s = stems(loud, loud, loud, zeros(2.0));
+        DjEdit.Plan plan = DjEdit.plan(1.0, 1.0);
+        int length = s[0][0].length;
+        int[] clampedClipped = new int[1];
+        int[] limitedClipped = new int[1];
+        DjEdit.ClipGuard clampedGuard = new DjEdit.ClipGuard(0, length);
+        DjEdit.ClipGuard limitedGuard = new DjEdit.ClipGuard(0, length);
+        float[][] clamped = DjEdit.renderHead(s, RATE, 2.0, plan, clampedClipped, null, null, 0,
+                null, null, 0, clampedGuard);
+        DjEdit.Limiter limiter = new DjEdit.Limiter(RATE);
+        float[][] limited = DjEdit.renderHead(s, RATE, 2.0, plan, limitedClipped, null, null, 0,
+                null, null, 0, limitedGuard, limiter);
+        println("%s; clamped %d of %d pairs, and %d of %d without the limiter",
+                limiter.describe(), limitedGuard.clipped, limitedGuard.pairs,
+                clampedGuard.clipped, clampedGuard.pairs);
+        double limitedPeak = 0d;
+        for (int i = 0; i < length; i++) {
+            limitedPeak = Math.max(limitedPeak, Math.abs(limited[0][i]));
+            assertTrue("the limiter's head is inside full scale at " + i, limitedPeak <= 1.0 + 1e-6);
+        }
+        assertTrue("a 2.7x-over master is clamped without a limiter", clampedClipped[0] > 100_000);
+        assertTrue("with the limiter only the attack's own ramp is left: " + limitedClipped[0],
+                clampedClipped[0] > 10 * Math.max(1, limitedClipped[0]));
+        assertTrue(limiter.heldFrames > 0);
+        // The static guard the prototype used: the whole head down by its own peak. The clamp has
+        // already cut that peak to 1.0 in the render without a limiter, so the visible fact is the
+        // one the limiter's own deepest hold implies — the peak it held was AT LEAST that much over
+        // full scale, and a divisor spends that much on every frame where the limiter takes it only
+        // while the peak is there.
+        double divisorCostAtLeast = 20d * Math.log10(1d / limiter.deepestGain);
+        println("a static divisor would cost at least %.2f dB of head on every frame; the limiter's"
+                        + " deepest hold was %.2f dB", divisorCostAtLeast,
+                limiter.deepestReductionDb());
+        assertTrue("the limiter's cost is bounded by what the peak needed: "
+                        + limiter.deepestReductionDb() + " against " + divisorCostAtLeast,
+                limiter.deepestReductionDb() <= divisorCostAtLeast + 1e-9);
+        assertTrue("...and it is not held on every frame: " + limiter.heldFrames + " of "
+                        + limiter.frames, limiter.heldFrames <= limiter.frames);
+    }
 }
