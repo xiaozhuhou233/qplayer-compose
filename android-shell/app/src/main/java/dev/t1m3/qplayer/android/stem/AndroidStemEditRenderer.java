@@ -439,6 +439,11 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 // the boundary has to be able to tell that from a refusal about the files
                 // themselves — otherwise the pair is never asked again (see the class's WHY_*).
                 + (fusion == null && refusedWhy[0] > 0 ? "-x" + refusedWhy[0] : "")
+                // ⚠️ And the rule set this file was rendered under, so a file that predates the
+                // version cannot be mistaken for a finished edit of the current rules (the
+                // boundary treats a name with no `-r<current>` as stale — see PlayerController's
+                // STALE_LEGACY).
+                + "-r" + StemFusion.RULE_VERSION
                 + ".m4a");
         AacFileWriter writer = new AacFileWriter(named, format.rate, 2);
         boolean wrote = false;
@@ -603,12 +608,22 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         Logger.info("transition: DJ edit for {}: the two backgrounds can be fused — {}. Its own"
                         + " bar grid came from {} of the outgoing track's low end decoded in {}ms",
                 request.title(), plan.describe(), gridText(aBeatMs), probeMs);
-        if (plan.holdForIncoming) {
-            Logger.info("transition: DJ edit for {}: A's rows WAIT for the incoming's own — its"
-                            + " drums are not playing until {}ms and its low end until {}ms of its"
-                            + " own file, so the passage holds them at unity until then (a recede"
-                            + " that started before them would hand the pulse to nobody)",
-                    request.title(), plan.incomingDrumsMs, plan.incomingBassMs);
+        if (plan.incomingDrumsMs >= 0L || plan.incomingBassMs >= 0L) {
+            // ⚠️ Printed whether or not the wait CHANGED anything: this is the measurement the
+            // renderer's own head separation supplies, and a device log that does not show it is a
+            // log nobody can tell from the measurement never having been wired in (which is what
+            // the round-6 device run after da6e789 looked like — the build predated the wiring).
+            Logger.info("transition: DJ edit for {}: the incoming's own rows, off its separated"
+                            + " head — its drums are playing from {}ms and its low end from {}ms of"
+                            + " its own file, against an entry at {}ms and a passage ending at"
+                            + " {}ms: {}",
+                    request.title(), plan.incomingDrumsMs, plan.incomingBassMs, plan.entryMs,
+                    plan.fusionEndMs, plan.holdForIncoming
+                            ? "so A's rows HOLD at unity until " + plan.holdEndMs + "ms before"
+                                    + " their recede (a fade that started before the incoming's own"
+                                    + " row is on hands the pulse to nobody)"
+                            : "so the design's own hold already covers them and A's rows recede"
+                                    + " where they always did");
         }
 
         long[] material = StemFusion.materialWindow(plan);

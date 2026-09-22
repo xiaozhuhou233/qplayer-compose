@@ -878,6 +878,16 @@ public final class StemFusion {
      * loud tenth is "this row is playing", whatever the track's overall level is. One beat wide, so
      * a row that plays on the beat is found on the beat.
      *
+     *  <p>⚠️ <b>The reference is the row's own loud tenth over the WHOLE array, not over the search
+     *  window.</b> That distinction is not cosmetic: the search window is the passage, which on the
+     *  device's pair is 15 s of an intro with no kit in it at all, and a loud tenth measured over
+     *  <em>that</em> is the intro's own two hits (−13.9 dBFS) — so every beat of the intro sat
+     *  within the margin of it and the answer was "playing from the start", the false negative that
+     *  leaves the hole to the acceptance. Over the whole head the same row's loud tenth is the
+     *  kit's (−0.1 dBFS over 45 s, and −13.9 over the intro alone), and the answer is 8 415 ms,
+     *  which is the kit returning. A row whose loud tenth is under
+     *  {@link #INCOMING_ROW_FLOOR_DBFS} anywhere in the head is absent and answers -1.
+     *
      *  <p>⚠️ <b>And it has to be {@link #INCOMING_SUSTAIN_BEATS} beats in a row.</b> One beat above
      *  the margin is not a row playing — it is a hit, a crash, a stray kick — and this measurement
      *  exists to answer "may A's row leave now", which needs a row that STAYS. Measured on the
@@ -903,8 +913,9 @@ public final class StemFusion {
         int from = (int) Math.max(0L, Math.round(fromMs * rate / 1000d));
         int to = Math.min(pcm[0].length, (int) Math.round(toMs * rate / 1000d));
         if (to - from < step) return -1L;
+        if (to < 0 || from > pcm[0].length) return -1L;
         java.util.ArrayList<Double> peaks = new java.util.ArrayList<>();
-        for (int at = from; at + step <= to; at += step) {
+        for (int at = 0; at + step <= pcm[0].length; at += step) {
             double peak = 0d;
             for (int ch = 0; ch < pcm.length; ch++) {
                 if (pcm[ch] == null) continue;
@@ -923,19 +934,25 @@ public final class StemFusion {
         for (int i = 0; i < sorted.length; i++) sorted[i] = peaks.get(i);
         java.util.Arrays.sort(sorted);
         // The row's own loud tenth, the same measure StemBridge's level clauses use: for a drum row
-        // that is "a beat with the kit on it", and for a bass row its note.
+        // that is "a beat with the kit on it", and for a bass row its note. Taken over the whole
+        // array (see the method's own note) so an intro-only window cannot call its own two hits the
+        // row's playing level.
         double loud = sorted[(int) Math.min(sorted.length - 1L, Math.round(0.9d * (sorted.length - 1)))];
         double loudDb = 20d * Math.log10(Math.max(1e-9d, loud));
         if (loudDb < INCOMING_ROW_FLOOR_DBFS) return -1L;
         double floor = loudDb - INCOMING_ON_DB;
+        // The search is the caller's window: the reference is the row's, the question is this
+        // stretch of it.
+        int firstBeat = Math.max(0, (from - 0) / step);
+        int lastBeat = Math.min(peaks.size(), Math.max(firstBeat + 1, (to) / step + 1));
         int run = 0;
-        for (int i = 0; i < peaks.size(); i++) {
+        for (int i = firstBeat; i < lastBeat; i++) {
             run = 20d * Math.log10(Math.max(1e-9d, peaks.get(i))) >= floor ? run + 1 : 0;
             if (run >= INCOMING_SUSTAIN_BEATS) {
                 // The row's run started `INCOMING_SUSTAIN_BEATS` beats ago: the row is playing from
                 // there, which is the instant a recede may start on.
                 int first = i - INCOMING_SUSTAIN_BEATS + 1;
-                return fromMs + (long) Math.round(first * step * 1000d / (double) rate);
+                return (long) Math.round(first * step * 1000d / (double) rate);
             }
         }
         return -1L;
@@ -1831,6 +1848,12 @@ public final class StemFusion {
                         incomingDrumsMs < 0L ? "drums" : "low end", (long) maxSteps * barSteps,
                         in.contentStartMs, maxSteps, stepMs, lowEndFadeSteps), aBar, bBar, lock);
             }
+            // ⚠️ Anchored at the incoming's own content start, not at the entry: this decision is
+            // made before the entry (it feeds the take's own span, which feeds the junction search),
+            // and the entry is a common-grid line within two steps of that start — so the hold can
+            // end up one or two steps LATER than the row's own instant needs. That side of the error
+            // is the safe one: A's row is never faded before the row that replaces it is on, which
+            // is the whole rule, and the cost is a step of A's drums and low end holding on.
             int needed = (int) Math.ceil((late - in.contentStartMs) / (double) barSteps);
             if (needed + lowEndFadeSteps > maxSteps) {
                 return invalid(String.format(Locale.US,

@@ -805,6 +805,12 @@ public final class PlayerController {
      *  seconds of real silence, and starting the next track that deep into its own
      *  music is worse than starting it on a breath. */
     private static final long MAX_OVERLAP_HEAD_SKIP_MS = 3000L;
+
+    /** {@link #staleGridRefusal}'s own code for the third way an edit on disk can be stale: it
+     *  carries no rule version at all (see {@link StemFusion#RULE_VERSION}). Not one of the
+     *  grid codes, because no grid answers for it — what it is a plain edit OF is not in its
+     *  name. */
+    private static final int STALE_LEGACY = -1;
     /** The most a beat-aligned entry may move the incoming track from where its own
      *  content starts. A grid is one period and one phase for a whole track, and the
      *  phase is the least certain part of it: past a few hundred milliseconds the
@@ -4422,6 +4428,18 @@ public final class PlayerController {
      * invisible: {@code djEditBaseName} hashes it into a different name, the lookup finds nothing,
      * the render runs once more, and the cache's own cap evicts the old name in time.
      */
+    /**
+     * Whether a DJ edit's file name carries the current rule version marker
+     * ({@code -r<version>}, written by the renderer — see {@link StemFusion#RULE_VERSION}). A name
+     * without it was written before the marker existed, and what it is a plain edit OF is not
+     * knowable from its name: the boundary re-renders those rather than playing them as finished
+     * edits. The device had exactly that — {@code 1071493184-v17045.m4a}, no {@code -x} marker and
+     * no version — and it hid a fusion for a whole direction until the file was deleted by hand.
+     */
+    static boolean carriesRuleVersion(String name) {
+        return name != null && name.contains("-r" + StemFusion.RULE_VERSION);
+    }
+
     static String djEditKey(String key) {
         return key == null ? null : key + "#r" + StemFusion.RULE_VERSION;
     }
@@ -4693,9 +4711,15 @@ public final class PlayerController {
         // round-12 edit for the same track is already lying there — and a pair that cannot bridge
         // is not re-rendered because a bridged edit for a different outgoing exists.
         final long removalMs = djEditRemovalMs(t);
-        final String wanted = outgoingAudio != null && outgoingKey != null
+        // ⚠️ `djEditKey`, not the bare key: the rule version is what makes an edit rendered under
+        // older arithmetic invisible (see {@link #djEditKey}). This call site was the one that
+        // forgot it, and the device paid for it: `1071493184-v17045.m4a` — written before the
+        // version existed, with no `-x` marker — matched here, so `requestStemEdit` answered "the
+        // DJ edit is already rendered" and no render was ever attempted for that direction. The
+        // file had to be deleted by hand before the pair would fuse.
+        final String wanted = djEditKey(outgoingAudio != null && outgoingKey != null
                 ? key + "@" + removalMs + "|" + outgoingKey
-                : key + "@" + removalMs;
+                : key + "@" + removalMs);
         final String wantedBase = diskCache.djEditBaseName(wanted);
         if (wantedBase != null) {
             for (String name : diskCache.djEditNames()) {
@@ -4706,15 +4730,27 @@ public final class PlayerController {
                 // code was decided by the files or the material, which re-rendering cannot change —
                 // so this is one re-render per healed pair, not one per boundary.
                 int stale = staleGridRefusal(name, wantedBase, grid, outgoingGrid);
+                if (stale == 0 && !carriesRuleVersion(name)) {
+                    // ⚠️ The belt to `djEditKey`'s braces: an edit whose name carries no version
+                    // marker at all was written before the rule set had one, and what it is a plain
+                    // edit OF is not knowable from the name — so it is stale by definition rather
+                    // than treated as today's finished edit.
+                    stale = STALE_LEGACY;
+                }
                 if (stale == 0) {
                     Logger.info("transition: the DJ edit for {} is already rendered ({}), so this"
                             + " boundary plays it", t.title, name);
                     return;
                 }
-                Logger.info("transition: the DJ edit for {} on disk ({}) was rendered when the {}"
-                                + " beat grid was missing, and it is measured now — re-rendering it"
-                                + " (the old file stays playable until this one is written; a fusion"
-                                + " render names itself with -e/-j/-f and wins the lookup)",
+                Logger.info(stale == STALE_LEGACY
+                                ? "transition: the DJ edit for {} on disk ({}) carries no rule"
+                                        + " version, so what it is a plain edit of is not knowable"
+                                        + " from its name — re-rendering it (a fusion render names"
+                                        + " itself with -e/-j/-f and wins the lookup)"
+                                : "transition: the DJ edit for {} on disk ({}) was rendered when the"
+                                        + " {} beat grid was missing, and it is measured now —"
+                                        + " re-rendering it (the old file stays playable until this"
+                                        + " one is written)",
                         t.title, name, stale == 1 ? "incoming track's" : "outgoing track's");
             }
         }

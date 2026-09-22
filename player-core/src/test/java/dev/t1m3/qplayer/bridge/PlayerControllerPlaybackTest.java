@@ -903,6 +903,22 @@ public class PlayerControllerPlaybackTest {
                 PlayerController.djEditKey(key), PlayerController.djEditKey(key));
     }
 
+    /**
+     * ⚠️ And the belt that catches an edit whose name predates the version: the device had
+     * {@code 1071493184-v17045.m4a} — no {@code -xN}, no version marker — and `requestStemEdit`
+     * treated it as today's finished edit, so no render was ever attempted for that direction until
+     * the file was deleted by hand. A name with no {@code -r<current>} is stale by definition.
+     */
+    @Test
+    public void anEditWithoutTheRuleVersionIsStale() {
+        assertTrue(PlayerController.carriesRuleVersion(
+                "1234-v16000-r" + dev.t1m3.qplayer.audio.StemFusion.RULE_VERSION + ".m4a"));
+        assertFalse("a legacy name has no marker at all",
+                PlayerController.carriesRuleVersion("1071493184-v17045.m4a"));
+        assertFalse("and neither has a name from an older rule set",
+                PlayerController.carriesRuleVersion("1234-v16000-r1.m4a"));
+    }
+
     private static void waitForPauseCalls(FakeAudioBackend backend, int target,
                                           long timeoutMs) throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeoutMs;
