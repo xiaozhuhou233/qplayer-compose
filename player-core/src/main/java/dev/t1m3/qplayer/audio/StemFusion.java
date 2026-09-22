@@ -177,6 +177,40 @@ public final class StemFusion {
     }
 
     /**
+     * Whether the junction search would have a candidate at all with a passage of {@code steps}:
+     * the band {@link #bandFor} leaves, split the way {@link #plan} splits it, with at least one of
+     * the outgoing's own bar lines inside it. Cheap (a scan of the grid), and it is the question
+     * that decides whether the gesture has to give — see {@code plan}'s own note.
+     */
+    private static boolean bandHasLine(Input in, long target, long cap, int steps, double stepMs,
+                                       double stretch) {
+        long budget = bandFor(steps, stepMs, stretch, cap);
+        if (budget < 0L || in.aBarLinesMs == null) return false;
+        long forward = Math.min(Math.round(JUNCTION_SEARCH_BARS * in.aBeatMs * BEATS_PER_BAR),
+                Math.max(0L, budget / 2L));
+        long back = Math.min(QUIET_SEARCH_MAX_MS, Math.max(0L, budget - forward));
+        double from = target - back;
+        double to = target + forward;
+        for (double line : in.aBarLinesMs) {
+            if (line >= from && line <= to) return true;
+        }
+        return false;
+    }
+
+    /**
+     * The room the junction search has left with a passage of {@code steps} steps, ms:
+     * {@code cap - sourceSpan - 2*slack}, which is what {@link #plan} splits between the search's
+     * backward and forward reach. The same arithmetic {@link #maxStepsFor} inverts, and it is the
+     * number the gesture has to keep at least one of the outgoing's own bars wide — see
+     * {@code plan}'s own note.
+     */
+    private static long bandFor(int steps, double stepMs, double stretch, long cap) {
+        long sourceSpan = (long) Math.ceil((steps * stepMs + CUT_MS)
+                / (stretch > 0d ? stretch : 1d));
+        return cap - sourceSpan - 2L * A_TAIL_SLACK_MS;
+    }
+
+    /**
      * The shape one pair's own step leaves room for: {@code {holdSteps, lowEndFadeSteps}} of the
      * round-6 gesture, ms of the outgoing's file being the budget.
      *
@@ -1474,9 +1508,18 @@ public final class StemFusion {
                     ? "A's rows cut on its one line (a slam is the cut gesture)"
                     : String.format(Locale.US, "A recedes, never cut: %dms at unity, then its drums"
                             + " fade over %dms and its low end and melodic row over %dms; the"
-                            + " incoming's drums and low end rise over %dms from %dms",
+                            + " incoming's drums and low end rise over %dms from %dms%s",
                     recede.length > 0 ? recede[0] : 0L, recede.length > 1 ? recede[1] : 0L,
-                    recede.length > 2 ? recede[2] : 0L, arriveEndMs - arriveStartMs, arriveStartMs);
+                    recede.length > 2 ? recede[2] : 0L, arriveEndMs - arriveStartMs, arriveStartMs,
+                    // ⚠️ A one-step low end fade is not the design's shape: it is what the gesture
+                    // gave up so the junction search could keep a band at least as wide as one of
+                    // the outgoing's own bars (see `plan`). Said out loud, because the listener
+                    // hears it and a log that does not mention it reads as the design's own.
+                    !slam && lowEndEndMs - holdEndMs < (long) A_LOW_END_FADE_STEPS
+                            * Math.max(1L, Math.round(barStepMs))
+                            ? " (its low end's fade is ONE step: the passage and the junction"
+                                    + " search's own band are paid for out of the same cost cap)"
+                            : "");
             String head = slam
                     ? String.format(Locale.US, "SLAM (the grids are in no relation, so nothing is"
                             + " beat-matched: one bar of the incoming's grid, every element changing"
@@ -1826,6 +1869,9 @@ public final class StemFusion {
         long incomingDrumsMs = -1L;
         long incomingBassMs = -1L;
         boolean holdForIncoming = false;
+        // What the incoming's own rows ask the hold to be, in steps, whether or not the design's
+        // hold already covers it: the shortening below may not go under it.
+        int holdForIncomingSteps = 0;
         if (!slam && in.incoming != NO_INCOMING_MEASUREMENT) {
             int barSteps = Math.max(1, Math.round((float) stepMs));
             int maxSteps = maxStepsFor(stepMs, stretch, cap, in.removalMs, in.contentStartMs);
@@ -1855,6 +1901,7 @@ public final class StemFusion {
             // is the safe one: A's row is never faded before the row that replaces it is on, which
             // is the whole rule, and the cost is a step of A's drums and low end holding on.
             int needed = (int) Math.ceil((late - in.contentStartMs) / (double) barSteps);
+            holdForIncomingSteps = needed;
             if (needed + lowEndFadeSteps > maxSteps) {
                 return invalid(String.format(Locale.US,
                         "the incoming's own %s only start playing at %dms of its file, and the"
@@ -1869,6 +1916,39 @@ public final class StemFusion {
                 holdSteps = needed;
                 holdForIncoming = true;
             }
+        }
+        // ⚠️ And here the two rules that share the cap have to agree about the same milliseconds:
+        // the passage is paid for out of it, and so is the junction search's own band. On the
+        // device's `squabble up -> AGUDO` (a 2 305 ms bar, a locked pair, the 12 000 ms cap) the
+        // design's own 4-step gesture left a ±429 ms band while the outgoing's bar lines are
+        // 2 305 ms apart — no line in it — and the plan died with "no line of the outgoing's grid is
+        // inside the 12000ms the passage can be taken from", which is two of this file's own rules
+        // refusing a pair neither of them has anything against. So the gesture gives: the low
+        // end's fade shortens to one step first (still a fade; the coexistence stays a step and a
+        // third), then the hold — never below the wait the incoming's own rows ask for — and only a
+        // pair whose bar is wider than every affordable band is refused, by the search's own
+        // message, which now says the gesture was already at its shortest.
+        int shortestHold = Math.max(1, holdForIncomingSteps);
+        boolean shortenedForBand = false;
+        if (!slam) {
+            // The question is the direct one — would the search have a candidate at all — and not
+            // "is the band a whole bar wide": a band narrower than a bar still holds a line
+            // whenever one happens to sit in it (the canonical 500 ms fixture leaves 1 920 ms of
+            // band on 2 000 ms bars with a line 250 ms from the target, which is the plan the
+            // design intends, and a blanket "band >= bar" rule broke it).
+            while (!bandHasLine(in, target, cap, holdSteps + lowEndFadeSteps, stepMs, stretch)
+                    && (lowEndFadeSteps > 1 || holdSteps > shortestHold)) {
+                if (lowEndFadeSteps > 1) {
+                    lowEndFadeSteps = 1;
+                } else {
+                    holdSteps--;
+                }
+                shortenedForBand = true;
+            }
+            // The flag means "the gesture could not be made to find a line", which is what the
+            // search's refusal has to say — a pair already at its shortest says it too.
+            shortenedForBand |= !bandHasLine(in, target, cap, holdSteps + lowEndFadeSteps, stepMs,
+                    stretch);
         }
         int steps = slam ? SLAM_STEPS : holdSteps + lowEndFadeSteps;
         // How many steps of the table carry the outgoing's own rows: all of them, for a slam (its
@@ -1915,8 +1995,19 @@ public final class StemFusion {
             return invalid(String.format(Locale.US,
                     "no line of the outgoing's grid is inside the %dms the passage can be taken"
                             + " from (the search covers %dms back and %dms forward of %d outside"
-                            + " it)",
-                    materialWindow, back, forward, target), aBar, bBar, lock);
+                            + " it)%s",
+                    materialWindow, back, forward, target,
+                    shortenedForBand
+                            ? String.format(Locale.US, ", with the gesture already shortened to its"
+                                    + " shortest (%d steps of %.1fms: the incoming's own rows"
+                                    + " %s and the low end's fade is one step) because the passage"
+                                    + " and the search's own band are paid for out of the same"
+                                    + " %.0fms cap",
+                            steps, stepMs,
+                            holdForIncomingSteps > 0 ? "hold A's rows at unity until they arrive"
+                                    : "need no wait",
+                            (double) cap)
+                            : ""), aBar, bBar, lock);
         }
         if (choice.measured && choice.usable == 0) {
             return invalid(String.format(Locale.US,

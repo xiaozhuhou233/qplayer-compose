@@ -182,6 +182,66 @@ public class StemFusionIncomingWaitTest {
                 StemFusion.rowStartMs(always, RATE, 240L, 14_000L, 0d));
     }
 
+    /**
+     * ⚠️ The other rule the passage's own span fights with, on the device's own numbers:
+     * {@code squabble up -> AGUDO} is refused in the plan with
+     * "no line of the outgoing's grid is inside the 12000ms the passage can be taken from (the
+     * search covers 429ms back and 428ms forward of 142742 outside it)". The pair: a 2 305 ms bar
+     * (576.3 ms beats) against AGUDO's 566.4 ms (1.75% out of it, inside LOCK_TOLERANCE, so the
+     * unison cap of 12 000 applies), a 15 s blend, a 157 992 ms outgoing — i.e. the target is
+     * 142 742 ms, the design's own 4-step gesture needs 9 142 ms of the outgoing's file, and what
+     * is left of the cap is a ±429 ms band while the outgoing's bar lines are 2 305 ms apart. No
+     * line, and a pair nobody's rule has anything against: the passage and the search's OWN band
+     * come out of the same cap, so the gesture gives — the low end's fade first, still a fade.
+     */
+    @Test
+    public void theGestureGivesWhenTheSearchBandIsWhatThePassageSqueezed() {
+        StemFusion.Plan plan = StemFusion.plan(squabbleInput());
+        assertTrue(plan.describe(), plan.valid);
+        assertEquals("the low end's fade is one step, not two", Math.round(plan.barStepMs),
+                plan.lowEndEndMs - plan.holdEndMs);
+        assertEquals("and the hold is the design's own two", 2L * Math.round(plan.barStepMs),
+                plan.holdEndMs - plan.entryMs);
+        assertTrue("the log says what the gesture gave up: " + plan.describe(),
+                plan.describe().contains("its low end's fade is ONE step"));
+        // The junction is a line of the outgoing's own grid inside the band the shortened gesture
+        // leaves, and the passage is still three steps of the incoming's.
+        assertEquals("the passage is three steps of the incoming's grid", 3d,
+                plan.windowMs / plan.barStepMs, 0.01d);
+        // A pair whose bar is wider than every affordable band is still refused — by the search's
+        // own message, which now names the shortened gesture.
+        StemFusion.Plan tooWide = StemFusion.plan(wideBarInput());
+        assertFalse(tooWide.describe(), tooWide.valid);
+        assertTrue(tooWide.reason, tooWide.reason.contains("no line of the outgoing's grid is"
+                + " inside"));
+        assertTrue("and it says the gesture was already at its shortest: " + tooWide.reason,
+                tooWide.reason.contains("already shortened to its shortest"));
+    }
+
+    /** The device's own failing pair, in milliseconds: a 2 305.2 ms bar against AGUDO's 566.4 ms
+     *  (locked, so the unison cap of 12 000 applies), a 15 s blend on a 157 992 ms outgoing. */
+    private static StemFusion.Input squabbleInput() {
+        double[] aBars = new double[80];
+        for (int i = 0; i < aBars.length; i++) aBars[i] = 1_185.6d + i * 2_305.2d;
+        double[] bBars = new double[12];
+        for (int i = 0; i < bBars.length; i++) bBars[i] = 900d + i * 2_265.6d;
+        return new StemFusion.Input(157_992L, 15_000L, 15_240L, 240L, 576.3d, 0d, 566.4d, 355d, 1d,
+                aBars, bBars, StemFusion.NO_VOICE_MEASUREMENT,
+                StemFusion.NO_GROOVE_MEASUREMENT, StemFusion.NO_BODY_MEASUREMENT, -1L);
+    }
+
+    /** A pair whose outgoing bar (4 531 ms) is wider than any band a 12 s cap can leave: even the
+     *  shortest gesture cannot put a line of its grid in the search. */
+    private static StemFusion.Input wideBarInput() {
+        double[] aBars = new double[40];
+        for (int i = 0; i < aBars.length; i++) aBars[i] = 1_185.6d + i * 4_531.2d;
+        double[] bBars = new double[12];
+        for (int i = 0; i < bBars.length; i++) bBars[i] = 900d + i * 4_531.2d;
+        return new StemFusion.Input(120_000L, 15_000L, 16_000L, 240L, 1_132.8d, 0d, 1_132.8d, 355d,
+                1d, aBars, bBars, StemFusion.NO_VOICE_MEASUREMENT,
+                StemFusion.NO_GROOVE_MEASUREMENT, StemFusion.NO_BODY_MEASUREMENT, -1L);
+    }
+
     /** A kit on every beat of the window from {@code fromMs}, at {@code amp}. */
     private static float[][] kicks(double sec, long fromMs, long toMs, double amp) {
         float[][] out = new float[2][(int) (sec * RATE)];

@@ -765,11 +765,16 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 first.report.stepMeasured ? first.report.junctionStepDb : Double.NaN);
         if (!(makeup > 0d)) {
             if (first.report.stepMeasured && first.report.junctionStepDb > 0d) {
-                Logger.info("transition: DJ edit for {}: the fusion's first {}ms measures %+.2f dB"
+                // ⚠️ `{}` slots and `fmtDb`, not a printf specifier: this line carried a literal
+                // `%+.2f` that nothing ever substituted, and its third slot took the step's own
+                // double — so the device log read "the fusion's first 500ms measures %+.2f dB
+                // against the outgoing track's own last 0.6796672575850184ms", a dB value printed as
+                // a millisecond count. The line the fix is judged on has to say a level as a level.
+                Logger.info("transition: DJ edit for {}: the fusion's first {}ms measures {} dB"
                                 + " against the outgoing track's own last {}ms — it is already at"
                                 + " (or above) the listener's level, so no make-up gain is applied",
                         request.title(), StemFusion.STEP_WINDOW_MS,
-                        first.report.junctionStepDb, StemFusion.STEP_WINDOW_MS);
+                        fmtDb(first.report.junctionStepDb), StemFusion.STEP_WINDOW_MS);
             }
             return first;
         }
