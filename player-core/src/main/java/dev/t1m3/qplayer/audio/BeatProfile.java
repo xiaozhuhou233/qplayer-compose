@@ -329,8 +329,21 @@ public final class BeatProfile {
      *  uniform 0.083 and on this library's 36 cached tracks named the wrong key on 16
      *  of them. A cache file is a decode's worth of work per track; the cost of
      *  discarding the old ones once is one re-measure per track, and the first play of
-     *  that track pays it off the playback path. */
-    private static final byte VERSION = 5;
+     *  that track pays it off the playback path.
+     *
+     *  <p><b>Version 6 is the same layout, and the first bump that is not about the
+     *  estimator's arithmetic.</b> The profiler now refuses to answer with a pass its own
+     *  deadline truncated — the starvation flag lives in the decode, in the platform half, and
+     *  is not something a stored grid can carry. A 5 file cannot therefore be told from one
+     *  whose numbers came out of a decode that died after four seconds, and that is exactly the
+     *  failure this bump pays for: on this device one track sat at confidence <b>0.19</b> (under
+     *  {@link #MIN_CONFIDENCE}) from a pass starved while DJ edits were rendering, and the cache
+     *  made that reading permanent — the pair it belonged to could not be faded, fused or
+     *  aligned for as long as the file existed, and the head window that would have measured it
+     *  properly was never asked again. So the old files are discarded and every track is
+     *  re-measured, which is the same price this field has always charged for a measurement
+     *  whose meaning changed. */
+    private static final byte VERSION = 6;
 
     /** Twelve bytes plus the key when there is one and the prominence when it was
      *  measured (two bytes): version, a reserved byte, the gating confidence in

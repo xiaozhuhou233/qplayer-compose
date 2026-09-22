@@ -115,6 +115,59 @@ public final class StemFusion {
      *  the incoming's grid the window is already 8 s, so the bound bites around a 50 BPM pair. */
     public static final long FUSION_TAIL_MAX_MS = 12_000L;
 
+    /** The same cap for a <b>relative</b> pair (round 5, revised), ms: 20 000.
+     *
+     *  <p>Why it is not the 12 s the unison case uses: a relative pair's step is `p` bars of the
+     *  incoming's grid, so exactly the pairs this family was widened for — the 2:1 / 1:2 octaves,
+     *  the largest family in the user's library after the unison — have steps of 3.75 s and a
+     *  four-step recede that needs about 15 s of the outgoing's own file. Measured on the harness's
+     *  own grids: {@code owa -> paradise} (476.6 vs 937.6 ms beats, a 1:2 relation 1.67% out) has a
+     *  step of 3750.2 ms and a stretch of 0.9836, so the passage A's rows need is
+     *  {@code ceil((4*3750.2 + 80)/0.9836) = 15 333 ms} of A's file, and the separation window with
+     *  {@link #A_TAIL_SLACK_MS} of lead on either side is <b>17 333 ms</b> — the 12 000 ms cap
+     *  refused it on the cost clause alone. That bound exists to stop a render becoming a minute of
+     *  separation, not to exclude the largest family of pairs there is: the render runs minutes ahead
+     *  of its boundary, so the window is affordable. What it costs, in render seconds: the audio
+     *  through the model for that pair grows from 12 000 ms to 17 333 ms (<b>1.44x</b>), and the model
+     *  runs at roughly 1.5-3x real time on the reference device (12 s of window cost 24-77 s of CPU
+     *  in the harness), i.e. on the order of <b>+8 to +16 s</b> of render CPU. The unison case keeps
+     *  12 000 exactly (and so does a slam, which has no relation to justify the space). */
+    public static final long RELATIVE_TAIL_MAX_MS = 20_000L;
+
+    /** Which cap a plan is measured against: {@link #RELATIVE_TAIL_MAX_MS} for a relative
+     *  (non-unison) relation, {@link #FUSION_TAIL_MAX_MS} otherwise. */
+    public static long tailMaxMs(Relation relation) {
+        return relation != null && !relation.locked() ? RELATIVE_TAIL_MAX_MS : FUSION_TAIL_MAX_MS;
+    }
+
+    /**
+     * The shape one pair's own step leaves room for: {@code {holdSteps, lowEndFadeSteps}} of the
+     * round-6 gesture, ms of the outgoing's file being the budget.
+     *
+     * <p>The preferred shape is {@link #A_HOLD_STEPS} of hold at unity and {@link
+     * #A_LOW_END_FADE_STEPS} of low end fade, which is the 4-bar passage with a full step of
+     * coexistence the design asks for. A pair whose step is long enough that the whole shape does
+     * not fit {@code cap} gets ONE step of hold — still a recede, and the coexistence survives in
+     * time even when it loses a step — and if even that does not fit, the low end's fade shortens
+     * to one step as well. Never zero: the gesture is a fade, not a refusal.
+     *
+     * <p>Both {@link #plan} and {@link #refusal} decide with this one call, because they were
+     * written apart: the clause kept the full shape's arithmetic after the planner learned to
+     * shorten, and then refused pairs (the 4 s-bar family) the planner fused.
+     */
+    private static int[] shapeFor(double stepMs, double stretch, long cap) {
+        double ratio = stretch > 0d ? stretch : 1d;
+        int hold = A_HOLD_STEPS;
+        int lowEnd = A_LOW_END_FADE_STEPS;
+        if ((long) Math.ceil((hold + lowEnd) * stepMs / ratio) + 2L * A_TAIL_SLACK_MS > cap) {
+            hold = 1;
+            if ((long) Math.ceil((hold + lowEnd) * stepMs / ratio) + 2L * A_TAIL_SLACK_MS > cap) {
+                lowEnd = 1;
+            }
+        }
+        return new int[]{hold, lowEnd};
+    }
+
     /** The worst tempo error the two grids may have and still be fused, as a fraction of the
      *  incoming's beat <em>as heard</em>: {@code |aPeriod - bPeriod/speed| / (bPeriod/speed)}.
      *
@@ -217,21 +270,53 @@ public final class StemFusion {
 
     /** The window the junction's step is measured over, ms, and the most it may be, dB.
      *
-     *  <p>500 ms and not 100: the deck-level changeover ({@code FadeCurve.FUSION}'s 300 ms
-     *  equal-gain hand-over between the outgoing deck and this file) is part of what the listener
-     *  hears, so the measurement has to contain it. 3.5 dB is what the measurement of the real
-     *  prototype's junction leaves room for: a clamped-at-the-bus head measured −3.06 dB there
-     *  (and clipped 1352 samples), a statically divided one −6.80 dB, so the limiter has to land
-     *  inside 3.5 and the clause is what refuses a pairing it cannot hold. */
+     *  <p>⚠️ <b>500 ms, and it no longer contains the deck-level change-over.</b> That change-over
+     *  has grown twice since this window was chosen: it was an 80 ms splice, then 300 ms (round 3,
+     *  {@code FadeCurve.FUSION}), and it is now {@code FadeCurve.JUNCTION_XFADE_MS = 2000} — two
+     *  seconds of equal-gain hand-over between the outgoing deck and this file (`1ae22e9`). No
+     *  500 ms window can contain that, and the two numbers are held together from the other side
+     *  instead: {@link #A_HOLD_STEPS} keeps the file's outgoing rows at <b>unity</b> for two steps
+     *  of the table, which is the stretch over which the boundary is fading the outgoing deck out —
+     *  the file plays A's own material at full level through the whole hand-over, so the deck's own
+     *  fade is the only one the listener hears across it and nothing is doubled. (Degenerate case
+     *  worth knowing: a bar of about 2.8 s or more makes two steps ≈ the whole window, so on such a
+     *  pair the hold is most of the passage and the recede happens inside what is left — see the
+     *  adaptive hold in {@link #plan}.)
+     *
+     *  <p>3.5 dB is what the measurement of the real prototype's junction leaves room for: a
+     *  clamped-at-the-bus head measured −3.06 dB there (and clipped 1352 samples), a statically
+     *  divided one −6.80 dB, so the limiter has to land inside 3.5 and the clause is what refuses a
+     *  pairing it cannot hold. */
     public static final long STEP_WINDOW_MS = 500L;
     public static final double JUNCTION_STEP_MAX_DB = 3.5d;
 
-    /** The window the "the carry is still there at its own last cut" clause is measured over, ms:
-     *  the stretch of the outgoing's material immediately before {@code bassMs}. A take that ended
-     *  early (the round-18 defect the material window's derivation fixes) shows up as silence
-     *  exactly here, where every other level clause is measured over a span long enough to average
-     *  it away. */
+    /** The window the "the carry is still there where the gesture takes over" clause is measured
+     *  over, ms: the stretch of the outgoing's material immediately before {@code bassMs} (which
+     *  round 6 made the instant the outgoing's rows <em>start</em> to recede, not the instant they
+     *  are gone). A take that ended early (the round-18 defect the material window's derivation
+     *  fixes) shows up as silence exactly here, where every other level clause is measured over a
+     *  span long enough to average it away. The stretch of the fade after it is
+     *  {@link #carriedBassFadeDb}'s own clause — see {@link #CARRY_FADE_TOLERANCE_DB}. */
     public static final long CARRY_END_WINDOW_MS = 500L;
+
+    /** The RMS an equal-power fade leaves of its own material, dB: a cosine decline from unity to
+     *  the floor over its span has {@code mean(cos^2) = 1/2}, so a row that fades its own material
+     *  measures 3.01 dB under the source. Exact, which is what makes the fade's presence
+     *  measurable — see {@link #CARRY_FADE_TOLERANCE_DB}. */
+    public static final double FADE_RMS_DB = 3.0103d;
+
+    /** How much further under that line the carried low end's own fade may sit and still be the
+     *  material it claims, dB.
+     *
+     *  <p>Round 6's gesture fades A's rows instead of cutting them, which puts the round-18 defect
+     *  (a take shorter than the gesture needs) somewhere the absolute clauses cannot see it: inside
+     *  the fade the rendered row is falling by the table's own design, so measured against the
+     *  source it reads as a shape rather than as a hole. Measured on real material the fade sits
+     *  within about a decibel of {@link #FADE_RMS_DB} (it is analytic, and the low end's own level
+     *  barely moves over four seconds), so the tolerance only has to cover the material's own
+     *  variation between the two spans; 4 dB leaves it that room and still catches a take that ends
+     *  inside the fade (which reads tens of dB under, not four). */
+    public static final double CARRY_FADE_TOLERANCE_DB = 4d;
 
     /** Beats to a bar — the same assumption every bar-line use in this codebase makes. */
     public static final int BEATS_PER_BAR = DjEdit.BEATS_PER_BAR;
@@ -255,11 +340,12 @@ public final class StemFusion {
      * How much of the outgoing track's OWN file the carry needs, ms.
      *
      * <p>Derived from the gesture and not from a bar count: the table keeps A's material in the
-     * file over {@code [entryMs, bassMs + CUT_MS]} — the last cut is the low end's, and the splice
-     * that makes it is {@link #CUT_MS} long — which is {@code 2*bBar} of the incoming's file, i.e.
-     * {@code 2*bBar/speed} ms of the outgoing's own (the deck plays the file {@code speed} times as
-     * fast, so material stretched by {@code speed} comes out at the outgoing's tempo). Rounding up
-     * so the splice's own tail is covered.
+     * file over {@code [entryMs, fusionEndMs + CUT_MS]} — the last row reaches the floor at
+     * {@code fusionEndMs} and the tail that carries it is {@link #CUT_MS} long — which is
+     * {@code FUSION_BARS} steps of the incoming's file, i.e. {@code FUSION_BARS*barStep/stretch} ms
+     * of the outgoing's own (the deck plays the file {@code speed} times as fast, so material
+     * stretched by {@code speed} comes out at the outgoing's tempo). Rounding up so the tail is
+     * covered.
      *
      * <p>⚠️ The spec used to say {@code 3*aBar}, on the assumption that the lock holds. On a pair
      * whose grids are not in a 1:1 relation that is not the same number: measured on real material
@@ -273,15 +359,22 @@ public final class StemFusion {
         return sourceSpanFor(bBeatMs * BEATS_PER_BAR, speed);
     }
 
-    /** The material one take needs from the outgoing's own file, ms: two steps of the table
-     *  ({@code barStepMs} each) plus the last splice, divided by the ratio the material is read at
-     *  ({@code stretch}). For a relation 1 pair that is {@code (2*bBar + CUT)/speed} — round 18's
-     *  own number — and for a relative one {@code barStepMs} is {@code p} bars of the incoming's
-     *  and {@code stretch} is what makes the outgoing's bar exactly {@code p/q} of it. */
+    /** The material one take needs from the outgoing's own file, ms: the whole gesture ({@link
+     *  #FUSION_BARS} steps of the table, {@code barStepMs} each) plus the last tail, divided by the
+     *  ratio the material is read at ({@code stretch}). For a relation 1 pair that is
+     *  {@code (4*bBar + CUT)/speed} — round 18's own number, twice over, because round 6's recede
+     *  lasts four steps where the splices took two — and for a relative one {@code barStepMs} is
+     *  {@code p} bars of the incoming's and {@code stretch} is what makes the outgoing's bar exactly
+     *  {@code p/q} of it.
+     *
+     *  <p>This is the <b>over-estimate</b>: a plan whose step is long enough shortens its own hold
+     *  (see {@link #shapeFor}), and {@link Plan#sourceSpanMs} is the number the take really needs.
+     *  Callers that size a decode rather than a separation (see {@link #probeWindow}) want this one,
+     *  which is why it is the full shape rather than whatever the cap would allow. */
     public static long sourceSpanFor(double barStepMs, double stretch) {
         if (!(barStepMs > 0d)) return 0L;
         double ratio = stretch > 0d ? stretch : 1d;
-        return (long) Math.ceil((2d * barStepMs + CUT_MS) / ratio);
+        return (long) Math.ceil((FUSION_BARS * barStepMs + CUT_MS) / ratio);
     }
 
     /**
@@ -1265,16 +1358,23 @@ public final class StemFusion {
         Relation relation = relationOf(aBeatMs, bBeatMs, speed);
         double stepMs = relation == null ? bBeatMs * BEATS_PER_BAR : relation.barStepMs(bBeatMs);
         double stretch = relation == null ? speed : relation.stretch(aBeatMs, bBeatMs);
-        long window = (long) Math.ceil(((relation == null ? SLAM_STEPS : FUSION_BARS - 1) * stepMs
-                + CUT_MS) / (stretch > 0d ? stretch : 1d)) + 2L * A_TAIL_SLACK_MS;
-        if (!(window <= FUSION_TAIL_MAX_MS)) {
+        long cap = tailMaxMs(relation);
+        // ⚠️ The shape the pair's own step leaves room for, not the full gesture's three steps:
+        // {@link #plan} shortens the gesture when the step is long (see {@link #shapeFor}), so a
+        // clause written with the full shape's arithmetic would refuse pairs the planner fuses — a
+        // 4 s bar does exactly that: the full gesture needs 18 s of A's file (over the 12 s cap) and
+        // the planner answers with one step of hold and a one-step low end fade, 8080 ms, which
+        // fits. The two numbers are the same call so they cannot drift apart again.
+        int[] shape = shapeFor(stepMs, stretch, cap);
+        int steps = relation == null ? SLAM_STEPS : shape[0] + shape[1];
+        long window = (long) Math.ceil((steps * stepMs + CUT_MS)
+                / (stretch > 0d ? stretch : 1d)) + 2L * A_TAIL_SLACK_MS;
+        if (!(window <= cap)) {
             return String.format(Locale.US,
                     "the passage is %.1fms of the incoming's file (%d steps of %.1fms), so the"
                             + " material A's rows need from A is %dms — over the %.0fms one render"
                             + " may separate before the junction search's own band is paid for",
-                    (relation == null ? SLAM_STEPS : FUSION_BARS) * stepMs,
-                    relation == null ? SLAM_STEPS : FUSION_BARS, stepMs, window,
-                    (double) FUSION_TAIL_MAX_MS);
+                    steps * stepMs, steps, stepMs, window, (double) cap);
         }
         if (!(Math.round(aDurMs - CUT_BACK_MS - blendMs) > 0L)) {
             return String.format(Locale.US,
@@ -1486,13 +1586,12 @@ public final class StemFusion {
         // hold at unity plus the low end's own fade, and all of it has to be separated out of the
         // outgoing's own file like anything else. A pair whose step is so long that the full shape
         // does not fit gets ONE step of hold rather than no fusion at all — still a recede.
-        int holdSteps = A_HOLD_STEPS;
-        if (!slam) {
-            long full = (long) Math.ceil((A_HOLD_STEPS + A_LOW_END_FADE_STEPS) * stepMs
-                    / (stretch > 0d ? stretch : 1d)) + 2L * A_TAIL_SLACK_MS;
-            if (full > FUSION_TAIL_MAX_MS) holdSteps = 1;
-        }
-        int steps = slam ? SLAM_STEPS : holdSteps + A_LOW_END_FADE_STEPS;
+        long cap = slam ? FUSION_TAIL_MAX_MS : tailMaxMs(relation);
+        // ⚠️ The shape, from the one call the pre-decode clause uses too (see {@link #shapeFor}).
+        int[] shape = shapeFor(stepMs, stretch, cap);
+        int holdSteps = shape[0];
+        int lowEndFadeSteps = shape[1];
+        int steps = slam ? SLAM_STEPS : holdSteps + lowEndFadeSteps;
         // How many steps of the table carry the outgoing's own rows: all of them, for a slam (its
         // one cut is the window's own end) and for a fusion too (its rows reach the floor ON the
         // window's last step, so the material has to last that far).
@@ -1507,14 +1606,14 @@ public final class StemFusion {
         // JUNCTION_SEARCH_BARS bars forward of it (the groove preference), plus the lead the take's
         // alignment wants. A slow track's search is shorter rather than its separation longer — the
         // budget is the clause.
-        long budget = FUSION_TAIL_MAX_MS - sourceSpan - 2L * A_TAIL_SLACK_MS;
+        long budget = cap - sourceSpan - 2L * A_TAIL_SLACK_MS;
         if (budget < 0L) {
             return invalid(String.format(Locale.US,
                     "the passage is %.1fms of the incoming's file and the material A's rows need"
                             + " from A is %dms, so the window to separate is at least %dms — over"
                             + " the %.0fms one render may separate",
-                    steps * stepMs, sourceSpan, sourceSpan + 2L * A_TAIL_SLACK_MS,
-                    (double) FUSION_TAIL_MAX_MS), aBar, bBar, lock);
+                    steps * stepMs, sourceSpan, sourceSpan + 2L * A_TAIL_SLACK_MS, (double) cap),
+                    aBar, bBar, lock);
         }
         long forward = Math.min(Math.round(JUNCTION_SEARCH_BARS * aBar), Math.max(0L, budget / 2L));
         long back = Math.min(QUIET_SEARCH_MAX_MS, Math.max(0L, budget - forward));
@@ -1582,9 +1681,16 @@ public final class StemFusion {
         // starting where the outgoing's hold ends, and the outgoing's rows recede from that same
         // instant — its drums over one step, its low end and its melodic row over two.
         long holdEnd = entry + (long) holdSteps * barStep;
-        long arriveEnd = entry + (long) (holdSteps + B_ARRIVAL_FADE_STEPS) * barStep;
+        // ⚠️ The incoming arrives UNDER the outgoing's hold, not after it: its rise starts one step
+        // before the hold ends, so it reaches unity exactly where the outgoing starts to recede. That
+        // is what gives the passage its coexistence — both backings within 6 dB of their own level
+        // for MORE than a step (measured: one and a third) — which is the identity the user asked to
+        // keep (rule 3 of round 6: the fade must not dominate). With a one-step hold the rise starts
+        // at the entry itself.
+        long arriveStart = entry + (long) Math.max(0, holdSteps - 1) * barStep;
+        long arriveEnd = arriveStart + (long) B_ARRIVAL_FADE_STEPS * barStep;
         long drumsEnd = entry + (long) (holdSteps + A_DRUMS_FADE_STEPS) * barStep;
-        long lowEndEnd = entry + (long) (holdSteps + A_LOW_END_FADE_STEPS) * barStep;
+        long lowEndEnd = entry + (long) (holdSteps + lowEndFadeSteps) * barStep;
         long swap = slam ? entry + barStep : holdEnd;
         long bass = slam ? swap : holdEnd;
         long drawEnd = slam ? entry + barStep : lowEndEnd;
@@ -1594,7 +1700,7 @@ public final class StemFusion {
                 choice.measured, choice.bodyDb, choice.passageDb, choice.dropDb,
                 entryChoice[1] == 1L, entryChoice[2] / 1000d,
                 entryChoice.length > 3 ? entryChoice[3] : 0L, in.firstVocalMs, holdEnd, drumsEnd,
-                lowEndEnd, swap, arriveEnd);
+                lowEndEnd, arriveStart, arriveEnd);
     }
 
     /** The lock clause's own words, so {@link #refusal} and {@link #plan} refuse a pair for the
@@ -2193,6 +2299,13 @@ public final class StemFusion {
          *  is the instant the take's length is derived from. */
         public double carriedBassEndDb;
         public double sourceBassEndDb;
+        /** dBFS of the carried low end over its own FADE — the stretch from {@code bassMs} to
+         *  {@code fusionEndMs}, where the table takes it to the floor — and of the material it was
+         *  taken from over the same span: the measurement that says the fade is fading material and
+         *  not a hole the take left behind (see {@link #CARRY_FADE_TOLERANCE_DB}). NaN when the
+         *  gesture has no fade (a slam) or the window is too short to hold one. */
+        public double carriedBassFadeDb = Double.NaN;
+        public double sourceBassFadeDb = Double.NaN;
         /** dBFS of the outgoing's own master over the {@link #STEP_WINDOW_MS} before the junction,
          *  and of the rendered head's first {@link #STEP_WINDOW_MS}: the junction's step is the
          *  difference, and it has to be inside {@link #JUNCTION_STEP_MAX_DB}. */
@@ -2239,8 +2352,11 @@ public final class StemFusion {
         public String describe() {
             return String.format(Locale.US,
                     "fusion measured: carried drums %.1f / bass %.1f / melodic %.1f dBFS against"
-                            + " their sources %.1f / %.1f / %.1f; the low end still there at its own"
-                            + " cut (%.1f vs %.1f dBFS in the last %.0fms); the outgoing's voice in"
+                            + " their sources %.1f / %.1f / %.1f; the low end still there where the"
+                            + " gesture takes over (%.1f vs %.1f dBFS in the last %.0fms) and its own"
+                            + " fade fading material (%.1f vs %.1f dBFS over the fade, where the"
+                            + " table's own equal-power fade is %+.2f dB and the make-up %+.2f); the"
+                            + " outgoing's voice in"
                             + " them: %.2f / %.2f / %.2f; the incoming's own drums %.1f dBFS before"
                             + " their swap and %.1f after, its low end %.1f and %.1f, its voice %.1f"
                             + " (the floor is %.0f); the junction: the outgoing master's last %.0fms"
@@ -2251,7 +2367,9 @@ public final class StemFusion {
                             + " carry an attack, longest gap %.0fms of a %.0fms period%s",
                     carriedDrumsDb, carriedBassDb, carriedMelodyDb, sourceDrumsDb, sourceBassDb,
                     sourceMelodyDb, carriedBassEndDb, sourceBassEndDb,
-                    (double) CARRY_END_WINDOW_MS, voiceAlignmentDrums, voiceAlignmentBass,
+                    (double) CARRY_END_WINDOW_MS, carriedBassFadeDb, sourceBassFadeDb,
+                    -FADE_RMS_DB, makeupDb,
+                    voiceAlignmentDrums, voiceAlignmentBass,
                     voiceAlignmentMelody, incomingDrumsBeforeDb, incomingDrumsAfterDb,
                     incomingBassBeforeDb, incomingBassAfterDb, incomingVocalDb, SILENT_DBFS,
                     (double) STEP_WINDOW_MS, outgoingMasterDb, (double) STEP_WINDOW_MS,
@@ -2274,10 +2392,14 @@ public final class StemFusion {
      *       #CARRY_TOLERANCE_DB} of its own source level under the table's gain — no more than
      *       3 dB below it (a carry that lost its groove) and no more than 3 dB above the row's
      *       own source (a carry summed twice, or the wrong row placed). The carried low end is
-     *       additionally asked about the {@link #CARRY_END_WINDOW_MS} <em>right before its own
-     *       cut</em>: a take that is shorter than the gesture needs goes silent exactly there
-     *       (that was round 18's defect — A's bed dying on a hard cut the table never names), and
-     *       a clause measured over the whole of [entry, bassMs) would average it away.</li>
+     *       additionally asked about the {@link #CARRY_END_WINDOW_MS} <em>right before the gesture
+     *       takes over</em>: a take that is shorter than the gesture needs goes silent exactly
+     *       there (that was round 18's defect — A's bed dying on a hard cut the table never
+     *       names), and a clause measured over the whole of [entry, bassMs) would average it
+     *       away. Round 6 added the matching clause for the fade itself, where the same defect
+     *       now hides: {@link #carriedBassFadeDb} against the source under the table's own
+     *       equal-power fade ({@link #FADE_RMS_DB}, tolerance {@link
+     *       #CARRY_FADE_TOLERANCE_DB}).</li>
      *   <li><b>The outgoing's vocal content did not come along.</b> Each carried row is compared
      *       with the outgoing's separated vocal stem at zero lag: a row that is that voice is
      *       fatal for the drums and the bass and <em>drops the melodic carry</em> for {@code
@@ -2316,8 +2438,20 @@ public final class StemFusion {
             return r;
         }
         int rate = m.rate;
-        long swapIn = plan.swapMs - plan.entryMs;
-        long bassIn = plan.bassMs - plan.entryMs;
+        // ⚠️ Round 6: the spans the row clauses are measured over follow the new shape. The
+        // outgoing's rows hold at unity until its hold ends (which is `bassMs`, the instant the low
+        // end starts to recede), and the incoming's rows are absent only until their own rise BEGINS
+        // — which is one step BEFORE the hold ends, because that is what gives the passage its
+        // coexistence. Measuring "the incoming's drums are silent before their swap" over
+        // [entry, swapMs) would fail for every fusion now that the arrival starts under the hold,
+        // which is exactly what the fixture run caught.
+        long swapIn = plan.holdEndMs > 0L ? plan.holdEndMs - plan.entryMs : plan.swapMs - plan.entryMs;
+        long bassIn = swapIn;
+        // Where A's rows have all reached the floor (the low end's fade's end, which is the
+        // gesture's end): the fade the clause below measures is [bassIn, carryEndIn).
+        long carryEndIn = plan.fusionEndMs > 0L ? plan.fusionEndMs - plan.entryMs : bassIn;
+        long arriveIn = plan.arriveStartMs > 0L ? plan.arriveStartMs - plan.entryMs : swapIn;
+        long arrivedIn = plan.arriveEndMs > 0L ? plan.arriveEndMs - plan.entryMs : swapIn;
         double windowSec = m.frames / (double) rate;
 
         r.carriedDrumsDb = StemBridge.levelDb(carried(m, StemGesture.Stem.DRUMS.row()), rate,
@@ -2348,6 +2482,26 @@ public final class StemFusion {
         r.carriedBassEndDb = StemBridge.levelDb(bassEnd, rate, endFrames / (double) rate);
         r.sourceBassEndDb = StemBridge.levelDb(bassEndSource, rate,
                 Math.round(endFrames / m.speed) / (double) rate);
+
+        // ⚠️ Round 6: the rows FADE instead of cutting, so the clause above — the last
+        // CARRY_END_WINDOW_MS before the gesture takes over — is no longer the whole story: inside
+        // the fade the rendered row is falling by the table's own design, so an absolute level
+        // against the source reads a shape, not a hole, and a take that ended in the middle of the
+        // fade would fade silence with every clause still green. The fade's own gain is analytic
+        // (equal-power: the mean of cos^2 over the span is 1/2, i.e. FADE_RMS_DB under the
+        // material), so the material's presence INSIDE it is measurable — that is this measurement.
+        int fadeFrom = (int) Math.round(framewise(Math.max(0L, bassIn), rate));
+        int fadeFrames = plan.slam ? 0
+                : Math.max(0, (int) Math.round(framewise(carryEndIn, rate)) - fadeFrom);
+        if (fadeFrames > 0) {
+            float[][] bassFade = slice(carried(m, StemGesture.Stem.BASS.row()), fadeFrom,
+                    fadeFrames);
+            float[][] bassFadeSource = slice(source(m, StemGesture.Stem.BASS.row()),
+                    (int) Math.round(fadeFrom / m.speed), (int) Math.round(fadeFrames / m.speed));
+            r.carriedBassFadeDb = StemBridge.levelDb(bassFade, rate, fadeFrames / (double) rate);
+            r.sourceBassFadeDb = StemBridge.levelDb(bassFadeSource, rate,
+                    Math.round(fadeFrames / m.speed) / (double) rate);
+        }
 
         // The junction's step: the level the listener was already at (the outgoing's own master,
         // its last STEP_WINDOW_MS) against the level the fusion arrives at (the rendered head's
@@ -2394,14 +2548,14 @@ public final class StemFusion {
         // The incoming's own rows, as the table places them.
         float[][] inDrums = gated(m.incoming, StemGesture.Stem.DRUMS, plan, edit, rate, m.frames);
         float[][] inBass = gated(m.incoming, StemGesture.Stem.BASS, plan, edit, rate, m.frames);
-        r.incomingDrumsBeforeDb = StemBridge.levelDb(inDrums, rate, swapIn / 1000d);
-        r.incomingDrumsAfterDb = StemBridge.levelDb(slice(inDrums, (int) framewise(swapIn, rate),
-                m.frames - (int) framewise(swapIn, rate)), rate,
-                (m.frames - framewise(swapIn, rate)) / (double) rate);
-        r.incomingBassBeforeDb = StemBridge.levelDb(inBass, rate, bassIn / 1000d);
-        r.incomingBassAfterDb = StemBridge.levelDb(slice(inBass, (int) framewise(bassIn, rate),
-                m.frames - (int) framewise(bassIn, rate)), rate,
-                (m.frames - framewise(bassIn, rate)) / (double) rate);
+        r.incomingDrumsBeforeDb = StemBridge.levelDb(inDrums, rate, arriveIn / 1000d);
+        r.incomingDrumsAfterDb = StemBridge.levelDb(slice(inDrums, (int) framewise(arrivedIn, rate),
+                Math.max(0, m.frames - (int) framewise(arrivedIn, rate))), rate,
+                (m.frames - framewise(arrivedIn, rate)) / (double) rate);
+        r.incomingBassBeforeDb = StemBridge.levelDb(inBass, rate, arriveIn / 1000d);
+        r.incomingBassAfterDb = StemBridge.levelDb(slice(inBass, (int) framewise(arrivedIn, rate),
+                Math.max(0, m.frames - (int) framewise(arrivedIn, rate))), rate,
+                (m.frames - framewise(arrivedIn, rate)) / (double) rate);
         r.incomingVocalDb = StemBridge.levelDb(m.incomingVocals != null
                 && StemGesture.Stem.VOCALS.row() < m.incomingVocals.length
                 ? m.incomingVocals[StemGesture.Stem.VOCALS.row()] : new float[0][], rate,
@@ -2468,6 +2622,22 @@ public final class StemFusion {
         }
         if (hasMelody) rowClause(bad, "the melodic carry", r.carriedMelodyDb, r.sourceMelodyDb,
                 A_OTHER_DB, m.makeupDb);
+        // ⚠️ Round 6's clause, and the one the fade needed: the carried low end's own fade has to be
+        // fading material. The table's fade is equal-power, so the row must measure FADE_RMS_DB under
+        // its source (plus the make-up) and no further — a take that ended inside the fade fades
+        // silence and reads tens of dB under that line, which is round 18's defect in its round-6
+        // costume. A slam has no fade and is skipped (NaN).
+        if (!Double.isNaN(r.carriedBassFadeDb)
+                && !(r.carriedBassFadeDb > r.sourceBassFadeDb + m.makeupDb - FADE_RMS_DB
+                        - CARRY_FADE_TOLERANCE_DB)) {
+            bad.append("the carried low end fades a hole (")
+                    .append(fmt(r.carriedBassFadeDb)).append(" dBFS over its own fade, where its")
+                    .append(" material measures ").append(fmt(r.sourceBassFadeDb))
+                    .append(" and the table's equal-power fade leaves ")
+                    .append(fmt(-FADE_RMS_DB)).append(" dB under that");
+            if (m.makeupDb != 0d) bad.append(", lifted ").append(fmt(m.makeupDb)).append(" dB");
+            bad.append("); ");
+        }
         if (r.voiceAlignmentDrums > VOICE_CARRY_LIMIT) {
             bad.append("the carried drums are the outgoing's voice (they align ")
                     .append(fmt(r.voiceAlignmentDrums)).append(" with its vocal stem); ");

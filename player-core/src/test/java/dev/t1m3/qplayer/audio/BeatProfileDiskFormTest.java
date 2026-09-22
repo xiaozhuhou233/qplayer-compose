@@ -103,6 +103,25 @@ public class BeatProfileDiskFormTest {
         v3.putShort((short) 380);
         v3.put(new KeyProfile(0, true, 0.9f, chroma()).toBytes());
         assertNull(BeatProfile.fromBytes(v3.array()));
+
+        // Version 5 is the same layout as the current one too, written by the estimator that
+        // is still in use — and it is refused for a reason that is not arithmetic at all: the
+        // profiler used to analyse and cache a pass its own deadline had truncated, and a
+        // starvation artefact cannot be told from a measurement once it is a file. The bytes
+        // below are exactly that case, the one found on the device: 0.19 written for a track
+        // whose head window reads nothing at all and whose 15 s window reads 0.71, i.e. a grid
+        // under MIN_CONFIDENCE that the cache made permanent for the pair it belonged to. A
+        // re-measure is one decode off the playback path; believing a starved grid is a
+        // transition built on a beat the music does not have.
+        java.nio.ByteBuffer v5 = java.nio.ByteBuffer.allocate(29);
+        v5.put((byte) 5);
+        v5.put((byte) 0);
+        v5.putShort((short) 190);
+        v5.putInt(9650);
+        v5.putInt(20);
+        v5.putShort((short) 380);
+        v5.put(new KeyProfile(0, true, 0.9f, chroma()).toBytes());
+        assertNull(BeatProfile.fromBytes(v5.array()));
     }
 
     @Test

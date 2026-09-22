@@ -49,21 +49,29 @@ public class StemFusionTest {
         // 16000, and (the spec's own rule) the deck starts there.
         assertEquals(15_000L, 15_000L);
         assertEquals(16_000L, plan.entryMs);
-        assertEquals(18_000L, plan.swapMs);
+        // ⚠️ Round 6's instants, not the old splices': the outgoing's rows hold at unity until the
+        // hold ends (which is `swapMs` = `bassMs`, where its low end starts to recede), its drums
+        // reach the floor one step later, its low end and melodic row two steps later, and the
+        // incoming's rise begins one step BEFORE the hold ends — that overlap is the coexistence.
+        assertEquals(20_000L, plan.holdEndMs);
+        assertEquals(20_000L, plan.swapMs);
         assertEquals(20_000L, plan.bassMs);
-        assertEquals(22_000L, plan.fusionEndMs);
-        assertEquals(6_000L, plan.windowMs);
-        // ⚠️ The material is drawn from bassMs, not from a bar count: the table keeps A's rows in
-        // the file over [entry, bassMs + CUT_MS] = 2 bars + one splice, i.e. 4080 ms of A's own
-        // file at speed 1. (The spec's old 3*aBar = 6000 was 2 s generous here and 1.8 s short on
-        // an unlocked pair; see StemFusionTest.theFourRealPairsVerdicts.)
-        assertEquals(4_080L, plan.sourceSpanMs);
+        assertEquals(22_000L, plan.drumsEndMs);
+        assertEquals(24_000L, plan.lowEndEndMs);
+        assertEquals(24_000L, plan.fusionEndMs);
+        assertEquals(18_000L, plan.arriveStartMs);
+        assertEquals(20_000L, plan.arriveEndMs);
+        assertEquals(8_000L, plan.windowMs);
+        // ⚠️ The material is drawn from the table's own span, not from a bar count: A's rows live in
+        // the file over [entry, lowEndEnd + CUT_MS], i.e. four steps + the tail, 8080 ms of A's own
+        // file at speed 1. (The spec's old 3*aBar = 6000 was short of the four-step gesture.)
+        assertEquals(8_080L, plan.sourceSpanMs);
         assertEquals(220_000L, plan.sourceFromMs);
         // The material window is that passage plus the junction search's own band (round 3: ±2 bars
         // of the outgoing's grid, narrowed to what the separation budget has left) and the lead the
         // take's alignment wants on either side of the target.
-        assertEquals(2_960L, plan.searchBandMs);
-        assertEquals(215_790L, plan.materialFromMs);
+        assertEquals(960L, plan.searchBandMs);
+        assertEquals(219_750L - plan.searchBackMs - StemFusion.A_TAIL_SLACK_MS, plan.materialFromMs);
         assertEquals(12_000L, plan.materialWindowMs);
         assertEquals(250L, plan.junctionShiftMs);
         assertTrue(plan.materialWindowMs <= StemFusion.FUSION_TAIL_MAX_MS);
@@ -71,13 +79,14 @@ public class StemFusionTest {
         assertTrue(plan.phaseMatched);
         assertEquals(0d, plan.phaseErrorMs, 1e-9);
         assertEquals(0d, plan.lockError, 1e-9);
-        assertEquals(6, plan.splices());
+        assertEquals("a fusion splices nothing any more", 0, plan.splices());
+        assertEquals("[the hold, the drums' fade, the low end's fade]", 3, plan.recedeMs().length);
         // No measurement was handed in, so neither preference moved the junction.
         assertFalse(plan.grooveAtJunction);
         assertFalse(plan.quietAtJunction);
-        // The incoming's bed arrives over one bar of its own grid — the bar the outgoing's drums
-        // leave on, so the two are heard as one event.
-        assertEquals(plan.swapMs, plan.bedFadeMs);
+        // The incoming's bed arrives over one bar of its own grid — which is now the same instant
+        // its drums and low end begin to rise from, under the outgoing's hold.
+        assertEquals(plan.arriveStartMs, plan.bedFadeMs);
         assertEquals(2_000L, plan.bedFadeMs - plan.entryMs);
     }
 
@@ -106,8 +115,8 @@ public class StemFusionTest {
         assertFalse(plain.quietAtJunction);
 
         // A line outside the search band is not a candidate at all, even though the preference
-        // would have taken it: 224000 is 4250 ms from the target, past the 3960 ms the band and
-        // the take's lead reach.
+        // would have taken it: 224000 is 4250 ms from the target, past the 960 ms the band reaches
+        // forward of it (the round-6 shape spends most of the separation budget on the material).
         StemFusion.Plan tooFar = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 35_000L,
                 15_000L, 500d, 0d, 500d, 0d, 1d, new double[]{219_000d, 224_000d},
                 bars(2000d, 0d, 120), (atMs, beatMs) -> atMs == 224_000L));
@@ -126,10 +135,16 @@ public class StemFusionTest {
     @Test
     public void aJunctionWhereTheOutgoingGrooveIsPlayingWins() {
         double[] aBars = {218_000d, 220_000d};
+        // ⚠️ Round 6: the gesture eats the separation budget (4 steps + two leads of A's own file),
+        // so the search band is narrow — 960 ms each way on a 500 ms beat, which would leave the
+        // groove preference a single candidate to choose from. This fixture uses 200 ms beats so
+        // the band is wide enough for the preference to be a choice at all: 1600 ms forward and
+        // 5120 ms back, which contains both lines.
+        double beat = 200d;
         // The nearest line (220000, 250 ms away) is quiet but has no groove; 218000 is 1750 ms
         // away, loud in the low end, and its voice is not quiet. The groove decides.
         StemFusion.Plan plan = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 35_000L,
-                15_000L, 500d, 0d, 500d, 0d, 1d, aBars, bars(2000d, 0d, 120),
+                15_000L, beat, 0d, beat, 0d, 1d, aBars, bars(800d, 0d, 300),
                 (atMs, beatMs) -> atMs == 220_000L, (atMs, beatMs) -> atMs == 218_000d));
         assertTrue(plan.reason, plan.valid);
         assertEquals(218_000L, plan.junctionMs);
@@ -139,7 +154,7 @@ public class StemFusionTest {
 
         // Among two lines that both have the groove, the nearer one wins.
         StemFusion.Plan both = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 35_000L,
-                15_000L, 500d, 0d, 500d, 0d, 1d, aBars, bars(2000d, 0d, 120),
+                15_000L, beat, 0d, beat, 0d, 1d, aBars, bars(800d, 0d, 300),
                 StemFusion.NO_VOICE_MEASUREMENT, (atMs, beatMs) -> true));
         assertTrue(both.reason, both.valid);
         assertEquals(220_000L, both.junctionMs);
@@ -148,7 +163,7 @@ public class StemFusionTest {
         // And with no groove anywhere the search falls back to today's choice: the nearest line
         // (the quiet one, when one is quiet), which is what the make-up gain below then answers.
         StemFusion.Plan none = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 35_000L,
-                15_000L, 500d, 0d, 500d, 0d, 1d, aBars, bars(2000d, 0d, 120),
+                15_000L, beat, 0d, beat, 0d, 1d, aBars, bars(800d, 0d, 300),
                 (atMs, beatMs) -> atMs == 220_000L));
         assertEquals(220_000L, none.junctionMs);
         assertTrue(none.quietAtJunction);
@@ -219,20 +234,25 @@ public class StemFusionTest {
         assertTrue(StemFusion.plan(new StemFusion.Input(240_000L, 0L, 35_000L, 15_000L,
                 500d, 0d, 500d, 0d, 1d, bars(2000d, 0d, 120), bars(2000d, 0d, 120),
                 StemFusion.NO_VOICE_MEASUREMENT)).reason.contains("blend length"));
-        // ⚠️ The tempo lock, which is the clause the prototype's 2:1 pair fails: a 1000 ms beat
-        // against a 500 ms one played at x1 is 100% out, and no material can make that fusable --
-        // the bar lines slide against each other and every cut lands off the beat.
-        StemFusion.Plan unlocked = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 35_000L,
+        // ⚠️ Round 5: a 1000 ms against a 500 ms beat is a 2:1 RELATION now, so nothing refuses it
+        // — the deck-level lock is 100% out (asserted below, it is not the gate any more) but the
+        // two BAR grids coincide: one bar of the outgoing's grid is two of the incoming's, so every
+        // swap still lands on a line of both, which is all the gesture needs.
+        StemFusion.Plan twoToOne = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 35_000L,
                 15_000L, 1000d, 0d, 500d, 0d, 1d, bars(4000d, 0d, 60), bars(2000d, 0d, 120),
                 StemFusion.NO_VOICE_MEASUREMENT));
-        assertFalse(unlocked.reason, unlocked.valid);
-        assertTrue(unlocked.reason, unlocked.reason.contains("do not lock"));
-        assertEquals(1d, unlocked.lockError, 1e-9);
-        // ...and it is checked before anything is decoded: the same pair is refused up front.
-        assertNotNull(StemFusion.refusal(240_000L, 20_000L, 35_000L, 15_000L, 1000d, 500d, 1d));
-        assertTrue(StemFusion.refusal(240_000L, 20_000L, 35_000L, 15_000L, 1000d, 500d, 1d)
-                .contains("do not lock"));
-        assertFalse(StemFusion.possible(240_000L, 20_000L, 35_000L, 15_000L, 1000d, 500d, 1d));
+        assertTrue(twoToOne.describe(), twoToOne.valid);
+        assertEquals(2, twoToOne.relation.p);
+        assertEquals(1, twoToOne.relation.q);
+        assertEquals("one step is two bars of the incoming's grid", 4_000d, twoToOne.barStepMs, 1e-6);
+        assertEquals("the deck itself is not locked", 1d, StemFusion.lockError(1000d, 500d, 1d),
+                1e-9);
+        // ...and it is checked before anything is decoded, where it also passes.
+        assertNull(StemFusion.refusal(240_000L, 20_000L, 35_000L, 15_000L, 1000d, 500d, 1d));
+        assertTrue(StemFusion.possible(240_000L, 20_000L, 35_000L, 15_000L, 1000d, 500d, 1d));
+        // A pair in no relation at all (1.2 is 20% from 1 and from 3:2) still refuses nothing: it
+        // is the SLAM.
+        assertNull(StemFusion.refusal(240_000L, 20_000L, 35_000L, 15_000L, 600d, 500d, 1d));
         // The cost bound, on a pair that DOES lock: two 1500 ms beats are bars of 6 s, so the
         // passage is 12 s of the incoming's file and the material window 14 s of A's.
         assertTrue(StemFusion.plan(new StemFusion.Input(400_000L, 20_000L, 80_000L, 15_000L,
@@ -246,7 +266,12 @@ public class StemFusionTest {
         assertTrue(StemFusion.plan(input(100_000L, 4_000L, 20_000L, 500d, 500d,
                 bars(2000d, 0d, 60), bars(2000d, 0d, 60))).reason.contains("file ends"));
         // And the whole fusion has to stay inside the window the incoming's vocals are out for.
-        StemFusion.Plan late = StemFusion.plan(input(200_000L, 5_000L, 9_500L, 500d, 500d,
+        // ⚠️ The blend has to be long enough for the carried rows to exist in A's file at all
+        // (round 6's gesture takes 8080 ms of it from the junction on, i.e. a blend of about
+        // 8.8 s at a 500 ms beat — the measured real pairs' blends are 15 s), so a fixture that is
+        // meant to fail on the VOCAL window has to clear that clause: 9 s of blend does, and 9.5 s
+        // of removal leaves the fusion's 8 s from a 2 s entry 10 s, half a second too late.
+        StemFusion.Plan late = StemFusion.plan(input(200_000L, 9_000L, 9_500L, 500d, 500d,
                 bars(2000d, 0d, 120), bars(2000d, 0d, 120)));
         assertFalse(late.reason, late.valid);
         assertTrue(late.reason, late.reason.contains("past the 9500ms"));
@@ -260,24 +285,44 @@ public class StemFusionTest {
      * the grids, the blend and the content start are the harness's, and the verdict is what this
      * planner makes of them.
      *
-     * <p>Only one of the four locks. The other three are refused by the lock clause and <em>by
-     * nothing else</em> — their material is not the question, their grids are — which is the point
-     * of the clause: a bar-line cut on a pair whose grids slide is an off-beat edit.
+     * <p>Round 5 lives in the first three of them: two fuse as relations (their bar grids coincide)
+     * and one as the SLAM the user asked for, which is the whole point of the relation family — the
+     * old candidate clause refused every pair whose beat periods are not equal, and the measurement
+     * of the 1260-pair library showed that is the same set as the pairs that fade today. The
+     * fourth keeps round 18's bargain exactly, bit for bit.
      */
     @Test
     public void theFourRealPairsVerdicts() {
-        // owa -> paradise: 476.6 ms against 937.6 ms (a ratio of 1.9672, i.e. an octave apart, and
-        // the controller does not stretch it because neither grid is trustworthy). 49.2% out. The
-        // prototype rendered this one — and the user heard its junction.
-        assertLocked(false, 476.598639d, 937.55102d, 1d, 0.4917d, "audio_owa", "audio_paradise");
-        // obsessed -> owa: 838.8 ms against 476.6 ms (ratio 0.5682). 76.0% out.
-        assertLocked(false, 838.77551d, 476.598639d, 1d, 0.7599d, "audio_obsessed", "audio_owa");
-        // owa -> audio1: 476.6 ms against 459.6 ms — related (within 8%), and the grids are close,
-        // but x1.0 is what the controller applies (A's own grid is not trustworthy, so nothing is
-        // stretched) and 3.7% is past the 2% the lock allows.
-        assertLocked(false, 476.598639d, 459.637188d, 1d, 0.0369d, "audio_owa", "audio1");
-        // huai -> owa: 472.6 ms against 476.6 ms — 0.84% out, locked, and the one pairing of the
-        // four that a fusion can be built on. Its anchors are the prototype's own.
+        // ⚠️ Round 5: three of these four now fuse — that is the whole point of the relation
+        // family. The old clause refused every pair whose beat periods are not equal, which the
+        // measurement of the 1260-pair library showed is the same set as the pairs that fade today
+        // (87.6% of all pairs were refused by it alone).
+        //
+        // owa -> paradise: 476.6 ms against 937.6 ms — a ratio of 1.9672, 1.67% from the 2:1
+        // relation, so the swaps land on one bar of paradise's grid (two of owa's). The prototype
+        // rendered this pair (and the user heard its junction); under round 5 it is a FUSION.
+        assertRelation(1, 2, 476.598639d, 937.55102d, 1d, 0.0167d, "audio_owa", "audio_paradise");
+        // ⚠️ Round 6's cost bound, with the numbers, on that same pair: its step is one bar of the
+        // incoming's grid (3750.2 ms) and its carry is read at 0.9836, so A's rows need
+        // ceil((4*3750.2 + 80)/0.9836) = 15 333 ms of A's own file and the separation window
+        // 17 333 ms with the two leads — over the unison cap (12 000, which refused it) and inside
+        // the relative one (20 000, which is why the two caps differ).
+        assertEquals("the passage A's rows need from A", 15_333L,
+                StemFusion.sourceSpanMs(937.55102d, 0.98359d));
+        assertEquals("and the window one render separates, with both leads",
+                17_333L, StemFusion.sourceSpanMs(937.55102d, 0.98359d) + 2L * 1_000L);
+        assertTrue("which is over the unison cap", 17_333L > StemFusion.FUSION_TAIL_MAX_MS);
+        assertTrue("and inside the relative one", 17_333L <= StemFusion.RELATIVE_TAIL_MAX_MS);
+        // obsessed -> owa: 838.8 ms against 476.6 ms — 13.6% from the nearest relation (1/2), i.e.
+        // in none, so it is the SLAM the user asked for: one bar of the incoming's grid, no beat
+        // matching, every element changing hands on the same line.
+        assertSlam(838.77551d, 476.598639d, "audio_obsessed", "audio_owa");
+        // owa -> audio1: 476.6 ms against 459.6 ms — 3.69% from the unison, inside
+        // RELATION_TOLERANCE and outside LOCK_TOLERANCE, so it is a 1:1 RELATIVE whose residual the
+        // carry's stretch absorbs (the deck itself plays at x1.0).
+        assertRelation(1, 1, 476.598639d, 459.637188d, 1d, 0.0369d, "audio_owa", "audio1");
+        // huai -> owa: 472.6 ms against 476.6 ms — 0.84% out, inside LOCK_TOLERANCE, which is the
+        // case that keeps round 18's bargain exactly. Its anchors are the prototype's own.
         assertLocked(true, 472.60771d, 476.598639d, 1d, 0.0084d, "audio_huai", "audio_owa");
 
         StemFusion.Plan plan = StemFusion.plan(new StemFusion.Input(187_241L, 15_000L, 15_000L,
@@ -287,27 +332,157 @@ public class StemFusionTest {
         assertTrue(plan.reason, plan.valid);
         // The prototype's own anchors, to the millisecond: the junction is the bar line 248 ms
         // after the target, the deck starts on B's first bar line (12 ms), and all of A is gone
-        // 5.7 s into B's file — inside the 15 s the vocals are out for.
+        // four steps into B's file — inside the 15 s the vocals are out for.
         assertEquals(171_991L, Math.round(187_241d - 250d - 15_000d));
         assertEquals(172_239L, plan.junctionMs);
         assertEquals(12L, plan.entryMs);
-        assertEquals(1_918L, plan.swapMs);
-        assertEquals(3_824L, plan.bassMs);
-        assertEquals(5_731L, plan.fusionEndMs);
-        assertEquals(5_719L, plan.windowMs);
-        // The carry's own span: 2 bars of B's grid (3812.8 ms) + one splice = 3892.8 -> 3893 ms of
-        // A's file. The spec's old 3*aBar would have been 5671 ms — 1.8 s more than the gesture
-        // needs here — and on a pair whose bars are not equal it would have been short.
-        assertEquals(3_893L, plan.sourceSpanMs);
-        // Round 3's search band: ±2 bars of A's grid (3780.9 ms) narrowed to the 6107 ms the
-        // separation budget has left after the carry, i.e. 3053 ms each way.
-        assertEquals(3_053L, plan.searchBandMs);
-        assertEquals(171_991L - 3_053L - StemFusion.A_TAIL_SLACK_MS, plan.materialFromMs);
-        assertEquals(11_999L, plan.materialWindowMs);
-        assertTrue(plan.describe(), plan.materialWindowMs <= StemFusion.FUSION_TAIL_MAX_MS);
+        long step = Math.round(476.598639d * 4d);
+        assertEquals("the hold at unity is two steps", 12L + 2L * step, plan.swapMs);
+        assertEquals("the low end starts to recede with the drums' hold over", plan.swapMs,
+                plan.bassMs);
+        assertEquals("the drums' fade is one step", 12L + 3L * step, plan.drumsEndMs);
+        assertEquals("the low end's and the melodic row's fade is two", 12L + 4L * step,
+                plan.fusionEndMs);
+        assertEquals(Math.round(4d * 1906.394556d), plan.windowMs);
+        // The carry's own span: 4 steps of B's grid (7625.6 ms) + the 80 ms tail = 7706 ms of A's
+        // file at speed 1. The spec's old 3*aBar (5671 ms) would have been short of the gesture.
+        assertEquals(7_706L, plan.sourceSpanMs);
+        // Round 3's search band: ±2 bars of A's grid (3780.9 ms) narrowed to the 2294 ms the
+        // separation budget has left after the carry, i.e. 1147 ms each way.
+        assertEquals(1_147L, plan.searchBandMs);
+        assertEquals(1_147L, plan.searchBackMs);
+        assertEquals(171_991L - plan.searchBackMs - StemFusion.A_TAIL_SLACK_MS,
+                plan.materialFromMs);
+        assertEquals("the band spends the whole cap", StemFusion.FUSION_TAIL_MAX_MS,
+                plan.materialWindowMs);
         assertEquals(248L, plan.junctionShiftMs);
-        // And the whole thing is a bar chart of B's grid: three bars of 1906.4 ms.
-        assertEquals(Math.round(3d * 1906.394556d), plan.windowMs);
+    }
+
+    /**
+     * ⚠️ Round 5's quiet-passage clause, on the shape the user described: a track whose last ten
+     * seconds are its own fade. The body level is measured over the material the render holds, and
+     * a passage more than {@link StemFusion#QUIET_PASSAGE_DB} under it is not a line a fusion may be
+     * cut on — the search looks further BACK first (the earlier line is the one that has the body),
+     * and only a band with no body-level line at all refuses.
+     */
+    @Test
+    public void aPassageInsideAFadeIsNotUsedIfAnEarlierLineHasBody() {
+        // A's bar lines every 2000 ms from 12 000: 200 000 (the nearest to the target 219 750...
+        // no: this fixture's target is 219 750 only for the other inputs). A's grid is built so the
+        // target's own line is deep in a fade and the line 6 s earlier (202 000) is the body.
+        double[] aBars = bars(800d, 100_000d, 200);
+        StemFusion.BodyLevel body = new StemFusion.BodyLevel() {
+            @Override
+            public double bodyDb() {
+                return -8d;
+            }
+
+            @Override
+            public double passageDropDb(long atMs, long passageMs) {
+                // The fade: everything from 218 000 on is 30 dB down, everything before it is 1 dB
+                // under the body (so within QUIET_PASSAGE_DB).
+                return atMs >= 218_000L ? 30d : 1d;
+            }
+        };
+        StemFusion.Plan plan = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 35_000L,
+                15_000L, 200d, 0d, 200d, 0d, 1d, aBars, bars(800d, 0d, 300),
+                StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT, body, -1L));
+        assertTrue(plan.reason, plan.valid);
+        assertTrue("the junction is one the track is still playing on: " + plan.junctionMs,
+                plan.junctionMs < 218_000L);
+        assertTrue("and the search had to reach back for it: " + plan.junctionShiftMs,
+                plan.junctionShiftMs < -1000L);
+        assertTrue("and it is at the body level", plan.bodyLevelAtJunction);
+        assertTrue(plan.describe(), plan.describe().contains("body level"));
+
+        // The same material with no body-level line anywhere: the clause refuses, and its reason
+        // carries the numbers it measured.
+        StemFusion.BodyLevel alwaysFading = new StemFusion.BodyLevel() {
+            @Override
+            public double bodyDb() {
+                return -8d;
+            }
+
+            @Override
+            public double passageDropDb(long atMs, long passageMs) {
+                return 30d;
+            }
+        };
+        StemFusion.Plan refused = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 35_000L,
+                15_000L, 200d, 0d, 200d, 0d, 1d, aBars, bars(800d, 0d, 300),
+                StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT, alwaysFading,
+                -1L));
+        assertFalse(refused.reason, refused.valid);
+        assertTrue(refused.reason, refused.reason.contains("below the track's own body"));
+        assertTrue(refused.reason, refused.reason.contains("30.00"));
+    }
+
+    /**
+     * ⚠️ Round 5's intro skip (「直接词接词」): the incoming track's voice arrives 12 s in (a rap
+     * track's vocal-free intro, measured on the device's {@code 34364062}: its first sustained
+     * vocal second is at 12 125 ms), so the deck starts at the common line a runway before that
+     * voice instead of at the content start — and its voice arrives right after the outgoing's,
+     * with the dead intro never played. When the voice is there from the start, nothing moves.
+     */
+    @Test
+    public void aDeadIntroIsSkippedAndAVoiceFromTheStartIsNot() {
+        double[] bBars = bars(2000d, 0d, 120);
+        StemFusion.Plan skipped = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 40_000L,
+                0L, 500d, 0d, 500d, 0d, 1d, bars(2000d, 0d, 120), bBars,
+                StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT,
+                StemFusion.NO_BODY_MEASUREMENT, 12_125L));
+        assertTrue(skipped.reason, skipped.valid);
+        assertEquals("the line a runway before the voice (12 000) is the deck's start", 10_000L,
+                skipped.entryMs);
+        assertEquals("and 2 000 ms of intro were skipped", 2_000L, skipped.skippedIntroMs);
+        assertEquals(12_125L, skipped.firstVocalMs);
+        assertTrue(plan(skipped), skipped.fusionEndMs <= 40_000L);
+        assertTrue(skipped.describe(), skipped.describe().contains("skipping 2000ms of its intro"));
+
+        // The voice from the start: the entry is where it always was.
+        StemFusion.Plan immediate = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 40_000L,
+                0L, 500d, 0d, 500d, 0d, 1d, bars(2000d, 0d, 120), bBars,
+                StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT,
+                StemFusion.NO_BODY_MEASUREMENT, 200L));
+        assertTrue(immediate.reason, immediate.valid);
+        assertEquals(0L, immediate.entryMs);
+        assertEquals(0L, immediate.skippedIntroMs);
+    }
+
+    /** A plan's own evidence, for a message. */
+    private static String plan(StemFusion.Plan p) {
+        return p.describe();
+    }
+
+    /** A pair's relation verdict: {@code p:q} within tolerance, and the plan that comes of it. */
+    private static void assertRelation(int p, int q, double aBeatMs, double bBeatMs, double speed,
+                                       double expectedError, String a, String b) {
+        StemFusion.Relation relation = StemFusion.relationOf(aBeatMs, bBeatMs, speed);
+        assertNotNull(a + " -> " + b + " should be a relation", relation);
+        assertEquals(p, relation.p);
+        assertEquals(q, relation.q);
+        assertEquals(a + " -> " + b, expectedError, relation.error, 0.001d);
+        assertFalse("a relative pair more than LOCK_TOLERANCE out is not the unison case",
+                relation.locked() && expectedError > StemFusion.LOCK_TOLERANCE);
+        assertNull("the pre-decode clause accepts a relation too: "
+                        + StemFusion.refusal(200_000L, 15_000L, 15_000L, 0L, aBeatMs, bBeatMs, speed),
+                StemFusion.refusal(200_000L, 15_000L, 15_000L, 0L, aBeatMs, bBeatMs, speed));
+    }
+
+    /** A pair in no relation fuses as a SLAM: one step of the table, the swaps on one line. */
+    private static void assertSlam(double aBeatMs, double bBeatMs, String a, String b) {
+        assertNull(a + " -> " + b + " should be in no relation",
+                StemFusion.relationOf(aBeatMs, bBeatMs, 1d));
+        StemFusion.Plan plan = StemFusion.plan(new StemFusion.Input(200_000L, 15_000L, 20_000L, 0L,
+                aBeatMs, 0d, bBeatMs, 0d, 1d, bars(aBeatMs * 4, 0d, 200), bars(bBeatMs * 4, 0d, 400),
+                StemFusion.NO_VOICE_MEASUREMENT));
+        assertTrue(plan.reason, plan.valid);
+        assertTrue("it is a SLAM", plan.slam);
+        assertEquals("one bar of the incoming's own grid", Math.round(bBeatMs * 4),
+                plan.windowMs);
+        assertEquals("every element changes hands on the same line", plan.swapMs, plan.bassMs);
+        assertEquals(plan.swapMs, plan.fusionEndMs);
+        assertEquals("and the carry's stretch is the deck's own ratio", 1d, plan.stretch, 1e-9);
     }
 
     /** A pair's lock verdict, named the way the log names it. */
@@ -342,54 +517,114 @@ public class StemFusionTest {
     }
 
     @Test
-    public void theTableIsThreeStatesWithEightyMillisecondSplices() {
+    public void theOutgoingRecedesAndTheIncomingRises() {
+        // ⚠️ Round 6, from listening: A recedes, it does not cut (the user heard the 80 ms splices
+        // as the outgoing track being stopped). A's rows hold at unity through the hold, then fade
+        // out over their own spans — the drums over one step, the low end and the melodic row over
+        // two — equal-power and monotone. B's drums and low end rise over one step from there.
         StemFusion.Plan plan = fixture();
         long entry = plan.entryMs;
-        long swap = plan.swapMs;
-        long bass = plan.bassMs;
-        long end = plan.fusionEndMs;
+        long step = Math.round(plan.barStepMs);
+        long holdEnd = plan.holdEndMs;
+        long drumsEnd = plan.drumsEndMs;
+        long lowEndEnd = plan.lowEndEndMs;
         double unity = 1d;
         double aOther = Math.pow(10d, StemFusion.A_OTHER_DB / 20d);
+        assertEquals("the hold is A_HOLD_STEPS steps", entry + StemFusion.A_HOLD_STEPS * step,
+                holdEnd);
+        assertEquals("the drums' fade is one step", step, drumsEnd - holdEnd);
+        assertEquals("the low end's fade is two", 2 * step, lowEndEnd - holdEnd);
+        assertEquals("and the gesture ends where the low end's fade does", lowEndEnd,
+                plan.fusionEndMs);
+        assertEquals("nothing is spliced in a fusion any more", 0, plan.splices());
+        assertEquals(3, plan.recedeMs().length);
 
-        // [entry, swap): both backings' grooves, the outgoing's melodic row 12 dB down. The
-        // incoming's bed is NOT there yet — it is the table's one arrival that is ramped, and it
-        // is measured on its own below.
-        assertEquals(unity, StemFusion.gainAt(plan, true, StemGesture.Stem.DRUMS, entry), 1e-9);
-        assertEquals(unity, StemFusion.gainAt(plan, true, StemGesture.Stem.BASS, entry), 1e-9);
-        assertEquals(aOther, StemFusion.gainAt(plan, true, StemGesture.Stem.OTHER, entry), 1e-9);
-        assertEquals(0d, StemFusion.gainAt(plan, false, StemGesture.Stem.DRUMS, entry), 1e-9);
-        assertEquals(0d, StemFusion.gainAt(plan, false, StemGesture.Stem.BASS, entry), 1e-9);
-        assertEquals(0d, StemFusion.gainAt(plan, false, StemGesture.Stem.OTHER, entry), 1e-9);
+        // Unity through the hold: the file is continuous with the outgoing's live deck for the whole
+        // of the deck-level handover, which is what keeps the two fades from stacking.
+        for (StemGesture.Stem row : new StemGesture.Stem[]{StemGesture.Stem.DRUMS,
+                StemGesture.Stem.BASS, StemGesture.Stem.OTHER}) {
+            assertEquals(row + " at the entry", row == StemGesture.Stem.OTHER ? aOther : unity,
+                    StemFusion.gainAt(plan, true, row, entry), 1e-9);
+            assertEquals(row + " still at unity at the hold's end",
+                    row == StemGesture.Stem.OTHER ? aOther : unity,
+                    StemFusion.gainAt(plan, true, row, holdEnd), 1e-9);
+        }
+        // Each fade is an equal-power decline — a cosine to the floor — so half way through ITS OWN
+        // span each side is at cos(pi/4) of its own level (the drums' span is one step, the low
+        // end's and the melodic row's two), and the floor is reached on the step line, never before.
+        assertEquals(unity * Math.cos(Math.PI / 4),
+                StemFusion.gainAt(plan, true, StemGesture.Stem.DRUMS, holdEnd + step / 2), 1e-9);
+        assertEquals(0d, StemFusion.gainAt(plan, true, StemGesture.Stem.DRUMS, drumsEnd), 1e-9);
+        assertEquals(unity * Math.cos(Math.PI / 4),
+                StemFusion.gainAt(plan, true, StemGesture.Stem.BASS, holdEnd + step), 1e-9);
+        assertEquals(0d, StemFusion.gainAt(plan, true, StemGesture.Stem.BASS, lowEndEnd), 1e-9);
+        assertEquals(aOther * Math.cos(Math.PI / 4),
+                StemFusion.gainAt(plan, true, StemGesture.Stem.OTHER, holdEnd + step), 1e-9);
+        // Monotone: no element comes back, ever.
+        for (StemGesture.Stem row : new StemGesture.Stem[]{StemGesture.Stem.DRUMS,
+                StemGesture.Stem.BASS, StemGesture.Stem.OTHER}) {
+            double previous = Double.MAX_VALUE;
+            for (long at = entry; at <= plan.fusionEndMs; at += 13L) {
+                double g = StemFusion.gainAt(plan, true, row, at);
+                assertTrue(row + " must never rise again (" + g + " at " + at + ")", g <= previous + 1e-9);
+                previous = g;
+            }
+        }
+        // B's arrival: silence at the hold's end, half way up at the middle of its step, unity from
+        // the step after.
+        long arriveStart = plan.arriveStartMs;
+        long arriveEnd = plan.arriveEndMs;
+        assertEquals("B's drums and low end start arriving one step before A's hold ends",
+                holdEnd - step, arriveStart);
+        assertEquals(unity, StemFusion.gainAt(plan, false, StemGesture.Stem.DRUMS, arriveEnd), 1e-9);
+        assertEquals(Math.sin(Math.PI / 4), StemFusion.gainAt(plan, false, StemGesture.Stem.DRUMS,
+                (arriveStart + arriveEnd) / 2), 1e-9);
+        assertEquals(0d, StemFusion.gainAt(plan, false, StemGesture.Stem.DRUMS, arriveStart), 1e-9);
 
-        // The splice at swapMs: half way through it each side is at equal power, and it is over
-        // by swapMs + CUT_MS -- 80 ms, not a fade, and the two rows cross on the same line.
-        assertEquals(unity, StemFusion.gainAt(plan, true, StemGesture.Stem.DRUMS, swap - 1), 1e-9);
-        assertEquals(Math.sin(Math.PI / 4), StemFusion.gainAt(plan, true, StemGesture.Stem.DRUMS,
-                swap + StemFusion.CUT_MS / 2), 1e-9);
-        assertEquals(Math.cos(Math.PI / 4), StemFusion.gainAt(plan, false, StemGesture.Stem.DRUMS,
-                swap + StemFusion.CUT_MS / 2), 1e-9);
-        assertEquals(0d, StemFusion.gainAt(plan, true, StemGesture.Stem.DRUMS, swap
-                + StemFusion.CUT_MS), 1e-9);
-        assertEquals(unity, StemFusion.gainAt(plan, false, StemGesture.Stem.DRUMS, swap
-                + StemFusion.CUT_MS), 1e-9);
-        assertEquals(unity, StemFusion.gainAt(plan, true, StemGesture.Stem.BASS, swap + 1L), 1e-9);
-
-        // [bass, fusionEnd): the low end changes hands and the outgoing's material is gone.
-        assertEquals(0d, StemFusion.gainAt(plan, true, StemGesture.Stem.BASS, bass
-                + StemFusion.CUT_MS), 1e-9);
-        assertEquals(unity, StemFusion.gainAt(plan, false, StemGesture.Stem.BASS, bass
-                + StemFusion.CUT_MS), 1e-9);
-        assertEquals(unity, StemFusion.gainAt(plan, false, StemGesture.Stem.OTHER, bass
-                + StemFusion.CUT_MS), 1e-9);
-        assertEquals(0d, StemFusion.gainAt(plan, true, StemGesture.Stem.OTHER, bass
-                + StemFusion.CUT_MS), 1e-9);
-
-        // Outside the window: today's content (the incoming's own backing at unity) and nothing
-        // of the outgoing's.
+        // Outside the window: today's content (the incoming's own backing at unity) and nothing of
+        // the outgoing's.
         assertEquals(unity, StemFusion.gainAt(plan, false, StemGesture.Stem.DRUMS, entry - 1L), 1e-9);
         assertEquals(0d, StemFusion.gainAt(plan, true, StemGesture.Stem.BASS, entry - 1L), 1e-9);
-        assertEquals(unity, StemFusion.gainAt(plan, false, StemGesture.Stem.OTHER, end), 1e-9);
-        assertEquals(0d, StemFusion.gainAt(plan, true, StemGesture.Stem.DRUMS, end), 1e-9);
+        assertEquals(unity, StemFusion.gainAt(plan, false, StemGesture.Stem.OTHER, plan.fusionEndMs), 1e-9);
+        assertEquals(0d, StemFusion.gainAt(plan, true, StemGesture.Stem.DRUMS, plan.fusionEndMs), 1e-9);
+    }
+
+    /** How long a row takes to get within 6 dB of its own level (a rise) or of the floor (a fall),
+     *  ms — the measurement the round-6 shapes are chosen by. */
+    private static long reachMs(StemFusion.Plan plan, boolean fromOutgoing, StemGesture.Stem row,
+                                long fromMs, double target, double tol) {
+        for (long at = fromMs; at <= plan.fusionEndMs; at += 5L) {
+            if (Math.abs(StemFusion.gainAt(plan, fromOutgoing, row, at) - target) <= tol) {
+                return at - fromMs;
+            }
+        }
+        return -1L;
+    }
+
+    @Test
+    public void theRecedeAndArrivalTimesAreTheOnesTheDesignNames() {
+        StemFusion.Plan plan = fixture();
+        long step = Math.round(plan.barStepMs);
+        // An equal-power decline is a cosine, so -6 dB (half amplitude) is reached TWO THIRDS of
+        // the way through its span; an equal-power rise is a sine, so -6 dB comes after ONE THIRD.
+        long drumsSix = reachMs(plan, true, StemGesture.Stem.DRUMS, plan.holdEndMs, 0d, 0.5d);
+        long lowEndSix = reachMs(plan, true, StemGesture.Stem.BASS, plan.holdEndMs, 0d, 0.5d);
+        long arriveSix = reachMs(plan, false, StemGesture.Stem.DRUMS, plan.arriveStartMs, 1d, 0.5d);
+        println("A's drums reach -6 dB %dms into their 1-step fade, its low end %dms into its"
+                        + " 2-step one; B's drums reach -6 dB %dms into their 1-step rise",
+                drumsSix, lowEndSix, arriveSix);
+        assertEquals(Math.round(2d / 3d * step), drumsSix, 15L);
+        assertEquals("the low end's fade is twice as long, so its -6 dB is twice as far in",
+                Math.round(4d / 3d * step), lowEndSix, 15L);
+        assertEquals(Math.round(1d / 3d * step), arriveSix, 15L);
+        // The coexistence the user asked to keep (rule 3): the stretch over which BOTH backings are
+        // within 6 dB of their own level — B's drums on their way up and A's on their way down.
+        long from = plan.arriveStartMs + arriveSix;
+        long to = plan.holdEndMs + drumsSix;
+        println("the overlap where both backings are within 6 dB of unity: %dms (one step is %dms)",
+                to - from, step);
+        assertTrue("both sides are near unity for more than one step: " + (to - from),
+                to - from > step);
     }
 
     /**
@@ -422,14 +657,21 @@ public class StemFusionTest {
             assertTrue("gain " + g + " at " + at, g >= previous - 1e-12 && g <= 1d + 1e-12);
             previous = g;
         }
-        // The incoming's drums are NOT ramped like the bed: they are at exactly zero until their
-        // own splice begins on the bar line the bed has just arrived on, and then arrive in 80 ms.
-        // A faded drum swap would smear the pulse, which is the hand-over's signature.
-        assertEquals(0d, StemFusion.gainAt(plan, false, StemGesture.Stem.DRUMS,
-                entry + fade / 2), 1e-9);
-        assertEquals(0d, StemFusion.gainAt(plan, false, StemGesture.Stem.DRUMS, swap - 1L), 1e-9);
+        // ⚠️ Round 6: the incoming's drums and low end are not cut in either — they RISE, over one
+        // step, starting one step BEFORE the hold ends (which is the same instant the bed starts
+        // from), so both backings are near their own level together for more than a step. Zero
+        // exactly at the rise's start, cos/sin-exact in the middle, unity from its end on.
+        long arriveStart = plan.arriveStartMs;
+        long arriveEnd = plan.arriveEndMs;
+        assertEquals(entry + fade, arriveStart);
+        assertEquals(arriveStart + Math.round(plan.barStepMs), arriveEnd);
+        assertEquals(0d, StemFusion.gainAt(plan, false, StemGesture.Stem.DRUMS, arriveStart), 1e-9);
         assertEquals(Math.sin(Math.PI / 4), StemFusion.gainAt(plan, false, StemGesture.Stem.DRUMS,
-                swap + StemFusion.CUT_MS / 2), 1e-9);
+                (arriveStart + arriveEnd) / 2L), 1e-9);
+        assertEquals(1d, StemFusion.gainAt(plan, false, StemGesture.Stem.DRUMS, arriveEnd), 1e-9);
+        assertEquals(1d, StemFusion.gainAt(plan, false, StemGesture.Stem.BASS, arriveEnd), 1e-9);
+        assertEquals("A's low end is still at unity where B's drums top out", 1d,
+                StemFusion.gainAt(plan, true, StemGesture.Stem.BASS, arriveEnd), 1e-9);
     }
 
     /**
@@ -445,16 +687,22 @@ public class StemFusionTest {
         // faster, so the carry is stretched by the same 1.25 (which is what makes playback return it
         // to the outgoing's tempo and pitch).
         StemFusion.Plan plan = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 35_000L,
-                15_000L, 400d, 0d, 500d, 0d, 1.25d, bars(1600d, 0d, 150), bars(2000d, 0d, 120),
+                15_000L, 500d, 0d, 520d, 0d, 1d, bars(2000d, 0d, 120), bars(2080d, 0d, 120),
                 StemFusion.NO_VOICE_MEASUREMENT));
         assertTrue(plan.reason, plan.valid);
-        assertEquals(1.25d, plan.speed, 1e-9);
-        assertEquals(0d, plan.lockError, 1e-9);
-        assertTrue(plan.describe(), plan.describe().contains("x1.2500"));
+        // The deck plays at x1.0 (the controller applies the tempo lock only inside its ±8% clamp
+        // and this pair is already within RELATION_TOLERANCE of the unison), while the carry is read
+        // at the bar ratio — two different numbers, which is the whole point of the line.
+        assertEquals(1d, plan.speed, 1e-9);
+        assertEquals(1.04d, plan.stretch, 1e-9);
+        assertEquals(0.0385d, plan.relation.error, 0.001d);
+        assertTrue(plan.describe(), plan.describe().contains("x1.0000"));
+        assertTrue(plan.describe(), plan.describe().contains("x1.0400"));
         assertFalse("the bar-count ratio must not be in the line: " + plan.describe(),
                 plan.describe().contains("x1.83"));
-        // At that ratio the take fills exactly the incoming's two bars and the splice it is cut on.
-        assertEquals(2 * 2000d + StemFusion.CUT_MS, plan.sourceSpanMs * plan.speed, 1.0d);
+        // At that ratio the take fills exactly the table's own span plus the tail it is cut on:
+        // four steps of 2080 ms at x1.04, which is the window the deck plays.
+        assertEquals(plan.windowMs + StemFusion.CUT_MS, plan.sourceSpanMs * plan.stretch, 2.0d);
     }
 
     /**
@@ -570,13 +818,13 @@ public class StemFusionTest {
         int frames = (int) Math.round(plan.windowMs * RATE / 1000d);
         assertEquals(frames, carried[StemGesture.Stem.DRUMS.row()][0].length);
         // In the file the 0.5 s beats are 0.625 s apart; heard at x1.25 they are 0.5 s apart again.
-        // The material runs to the last cut's own splice (bassMs + CUT), so the audible part is the
-        // take's own span stretched by the speed — the rest of the window is silence the table's
-        // own gains are zero on.
-        int audibleFrames = (int) Math.round(plan.sourceSpanMs * speed * RATE / 1000d);
+        // ⚠️ Counted over the window's unity stretch (the hold), not over the whole take: the take's
+        // last steps are the fade, which takes the bursts below the counting threshold — that is the
+        // round-6 gesture working, not a defect.
+        int unityFrames = (int) Math.round((plan.holdEndMs - plan.entryMs) * RATE / 1000d);
         int inFile = countBursts(carried[StemGesture.Stem.DRUMS.row()][0],
-                (int) Math.round(0.01d * RATE), 0, audibleFrames);
-        assertEquals(plan.sourceSpanMs / (beatSec * 1000d), inFile, 1.0d);
+                (int) Math.round(0.01d * RATE), 0, unityFrames);
+        assertEquals((plan.holdEndMs - plan.entryMs) / (beatSec * 1000d * speed), inFile, 1.0d);
 
         // And with no tempo applied the carry is sample-exact, starting exactly at the junction:
         // the first sample of the passage is A's own sample at the junction.
@@ -944,7 +1192,7 @@ public class StemFusionTest {
         // material: the make-up scales the outgoing's carried rows and nothing else.
         Ran[] bare = renderWithMakeup(plan, 1d, true, a, cleanIncoming(30d), 0.5d, 0.5d, false);
         int last = after.head[0].length;
-        int from = (int) Math.round((plan.bassMs + StemFusion.CUT_MS - plan.entryMs) * RATE / 1000d);
+        int from = (int) Math.round((plan.lowEndEndMs - plan.entryMs) * RATE / 1000d);
         for (int ch = 0; ch < bare[1].head.length; ch++) {
             for (int i = from; i < last; i++) {
                 assertEquals("the make-up must not touch B's rows (sample " + i + ")",
@@ -1023,44 +1271,59 @@ public class StemFusionTest {
      */
     @Test
     public void aCarryThatEndsBeforeItsOwnLastCutIsCaught() {
-        // A slow outgoing track: a 1 s beat, a 4 s bar, and the fusion's window is three bars of
-        // B's grid = 6 s. The material the gesture needs is (2*2000 + 80) = 4080 ms of A's file,
-        // so the report is measured against a source window of that length — but what is carried
-        // is only the first 3000 ms of it, as a short separation would give.
+        // A slow outgoing track: a 1 s beat, a 4 s bar. The material the gesture needs is the
+        // window (see the assertion below), so the report is measured against a source window of
+        // that length — but what is carried is only part of it, as a short separation would give.
+        // ⚠️ Round 5: a 1000 ms against a 500 ms beat is a 2:1 relation, so this is a plan now (the
+        // point of the test is the material its carry needs, not the refusal it used to be).
         StemFusion.Plan plan = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 35_000L,
                 15_000L, 1000d, 0d, 500d, 0d, 1d, bars(4000d, 0d, 60), bars(2000d, 0d, 120),
                 StemFusion.NO_VOICE_MEASUREMENT));
-        assertFalse(plan.describe(), plan.valid);
+        assertTrue(plan.describe(), plan.valid);
+        assertEquals(2, plan.relation.p);
+        assertEquals(1, plan.relation.q);
         // The same pair, locked (both grids 1 s beats) is a real fusion: the bass must be in the
         // file right up to the 2 s bar line, and it is.
         StemFusion.Plan locked = StemFusion.plan(new StemFusion.Input(400_000L, 20_000L, 35_000L,
                 15_000L, 1000d, 0d, 1000d, 0d, 1d, bars(4000d, 0d, 100), bars(4000d, 0d, 100),
                 StemFusion.NO_VOICE_MEASUREMENT));
         assertTrue(locked.describe(), locked.valid);
+        // ⚠️ Round 6's adaptive shape, and the reason it exists: a 4 s step cannot afford the full
+        // gesture (a hold of 2 steps plus a 2-step low end fade is 16 s of A's file, over the 12 s
+        // cap), so this pair gets ONE step of hold and a one-step low end fade. Still a recede —
+        // the outgoing's rows fade out, none of them is cut — and the take it needs is 8080 ms.
+        assertEquals("one step of hold", 4_000L, locked.holdEndMs - locked.entryMs);
+        assertEquals("and the low end's own fade is one step too", 4_000L,
+                locked.lowEndEndMs - locked.holdEndMs);
         assertEquals(8_080L, locked.sourceSpanMs);
-        // The low end is cut at bassMs = entry + 8 s, and the material it is cut from is the
-        // 8 s of A's own file from the junction — 8080 ms including the splice's own tail.
-        assertEquals(8_000L, locked.bassMs - locked.entryMs);
+        assertEquals(8_000L, locked.fusionEndMs - locked.entryMs);
 
         float[][][] a = cleanOutgoing(30d);
         Ran full = render(locked, 1d, true, a, cleanIncoming(30d), 1d, 1d, true);
         println("%s", full.report.describe());
         assertTrue(full.report.describe(), full.report.stepMeasured);
         assertTrue(full.report.describe(), full.report.acceptable);
-        // Now the same render with the take cut short: the last bar of the carried low end is
-        // gone while the table still has it on, and the outgoing's own file still has the material
-        // the take was supposed to come from.
+        // Now the same render with the take cut short: the second half of A's material is gone, so
+        // the outgoing's low end reaches the middle of the gesture and then fades SILENCE — the
+        // round-18 defect in its round-6 costume, which is what the fade's own clause catches (a
+        // clause on the level before the gesture takes over cannot see inside the fade, because
+        // there the row is falling by the table's own design).
         float[][][] short_ = truncateRows(a, locked, 0.5d);
         Ran clipped = render(locked, 1d, true, short_, cleanIncoming(30d), 1d, 1d, true, a, 0d);
         println("%s", clipped.report.describe());
         assertFalse(clipped.report.describe(), clipped.report.acceptable);
         assertTrue(clipped.report.failures,
-                clipped.report.failures.contains("up to its own cut")
+                clipped.report.failures.contains("fades a hole")
                         || clipped.report.failures.contains("low end is not there"));
         // The clause is measurable rather than vacuous: with the full take it is satisfied.
         assertTrue(full.report.describe(),
                 full.report.carriedBassEndDb > full.report.sourceBassEndDb
                         - StemFusion.CARRY_TOLERANCE_DB);
+        // And so is the fade's own clause: the full take's fade sits under its source by the
+        // table's equal-power FADE_RMS_DB and no more.
+        assertTrue(full.report.describe(),
+                full.report.carriedBassFadeDb > full.report.sourceBassFadeDb
+                        - StemFusion.FADE_RMS_DB - StemFusion.CARRY_FADE_TOLERANCE_DB);
     }
 
     /** The same stems with every row's material past {@code fraction} of the take's own span

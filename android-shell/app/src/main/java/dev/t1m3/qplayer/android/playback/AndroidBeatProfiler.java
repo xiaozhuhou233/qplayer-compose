@@ -40,6 +40,48 @@ import java.nio.ByteOrder;
  *       boundary it would serve.</li>
  * </ul>
  *
+ * <p><b>⚠️ The ladder of windows, and why one window is not enough.</b> A single 30 s
+ * window at the head used to be the whole measurement, and on this library it refuses two
+ * kinds of track that a shorter one reads clearly:
+ *
+ * <ul>
+ *   <li><b>A sparse beat</b> ({@code BeatAnalysis.windowAgreement} only arms its 3-segment
+ *       agreement test once the window is at least 18 s, and a track whose onset pattern
+ *       repeats every one and a half beats fails that test): 《Hurt You》548785556 reads
+ *       <em>no grid at all</em> from the head 30 s, while a 15 s window at the same place
+ *       reads 642 ms of phase at confidence 0.71 — the window that should have been the
+ *       safest is the worst choice there.</li>
+ *   <li><b>A starved pass</b>: the deadline is wall clock, and on a device that is busy
+ *       (rendering DJ edits, for one) it can cut the decode after four or five seconds of
+ *       audio. What came out was still analysed and cached, so 《Lose My Mind》2700280437 sat
+ *       in the cache at confidence 0.19 — under {@link BeatProfile#MIN_CONFIDENCE}, which is
+ *       the one number everything downstream gates on, and the cache made it permanent.</li>
+ * </ul>
+ *
+ * <p>So the probe now tries {@link #ATTEMPTS}: the head 30 s first (the measurement every
+ * boundary has used since P4, unchanged for every track it works for), then a 15 s window at
+ * the head, then a 15 s window {@link #LATE_START_MS} into the file. It stops at the first
+ * window whose grid reaches {@link BeatProfile#MIN_CONFIDENCE}, logs every window it tried
+ * with what it read, and — the rule that matters for the second failure above — <b>never
+ * answers with a pass its own deadline truncated</b>: a truncated pass is retried, and if
+ * every window is truncated the track is left unmeasured (the controller then caches nothing
+ * and a later play probes again) rather than storing a starved grid that would be believed
+ * forever. A window that completed and still reads weak is not a starvation artefact: it is a
+ * track without a credible beat, and it is returned as it always was, which keeps the key
+ * measurement it carries (the key comes from the same decode and gated on nothing).
+ *
+ * <p><b>Phase semantics do not change with the window.</b> The sink takes its origin from the
+ * <em>first decoded buffer's own presentation timestamp</em> ({@link Mono#originMs}), and the
+ * estimator adds that origin before folding the phase into one period
+ * ({@code BeatAnalysis.analyse}), so a reported first beat is a position in the FILE whatever
+ * window it was measured from — including the late one, whose seek lands on a sync point
+ * rather than on the exact millisecond asked for: the samples carry their own timestamps, so a
+ * seek that lands early labels itself. Two windows of the same track therefore describe the
+ * same family of beat positions (the grid is {@code firstBeat + k*period}), which is why the
+ * later window is a valid measurement of the track's own grid and not a different one. The
+ * window that answered is logged, and the head is preferred: the ladder only moves later when
+ * the head has nothing usable to say.
+ *
  * <p>Nothing here can affect playback: it runs on the controller's beat worker,
  * opens its own extractor and codec, and answers null for every problem (unknown
  * container, no audio track, a decoder that will not start, float or 8-bit PCM,
@@ -47,13 +89,66 @@ import java.nio.ByteOrder;
  */
 public final class AndroidBeatProfiler implements BeatProfiler {
 
-    /** How much audio is decoded, ms. */
+    /** How much audio is decoded by the first window, ms. */
     private static final long WINDOW_MS = 30_000L;
 
-    /** The whole probe gives up here. The window is 30 s of audio, which this
+    /** The window every retry uses, ms. Short enough that
+     *  {@code BeatAnalysis.windowAgreement}'s 3-segment test is not armed (it needs 18 s) —
+     *  which is the point: the segments are what refuses a sparse beat — and long enough that
+     *  a slow track still holds a dozen beats. */
+    private static final long SHORT_WINDOW_MS = 15_000L;
+
+    /** Where the last window starts, ms: a track's intro is often the least representative
+     *  part of it (a solo, a pad, a spoken line), and the body is where the groove is. The
+     *  sweep that chose this point measured 15 s at +30 s reading 0.84 on a track whose head
+     *  windows read 0.19 (starved) and 0.43 (complete). */
+    private static final long LATE_START_MS = 30_000L;
+
+    /** The whole probe gives up here, per window. The window is 30 s of audio, which this
      *  decodes in a fraction of a second locally and in a few seconds from a CDN;
      *  past this the answer would arrive after the boundary that wanted it. */
     private static final long DEADLINE_MS = 8_000L;
+
+    /** What each retry may spend, ms. A retry decodes half the audio of the first window, so
+     *  it gets half the budget; the whole ladder is therefore bounded at
+     *  {@code DEADLINE_MS + 2 * RETRY_DEADLINE_MS} = 16 s of wall clock, and only in the case
+     *  where the first window produced nothing usable (a track the ladder is not going to
+     *  rescue costs exactly one window, as it always did). */
+    private static final long RETRY_DEADLINE_MS = 4_000L;
+
+    /**
+     * The windows one probe tries, in order. Each is a start in the file (ms), a length, and a
+     * deadline; the first whose grid reaches {@link BeatProfile#MIN_CONFIDENCE} wins, and the
+     * probe stops there.
+     */
+    private static final Attempt[] ATTEMPTS = {
+            new Attempt(0L, WINDOW_MS, DEADLINE_MS, "head 30s"),
+            new Attempt(0L, SHORT_WINDOW_MS, RETRY_DEADLINE_MS, "head 15s"),
+            new Attempt(LATE_START_MS, SHORT_WINDOW_MS, RETRY_DEADLINE_MS, "body 15s"),
+    };
+
+    /** One window of the ladder. */
+    private static final class Attempt {
+        final long startMs;
+        final long windowMs;
+        final long deadlineMs;
+        /** How the log names it ("head 30s"). */
+        final String what;
+
+        Attempt(long startMs, long windowMs, long deadlineMs, String what) {
+            this.startMs = startMs;
+            this.windowMs = windowMs;
+            this.deadlineMs = deadlineMs;
+            this.what = what;
+        }
+
+        /** Whether a file of {@code durationMs} (0 = unknown) can hold this window at all: a
+         *  start past the end is skipped rather than decoded into nothing. The known-length
+         *  case is the only reason this probe reads the length hint. */
+        boolean fitsIn(long durationMs) {
+            return startMs == 0L || durationMs <= 0L || startMs + MIN_USABLE_MS <= durationMs;
+        }
+    }
 
     /** The rate the mono signal is decimated to before the analysis. A beat lives
      *  under 10 Hz; 11 kHz is more than two orders of magnitude above anything the
@@ -74,54 +169,137 @@ public final class AndroidBeatProfiler implements BeatProfiler {
 
     @Override
     public BeatProfile probe(String source, long durationMsHint) {
-        // durationMsHint is deliberately unused: a grid is measured from the head of
-        // the track, so its length adds nothing (see BeatProfiler.probe).
         if (source == null || source.isEmpty()) return null;
-        long deadlineNs = System.nanoTime() + DEADLINE_MS * 1_000_000L;
-        Mono sink = new Mono();
-        int result = decode(source, deadlineNs, sink);
-        if (result == DECODE_FAILED || !sink.sawFormat || sink.count <= 0) {
-            Logger.info("beat probe: unusable for {}", shortSource(source));
-            return null;
+        String shortName = shortSource(source);
+        BeatProfile winner = null;
+        Mono winnerMono = null;
+        // A grid from a window that COMPLETED and still reads below the gate: kept as the
+        // answer of last resort (it is a track without a credible beat, not a starvation
+        // artefact), but only after every window has had its turn.
+        BeatProfile weak = null;
+        Mono weakMono = null;
+        long weakAnalysedMs = 0L;
+        for (Attempt attempt : ATTEMPTS) {
+            if (!attempt.fitsIn(durationMsHint)) {
+                Logger.info("beat probe: skipping the {} window for {} — the file is {}ms long",
+                        attempt.what, shortName, durationMsHint);
+                continue;
+            }
+            Pass pass = one(source, attempt);
+            if (pass == null) continue;
+            Logger.info("beat probe: {} window for {} analysed {}ms{} -> {}", attempt.what,
+                    shortName, pass.analysedMs,
+                    pass.truncated ? " (cut short by its deadline)" : "",
+                    pass.profile == null ? "no grid" : pass.profile.label());
+            if (pass.profile == null) continue;
+            if (pass.profile.trustworthy()) {
+                winner = pass.profile;
+                winnerMono = pass.mono;
+                Logger.info("beat probe: the {} window answered for {} ({})", attempt.what,
+                        shortName, winner.label());
+                break;
+            }
+            if (!pass.truncated && (weak == null
+                    || pass.profile.confidence() > weak.confidence())) {
+                weak = pass.profile;
+                weakMono = pass.mono;
+                weakAnalysedMs = pass.analysedMs;
+            }
+            // Under the gate and not from a truncated pass: the next window gets a turn,
+            // because on this library a sparse beat is exactly the case one window refuses
+            // and another reads (see the class doc).
         }
-        // A pass that hit the window limit or ran out of time is still usable: what
-        // was decoded is a contiguous run from the track's start, and 8+ seconds of
-        // it hold enough beats at any tempo in range. Only a pass with (almost)
-        // nothing in it is a failure — and that is what MIN_USABLE_MS checks.
+        if (winner == null) {
+            if (weak == null) {
+                // Every window was empty, truncated, or decoded too little: the track stays
+                // unmeasured. That is the point of the rule — a starved pass must not become a
+                // cached grid, or the one number everything gates on is wrong for good (the
+                // controller caches only what it is handed, so nothing is stored and a later
+                // play probes again once the device is less busy).
+                Logger.info("beat probe: no usable window for {} — left unmeasured rather than"
+                        + " caching a starved grid", shortName);
+                return null;
+            }
+            winner = weak;
+            winnerMono = weakMono;
+            Logger.info("beat probe: every window for {} read below {} — keeping {} from a window"
+                            + " that completed ({}ms analysed), which also carries the measured"
+                            + " key",
+                    shortName, BeatProfile.MIN_CONFIDENCE, winner.label(), weakAnalysedMs);
+        }
+        // The key, from the winning window's own samples: one decode answers both of the
+        // questions a mix asks (where the beats are, and what key the music is in). Measured
+        // only when a grid was found, which is deliberate — the key is only ever used to
+        // transpose a track into another one's key during an overlap, and a track with no
+        // grid cannot be aligned into an overlap in the first place, so a profile for one
+        // would be a decode nobody reads.
+        KeyProfile key = winnerMono != null
+                ? KeyAnalysis.analyse(winnerMono.samples(), winnerMono.rate()) : null;
+        return key != null ? winner.withKey(key) : winner;
+    }
+
+    /** One window's outcome: the grid it produced (null when the estimator found none), how
+     *  much audio it got to analyse, whether its own deadline cut the decode short, and the
+     *  decoded window itself (kept for the key of whichever window wins). */
+    private static final class Pass {
+        final BeatProfile profile;
+        final long analysedMs;
+        final boolean truncated;
+        final Mono mono;
+
+        Pass(BeatProfile profile, long analysedMs, boolean truncated, Mono mono) {
+            this.profile = profile;
+            this.analysedMs = analysedMs;
+            this.truncated = truncated;
+            this.mono = mono;
+        }
+    }
+
+    /** Decode and analyse one window, or null when this window has nothing to offer (a decode
+     *  that failed, no format, no audio, less than {@link #MIN_USABLE_MS} of it). */
+    private Pass one(String source, Attempt attempt) {
+        Mono sink = new Mono(attempt.windowMs);
+        long deadlineNs = System.nanoTime() + attempt.deadlineMs * 1_000_000L;
+        int result = decode(source, deadlineNs, sink, attempt.startMs, attempt.what);
+        if (result == DECODE_FAILED || !sink.sawFormat || sink.count <= 0) return null;
         long analysedMs = (long) (sink.count * 1000d / sink.rate());
         if (analysedMs < MIN_USABLE_MS) {
-            Logger.info("beat probe: only {}ms decoded for {}", analysedMs, shortSource(source));
+            Logger.info("beat probe: only {}ms decoded in the {} window", analysedMs,
+                    attempt.what);
             return null;
         }
         BeatProfile p = BeatAnalysis.analyse(sink.samples(), sink.rate(), sink.originMs);
-        if (p == null) {
-            Logger.info("beat probe: no grid in {}ms of {}", analysedMs, shortSource(source));
-            return null;
-        }
-        // The key, from the same window and the same samples: one decode answers both
-        // of the questions a mix asks (where the beats are, and what key the music is
-        // in). Measured only when a grid was found, which is deliberate — the key is
-        // only ever used to transpose a track into another one's key during an
-        // overlap, and a track with no grid cannot be aligned into an overlap in the
-        // first place, so a profile for one would be a decode nobody reads.
-        KeyProfile key = KeyAnalysis.analyse(sink.samples(), sink.rate());
-        return key != null ? p.withKey(key) : p;
+        return new Pass(p, analysedMs, result == DECODE_TRUNCATED, sink);
     }
 
     // --- decode -------------------------------------------------------------
 
     private static final int DECODE_FAILED = 0;
-    /** The pass ran to the end of the stream, or to the window, or out of time —
-     *  all of which leave usable audio behind (see the caller). */
+    /** The pass ran to the end of the stream or filled its window: everything the window
+     *  asked for is there. */
     private static final int DECODE_OK = 1;
+    /** The pass ran out of time before its window filled: what is there is a strict prefix of
+     *  what was asked for, and a grid measured from it may be an artefact of the starvation
+     *  rather than of the music (see the class doc — this is the flag the ladder gates on). */
+    private static final int DECODE_TRUNCATED = 2;
 
-    private int decode(String source, long deadlineNs, Mono sink) {
+    /**
+     * Decode one window of {@code source} into {@code sink}.
+     *
+     * @param startMs where the window starts, ms. 0 is the file's head and needs no seek; a
+     *                later start seeks to the sync point at or before it, and the sink then
+     *                takes its origin from the first buffer that actually comes out — so the
+     *                phase the estimator reports stays a position in the file even when the
+     *                seek lands short of the request (see the class doc on phase semantics).
+     */
+    private int decode(String source, long deadlineNs, Mono sink, long startMs, String what) {
         MediaExtractor extractor = new MediaExtractor();
         MediaCodec codec = null;
         boolean produced = false;
         boolean inputDone = false;
         boolean outputDone = false;
         boolean stopped = false;
+        boolean outOfTime = false;
         try {
             if (isRemote(source)) {
                 // Same path the player uses for the bili CDN; a transition never
@@ -140,13 +318,23 @@ public final class AndroidBeatProfiler implements BeatProfiler {
             codec = MediaCodec.createDecoderByType(mime);
             codec.configure(format, null, null, 0);
             codec.start();
-            // No seek: the grid's phase is measured from the file's own start, so
-            // the decode has to start there too.
+            if (startMs > 0L) {
+                // To the sync point at or before the requested start: a decode cannot begin
+                // anywhere else, and the sink's origin is taken from what comes out (not from
+                // what was asked for), so a short landing is labelled correctly rather than
+                // shifting the grid by the difference.
+                extractor.seekTo(startMs * 1000L, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
+                Logger.info("beat probe: {} window decoding from {}ms", what, startMs);
+            }
 
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             while (!outputDone && !stopped) {
                 if (System.nanoTime() > deadlineNs) {
-                    Logger.info("beat probe: deadline hit");
+                    // Out of time with the window unfilled: the caller has to know, because a
+                    // grid from this much audio may be an artefact of the starvation (see
+                    // DECODE_TRUNCATED).
+                    outOfTime = true;
+                    Logger.info("beat probe: {} window hit its deadline", what);
                     break;
                 }
                 if (!inputDone) {
@@ -177,6 +365,7 @@ public final class AndroidBeatProfiler implements BeatProfiler {
                     if (!sink.format(codec.getOutputFormat())) stopped = true;
                 }
             }
+            if (outOfTime) return produced ? DECODE_TRUNCATED : DECODE_FAILED;
             return produced ? DECODE_OK : DECODE_FAILED;
         } catch (Throwable e) {
             Logger.warn("beat probe decode failed: {}", e.toString());
@@ -219,14 +408,18 @@ public final class AndroidBeatProfiler implements BeatProfiler {
      * anti-alias filter the analysis needs — a decimated signal that still contains
      * 5 kHz content would put hat noise into the onset envelope).
      *
-     * <p>The samples handed to the estimator are the *first* ones of the track, and
+     * <p>The samples handed to the estimator are the first ones of the window, and
      * {@link #originMs} carries the file time of the first of them, so the returned
-     * phase is an offset into the track rather than into the decode.
+     * phase is a position in the track whatever window it was measured from — the
+     * file's head, or {@link #LATE_START_MS} into it (see the class doc).
      */
     private static final class Mono {
         boolean sawFormat;
         int count;
         long originMs;
+        /** How much audio this sink holds, ms: the window it was made for, which fixes the
+         *  buffer and therefore what "the window is full" means. */
+        private final long windowMs;
         private double[] out;
         private int rate;
         private int channels;
@@ -239,6 +432,10 @@ public final class AndroidBeatProfiler implements BeatProfiler {
          *  timestamp as the track's start, which put the whole grid one buffer late
          *  (measured: +23 ms on a synthetic track, the length of a 4 KB buffer). */
         private boolean originSet;
+
+        Mono(long windowMs) {
+            this.windowMs = windowMs;
+        }
 
         /** Whether the decoded rate and channel count are usable; false stops the
          *  pass (the caller then has no grid, as with every other problem). */
@@ -258,7 +455,7 @@ public final class AndroidBeatProfiler implements BeatProfiler {
             try { channelCount = f.getInteger(MediaFormat.KEY_CHANNEL_COUNT); } catch (Throwable ignored) { }
             if (sampleRate <= 0 || channelCount <= 0) return false;
             int decimation = Math.max(1, (int) Math.round(sampleRate / TARGET_RATE));
-            int capacity = (int) (sampleRate / decimation * (WINDOW_MS / 1000d)) + 1024;
+            int capacity = (int) (sampleRate / decimation * (windowMs / 1000d)) + 1024;
             rate = sampleRate / decimation;
             channels = channelCount;
             decim = decimation;
