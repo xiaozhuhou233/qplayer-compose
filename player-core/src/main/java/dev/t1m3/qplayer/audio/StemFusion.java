@@ -912,73 +912,43 @@ public final class StemFusion {
      * loud tenth is "this row is playing", whatever the track's overall level is. One beat wide, so
      * a row that plays on the beat is found on the beat.
      *
-     *  <p>⚠️ <b>The reference is the row's own loud tenth over the WHOLE array, not over the search
-     *  window.</b> That distinction is not cosmetic: the search window is the passage, which on the
-     *  device's pair is 15 s of an intro with no kit in it at all, and a loud tenth measured over
-     *  <em>that</em> is the intro's own two hits (−13.9 dBFS) — so every beat of the intro sat
-     *  within the margin of it and the answer was "playing from the start", the false negative that
-     *  leaves the hole to the acceptance. Over the whole head the same row's loud tenth is the
-     *  kit's (−0.1 dBFS over 45 s, and −13.9 over the intro alone), and the answer is 8 415 ms,
-     *  which is the kit returning. A row whose loud tenth is under
-     *  {@link #INCOMING_ROW_FLOOR_DBFS} anywhere in the head is absent and answers -1.
+     *  <p>⚠️ <b>What this measurement CANNOT do, measured, and why its reading has to be
+     *  checked.</b> On the device pair's incoming ({@code Lose My Mind}'s own separated drums, the
+     *  harness's 45 s head, per-beat peaks in dBFS): {@code -8 -10 -20 -34 -38 -42 -51 -51 -37 -54
+     *  -53 -53 -57 -54 -51 -49 -5 -10 -18 -30} — a <b>52 dB</b> spread from its loudest beat to its
+     *  quietest, and it OPENS on two loud hits. Its loud tenth is therefore the intro's own level in
+     *  any window short of the kit's return (measured: −10.4 dBFS over a 15 s head, −9.7 over 19 s,
+     *  −17.6 over 30 s, −1.0 over 45 s), and no margin separates the opening hit (−8) from the
+     *  kit's ordinary beats (−18, −30, −55): at 12, 18 and 24 dB under its own loud tenth the
+     *  row's hit share never exceeds 0.38 on any beat, and at every head length from 15 s to 45 s
+     *  this method answers <b>0 ms</b> — "playing from the first beat". The device's log said exactly
+     *  that, and it is right: an earlier figure of 8 415 ms for this row came from a scratch mirror
+     *  of this rule and is not reproducible from the same data (13 calibrations over four head
+     *  lengths), so it must not be relied on. <b>What follows:</b> the wait only ever HOLDS A's rows
+     *  longer and can never create a hole, but on a stem like this one it does not engage, and the
+     *  pair's fate is the acceptance's pulse clause — which is measured on the produced passage and
+     *  is reliable there. {@link #rowHitShare} is how a caller sees that the reading is not
+     *  evidence: below {@link #INCOMING_TRUST_SHARE} the row cannot be told from its own intro.
      *
-     *  <p>⚠️ <b>And it has to be {@link #INCOMING_SUSTAIN_BEATS} beats in a row.</b> One beat above
-     *  the margin is not a row playing — it is a hit, a crash, a stray kick — and this measurement
-     *  exists to answer "may A's row leave now", which needs a row that STAYS. Measured on the
-     *  device pair's incoming ({@code Lose My Mind}'s own separated head, per-beat peaks, dBFS):
-     *  {@code -8 -10 -20 -34 -38 -42 -52 -51 -37 -54 -58 -53 -57 -56 -54 -51 -5 -10 -18} — the kit
-     *  hits twice and then leaves for seven seconds (its intro is voice and pad, which is what the
-     *  listener hears as the passage going flat), and the first SINGLE beat above the margin is beat
-     *  one, which would have answered "playing from the start" and changed nothing. Three beats in a
-     *  row answers <b>8 415 ms</b> of its own file — the kit returning — and that reconciles the
-     *  acceptance's own number to the millisecond: the pair's render put A's drums out over
-     *  [5 260, 7 440) ms, its last carried attack is at 5 583, and 8 415 − 5 583 = <b>2 832 ms</b>,
-     *  exactly the "longest gap 2832ms of a 566ms period" it reported. The wait then makes the hold
-     *  four steps (entry + 8 720 ms), A's drums keep attacking until 9 620, and the gap is gone. (Its
-     *  low end answers 240 ms — a sustained line from the first beat, loud tenth −3.9 dBFS — so on
-     *  this pair only the drums make the recede wait.)
+     *  <p>The reference is the row's own loud tenth over the whole array, and
+     *  {@link #INCOMING_SUSTAIN_BEATS} beats in a row are required, so a single hit is not a row
+     *  playing. A row whose loud tenth is under {@link #INCOMING_ROW_FLOOR_DBFS} is absent and
+     *  answers -1.
      */
     public static long rowStartMs(float[][] pcm, int rate, long fromMs, long toMs, double beatMs) {
-        if (pcm == null || pcm.length == 0 || pcm[0] == null || !(beatMs > 0d) || !(rate > 0)) {
-            return -1L;
-        }
+        java.util.List<Double> peaks = beatPeaks(pcm, rate, toMs, beatMs);
+        if (peaks == null || peaks.size() < INCOMING_SUSTAIN_BEATS) return -1L;
         int step = Math.max(1, (int) Math.round(beatMs * rate / 1000d));
-        int frame = Math.max(1, step / 4);
         int from = (int) Math.max(0L, Math.round(fromMs * rate / 1000d));
         int to = Math.min(pcm[0].length, (int) Math.round(toMs * rate / 1000d));
-        if (to - from < step) return -1L;
-        if (to < 0 || from > pcm[0].length) return -1L;
-        java.util.ArrayList<Double> peaks = new java.util.ArrayList<>();
-        for (int at = 0; at + step <= pcm[0].length; at += step) {
-            double peak = 0d;
-            for (int ch = 0; ch < pcm.length; ch++) {
-                if (pcm[ch] == null) continue;
-                for (int i = at; i < at + step && i < pcm[ch].length; i += frame) {
-                    double window = 0d;
-                    for (int j = i; j < Math.min(i + frame, pcm[ch].length); j++) {
-                        window = Math.max(window, Math.abs(pcm[ch][j]));
-                    }
-                    peak = Math.max(peak, window);
-                }
-            }
-            peaks.add(peak);
-        }
-        if (peaks.size() < INCOMING_SUSTAIN_BEATS) return -1L;
-        double[] sorted = new double[peaks.size()];
-        for (int i = 0; i < sorted.length; i++) sorted[i] = peaks.get(i);
-        java.util.Arrays.sort(sorted);
-        // The row's own loud tenth, the same measure StemBridge's level clauses use: for a drum row
-        // that is "a beat with the kit on it", and for a bass row its note. Taken over the whole
-        // array (see the method's own note) so an intro-only window cannot call its own two hits the
-        // row's playing level.
-        double loud = sorted[(int) Math.min(sorted.length - 1L, Math.round(0.9d * (sorted.length - 1)))];
-        double loudDb = 20d * Math.log10(Math.max(1e-9d, loud));
+        if (to - from < step || to < 0 || from > pcm[0].length) return -1L;
+        double loudDb = loudTenthDb(peaks);
         if (loudDb < INCOMING_ROW_FLOOR_DBFS) return -1L;
         double floor = loudDb - INCOMING_ON_DB;
         // The search is the caller's window: the reference is the row's, the question is this
         // stretch of it.
-        int firstBeat = Math.max(0, (from - 0) / step);
-        int lastBeat = Math.min(peaks.size(), Math.max(firstBeat + 1, (to) / step + 1));
+        int firstBeat = Math.max(0, from / step);
+        int lastBeat = Math.min(peaks.size(), Math.max(firstBeat + 1, to / step + 1));
         int run = 0;
         for (int i = firstBeat; i < lastBeat; i++) {
             run = 20d * Math.log10(Math.max(1e-9d, peaks.get(i))) >= floor ? run + 1 : 0;
@@ -990,6 +960,80 @@ public final class StemFusion {
             }
         }
         return -1L;
+    }
+
+    /**
+     * The share of a window's beats that carry a hit of a row, at {@link #rowStartMs}'s own
+     * reference: the figure that says whether {@link #rowStartMs} could read the row at all, and the
+     * one to print beside its answer.
+     *
+     * <p>Measured: a kit that plays on its beats (the device's {@code squabble up}, its beats
+     * −0.1…−7.9 dBFS) answers ~1.0; {@code Lose My Mind}'s own separated drums — a 52 dB spread
+     * between its beats, an intro that opens on two loud hits — never exceed 0.38 at any margin,
+     * and its {@link #rowStartMs} answer is 0 ms at every head length. Under
+     * {@link #INCOMING_TRUST_SHARE} the row cannot be told from its own intro, so the wait (which
+     * exists to hold A's rows for it) has nothing to key on and the pair is the acceptance's.
+     */
+    public static double rowHitShare(float[][] pcm, int rate, long fromMs, long toMs,
+                                     double beatMs) {
+        java.util.List<Double> peaks = beatPeaks(pcm, rate, toMs, beatMs);
+        if (peaks == null || peaks.isEmpty()) return 0d;
+        double floor = loudTenthDb(peaks) - INCOMING_ON_DB;
+        int first = Math.max(0, (int) (fromMs / Math.max(1d, beatMs)));
+        int hits = 0;
+        int beats = 0;
+        for (int i = first; i < peaks.size(); i++) {
+            beats++;
+            if (20d * Math.log10(Math.max(1e-9d, peaks.get(i))) >= floor) hits++;
+        }
+        return beats == 0 ? 0d : hits / (double) beats;
+    }
+
+    /** The share below which {@link #rowStartMs}'s own answer is not evidence (see
+     *  {@link #rowHitShare}): a row that plays on half its beats is one a listener would call
+     *  playing, and under that what the measurement reads may be an intro's two hits. */
+    public static final double INCOMING_TRUST_SHARE = 0.5d;
+
+    /** One row's per-beat peaks (the beat's own quarter-frames, so a hit between samples is still
+     *  found), over the array's own timeline up to {@code toMs}; null when there is nothing to
+     *  measure. The one implementation {@link #rowStartMs} and {@link #rowHitShare} share, so the
+     *  answer and its reliability cannot be about different peaks. */
+    private static java.util.List<Double> beatPeaks(float[][] pcm, int rate, long toMs,
+                                                    double beatMs) {
+        if (pcm == null || pcm.length == 0 || pcm[0] == null || !(beatMs > 0d) || !(rate > 0)) {
+            return null;
+        }
+        int step = Math.max(1, (int) Math.round(beatMs * rate / 1000d));
+        int frame = Math.max(1, step / 4);
+        int upto = (int) Math.min(pcm[0].length, Math.round(toMs * rate / 1000d));
+        java.util.ArrayList<Double> peaks = new java.util.ArrayList<>();
+        for (int at = 0; at + step <= upto; at += step) {
+            double peak = 0d;
+            for (int ch = 0; ch < pcm.length; ch++) {
+                if (pcm[ch] == null) continue;
+                int end = Math.min(pcm[ch].length, at + step);
+                for (int i = at; i < end; i += frame) {
+                    double window = 0d;
+                    for (int j = i; j < Math.min(i + frame, end); j++) {
+                        window = Math.max(window, Math.abs(pcm[ch][j]));
+                    }
+                    peak = Math.max(peak, window);
+                }
+            }
+            peaks.add(peak);
+        }
+        return peaks;
+    }
+
+    /** A row's own loud tenth over peaks it was given, dBFS — the measure StemBridge's level clauses
+     *  use: for a drum row "a beat with the kit on it", for a bass row its note. */
+    private static double loudTenthDb(java.util.List<Double> peaks) {
+        double[] sorted = new double[peaks.size()];
+        for (int i = 0; i < sorted.length; i++) sorted[i] = peaks.get(i);
+        java.util.Arrays.sort(sorted);
+        double loud = sorted[(int) Math.min(sorted.length - 1L,
+                Math.round(0.9d * (sorted.length - 1)))];
+        return 20d * Math.log10(Math.max(1e-9d, loud));
     }
 
     /** How far under a row's OWN loud tenth a beat may sit and still count as the row playing, dB

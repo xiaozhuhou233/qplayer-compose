@@ -242,6 +242,59 @@ public class StemFusionIncomingWaitTest {
                 StemFusion.NO_GROOVE_MEASUREMENT, StemFusion.NO_BODY_MEASUREMENT, -1L);
     }
 
+    /**
+     * ⚠️ <b>The measurement's own limit, pinned so nobody re-claims a fix it cannot deliver.</b>
+     * The device's pair is refused on a pulse hole of 2 832 ms, and the rule above was expected to
+     * close it by waiting for Lose My Mind's kit to return. It cannot: that row's own separated
+     * beats, measured ({@code -8 -10 -20 -34 -38 -42 -51 -51 -37 -54 -53 -53 -57 -54 -51 -49 -5
+     * -10 -18 -30} dBFS), span <b>52 dB</b> and it opens on two loud hits, so its loud tenth is the
+     * intro's level in any window short of the kit's return and the rule answers "playing from the
+     * first beat" at every head length from 15 s to 45 s. No margin separates the opening hit
+     * (−8) from the kit's ordinary beats (−18, −30, −55). So the wait does not engage on this stem,
+     * the pair's fate is the acceptance's pulse clause (which measures the produced passage and is
+     * reliable there), and {@link StemFusion#rowHitShare} is what says so in the log.
+     */
+    @Test
+    public void aStemTooDynamicToReadSaysSoInsteadOfAnswering() {
+        // The measured series, rebuilt as a row: an opening hit pair, seven seconds of nothing, then
+        // the kit as the harness measured it.
+        float[][] measured = fromPeaks(20d, new double[]{-8, -10, -20, -34, -38, -42, -51, -51, -37,
+                -54, -53, -53, -57, -54, -51, -49, -5, -10, -18, -30});
+        long start = StemFusion.rowStartMs(measured, RATE, 240L, 15_000L, BEAT_MS);
+        double share = StemFusion.rowHitShare(measured, RATE, 240L, 15_000L, BEAT_MS);
+        System.out.println("the measured Lose My Mind row: the rule says " + start + "ms, its hit"
+                + " share is " + String.format(java.util.Locale.US, "%.2f", share));
+        assertEquals("the rule reads the opening hits, not the kit (the kit is at ~8700ms)",
+                0L, start);
+        assertTrue("and the share is what says the reading is not evidence (" + share + ")",
+                share < StemFusion.INCOMING_TRUST_SHARE);
+        // A row a listener would call playing answers 240 ms with a share of ~1, which is the
+        // contrast that makes the diagnostic worth printing.
+        float[][] clean = kicks(14d, 240L, 15_000L, 0.5d);
+        // The answer is a BEAT's own instant, so a hit inside the very first beat answers 0: the
+        // plan rounds it up to a whole step of the table anyway.
+        assertEquals(0L, StemFusion.rowStartMs(clean, RATE, 240L, 15_000L, BEAT_MS));
+        assertTrue("a kit on every beat is all hits",
+                StemFusion.rowHitShare(clean, RATE, 240L, 15_000L, BEAT_MS) > 0.9d);
+    }
+
+    /** A row whose beats carry the given peaks in dBFS (one per beat, from 0), for pinning a
+     *  measured series without the audio. */
+    private static float[][] fromPeaks(double seconds, double[] peakDb) {
+        float[][] out = new float[2][(int) (seconds * RATE)];
+        for (int k = 0; k < peakDb.length; k++) {
+            int from = (int) Math.round(k * BEAT_MS * RATE / 1000d);
+            double amp = Math.pow(10d, peakDb[k] / 20d);
+            for (int i = from; i < Math.min(out[0].length, from + RATE / 8); i++) {
+                double envelope = Math.exp(-(i - from) / (RATE * 0.05d));
+                double value = amp * envelope * Math.sin(2d * Math.PI * 60d * (i - from) / RATE);
+                out[0][i] = (float) value;
+                out[1][i] = (float) value;
+            }
+        }
+        return out;
+    }
+
     /** A kit on every beat of the window from {@code fromMs}, at {@code amp}. */
     private static float[][] kicks(double sec, long fromMs, long toMs, double amp) {
         float[][] out = new float[2][(int) (sec * RATE)];

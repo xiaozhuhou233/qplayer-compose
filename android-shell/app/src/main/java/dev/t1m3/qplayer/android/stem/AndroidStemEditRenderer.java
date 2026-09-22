@@ -609,6 +609,23 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                         + " bar grid came from {} of the outgoing track's low end decoded in {}ms",
                 request.title(), plan.describe(), gridText(aBeatMs), probeMs);
         if (plan.incomingDrumsMs >= 0L || plan.incomingBassMs >= 0L) {
+            // ⚠️ And how much the reading can be trusted: on a stem whose beats span tens of dB (the
+            // device's Lose My Mind is 52 dB from its loudest beat to its quietest and OPENS on two
+            // loud hits) this measurement answers "playing from 0ms" at every head length, which is
+            // true of the hits and false of the kit. The share says so, and a reading under
+            // StemFusion.INCOMING_TRUST_SHARE must not be read as the wait having been considered:
+            // the pair's fate is then the acceptance's pulse clause.
+            double drumsShare = StemFusion.rowHitShare(headStems[StemGesture.Stem.DRUMS.row()],
+                    StemModel.MODEL_RATE, request.incomingContentStartMs, request.removalMs, bBeatMs);
+            double bassShare = StemFusion.rowHitShare(headStems[StemGesture.Stem.BASS.row()],
+                    StemModel.MODEL_RATE, request.incomingContentStartMs, request.removalMs, bBeatMs);
+            Logger.info("transition: DJ edit for {}: how much those two readings are evidence —"
+                            + " the incoming's drums carry a hit on {}% of the passage's beats and"
+                            + " its low end on {}% (under {}% a row cannot be told from its own"
+                            + " intro, and then nothing here keys the wait: the acceptance's pulse"
+                            + " clause is the judge)",
+                    request.title(), Math.round(drumsShare * 100d), Math.round(bassShare * 100d),
+                    Math.round(StemFusion.INCOMING_TRUST_SHARE * 100d));
             // ⚠️ Printed whether or not the wait CHANGED anything: this is the measurement the
             // renderer's own head separation supplies, and a device log that does not show it is a
             // log nobody can tell from the measurement never having been wired in (which is what
