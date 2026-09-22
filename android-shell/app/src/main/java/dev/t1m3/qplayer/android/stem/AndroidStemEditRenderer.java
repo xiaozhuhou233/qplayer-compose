@@ -447,15 +447,28 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 + ".m4a");
         AacFileWriter writer = new AacFileWriter(named, format.rate, 2);
         boolean wrote = false;
+        // ⚠️ The write phase in its two halves, timed separately, because they are what the render's
+        // cost is made of: the head's own encode (a few seconds of audio through MediaCodec) and the
+        // body's decode+encode (the whole rest of the track). They are sequential today and the two
+        // are independent of the model, so the overlap the next increment needs is
+        // `max(model, encode)` — and its size is `min` of the halves logged here against the
+        // separations logged above. Timed, not guessed: the single "Nms of encode" line that exists
+        // now lumps them together and cannot say which one the overlap would hide.
+        long headEncodeStart = System.currentTimeMillis();
+        long headEncodeMs;
+        long bodyEncodeMs;
         try {
             writer.start();
             writer.write(editedForSource);
+            headEncodeMs = System.currentTimeMillis() - headEncodeStart;
+            long bodyEncodeStart = System.currentTimeMillis();
             if (!decodeBody(request.sourcePath, editedForSource[0].length, writer,
                     request.stillWanted)) {
                 Logger.info("transition: DJ edit for {} cancelled while writing the body (the"
                         + " queue moved on)", request.title());
                 return null;
             }
+            bodyEncodeMs = System.currentTimeMillis() - bodyEncodeStart;
             writer.finish();
             wrote = true;
         } finally {
@@ -465,6 +478,13 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 if (!out.equals(named)) deleteQuietly(out);
             }
         }
+        Logger.info("transition: DJ edit for {}: the render's own accounting — the model {}ms"
+                        + " (this head's separation), the head's encode {}ms, the body's"
+                        + " decode+encode {}ms, and the file's bytes written in {}ms in all"
+                        + " (the model and MediaCodec are independent, so an overlap would make the"
+                        + " wall clock max(model, encode) instead of their sum)",
+                request.title(), separateMs, headEncodeMs, bodyEncodeMs,
+                System.currentTimeMillis() - startedAt);
         long bytes = named.length();
         if (bytes < MIN_EDIT_BYTES) {
             Logger.warn("transition: DJ edit for {} came out at {} bytes, which is not a"
