@@ -23,7 +23,9 @@ import dev.t1m3.qplayer.model.Track;
  *   <li>{@link TransitionKind#QUICK_FADE} — a track under {@code SHORT_TRACK_MS};</li>
  *   <li>{@link TransitionKind#FADE_OUT_IN} — <b>new in round 17</b>: the pair's own beat grids
  *       and keys measured to clash ({@link TransitionContext.PairFit#overlapsBadly()});</li>
- *   <li>{@link TransitionKind#CROSSFADE} — an ordinary pair.</li>
+ *   <li>{@link TransitionKind#CROSSFADE} — an ordinary pair, <b>or round 19</b>: the incoming
+ *       track's own rendered edit is a fusion, which decides the kind whatever the pair's numbers
+ *       say (see {@link #aFusionEditDecidesTheKindEvenWhenTheTemposAreUnrelated}).</li>
  * </ul>
  */
 public class HeuristicTransitionChooserTest {
@@ -46,6 +48,25 @@ public class HeuristicTransitionChooserTest {
                                          TransitionContext.PairFit fit) {
         return new TransitionContext(a, b, remaining, a.durationMs, streamableA, streamableB,
                 tailSilence, headSilence, fit);
+    }
+
+    /** The same case with the one round-19 fact set: the incoming track's rendered edit is a
+     *  fusion (the file the deck will play carries both backgrounds, cut at the outgoing
+     *  track's own junction bar line). */
+    private static TransitionContext fusionCtx(Track a, Track b, long remaining, long tailSilence,
+                                               TransitionContext.PairFit fit) {
+        return new TransitionContext(a, b, remaining, a.durationMs, true, true,
+                tailSilence, TransitionContext.SILENCE_UNKNOWN, fit, true);
+    }
+
+    /** The pair the device's own profiles produce and the round-17 rule answers
+     *  {@link TransitionKind#FADE_OUT_IN} for: 120 against 145BPM is x1.2083, outside the
+     *  x1.08 clamp, with a key distance nothing can bring together. */
+    private static TransitionContext.PairFit clashingPair() {
+        return new TransitionContext.PairFit(true, true, true, false, 0.79d,
+                "keys measured and clashing (chroma distance 0.79, best allowed shift +1 reaches"
+                        + " 0.71), tempo not lockable (120.0 vs 145.0BPM, x1.2083 (outside the"
+                        + " x1.08 clamp))", "");
     }
 
     @Test
@@ -217,6 +238,138 @@ public class HeuristicTransitionChooserTest {
                 chooser.choose(ctx(a, unknownLength, 60_000L, true, true,
                         TransitionContext.SILENCE_UNKNOWN, TransitionContext.SILENCE_UNKNOWN,
                         TransitionContext.PairFit.UNMEASURED)));
+        // ⚠️ Round 19, and the point of this assertion: a FUSION edit may not resurrect a
+        // boundary that cannot be armed. The three clauses above are physical — no second
+        // player, no room left, no length to plan against — and the file being the transition
+        // does not create any of them: the same three contexts, with the fusion fact set, are
+        // still CUT (the controller would otherwise arm a plan it cannot perform, which is the
+        // one thing a chooser is never allowed to answer).
+        assertEquals("a fusion does not make an unstreamable side performable",
+                TransitionKind.CUT,
+                chooser.choose(new TransitionContext(a, b, 60_000L, a.durationMs, false, true,
+                        TransitionContext.SILENCE_UNKNOWN, TransitionContext.SILENCE_UNKNOWN,
+                        TransitionContext.PairFit.UNMEASURED, true)));
+        assertEquals("... nor one whose boundary has already arrived",
+                TransitionKind.CUT,
+                chooser.choose(fusionCtx(a, b, 1_000L, TransitionContext.SILENCE_UNKNOWN,
+                        TransitionContext.PairFit.UNMEASURED)));
+        assertEquals("... nor one whose length nobody knows",
+                TransitionKind.CUT,
+                chooser.choose(new TransitionContext(a, unknownLength, 60_000L, a.durationMs,
+                        true, true, TransitionContext.SILENCE_UNKNOWN,
+                        TransitionContext.SILENCE_UNKNOWN, TransitionContext.PairFit.UNMEASURED,
+                        true)));
+    }
+
+    /**
+     * Round 19's rule, and the whole reason it exists: the incoming track's own rendered file
+     * carries the transition, so the transition happens even for a pair the chooser's tempo rule
+     * would have answered "do not put these two on top of each other".
+     *
+     * <p>The pair is the round-17 distribution's own {@code FADE_OUT_IN} case (a measured key
+     * clash and tempos outside the clamp) — the pair the user hears as 「淡入淡出」 — and the only
+     * difference between the two halves of this test is the one fact
+     * {@link TransitionContext#incomingEditIsFusion()}.
+     */
+    @Test
+    public void aFusionEditDecidesTheKindEvenWhenTheTemposAreUnrelated() {
+        Track a = track("a", LONG_MS);
+        Track b = track("b", LONG_MS);
+        HeuristicTransitionChooser chooser = new HeuristicTransitionChooser();
+        // The behaviour that must not change: the same pair with no rendered edit.
+        TransitionContext plain = ctx(a, b, 60_000L, true, true,
+                TransitionContext.SILENCE_UNKNOWN, TransitionContext.SILENCE_UNKNOWN,
+                clashingPair());
+        assertEquals(TransitionKind.FADE_OUT_IN, chooser.choose(plain));
+        assertEquals("and the sequential fade is what the boundary plays",
+                0L, chooser.plan(plain).overlapMs());
+        // The same pair whose incoming track's edit is a fusion: an overlap, and specifically
+        // the fusion's own shape.
+        TransitionContext fused = fusionCtx(a, b, 60_000L, TransitionContext.SILENCE_UNKNOWN,
+                clashingPair());
+        assertEquals(TransitionKind.CROSSFADE, chooser.choose(fused));
+        TransitionPlan plan = chooser.plan(fused);
+        assertEquals(TransitionKind.CROSSFADE, plan.kind());
+        assertTrue("the kind is an overlapping one, which is what makes the boundary play the"
+                        + " edit at all (resolveIncomingSource's arming gate)",
+                plan.kind().overlapping());
+        assertTrue("... and it needs the second player the fusion edit is prepared on",
+                plan.kind().needsSecondPlayer());
+        assertTrue("the overlap is the ordinary long one, not a seam: " + plan.overlapMs(),
+                plan.overlapMs() >= 15_000L);
+        assertEquals("the fusion's own shape, not the DJ blend — the two decks change over once"
+                        + " and are constant either side of it",
+                FadeCurve.FUSION, plan.curveOr(FadeCurve.EQUAL_POWER));
+        assertTrue("the reason says what decided it: " + plan.decidedBy(),
+                plan.decidedBy().contains("FUSION")
+                        && plan.decidedBy().contains("junction bar line"));
+        System.out.println("fusion pair: " + plan.kind() + " " + plan.overlapMs() + "ms — "
+                + plan.decidedBy());
+    }
+
+    /**
+     * The fusion rule is not only about the tempo clash: it comes before every <em>shape</em>
+     * rule, because both of those would discard a gesture the render has already made — a trim
+     * never plays the file at all (it is not an overlapping kind, so the deck plays the track's
+     * own master), and a quick fade would give the file's own two-bar gesture a one-second
+     * window.
+     */
+    @Test
+    public void aFusionEditOutranksTheTrimAndTheQuickFade() {
+        Track a = track("a", LONG_MS);
+        Track b = track("b", LONG_MS);
+        HeuristicTransitionChooser chooser = new HeuristicTransitionChooser();
+        // A measured silent tail: a trim with no edit...
+        assertEquals(TransitionKind.SILENCE_TRIM,
+                chooser.choose(ctx(a, b, 60_000L, true, true, 4_600L, 0L,
+                        TransitionContext.PairFit.UNMEASURED)));
+        // ... and the fusion's overlap when the incoming deck has one.
+        TransitionContext fusedTail = fusionCtx(a, b, 60_000L, 4_600L,
+                TransitionContext.PairFit.UNMEASURED);
+        assertEquals(TransitionKind.CROSSFADE, chooser.choose(fusedTail));
+        assertEquals(FadeCurve.FUSION, chooser.plan(fusedTail).curveOr(FadeCurve.LINEAR));
+        // A short track: a quick fade with no edit...
+        Track shortA = track("short-a", 60_000L);
+        assertEquals(TransitionKind.QUICK_FADE,
+                chooser.choose(ctx(shortA, b, 30_000L, true, true,
+                        TransitionContext.SILENCE_UNKNOWN, TransitionContext.SILENCE_UNKNOWN,
+                        TransitionContext.PairFit.UNMEASURED)));
+        // ... and the fusion's overlap when there is one (the render's own window is the
+        // setting's blend length, so the file was cut for a full-length blend either way).
+        assertEquals(TransitionKind.CROSSFADE,
+                chooser.choose(fusionCtx(shortA, b, 30_000L, TransitionContext.SILENCE_UNKNOWN,
+                        TransitionContext.PairFit.UNMEASURED)));
+    }
+
+    /**
+     * The other half of the promise: with no rendered edit — the ordinary world, which is every
+     * boundary of a build without a stem model in it — every rule answers exactly what it
+     * answered before round 19.
+     */
+    @Test
+    public void withNoRenderedEditEveryRuleAnswersAsBefore() {
+        Track a = track("a", LONG_MS);
+        Track b = track("b", LONG_MS);
+        HeuristicTransitionChooser chooser = new HeuristicTransitionChooser();
+        Object[][] cases = {
+                {ctx(a, b, 60_000L, true, true, TransitionContext.SILENCE_UNKNOWN,
+                        TransitionContext.SILENCE_UNKNOWN, TransitionContext.PairFit.UNMEASURED),
+                    TransitionKind.CROSSFADE},
+                {ctx(a, b, 60_000L, true, true, 4_600L, 0L, TransitionContext.PairFit.UNMEASURED),
+                    TransitionKind.SILENCE_TRIM},
+                {ctx(a, track("short", 40_000L), 20_000L, true, true,
+                        TransitionContext.SILENCE_UNKNOWN, TransitionContext.SILENCE_UNKNOWN,
+                        TransitionContext.PairFit.UNMEASURED), TransitionKind.QUICK_FADE},
+                {ctx(a, b, 60_000L, true, true, TransitionContext.SILENCE_UNKNOWN,
+                        TransitionContext.SILENCE_UNKNOWN, clashingPair()),
+                    TransitionKind.FADE_OUT_IN},
+        };
+        for (Object[] c : cases) {
+            TransitionContext context = (TransitionContext) c[0];
+            assertFalse("a context nobody set the fusion fact on is not a fusion",
+                    context.incomingEditIsFusion());
+            assertEquals("no edit means the rule that used to answer", c[1], chooser.choose(context));
+        }
     }
 
     @Test

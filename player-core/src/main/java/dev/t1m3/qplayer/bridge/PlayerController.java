@@ -2448,11 +2448,23 @@ public final class PlayerController {
             plan = TransitionPlan.of(transitionKindOverride);
             why = "forced by 过渡方式";
         } else {
+            // ⚠️ Round 19: whether the incoming track's rendered edit is a FUSION is a decision
+            // input, and it is read HERE because this is where the edit is visible: the render
+            // runs minutes earlier (`requestStemEdit`, on the preload lane, the moment the
+            // incoming track's audio lands) and this instant already stats the same file for
+            // another reason (`capWithoutEdit`, a few lines below). Same lookup the arm will use
+            // (`resolveIncomingSource`), so the kind is decided from the file that will really be
+            // played rather than from a measurement that predicts it — and a boundary whose
+            // render lands after this instant is answered exactly as it is today (the stat is the
+            // same one that decides the DEGRADED cap), which is why there is no second path to
+            // keep in step.
+            EditRef incomingEdit = djEditFor(next);
             plan = transitionChooser.plan(
                     new TransitionContext(cur, next, remaining, dur,
                             crossfadeStreamable(cur), crossfadeStreamable(next),
                             measuredTailSilenceMs(cur), measuredHeadSilenceMs(next),
-                            pairFitOf(cur, next)));
+                            pairFitOf(cur, next),
+                            incomingEdit != null && incomingEdit.isFusion()));
             if (plan == null) plan = TransitionPlan.of(TransitionKind.CUT);
             // The chooser labels the branch it took ("AI cached", "rule: ..."),
             // which is the one thing a decision needs to be auditable from the log.

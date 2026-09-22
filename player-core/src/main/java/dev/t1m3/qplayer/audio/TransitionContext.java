@@ -19,6 +19,13 @@ import dev.t1m3.qplayer.model.Track;
  * the one analysis that does reach the decision, because a trim's whole
  * justification is a number the app has already measured for another reason.
  *
+ * <p>Round 19 adds one more fact, and it is not analysis either: whether the incoming
+ * track's own rendered edit is a fusion ({@link #incomingEditIsFusion()}). That is a
+ * statement about the <em>file</em> the incoming deck will play — the renderer's own
+ * answer, read back from its name — and it is the one thing that can settle the kind
+ * before any of the pair's numbers are consulted, because a fusion's transition is
+ * already inside that file.
+ *
  * <p>Immutable: built by the controller per boundary and handed to the chooser.
  */
 public final class TransitionContext {
@@ -137,14 +144,17 @@ public final class TransitionContext {
     private final long outgoingTailSilenceMs;
     private final long incomingHeadSilenceMs;
     private final PairFit pairFit;
+    private final boolean incomingEditIsFusion;
 
     /** The context a chooser sees: metadata plus "either side can be streamed on a
-     *  second player", with both silence measurements unknown and no pair measurement. */
+     *  second player", with both silence measurements unknown, no pair measurement and
+     *  no rendered edit for the incoming track. */
     public TransitionContext(Track outgoing, Track incoming, long remainingMs,
                              long outgoingDurationMs, boolean outgoingStreamable,
                              boolean incomingStreamable) {
         this(outgoing, incoming, remainingMs, outgoingDurationMs, outgoingStreamable,
-                incomingStreamable, SILENCE_UNKNOWN, SILENCE_UNKNOWN, PairFit.UNMEASURED);
+                incomingStreamable, SILENCE_UNKNOWN, SILENCE_UNKNOWN, PairFit.UNMEASURED,
+                false);
     }
 
     /**
@@ -165,19 +175,59 @@ public final class TransitionContext {
                              long outgoingTailSilenceMs, long incomingHeadSilenceMs) {
         this(outgoing, incoming, remainingMs, outgoingDurationMs, outgoingStreamable,
                 incomingStreamable, outgoingTailSilenceMs, incomingHeadSilenceMs,
-                PairFit.UNMEASURED);
+                PairFit.UNMEASURED, false);
     }
 
     /**
-     * The full context: the two ends' silence, and the pair's own measurement
-     * ({@link PairFit}) — see that class for why the second one exists and what it may and may
-     * not be used for.
+     * The full context as it was before round 19: the two ends' silence and the pair's own
+     * measurement ({@link PairFit}), with no rendered edit for the incoming track — see the
+     * constructor below for what a fusion adds and why it is read from the file rather than
+     * guessed from the pair.
      */
     public TransitionContext(Track outgoing, Track incoming, long remainingMs,
                              long outgoingDurationMs, boolean outgoingStreamable,
                              boolean incomingStreamable,
                              long outgoingTailSilenceMs, long incomingHeadSilenceMs,
                              PairFit pairFit) {
+        this(outgoing, incoming, remainingMs, outgoingDurationMs, outgoingStreamable,
+                incomingStreamable, outgoingTailSilenceMs, incomingHeadSilenceMs, pairFit, false);
+    }
+
+    /**
+     * The full context: the two ends' silence, the pair's own measurement
+     * ({@link PairFit}) — see that class for why the second one exists and what it may and may
+     * not be used for — and whether the incoming track's own rendered edit is a
+     * <b>fusion</b>.
+     *
+     * <p>⚠️ <b>{@code incomingEditIsFusion} is not a guess about the pair: it is the file the
+     * incoming deck will actually play.</b> A DJ edit is the incoming track's own audio with its
+     * vocals taken out of the front ({@code StemEditRenderer}); the renderer may instead write a
+     * <em>fusion</em> — the two tracks' backgrounds spliced into one passage inside that file,
+     * anchored on the outgoing track's own junction bar line and the incoming file's own entry
+     * ({@link TransitionKind#CROSSFADE}'s path, {@code StemFusion}). When one exists, the
+     * transition is <em>already in the file</em>: the two live decks only change over once, at
+     * that junction, and nothing about the pair's tempos or keys can be laid on top of it — which
+     * is why {@link HeuristicTransitionChooser} answers an overlapping kind for such a boundary
+     * whatever its own rules would otherwise have said (a sequential fade or a trim would discard
+     * the gesture the render already made, and a trim would not even play the file: it is not an
+     * overlapping kind).
+     *
+     * <p>The fact lives here rather than in the chooser because the chooser is a decision over
+     * facts: it may not touch the filesystem, and the only thing that may is the controller, which
+     * already stats this pair's edit at exactly this instant for its own reasons
+     * ({@code PlayerController.capWithoutEdit}). The chooser only has to say what it wants the
+     * kind to be.
+     *
+     * <p>False is the whole ordinary world: no renderer at all (a host with no stem code), no
+     * model, a render that has not finished, a render that refused to fuse, or a user whose
+     * 过渡时长 the file was not rendered for. Every rule below then answers exactly what it always
+     * did.
+     */
+    public TransitionContext(Track outgoing, Track incoming, long remainingMs,
+                             long outgoingDurationMs, boolean outgoingStreamable,
+                             boolean incomingStreamable,
+                             long outgoingTailSilenceMs, long incomingHeadSilenceMs,
+                             PairFit pairFit, boolean incomingEditIsFusion) {
         this.outgoing = outgoing;
         this.incoming = incoming;
         this.remainingMs = Math.max(0L, remainingMs);
@@ -187,6 +237,7 @@ public final class TransitionContext {
         this.outgoingTailSilenceMs = outgoingTailSilenceMs;
         this.incomingHeadSilenceMs = incomingHeadSilenceMs;
         this.pairFit = pairFit == null ? PairFit.UNMEASURED : pairFit;
+        this.incomingEditIsFusion = incomingEditIsFusion;
     }
 
     /** The track that is playing now. Never null in a boundary the controller
@@ -253,11 +304,27 @@ public final class TransitionContext {
         return pairFit;
     }
 
+    /**
+     * Whether the incoming track's own rendered edit is a <b>fusion</b> — the two backgrounds
+     * spliced into one passage inside the file, with the outgoing track's junction bar line and
+     * the incoming file's own entry baked into its name ({@code StemFusion},
+     * {@code PlayerController.djEditFor} / {@code EditRef.isFusion()}).
+     *
+     * <p>True means the transition this boundary will hear is <em>inside the incoming deck's
+     * file</em>, and the two live decks only hand over once: an overlapping kind is then the only
+     * honest answer, and it is the only kind that plays that file at all. False means there is
+     * nothing special about this pair — see the constructor for the whole list of ordinary cases.
+     */
+    public boolean incomingEditIsFusion() {
+        return incomingEditIsFusion;
+    }
+
     @Override
     public String toString() {
         return "TransitionContext{" + outgoing + " -> " + incoming
                 + ", remaining=" + remainingMs + "ms"
                 + ", streamable=" + outgoingStreamable + "/" + incomingStreamable
+                + (incomingEditIsFusion ? ", incoming edit is a FUSION" : "")
                 + ", " + pairFit + "}";
     }
 }

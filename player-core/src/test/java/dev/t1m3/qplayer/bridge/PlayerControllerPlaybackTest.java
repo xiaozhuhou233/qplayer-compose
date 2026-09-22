@@ -1,15 +1,20 @@
 package dev.t1m3.qplayer.bridge;
 
 import dev.t1m3.qplayer.audio.AudioBackend;
+import dev.t1m3.qplayer.audio.BeatProfile;
+import dev.t1m3.qplayer.audio.FadeCurve;
+import dev.t1m3.qplayer.audio.StemEditRenderer;
 import dev.t1m3.qplayer.customapi.CustomSong;
 import dev.t1m3.qplayer.model.Track;
 import dev.t1m3.qplayer.netease.NeteaseClient;
 import dev.t1m3.qplayer.netease.dto.NeteaseSong;
 import dev.t1m3.qplayer.store.AppDirs;
+import dev.t1m3.qplayer.util.Logger;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
+import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -599,6 +604,140 @@ public class PlayerControllerPlaybackTest {
             if (controller != null) controller.shutdown();
             AppDirs.setBase(oldBase);
             AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
+    /**
+     * Round 19 at the boundary: <b>the incoming track's own rendered edit decides the kind</b>,
+     * and the decision is taken from the file the deck will really play.
+     *
+     * <p>The pair here is the one round 17 answers {@link TransitionKind#FADE_OUT_IN} for — two
+     * measured grids that cannot be brought together (120 against 145BPM is x1.2083, outside the
+     * x1.08 clamp, and not a harmonic relative of it), i.e. the pair the user hears as 「淡入淡出」.
+     * The two halves of the test differ in exactly one thing: whether the fusion edit is on disk
+     * at the name the boundary looks the edit up by. With it, the boundary must take the
+     * overlapping branch — which is also the only branch that plays that file at all
+     * ({@code resolveIncomingSource} asks {@code transitionKind.overlapping()}), and the decision
+     * line prints a curve only for one. Without it, nothing about the answer may change.
+     */
+    @Test
+    public void aFusionEditDecidesTheKindForAPairTheTempoRuleWouldFade() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        try {
+            String withEdit = decisionLineForBoundary(true);
+            assertTrue("with a fusion edit the pair must not be faded out and in: " + withEdit,
+                    withEdit.contains("CROSSFADE") && !withEdit.contains("FADE_OUT_IN"));
+            assertTrue("the decision line must name the fusion it was decided from: " + withEdit,
+                    withEdit.contains("FUSION"));
+            assertTrue("the curve is printed only for an OVERLAPPING kind, which is the arming"
+                            + " gate's own condition (resolveIncomingSource): " + withEdit,
+                    withEdit.contains("curve=" + FadeCurve.FUSION));
+            assertTrue("the overlap is a blend, not a seam: " + withEdit,
+                    withEdit.contains("重叠=") && !withEdit.contains("重叠=none"));
+
+            String noEdit = decisionLineForBoundary(false);
+            assertTrue("with no rendered edit the same pair is played one after the other: "
+                    + noEdit, noEdit.contains("FADE_OUT_IN"));
+            assertFalse("and nothing about that answer mentions the fusion path: " + noEdit,
+                    noEdit.contains("FUSION"));
+            System.out.println("fusion edit on disk:  " + withEdit);
+            System.out.println("no edit at all:       " + noEdit);
+        } finally {
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
+    /**
+     * One boundary's decision line, decided by the running controller, with or without a rendered
+     * FUSION edit for the incoming track — the whole path the change lives on: the controller
+     * stats the edit ({@code capWithoutEdit} already did, at this same instant), hands the fact to
+     * the chooser, and the chooser answers the kind.
+     *
+     * <p>The two tracks have measured grids that clash, their audio is "on disk" so the play path
+     * serves it from the cache and never resolves anything, and the boundary is put inside the
+     * decision window by moving the fake backend's position. Everything is a real method on the
+     * controller; nothing is stubbed except the audio backend and the (absent) stem renderer.
+     */
+    private String decisionLineForBoundary(boolean withFusionEdit) throws Exception {
+        Path base = temporaryFolder.newFolder(withFusionEdit ? "fusion-edit" : "no-edit").toPath();
+        AppDirs.setBase(base.toString());
+        AppDirs.setCacheBase(base.resolve("cache").toString());
+        Files.write(base.resolve("queue.json"), ("{\"playIndex\":0,\"positionMs\":0,\"playMode\":0,"
+                + "\"tracks\":["
+                + "{\"source\":\"NETEASE\",\"neteaseId\":11,\"title\":\"outgoing\","
+                + "\"durationMs\":120000},"
+                + "{\"source\":\"NETEASE\",\"neteaseId\":22,\"title\":\"incoming\","
+                + "\"durationMs\":120000}]}").getBytes(StandardCharsets.UTF_8));
+        Logger.clear();
+        FakeAudioBackend backend = new FakeAudioBackend();
+        PlayerController controller =
+                new PlayerController(backend, track -> { }, NeteaseClient.INSTANCE);
+        try {
+            controller.setStemEditRenderer(new FakeStemEditRenderer());
+            writeBeatProfile(controller, 11L, 120.0d);
+            writeBeatProfile(controller, 22L, 145.0d);
+            writeCachedAudio(controller, 11L);
+            writeCachedAudio(controller, 22L);
+            if (withFusionEdit) writeFusionEdit(controller, 11L, 22L);
+            controller.playQueueIndex(0);
+            // Inside the decision lead, with room for the longest plan (the lead is ~45s).
+            backend.position = backend.duration() - 20_000L;
+            controller.pump();
+            StringBuilder lines = new StringBuilder();
+            for (String line : Logger.snapshot()) {
+                if (line.contains("transition: slot 0 -> 1:")) lines.append(line).append('\n');
+            }
+            assertTrue("no boundary was decided at all — the test's setup is wrong, not the"
+                    + " rule: " + Logger.snapshot(), lines.length() > 0);
+            return lines.toString();
+        } finally {
+            controller.shutdown();
+        }
+    }
+
+    /** A measured grid for one track, written where {@code beatProfileOf} reads it. */
+    private static void writeBeatProfile(PlayerController controller, long neteaseId, double bpm)
+            throws Exception {
+        File file = new File(controller.diskCache.beatPath("n" + neteaseId));
+        file.getParentFile().mkdirs();
+        Files.write(file.toPath(), new BeatProfile(bpm, 0L, 0.8f).toBytes());
+    }
+
+    /** The track's audio in the cache, so {@code playAt} plays it from disk and the test never
+     *  resolves anything (a NETEASE track is the only kind a transition may overlap). */
+    private static void writeCachedAudio(PlayerController controller, long neteaseId)
+            throws Exception {
+        File file = new File(controller.diskCache.audioPath(neteaseId));
+        file.getParentFile().mkdirs();
+        Files.write(file.toPath(), new byte[4096]);
+    }
+
+    /**
+     * The render the boundary is supposed to obey: a fusion edit at the name it looks one up by
+     * — the incoming track's key, the window it was rendered for, the outgoing track's key — with
+     * the three anchors the render baked into the name ({@code -e} entry, {@code -j} junction,
+     * {@code -f} fusion end; {@code PlayerController.EditRef.isFusion}).
+     */
+    private static void writeFusionEdit(PlayerController controller, long outgoingId,
+                                        long incomingId) throws Exception {
+        String key = "n" + incomingId + "@" + controller.blendDurationMs() + "|n" + outgoingId;
+        File dir = new File(controller.diskCache.djEditDir());
+        dir.mkdirs();
+        Files.write(new File(dir, controller.diskCache.djEditBaseName(key)
+                + "-v16000-e1200-j100000-f106000.m4a").toPath(), new byte[]{0, 1, 2, 3});
+    }
+
+    /** No stem path in a unit test's host: it can render nothing, which is the ordinary "there is
+     *  no edit for this pair" case (a {@code null} answer, see {@code StemEditRenderer.render}). */
+    private static final class FakeStemEditRenderer implements StemEditRenderer {
+        @Override public boolean available() {
+            return true;
+        }
+
+        @Override public Result render(Request request) {
+            return null;
         }
     }
 

@@ -31,6 +31,15 @@ import dev.t1m3.qplayer.model.Track;
  * the two contents together is demonstrably better, and the measurement that says so
  * is already in hand. Without that measurement the answer is the plain overlap.
  *
+ * <p>⚠️ <b>Round 19: one rule is not about the pair at all — the incoming track's own
+ * rendered edit.</b> When that edit is a <em>fusion</em>
+ * ({@link TransitionContext#incomingEditIsFusion()}), the transition is already inside
+ * the file the incoming deck will play, so the answer is {@link TransitionKind#CROSSFADE}
+ * whatever the pair's numbers say — that is the rule at the top of {@link #choose}, and it
+ * is the one case where a measured clash does <em>not</em> buy a sequential fade: there is
+ * no second tempo or key to clash with, because the file carries both tracks' material
+ * itself.
+ *
  * <p>To be replaced by an AI implementation later through
  * {@code PlayerController.setTransitionChooser(...)}; this class stays as the
  * fallback and as the definition of "sensible defaults" that implementation has
@@ -84,7 +93,37 @@ public final class HeuristicTransitionChooser implements TransitionChooser {
         //    callback is most likely to arrive while a ramp is still running. The
         //    historical hard cut is the only honest answer.
         if (!ctx.hasBothLengths()) return TransitionKind.CUT;
-        // 4. The outgoing track is measured to end in silence: there is nothing to
+        // 4. ⚠️ Round 19: an existing FUSION edit decides the kind. The incoming track's
+        //    own rendered file does not carry just that track — it carries a passage the
+        //    renderer built out of BOTH backgrounds, spliced at the outgoing track's own
+        //    junction bar line and the incoming file's own entry (`StemFusion`), so the
+        //    transition is already inside the file and the two live decks only change over
+        //    once (300 ms, equal gain, at that bar line). Nothing this chooser could add
+        //    from the pair's numbers is worth anything there:
+        //
+        //      • an overlap is what plays that file at all — the controller only gives it
+        //        to the incoming deck when the kind is overlapping (`resolveIncomingSource`),
+        //        and a non-overlapping kind therefore throws the whole rendered gesture away
+        //        and plays the track's own master instead (FADE_OUT_IN, SILENCE_TRIM);
+        //      • the pair's tempo judgement does not apply: the file is ONE source carrying
+        //        both tempos' material, so there is no second grid left to clash with — and a
+        //        fusion only exists for a pair whose grids already locked (the renderer
+        //        refuses any other pair, and then the two decks are uncorrelated, which is why
+        //        its hand-over is the short changeover and not a musical blend).
+        //
+        //    This is the boundary's own rule, and the evidence is the file: the controller
+        //    stats it at exactly this instant for its own reasons (`capWithoutEdit`), with the
+        //    same lookup the arm will use, so the kind is decided from the thing that will
+        //    really be played rather than from a measurement that predicts it.
+        //
+        //    It is placed after the three capability rules above and before every shape rule:
+        //    a boundary that cannot be armed at all (an unstreamable side, no room left, a
+        //    length nobody knows) is still CUT, and the user's own 过渡方式 never reaches this
+        //    method (the controller answers a forced kind itself).
+        if (ctx.incomingEditIsFusion()) {
+            return TransitionKind.CROSSFADE;
+        }
+        // 5. The outgoing track is measured to end in silence: there is nothing to
         //    overlap, so trim the dead air instead (see TRIM_TAIL_MIN_MS). This is
         //    the only case where a seam beats an overlap, and it is the only reason
         //    SILENCE_TRIM is ever the automatic answer. Evidence first: a measurement
@@ -94,16 +133,16 @@ public final class HeuristicTransitionChooser implements TransitionChooser {
         if (ctx.outgoingTailSilenceMs() >= TRIM_TAIL_MIN_MS) {
             return TransitionKind.SILENCE_TRIM;
         }
-        // 5. Either side short: fade, but briefly. An 8 s overlap would eat a
+        // 6. Either side short: fade, but briefly. An 8 s overlap would eat a
         //    noticeable fraction of a song that is only a minute or two long — and a
         //    short overlap is also the least damaging answer for a pair whose material
-        //    clashes (see rule 6), because there is barely a stretch where the two are
+        //    clashes (see rule 7), because there is barely a stretch where the two are
         //    audible together at all.
         if (ctx.outgoingDurationMs() < SHORT_TRACK_MS
                 || ctx.incomingDurationMs() < SHORT_TRACK_MS) {
             return TransitionKind.QUICK_FADE;
         }
-        // 6. The pair's own material is measured to overlap badly — their keys clash, or
+        // 7. The pair's own material is measured to overlap badly — their keys clash, or
         //    their tempos cannot be brought onto one grid — so a blend would be two
         //    keys or two tempos at once for its whole length. Play them one after the
         //    other instead: FADE_OUT_IN ramps the outgoing track out, starts the next
@@ -113,7 +152,7 @@ public final class HeuristicTransitionChooser implements TransitionChooser {
         if (ctx.pairFit().overlapsBadly()) {
             return TransitionKind.FADE_OUT_IN;
         }
-        // 7. Everything else: the plain overlap. Two ordinary streams with room
+        // 8. Everything else: the plain overlap. Two ordinary streams with room
         //    ahead of them are exactly the case the whole feature exists for, and a
         //    cut here would be a blend given up for no reason at all. The length is
         //    the kind's default (the setting's own 过渡时长, default 15 s — raised
@@ -138,10 +177,36 @@ public final class HeuristicTransitionChooser implements TransitionChooser {
      * {@link FadeCurve#bothAudibleMs(long)}). A forced kind or an AI answer that names
      * its own curve still goes through untouched, and the plan carries whichever was
      * chosen so the boundary's log line prints it.
+     *
+     * <p>The one other curve this class ever names is {@link FadeCurve#FUSION}, for a
+     * boundary whose edit is a fusion: there the two decks change over once and are
+     * constant either side of it, so the DJ shape would describe a ramp that is not going
+     * to happen. The kind is the same plain overlap; only the reason and the shape differ.
      */
     @Override
     public TransitionPlan plan(TransitionContext ctx) {
         TransitionKind kind = choose(ctx);
+        if (kind == TransitionKind.CROSSFADE && ctx != null && ctx.incomingEditIsFusion()) {
+            // A fusion's own shape, not the DJ blend: the file already carries the
+            // transition, so the two live decks only have to change over once — a linear
+            // (equal-gain) 300 ms splice at the junction, then both constant (see
+            // FadeCurve.FUSION). The length is the kind's default, which the controller
+            // then raises to the 过渡时长 the render's own window was cut for; naming the
+            // curve here means the boundary's decision line prints 融合 instead of the DJ
+            // shape it will not use (the ramp swaps in FUSION for a fusion edit either way,
+            // and that is the one place the two numbers could disagree).
+            return TransitionPlan.of(kind, TransitionPlan.defaultOverlapMs(kind),
+                    FadeCurve.FUSION, "rule: the incoming track's rendered edit is a FUSION — one"
+                            + " passage the renderer cut out of BOTH tracks, anchored on the outgoing"
+                            + " track's own junction bar line and the incoming file's own entry — so"
+                            + " the transition is inside the incoming deck's file: the outgoing deck"
+                            + " is cut on that bar line and the two decks change over once in "
+                            + FadeCurve.JUNCTION_XFADE_MS + "ms (linear, equal gain — the two are the"
+                            + " same material there), and no tempo or key judgement applies because"
+                            + " the file is one source carrying both backgrounds. This kind is also"
+                            + " what makes the deck play that file at all: a non-overlapping one"
+                            + " would play the track's own master instead");
+        }
         if (kind == TransitionKind.CROSSFADE) {
             return TransitionPlan.of(kind, TransitionPlan.defaultOverlapMs(kind),
                     FadeCurve.DJ_BLEND,
