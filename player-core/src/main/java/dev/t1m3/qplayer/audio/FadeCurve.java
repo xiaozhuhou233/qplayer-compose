@@ -237,11 +237,11 @@ public enum FadeCurve {
     },
 
     /**
-     * The fusion's deck-level hand-over: <b>a linear (equal-gain) crossfade of
-     * {@link #JUNCTION_XFADE_MS} at the top of the ramp, and nothing anywhere else.</b> The
-     * outgoing deck falls unity → <em>exactly</em> 0 over the first 300 ms of the ramp, the
-     * incoming deck rises <em>exactly</em> 0 → unity over the same 300 ms, and both are then
-     * <b>constant</b> for the rest of the window.
+     * The fusion's deck-level hand-over: <b>a linear (equal-gain) fade of
+     * {@link #JUNCTION_XFADE_MS} — about one bar of the incoming track — at the top of the ramp,
+     * and nothing anywhere else.</b> The outgoing deck falls unity → <em>exactly</em> 0 over that
+     * window, the incoming deck rises <em>exactly</em> 0 → unity over the same window, and both
+     * are then <b>constant</b> for the rest of the ramp.
      *
      * <p><b>Why this shape exists, and why the other three cannot stand in for it.</b> Every
      * earlier shape is a pair of levels travelling in opposite directions over the whole window,
@@ -250,78 +250,100 @@ public enum FadeCurve {
      * from the junction on (see {@code StemEditRenderer.Result.isFusion}), so by the time this
      * shape's ramp starts, the transition is <em>already carried</em> by the one source the
      * incoming deck is playing: the live decks no longer have to travel anywhere, they only have
-     * to change over once, at the top. That instant is a bar line — which is why the controller
+     * to hand over once, at the top. That instant is a bar line — which is why the controller
      * starts this ramp on the outgoing deck's own position rather than on what is left of its
      * file: a hand-over anywhere else would put A's live deck against a file that is not at the
      * same instant, and that is a phase step, not a late blend.
      *
-     * <p><b>Why it is 300 ms and no longer 80.</b> The first cut of this shape was an 80 ms
-     * equal-power splice on both decks — the same 80 ms the fusion's own file uses for its
-     * bar-line element swaps, on the reasoning that the hand-over should read as a cut. A
-     * prototype was rendered and listened to, and the listener reported a <b>卡顿</b> (a hitch)
-     * exactly at the junction, where the render itself measured a <b>−2.8…−4.1 dB</b> level step
-     * and a change of timbre: the outgoing's live master gives way to the same music rebuilt from
-     * separated stems, and a 3–4 dB step inside 80 ms is a seam however clean the timing is.
-     * Three hundred milliseconds turns that step into a short slide — the same material, changing
-     * hands over a gesture the ear reads as musical rather than as a splice — and it is also,
-     * verbatim, what the user asked for on hearing the prototype: 「新歌的进入请用淡入效果」
-     * (make the new song's entry a fade-in). It additionally removes the vocal mid-phrase cut:
-     * with the outgoing master still up for another 300 ms, the incoming file's own (quiet, gated)
-     * voice arrives <em>under</em> it instead of replacing it on one bar line.
+     * <p><b>⚠️ The outgoing track is never force-stopped, and that is the requirement this length
+     * answers.</b> The user's own words, after listening to a rendering of the shorter cut:
+     * 「你似乎给前一首歌强制停止了，不要这么干，让它放完并不要让它戛然而止，可以加淡出，
+     * 但不要抢整体效果」 — <em>you seem to have force-stopped the previous song; do not do that,
+     * let it play out and do not let it end abruptly; a fade-out is allowed, but do not let it
+     * dominate the whole effect.</em> Both halves of that are properties of this constant and of
+     * nothing else: the outgoing deck is <em>released</em> wherever the ramp ends (see
+     * {@code AndroidAudioBackend.logOutgoingRelease}), so the only way to keep it from being
+     * "stopped" is for its level to have reached zero on its own, musically, well before that
+     * instant — and the only way for the fade not to "dominate" is for it to be a small share of
+     * the window rather than the window itself.
+     *
+     * <p><b>Why it is about a bar — {@link #JUNCTION_XFADE_MS} — and no longer 300 ms.</b> The
+     * first cut of this shape was an 80 ms equal-power splice (the same 80 ms the fusion's file
+     * uses for its bar-line element swaps), on the reasoning that the hand-over should read as a
+     * cut; a rendered prototype was listened to and reported as a <b>卡顿</b> exactly at the
+     * junction, where the render measured a <b>−2.8…−4.1 dB</b> step and a change of timbre (the
+     * live master giving way to the same music rebuilt from separated stems). Three hundred
+     * milliseconds turned that step into a slide and was heard as a fade-in instead — but it still
+     * ends A on the spot: 300 ms of a 15 s blend is not enough for a phrase to finish. So the
+     * window is now one <em>bar</em> of the incoming track at the ramp's own scale. The ramp
+     * carries no grid (it is a level curve, not a timeline), which is why this is a constant in the
+     * 1.5–2.5 s range rather than a computed bar: 2000 ms covers this library's ordinary tempos
+     * (75–160 BPM is a 1.5–3.2 s bar) closely enough for a crossfade whose shape is the thing
+     * being heard, and it leaves 13% of a 15 s blend as the hand-over with the remaining 87% at
+     * the incoming deck's own level.
+     *
+     * <p><b>Why the file is continuous with the live deck across the whole window.</b> The window
+     * is this long because it <em>can</em> be: the renderer holds the outgoing track's carried
+     * rows at unity through it and only lets them recede afterwards ({@code StemFusion}'s own
+     * table), so for these two seconds the incoming deck is playing the outgoing track's own
+     * material — not a bed, not a shadow of it — and the two decks are carrying the same music.
+     * That is what makes the fade a change of source rather than a change of song: at the end of
+     * it the listener has lost nothing, because everything the live deck was still going to play
+     * is in the file from that same bar line on (the file's copy is cut at exactly this
+     * instant — see the controller's position-based trigger).
      *
      * <p><b>Why LINEAR and not EQUAL_POWER — the load-bearing part.</b> The junction is built so
-     * the incoming deck starts playing exactly on the outgoing's own bar line: the incoming file's
-     * first 300 ms carries <em>the same material</em> the outgoing deck is playing at that instant
-     * (round 18's file holds A's own drums, bass and a quiet A melodic over B's bed for its first
-     * bar). The two decks are therefore <em>correlated</em> signals, not independent ones, and the
-     * usual reason to prefer equal power — two <em>uncorrelated</em> tracks summed at half gain
-     * lose 3 dB of power — does not apply here. It inverts: for correlated (here, literally the
-     * same) material the gains sum <em>amplitudes</em>, so an equal-power changeover puts its
-     * middle at cos 45° + sin 45° = 1.414 of one deck's level, i.e. <b>+3 dB</b> — a swell in the
-     * middle of the hand-over, exactly the 音量跳 the equal-power pair exists to avoid between
-     * independent tracks and <em>creates</em> between correlated ones. Equal gain ({@code 1−u} and
-     * {@code u}) sums correlated material to one deck's level at every instant, so the music stays
-     * flat through the changeover — which is the entire point of a hand-over between two copies of
-     * the same bar, and the property the harness measures as {@code outGain + inGain = 1}.
+     * the incoming deck starts playing exactly on the outgoing's own bar line, and the file's
+     * first bar carries <em>the same material</em> the outgoing deck is playing at that instant
+     * (A's own drums, bass and a quiet A melodic over B's bed). The two decks are therefore
+     * <em>correlated</em> signals, not independent ones, and the usual reason to prefer equal power
+     * — two <em>uncorrelated</em> tracks summed at half gain lose 3 dB of power — does not apply
+     * here. It inverts: for correlated (here, literally the same) material the gains sum
+     * <em>amplitudes</em>, so an equal-power changeover puts its middle at cos 45° + sin 45° =
+     * 1.414 of one deck's level, i.e. <b>+3 dB</b> — a swell in the middle of the hand-over,
+     * exactly the 音量跳 the equal-power pair exists to avoid between independent tracks and
+     * <em>creates</em> between correlated ones. Equal gain ({@code 1−u} and {@code u}) sums
+     * correlated material to one deck's level at every instant, so the music stays flat through
+     * the fade — which is the entire point of a hand-over between two copies of the same bar, and
+     * the property the harness measures as {@code outGain + inGain = 1} to a float ulp.
      *
      * <p><b>The two gains, exactly.</b> {@code outGain} = 1 at {@code t = 0}, falling linearly to
-     * 0 at 300 ms into the ramp, then <em>exactly</em> 0 to the end; {@code inGain} = 0 at
-     * {@code t = 0}, rising linearly to 1 at 300 ms, then exactly 1 to the end. The outgoing deck
-     * is consequently <b>not</b> silent for the whole blend — it is audible for the ramp's first
-     * 300 ms by construction — but the release assertion is unaffected, because what it needs is
-     * not "silent all blend" but "at exactly zero and holding well before anything may release
-     * it": this curve reaches exactly zero 300 ms in and stays there, so
-     * {@link #outSilentTail(long)} is {@code rampMs − 300} (14700 ms of a 15 s ramp, 29700 ms of a
-     * 30 s one, 92.5% of a 4 s one) and {@code AndroidAudioBackend} logs that held stretch on its
-     * release line.
+     * 0 at {@link #JUNCTION_XFADE_MS} into the ramp, then <em>exactly</em> 0 to the end;
+     * {@code inGain} = 0 at {@code t = 0}, rising linearly to 1 at the same instant, then exactly
+     * 1 to the end. The outgoing deck is consequently <b>not</b> silent for the whole blend — it
+     * is audible for the ramp's first 2000 ms by construction, which is the point — but the
+     * release assertion is unaffected, because what it needs is not "silent all blend" but "at
+     * exactly zero and holding well before anything may release it": this curve reaches exactly
+     * zero a bar in and stays there, so {@link #outSilentTail(long)} is {@code rampMs − 2000}
+     * (13000 ms of a 15 s ramp, 28000 ms of a 30 s one, 50% of a 4 s one) and
+     * {@code AndroidAudioBackend} logs that held stretch on its release line.
      *
-     * <p><b>Shorter ramps.</b> The 300 ms is a duration, not a share of the window, so a ramp no
-     * longer than that gets the whole window as its changeover — {@code share = min(1, 300/rampMs)}
-     * — and never runs past the end ({@link #outGain(float, long)}). Realistic fusion ramps are
-     * 4–30 s long (the controller's ramp is {@code min(blendMs, remaining − 250)}), where 300 ms
-     * is 1–7.5% of the window.
+     * <p><b>Shorter ramps.</b> The window is a duration, not a share, so a ramp no longer than it
+     * gets the whole window as its fade — {@code share = min(1, 2000/rampMs)} — and never runs past
+     * the end ({@link #outGain(float, long)}). Realistic fusion ramps are 4–30 s long (the
+     * controller's ramp is {@code min(blendMs, remaining − 250)}), where 2000 ms is 7–50% of the
+     * window.
      *
      * <p>Not selectable as a 淡化曲线: it is only ever handed to the backend by the controller,
      * for a boundary whose edit is a fusion. Applied to an ordinary boundary — where the incoming
      * deck plays material of its own, uncorrelated with the outgoing's — it would fade the
-     * outgoing deck out inside the first 300 ms and leave the incoming one alone for the rest of
+     * outgoing deck out inside the first 2000 ms and leave the incoming one alone for the rest of
      * the window, i.e. a switch dressed as a blend.
      */
     FUSION("融合") {
         /** The outgoing track's level: unity, a linear fall to nothing, then nothing.
          *  {@code share} is {@link FadeCurve#JUNCTION_XFADE_MS} as a fraction of the ramp, so
-         *  {@code x/share} is the changeover's own progress {@code u} — the same number
-         *  {@link #inAt} rises by, which is what makes the pair equal-gain rather than merely
-         *  symmetric. (An instance method, like DJ_BLEND's {@code ease}: an enum constant's body
-         *  is an inner class, where static methods are illegal — only its constants may be
-         *  static.)
+         *  {@code x/share} is the fade's own progress {@code u} — the same number {@link #inAt}
+         *  rises by, which is what makes the pair equal-gain rather than merely symmetric. (An
+         *  instance method, like DJ_BLEND's {@code ease}: an enum constant's body is an inner
+         *  class, where static methods are illegal — only its constants may be static.)
          *
-         *  <p>The end of the changeover is a comparison, not a threshold, so the zero it reaches
-         *  is exact rather than "very small": every float {@code t} at or past {@code share} is
+         *  <p>The end of the fade is a comparison, not a threshold, so the zero it reaches is
+         *  exact rather than "very small": every float {@code t} at or past {@code share} is
          *  exactly 0. The one sample that is not is a sample landing within a float ulp
-         *  <em>before</em> it — 300 ms of a 15 s ramp is {@code 0.02}, which no float represents,
-         *  and the largest float below it falls in this branch and asks for 2.2e-8, i.e. −153 dB.
-         *  That is the changeover not quite having finished, not a level. */
+         *  <em>before</em> it — 2000 ms of a 15 s ramp is {@code 0.13333…}, which no float
+         *  represents, and the largest float below it falls in this branch and asks for 6e-8, i.e.
+         *  −144 dB. That is the fade not quite having finished, not a level. */
         private float outAt(float t, double share) {
             double x = clamp(t);
             if (x <= 0d) return 1f;
@@ -340,23 +362,23 @@ public enum FadeCurve {
             return (float) (x / share);
         }
 
-        /** The changeover as a fraction of the ramp — 300 ms of it — or 1 (the whole window)
-         *  when the ramp is not longer than the changeover or its length is unknown; never more
-         *  than the ramp, so the changeover cannot run past the end. */
+        /** The fade as a fraction of the ramp — about a bar of it — or 1 (the whole window)
+         *  when the ramp is not longer than the fade or its length is unknown; never more
+         *  than the ramp, so the fade cannot run past the end. */
         private double shareOf(long rampMs) {
             return rampMs > 0L ? Math.min(1d, (double) JUNCTION_XFADE_MS / rampMs) : 1d;
         }
 
         /**
-         * The shape with no length to place the changeover in, so the changeover IS the window: a
-         * plain linear (equal-gain) pair from one track to the other — the same shape as
-         * {@link #LINEAR}, which is what a hand-over between correlated decks is when 300 ms is
-         * all the ramp there is.
+         * The shape with no length to place the fade in, so the fade IS the window: a plain linear
+         * (equal-gain) pair from one track to the other — the same shape as {@link #LINEAR}, which
+         * is what a hand-over between correlated decks is when the fade is all the ramp there is.
          *
          * <p>Only ever the answer where a length is genuinely unknown — a caller walking the enum
          * to measure a shape ({@link #bothAudibleMs(long)}, {@code FadeCurveTest}). The ramp
          * itself always has a length, and every path that applies this curve to audio knows it,
-         * so the audio always gets the 300 ms changeover ({@link #outGain(float, long)}).
+         * so the audio always gets the {@link #JUNCTION_XFADE_MS} fade
+         * ({@link #outGain(float, long)}).
          */
         @Override public float outGain(float t) {
             return outAt(t, 1d);
@@ -375,13 +397,20 @@ public enum FadeCurve {
         }
 
         /**
-         * Everything after the changeover: the outgoing track is at <b>exactly</b> zero from
+         * Everything after the fade: the outgoing track is at <b>exactly</b> zero from
          * {@link #JUNCTION_XFADE_MS} into the ramp onwards, so the stretch a player may be
-         * released inside is the whole ramp bar its first 300 ms — {@code rampMs − 300} of it.
+         * released inside is the whole ramp bar its first 2000 ms — {@code rampMs − 2000} of it.
          *
          * <p>The only shape whose answer depends on the ramp's length, and the reason
          * {@link #outSilentTail()} alone cannot describe it: "the last 1% of a 15 s ramp" is a
-         * share, while "all of it except the first 300 ms" is not a share at all.
+         * share, while "all of it except a bar at the head" is not a share at all.
+         *
+         * <p>⚠️ The number this returns is the one the release line quotes as "the held zero this
+         * curve promises", and it is now a bar shorter than it was at 300 ms of hand-over: on a
+         * 15 s ramp 13000 ms instead of 14700, and on a 4 s one 2000 instead of 3700. Still two
+         * orders of magnitude more than the write-to-release gap it exists to bound (the ramp
+         * promotes within one {@code RAMP_TICK_MS} of its end, tens of milliseconds), which is why
+         * the assertion it feeds is unaffected by the length — see {@code logOutgoingRelease}.
          */
         @Override public float outSilentTail(long rampMs) {
             return rampMs > 0L
@@ -390,28 +419,44 @@ public enum FadeCurve {
     };
 
     /**
-     * How long the two decks of a {@link #FUSION} take to change over, ms: a <b>linear
-     * (equal-gain) crossfade at the top of the ramp</b> — the outgoing deck unity → 0 and the
-     * incoming 0 → unity across this window, both constant outside it.
+     * How long the two decks of a {@link #FUSION} fade across, ms: <b>a linear (equal-gain) fade
+     * at the top of the ramp</b> — the outgoing deck unity → 0 and the incoming 0 → unity across
+     * this window, both constant outside it.
+     *
+     * <p>⚠️ <b>About one bar of the incoming track, because the outgoing track may not be
+     * force-stopped.</b> The user's correction after listening: 「你似乎给前一首歌强制停止了，
+     * 不要这么干，让它放完并不要让它戛然而止，可以加淡出，但不要抢整体效果」 — the previous song
+     * must be allowed to play out, its end must not be abrupt, a fade-out is allowed but must not
+     * dominate. A 300 ms hand-over satisfied neither half: 300 ms is not enough for a phrase to
+     * finish, so A still ended on the spot, and the listener reported it as a stop. The window is
+     * therefore a bar's worth of music rather than a splice's worth of milliseconds. The ramp
+     * carries no grid (a level curve has no timeline to read a tempo from), so this is a constant
+     * in the 1.5–2.5 s range covering this library's ordinary tempos — 75–160 BPM is a 1.5–3.2 s
+     * bar — with the file holding the outgoing track's own material at unity across the whole of
+     * it (see {@link #FUSION}'s doc: the two decks are carrying the same music here, which is why
+     * the fade is a change of source and not a change of song).
      *
      * <p>A duration rather than a share of the window, deliberately — and that is exactly why the
-     * fusion needs {@link #outGain(float, long)}: 300 ms is 2% of a 15 s blend and three quarters
-     * of a 400 ms one, so a share that meant "a short changeover" at one blend length would mean
-     * "the whole blend" at another. Every caller that applies the curve or reports a number for it
+     * fusion needs {@link #outGain(float, long)}: 2000 ms is 13% of a 15 s blend and more than a
+     * whole 1.5 s one, so a share that meant "a musical fade" at one blend length would mean "the
+     * entire blend" at another. Every caller that applies the curve or reports a number for it
      * has the ramp's real length in hand, so the length is passed rather than guessed.
      *
-     * <p>300 ms since the round-18 prototype was listened to; it was 80 (an equal-power splice, the
-     * same 80 ms the fusion's file uses for its bar-line element swaps). The listening report is
-     * what moved it: the prototype's junction measured a −2.8…−4.1 dB level step and a timbre
-     * change, heard as a 卡顿. See {@link #FUSION}'s doc for why the changeover is <em>linear</em>
-     * as well as longer — the two decks carry the same material across it and are therefore
-     * correlated, and an equal-power changeover would sum them to +3 dB in the middle.
+     * <p>The history, because each step was a listening report and the next reader should be able
+     * to tell which one a build is: 80 ms (an equal-power splice, the same 80 ms the fusion's file
+     * uses for its bar-line element swaps) was heard as a 卡顿 exactly at the junction, where the
+     * render measured a −2.8…−4.1 dB step and a change of timbre; 300 ms (the same linear shape,
+     * heard as 「新歌的进入请用淡入效果」 — a fade-in for the new song, which was the request at
+     * the time) fixed the step but still ended the outgoing song on the spot, which is the report
+     * this number answers. See {@link #FUSION}'s doc for why the fade is <em>linear</em> as well:
+     * the two decks carry the same material across it and are therefore correlated, and an
+     * equal-power fade would sum them to +3 dB in the middle.
      *
-     * <p>Public because the boundary's log line quotes it: "the decks change over in 300 ms rather
-     * than being cut" is a claim about this number, and a log that spelled the 300 itself would be
-     * able to disagree with the curve it is describing.
+     * <p>Public because the boundary's log line quotes it: "the decks hand over in 2000 ms rather
+     * than being cut" is a claim about this number, and a log that spelled the 2000 itself would
+     * be able to disagree with the curve it is describing.
      */
-    public static final long JUNCTION_XFADE_MS = 300L;
+    public static final long JUNCTION_XFADE_MS = 2_000L;
 
     /** How far apart the two tracks may be, dB, and still count as "both audible"
      *  for the measurement below. Six decibels is the usual "clearly quieter but
@@ -480,8 +525,9 @@ public enum FadeCurve {
         for (int i = 0; i < steps; i++) {
             float t = (i + 0.5f) / steps;             // midpoint of each slice
             // Asked WITH the ramp's length: for every shape written in t alone this is the
-            // same number, and for FUSION it is the only way the 300 ms changeover can be placed
-            // in a window of this length at all — its share is not a property of the shape.
+            // same number, and for FUSION it is the only way its JUNCTION_XFADE_MS fade can be
+            // placed in a window of this length at all — its share of the ramp is not a property
+            // of the shape.
             float out = Math.abs(outGain(t, rampMs));
             float in = Math.abs(inGain(t, rampMs));
             float loud = Math.max(out, in);
@@ -548,11 +594,11 @@ public enum FadeCurve {
      *
      * <p>Most shapes are written in terms of {@code t} alone and ignore the length (this default
      * does): a fade is a fade however long its window is. {@link #FUSION} is the exception, and
-     * the reason this overload exists — its whole change-over is a fixed 300 ms changeover at the
-     * top of the ramp, so the share of the ramp it occupies is only knowable from the ramp's real
-     * length. The backend has it at every tick ({@code rampDurationNs}), and every measurement that
-     * quotes a number for a ramp ({@link #bothAudibleMs(long, float)}) has it in hand, so no caller
-     * that applies or reports this curve has to guess.
+     * the reason this overload exists — its whole hand-over is a fixed {@link #JUNCTION_XFADE_MS}
+     * fade at the top of the ramp, so the share of the ramp it occupies is only knowable from the
+     * ramp's real length. The backend has it at every tick ({@code rampDurationNs}), and every
+     * measurement that quotes a number for a ramp ({@link #bothAudibleMs(long, float)}) has it in
+     * hand, so no caller that applies or reports this curve has to guess.
      */
     public float outGain(float t, long rampMs) {
         return outGain(t);

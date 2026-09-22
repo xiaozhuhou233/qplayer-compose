@@ -97,8 +97,10 @@ public final class HeuristicTransitionChooser implements TransitionChooser {
         //    own rendered file does not carry just that track — it carries a passage the
         //    renderer built out of BOTH backgrounds, spliced at the outgoing track's own
         //    junction bar line and the incoming file's own entry (`StemFusion`), so the
-        //    transition is already inside the file and the two live decks only change over
-        //    once (300 ms, equal gain, at that bar line). Nothing this chooser could add
+        //    transition is already inside the file and the two live decks only hand over
+        //    once (a JUNCTION_XFADE_MS equal-gain fade, at that bar line — the file carries the
+        //    outgoing track's own material across the whole of it, so that deck plays out
+        //    instead of being stopped). Nothing this chooser could add
         //    from the pair's numbers is worth anything there:
         //
         //      • an overlap is what plays that file at all — the controller only gives it
@@ -188,8 +190,9 @@ public final class HeuristicTransitionChooser implements TransitionChooser {
         TransitionKind kind = choose(ctx);
         if (kind == TransitionKind.CROSSFADE && ctx != null && ctx.incomingEditIsFusion()) {
             // A fusion's own shape, not the DJ blend: the file already carries the
-            // transition, so the two live decks only have to change over once — a linear
-            // (equal-gain) 300 ms splice at the junction, then both constant (see
+            // transition, so the two live decks only have to hand over once — a linear
+            // (equal-gain) FadeCurve.JUNCTION_XFADE_MS fade at the junction, then both constant
+            // (see
             // FadeCurve.FUSION). The length is the kind's default, which the controller
             // then raises to the 过渡时长 the render's own window was cut for; naming the
             // curve here means the boundary's decision line prints 融合 instead of the DJ

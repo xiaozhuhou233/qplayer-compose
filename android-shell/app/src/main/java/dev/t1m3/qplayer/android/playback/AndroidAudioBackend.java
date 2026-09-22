@@ -2201,14 +2201,16 @@ public final class AndroidAudioBackend implements AudioBackend {
                 // stays at one (no dip in the middle of the overlap).
                 //
                 // ⚠️ Asked WITH the ramp's length. Every shape but FUSION is written in terms
-                // of `t` alone and answers the same either way; FUSION's whole change-over is a
-                // fixed JUNCTION_XFADE_MS (300ms) hand-over at the TOP of the ramp — linear and
+                // of `t` alone and answers the same either way; FUSION's whole hand-over is a
+                // fixed FadeCurve.JUNCTION_XFADE_MS fade at the TOP of the ramp — linear and
                 // equal-gain, because the two decks carry the same material across it — whose
                 // share of a window this length is only knowable from the length itself (see
                 // FadeCurve.outGain(float, long)). Its outgoing track is at unity for that first
-                // 300ms and at exactly zero from then on, held there for the rest of the ramp
-                // (rampMs − 300), so the release assertion below is looking at a deck that has
-                // been silent for seconds by the time the promotion tears its player down.
+                // window and at exactly zero from the end of it on, held there for the rest of the
+                // ramp (rampMs − JUNCTION_XFADE_MS), so the release assertion below is looking at
+                // a deck that has been silent for seconds by the time the promotion tears its
+                // player down — and at a fade that runs at the top of the ramp rather than across
+                // it, which is what keeps the outgoing track from being stopped on the spot.
                 long rampMs = rampDurationNs / 1000000L;
                 float outGain = base * clampGain(rampCurve.outGain(t, rampMs));
                 float inGain = base * clampGain(rampCurve.inGain(t, rampMs));

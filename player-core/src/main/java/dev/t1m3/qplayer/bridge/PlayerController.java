@@ -719,11 +719,11 @@ public final class PlayerController {
      * playing normally the first frame that sees the position at or past the junction is one
      * {@code tick} — tens of milliseconds — past it. What 400 ms is for is the other case: the
      * listener scrubbed, or the deck was restarted, or the pump was blocked long enough for the
-     * position to leap. Then the two decks are nowhere near the same instant, and the fusion's
-     * splice would put A's live material against a copy of itself a good fraction of a second
-     * away — a phase step, twice the material, and A's vocals in the middle of it. Abandoning the
-     * fusion there costs an ordinary crossfade; not abandoning it costs the one artefact the
-     * fusion exists to avoid.
+     * position to leap. Then the two decks are nowhere near the same instant, and the fade's
+     * hand-over would put A's live material against a copy of itself a good fraction of a second
+     * away on both sides of it — a phase step, twice the material, and A's vocals in the middle of
+     * it, for as long as the hand-over lasts. Abandoning the fusion there costs an ordinary
+     * crossfade; not abandoning it costs the one artefact the fusion exists to avoid.
      *
      * <p>Note what abandoning means: the outgoing deck is NOT cut. It keeps playing and the
      * boundary finishes as the ordinary crossfade of the plan's own curve, with the already-armed
@@ -2275,8 +2275,8 @@ public final class PlayerController {
         // A FUSION starts it when the outgoing deck's own POSITION reaches the bar line the render
         // cut its material on. That is a different trigger because a fusion is a different thing:
         // the file the incoming deck is playing carries the outgoing track's own drums, bass and
-        // melodic from exactly that instant, so the two decks change over there or not at all —
-        // a splice a bar early would put A's live deck against the file's copy of A at a different
+        // melodic from exactly that instant, so the two decks hand over there or not at all —
+        // starting a bar early would put A's live deck against the file's copy of A at a different
         // instant, which is a phase step rather than a slightly late blend. What is left of the
         // outgoing file is not the question; `remaining` only enters afterwards, as the ramp's
         // length.
@@ -2292,12 +2292,14 @@ public final class PlayerController {
                 // is not cut on it (see FUSION_JUNCTION_GUARD_MS). The already-armed incoming edit
                 // keeps its offset and this boundary finishes as the ordinary crossfade it would
                 // have been — nothing is left silent and no deck is restarted from 0.
-                Logger.info("transition: FUSION GIVEN UP at the cut — the outgoing deck is at {}ms"
-                                + " and the render's bar line is at {}ms ({}ms off; the guard is"
-                                + " {}ms), so this deck is NOT cut on a position the render never"
-                                + " planned for. This boundary finishes as an ordinary crossfade"
-                                + " from the plan's own curve, and the incoming edit keeps playing"
-                                + " from the {}ms it was armed at (its own file)",
+                Logger.info("transition: FUSION GIVEN UP at the junction — the outgoing deck is at"
+                                + " {}ms and the render's bar line is at {}ms ({}ms off; the guard"
+                                + " is {}ms), so no hand-over is started on a position the render"
+                                + " never planned for. This boundary finishes as an ordinary"
+                                + " crossfade from the plan's own curve — the outgoing deck is not"
+                                + " stopped at the bar line, it keeps playing its own tail — and the"
+                                + " incoming edit keeps playing from the {}ms it was armed at (its"
+                                + " own file)",
                         outgoingPositionMs, fusion.junctionMs,
                         outgoingPositionMs - fusion.junctionMs, FUSION_JUNCTION_GUARD_MS,
                         crossfadeIncomingStartMs);
@@ -2313,19 +2315,22 @@ public final class PlayerController {
         // and FadeCurve.DJ_BLEND.
         FadeCurve curve = plan != null ? plan.curveOr(fadeCurve) : fadeCurve;
         if (fusion != null) {
-            // The two decks change over in one 80 ms splice rather than travelling across the
-            // window, because the transition is already inside the file this deck is playing (see
-            // FadeCurve.FUSION): there is nothing left for a level curve to do except stop one
-            // deck and start the other on the same beat.
+            // The two decks hand over once, in one equal-gain fade at the top of the ramp
+            // (FadeCurve.JUNCTION_XFADE_MS), rather than travelling against each other across the
+            // window: the transition is already inside the file this deck is playing, and for that
+            // whole window the file carries the outgoing track's own material, so the fade moves
+            // the source of the music rather than ending the song (see FadeCurve.FUSION). The
+            // outgoing deck is left at its own level through it and at exactly zero afterwards —
+            // it is never stopped on the spot.
             curve = FadeCurve.FUSION;
         } else if (curve == FadeCurve.FUSION) {
             // ⚠️ The fusion's shape is meaningless without an edit that carries the outgoing
-            // track's own material: it would silence the outgoing deck 80 ms into an ordinary
-            // blend and leave the incoming one alone for the rest of it, i.e. a switch wearing a
-            // blend's clothes. Nothing in this build offers it for a boundary that is not a fusion
-            // (the 淡化曲线 row lists three shapes and the model's vocabulary is that same list),
-            // but a plan read back from the decision cache is a byte saying "curve #3" and must
-            // not be able to turn a blend into a cut either.
+            // track's own material: it would fade the outgoing deck out inside the first
+            // JUNCTION_XFADE_MS of an ordinary blend and leave the incoming one alone for the rest
+            // of it, i.e. a switch wearing a blend's clothes. Nothing in this build offers it for a
+            // boundary that is not a fusion (the 淡化曲线 row lists three shapes and the model's
+            // vocabulary is that same list), but a plan read back from the decision cache is a byte
+            // saying "curve #3" and must not be able to turn a blend into a cut either.
             Logger.info("transition: the plan named the {} curve, which only a fusion may use and"
                             + " this boundary is not one — using {} instead",
                     FadeCurve.FUSION, FadeCurve.DJ_BLEND);
@@ -2360,10 +2365,11 @@ public final class PlayerController {
                         + " for {} — the symmetric {}-style ramp gives {} of the same {}ms",
                 transitionKind, rampMs, nextIndex, curve,
                 fusion != null
-                        ? "; 融合：出曲按自己的第 " + fusion.junctionMs + "ms 小节线切，"
+                        ? "; 融合：从出曲自己的第 " + fusion.junctionMs + "ms 小节线起，"
                                 + "两轨在 " + FadeCurve.JUNCTION_XFADE_MS + "ms 内线性等增益交接"
-                                + "（不是等功率：两轨这一段是同一段素材，等功率会在中间叠出 +3dB），"
-                                + "之后各自恒定，不是渐变"
+                                + "（约一小节：不是等功率，因为这一段两轨是同一段素材，"
+                                + "等功率会在中间叠出 +3dB），之后两轨各自恒定 —— 出曲不是被切停的，"
+                                + "它在整段淡出里都在自己放，淡出只占这一小节"
                                 + "（文件从 " + fusion.entryMs + "ms 起带着 A 的素材，"
                                 + fusion.fusionEndMs + "ms 起只剩下一首的背景）"
                         : (plan != null && plan.curveOverrides(fadeCurve)
@@ -2815,8 +2821,11 @@ public final class PlayerController {
         String fusionNote = fusion
                 ? "; and this is a FUSION: the deck starts on the EDIT's own entry (" + entry
                         + "ms of its file, where the render placed the outgoing track's carried"
-                        + " material) instead of the beat entry above, and the two decks are spliced"
-                        + " there rather than faded"
+                        + " material) instead of the beat entry above, and from that bar line the"
+                        + " two decks hand over in one " + FadeCurve.JUNCTION_XFADE_MS
+                        + "ms equal-gain fade — the file carries the outgoing track's own material"
+                        + " across the whole of it, so the outgoing deck plays out rather than being"
+                        + " stopped"
                 : "";
         final String alignmentOut = fusion
                 ? (alignment != null ? alignment : "") + fusionNote
@@ -3683,7 +3692,7 @@ public final class PlayerController {
         trimPlan = null;
         // A fusion belongs to the edit for the pair that was decided, exactly like the trim plan
         // above: the next boundary has its own edit (or none), and a junction left over from this
-        // one would trigger a splice at a bar line of a track that is no longer playing.
+        // one would trigger a hand-over at a bar line of a track that is no longer playing.
         fusionCut = null;
         fadeOutInArmed = false;
         incomingSrc = null;
@@ -3778,13 +3787,14 @@ public final class PlayerController {
                     start = edit.entryMs;
                     fusionCut = new FusionCut(edit.entryMs, edit.junctionMs, edit.fusionEndMs);
                     Logger.info("transition: that edit is a FUSION — the incoming deck starts at"
-                                    + " {}ms of its own file instead of {}ms ({}), and the"
-                                    + " outgoing deck is cut on its own {}ms bar line and the two"
-                                    + " decks change over linearly (equal gain, {}ms) rather than"
-                                    + " fading one out over the other (A's material is in the file"
-                                    + " from there until {}ms); the low end is NOT cut on the"
-                                    + " incoming deck and there is no key glide, because this file"
-                                    + " carries both backgrounds itself",
+                                    + " {}ms of its own file instead of {}ms ({}), and from the"
+                                    + " outgoing deck's own {}ms bar line the two hand over in one"
+                                    + " equal-gain fade of {}ms (about a bar; not one track fading"
+                                    + " out over the other, and not the outgoing deck being stopped"
+                                    + " — the file carries its material from there until {}ms),"
+                                    + " after which both decks are constant; the low end is NOT cut"
+                                    + " on the incoming deck and there is no key glide, because this"
+                                    + " file carries both backgrounds itself",
                             edit.entryMs, incomingStartMs,
                             incomingStartMs == edit.entryMs
                                     ? "the same position this boundary's alignment chose"
@@ -4071,12 +4081,12 @@ public final class PlayerController {
      *   anywhere else is playing a passage that does not line up with the outgoing deck it is
      *   fused with (and, since the whole audible transition is inside that file, it is playing the
      *   transition from the wrong place).</li>
-     *   <li>{@link #junctionMs} — the bar line of the OUTGOING track's own file the live deck is
-     *   cut on, i.e. the instant the file's copy of that track's material begins. The ramp is
+     *   <li>{@link #junctionMs} — the bar line of the OUTGOING track's own file the two decks
+     *   hand over on, i.e. the instant the file's copy of that track's material begins. The ramp is
      *   triggered on this position rather than on what is left of the outgoing file, because the
-     *   two decks are spliced rather than faded and the splice has to land on the bar line the
-     *   render cut at: a few hundred milliseconds of mismatch there is a phase step in A's own
-     *   material, not a slightly late blend.</li>
+     *   hand-over's fade spans this instant and has to be centred on the bar line the render cut at:
+     *   a few hundred milliseconds of mismatch there is a phase step in A's own material, not a
+     *   slightly late blend.</li>
      *   <li>{@link #fusionEndMs} — where the last of the outgoing track's material is gone. Only
      *   the log line needs it; the boundary's timing is settled by the two above.</li>
      * </ol>
@@ -4449,16 +4459,19 @@ public final class PlayerController {
         }
 
         /** Whether this edit carries the two backgrounds fused, i.e. the boundary must start the
-         *  incoming deck on {@link #entryMs} and cut the outgoing one on {@link #junctionMs}.
+         *  incoming deck on {@link #entryMs} and hand over on the outgoing deck's
+         *  {@link #junctionMs} bar line.
          *
          *  <p>The same test as {@link StemEditRenderer.Result#isFusion()} — read from the file
          *  name here rather than from the render's own object, because the render happened in
          *  another process (or a previous session) and the name is all that is left of it. The two
          *  have to agree: a fusion the renderer wrote and this parse did not recognise would be
          *  played as an ordinary edit, i.e. with the deck started at its beat entry and the
-         *  outgoing deck faded over the whole blend, which is the one thing the fusion exists to
-         *  replace. {@code -f} is not part of the test: the two times the trigger needs are the
-         *  entry and the junction, and the render writes all three together. */
+         *  outgoing track faded out across the whole window — the shape the fusion exists to
+         *  replace, and the one the user hears as 「上一首被强制停止了」 when it is used for a pair
+         *  whose file was built to hand over in a bar. {@code -f} is not part of the test: the two
+         *  times the trigger needs are the entry and the junction, and the render writes all three
+         *  together. */
         boolean isFusion() {
             return junctionMs >= 0L && entryMs >= 0L;
         }
@@ -4688,16 +4701,21 @@ public final class PlayerController {
             Logger.info("transition: the DJ edit for {} is ready at {} — {}", t.title, result.path,
                     result.note.isEmpty() ? "no bridge in it" : result.note);
             if (result.isFusion()) {
-                // The render baked a fusion: the boundary will start the deck on its entry and cut
-                // the outgoing deck on its junction (see FusionCut). Said here, from the render's
+                // The render baked a fusion: the boundary will start the deck on its entry and hand
+                // over on the outgoing deck's junction bar line (see FusionCut), in the curve's own
+                // equal-gain fade rather than by stopping that deck. Said here, from the render's
                 // own answer, so the pair of lines — what was rendered and what the boundary then
                 // did with it — can be compared without the file name in between.
                 Logger.info("transition: that edit is a FUSION — the incoming deck will start at"
-                                + " {}ms of its file (its own content start is {}ms), the outgoing"
-                                + " deck is cut on its own {}ms bar line, and the last of the"
-                                + " outgoing track's material is gone by {}ms (blend {}ms, which is"
-                                + " where the renderer's window came from)",
-                        result.entryMs, contentStart, result.junctionMs, result.fusionEndMs, blendMs);
+                                + " {}ms of its file (its own content start is {}ms), the two decks"
+                                + " hand over at the outgoing deck's own {}ms bar line in a {}ms"
+                                + " equal-gain fade (the file carries the outgoing track's material"
+                                + " across the whole of it and lets it recede after, so that deck"
+                                + " plays out and is not stopped), and the last of its material is"
+                                + " gone by {}ms (blend {}ms, which is where the renderer's window"
+                                + " came from)",
+                        result.entryMs, contentStart, result.junctionMs,
+                        FadeCurve.JUNCTION_XFADE_MS, result.fusionEndMs, blendMs);
             }
         });
     }
