@@ -161,6 +161,22 @@ public final class StemFusion {
     public static final int RULE_VERSION = 2;
 
     /**
+     * How many steps of the gesture the pair can afford in all: {@code steps} with
+     * {@code ceil((steps*stepMs + CUT)/stretch) + 2*slack <= cap} and
+     * {@code contentStart + steps*stepMs <= removalMs} (the fusion has to stay inside the window the
+     * incoming's vocals are out for — {@link #plan}'s own clause, asked here in the same terms so
+     * that the wait for the incoming's rows cannot push the passage past it).
+     */
+    private static int maxStepsFor(double stepMs, double stretch, long cap, long removalMs,
+                                   long contentStartMs) {
+        double ratio = stretch > 0d ? stretch : 1d;
+        long byCap = (long) Math.floor(((cap - 2L * A_TAIL_SLACK_MS) * ratio - CUT_MS) / stepMs);
+        long byVocals = Math.floorDiv(removalMs - contentStartMs,
+                Math.max(1L, Math.round(stepMs)));
+        return (int) Math.max(1L, Math.min(byCap, byVocals));
+    }
+
+    /**
      * The shape one pair's own step leaves room for: {@code {holdSteps, lowEndFadeSteps}} of the
      * round-6 gesture, ms of the outgoing's file being the budget.
      *
@@ -845,6 +861,130 @@ public final class StemFusion {
      *  the voice arriving, ms (see {@link #vocalStartMs}). */
     public static final long VOCAL_SUSTAIN_MS = 1_000L;
 
+    /**
+     * Where the incoming track's own <b>rhythm</b> row starts playing, ms of its own file, or -1
+     * when it is not playing anywhere in {@code [fromMs, toMs)}.
+     *
+     * <p>Round 6's second pass, and its subject is the passage's pulse rather than the entry: a row
+     * of the outgoing's may not be faded before the incoming's <em>same</em> row is playing, or the
+     * passage hands the pulse to nobody. The device's own pair shows what that sounds like —
+     * {@code Lose My Mind -> AGUDO} put A's drums out at 5260 ms while the incoming's own first
+     * ~3 s carry no drums at all (its head is voice and pad), and the acceptance measured a 2832 ms
+     * hole in the passage's pulse, which is five beats of the incoming's own 566 ms grid.
+     *
+     * <p>Measured on the incoming's own separated head — the rows the renderer already has in hand
+     * for the arrival side — and against the row's <em>own</em> loud level rather than an absolute
+     * one: a kick drum's peak is what marks a beat, and {@link #INCOMING_ON_DB} under the row's own
+     * loud tenth is "this row is playing", whatever the track's overall level is. One beat wide, so
+     * a row that plays on the beat is found on the beat.
+     *
+     *  <p>⚠️ <b>And it has to be {@link #INCOMING_SUSTAIN_BEATS} beats in a row.</b> One beat above
+     *  the margin is not a row playing — it is a hit, a crash, a stray kick — and this measurement
+     *  exists to answer "may A's row leave now", which needs a row that STAYS. Measured on the
+     *  device pair's incoming ({@code Lose My Mind}'s own separated head, per-beat peaks, dBFS):
+     *  {@code -8 -10 -20 -34 -38 -42 -52 -51 -37 -54 -58 -53 -57 -56 -54 -51 -5 -10 -18} — the kit
+     *  hits twice and then leaves for seven seconds (its intro is voice and pad, which is what the
+     *  listener hears as the passage going flat), and the first SINGLE beat above the margin is beat
+     *  one, which would have answered "playing from the start" and changed nothing. Three beats in a
+     *  row answers <b>8 415 ms</b> of its own file — the kit returning — and that reconciles the
+     *  acceptance's own number to the millisecond: the pair's render put A's drums out over
+     *  [5 260, 7 440) ms, its last carried attack is at 5 583, and 8 415 − 5 583 = <b>2 832 ms</b>,
+     *  exactly the "longest gap 2832ms of a 566ms period" it reported. The wait then makes the hold
+     *  four steps (entry + 8 720 ms), A's drums keep attacking until 9 620, and the gap is gone. (Its
+     *  low end answers 240 ms — a sustained line from the first beat, loud tenth −3.9 dBFS — so on
+     *  this pair only the drums make the recede wait.)
+     */
+    public static long rowStartMs(float[][] pcm, int rate, long fromMs, long toMs, double beatMs) {
+        if (pcm == null || pcm.length == 0 || pcm[0] == null || !(beatMs > 0d) || !(rate > 0)) {
+            return -1L;
+        }
+        int step = Math.max(1, (int) Math.round(beatMs * rate / 1000d));
+        int frame = Math.max(1, step / 4);
+        int from = (int) Math.max(0L, Math.round(fromMs * rate / 1000d));
+        int to = Math.min(pcm[0].length, (int) Math.round(toMs * rate / 1000d));
+        if (to - from < step) return -1L;
+        java.util.ArrayList<Double> peaks = new java.util.ArrayList<>();
+        for (int at = from; at + step <= to; at += step) {
+            double peak = 0d;
+            for (int ch = 0; ch < pcm.length; ch++) {
+                if (pcm[ch] == null) continue;
+                for (int i = at; i < at + step && i < pcm[ch].length; i += frame) {
+                    double window = 0d;
+                    for (int j = i; j < Math.min(i + frame, pcm[ch].length); j++) {
+                        window = Math.max(window, Math.abs(pcm[ch][j]));
+                    }
+                    peak = Math.max(peak, window);
+                }
+            }
+            peaks.add(peak);
+        }
+        if (peaks.size() < INCOMING_SUSTAIN_BEATS) return -1L;
+        double[] sorted = new double[peaks.size()];
+        for (int i = 0; i < sorted.length; i++) sorted[i] = peaks.get(i);
+        java.util.Arrays.sort(sorted);
+        // The row's own loud tenth, the same measure StemBridge's level clauses use: for a drum row
+        // that is "a beat with the kit on it", and for a bass row its note.
+        double loud = sorted[(int) Math.min(sorted.length - 1L, Math.round(0.9d * (sorted.length - 1)))];
+        double loudDb = 20d * Math.log10(Math.max(1e-9d, loud));
+        if (loudDb < INCOMING_ROW_FLOOR_DBFS) return -1L;
+        double floor = loudDb - INCOMING_ON_DB;
+        int run = 0;
+        for (int i = 0; i < peaks.size(); i++) {
+            run = 20d * Math.log10(Math.max(1e-9d, peaks.get(i))) >= floor ? run + 1 : 0;
+            if (run >= INCOMING_SUSTAIN_BEATS) {
+                // The row's run started `INCOMING_SUSTAIN_BEATS` beats ago: the row is playing from
+                // there, which is the instant a recede may start on.
+                int first = i - INCOMING_SUSTAIN_BEATS + 1;
+                return fromMs + (long) Math.round(first * step * 1000d / (double) rate);
+            }
+        }
+        return -1L;
+    }
+
+    /** How far under a row's OWN loud tenth a beat may sit and still count as the row playing, dB
+     *  (see {@link #rowStartMs}).
+     *
+     *  <p>20 and not a tight 3: this is asked of a row over a window that may be an intro, and the
+     *  question is "is the kit on", not "is this the loudest beat of the row". Measured on the
+     *  device pair's incoming, {@code Lose My Mind}'s own separated head — its loud beat is
+     *  −0.1 dBFS, its intro's beats sit −34…−58 dBFS and its kit −5…−30 — a 12 dB margin called the
+     *  intro's two opening hits "playing" (they are −8 and −10), a 20 dB margin calls the kit's
+     *  return (−5, −10, −18) playing and the intro's beats not, and its sustained low end
+     *  (−9…−18, its loud tenth −3.9) playing from the first beat either way. Both directions of the
+     *  error are visible and both are survivable: a row called playing too early leaves the
+     *  acceptance's pulse clause to measure the hole (which is what this measurement exists to
+     *  prevent), and a row called playing too late only holds A's row longer — and if it never gets
+     *  there inside the passage, the pair is refused BY NAME rather than accepted and measured. */
+    public static final double INCOMING_ON_DB = 20d;
+
+    /** How many beats in a row a row has to be above {@link #INCOMING_ON_DB} before
+     *  {@link #rowStartMs} calls it playing, so a single hit in an otherwise empty intro is not an
+     *  arrival (see that method's own measurement). Three beats is the same order as
+     *  {@link #VOCAL_SUSTAIN_MS} of the voice. */
+    public static final int INCOMING_SUSTAIN_BEATS = 3;
+
+    /** The floor a separated row's own loud tenth has to clear for {@link #rowStartMs} to answer at
+     *  all, dBFS. Under it the row is absent — an intro with no kit in it — and every beat is "as
+     *  loud as the loudest", which would make the first beat look like the row arriving. */
+    public static final double INCOMING_ROW_FLOOR_DBFS = -55d;
+
+    /**
+     * Where the incoming track's own rhythm rows start playing, as the planner asks for them —
+     * {@link #rowStartMs} behind an interface, because the planner's only business is whether the
+     * row that replaces A's is on yet.
+     */
+    @FunctionalInterface
+    public interface IncomingOn {
+        /** The first instant at or after {@code fromMs} where the row is playing, ms of the
+         *  incoming's own file, or -1 when it does not play inside {@code [fromMs, toMs)}. */
+        long firstPlayingMs(int row, long fromMs, long toMs);
+    }
+
+    /** No measurement was made: the recede then keeps the design's own instants, which is
+     *  bit-for-bit the behaviour before round 6's second pass — what every caller that does not
+     *  measure (and every test that is about something else) gets. */
+    public static final IncomingOn NO_INCOMING_MEASUREMENT = (row, fromMs, toMs) -> -1L;
+
     /** The floor a decoded window's low band has to be above for its downbeat to be estimated at
      *  all, dBFS. Under it there is nothing for the estimate to find, and the four candidate
      *  phases score the same nothing. */
@@ -1042,6 +1182,10 @@ public final class StemFusion {
         /** Where the incoming track's voice first comes in, ms of its own file, or -1 when unknown
          *  — the measurement the intro skip is written in (round 5). */
         public final long firstVocalMs;
+        /** Where the incoming track's own rhythm rows start playing, or
+         *  {@link #NO_INCOMING_MEASUREMENT} — the measurement round 6's second pass added: the
+         *  recede waits for the row that replaces A's (see {@link #rowStartMs}). */
+        public final IncomingOn incoming;
 
         public Input(long aDurMs, long blendMs, long removalMs, long contentStartMs,
                      double aBeatMs, double aPhaseMs, double bBeatMs, double bPhaseMs, double speed,
@@ -1061,6 +1205,15 @@ public final class StemFusion {
                      double aBeatMs, double aPhaseMs, double bBeatMs, double bPhaseMs, double speed,
                      double[] aBarLinesMs, double[] bBarLinesMs, VocalQuiet quiet, Groove groove,
                      BodyLevel body, long firstVocalMs) {
+            this(aDurMs, blendMs, removalMs, contentStartMs, aBeatMs, aPhaseMs, bBeatMs, bPhaseMs,
+                    speed, aBarLinesMs, bBarLinesMs, quiet, groove, body, firstVocalMs,
+                    NO_INCOMING_MEASUREMENT);
+        }
+
+        public Input(long aDurMs, long blendMs, long removalMs, long contentStartMs,
+                     double aBeatMs, double aPhaseMs, double bBeatMs, double bPhaseMs, double speed,
+                     double[] aBarLinesMs, double[] bBarLinesMs, VocalQuiet quiet, Groove groove,
+                     BodyLevel body, long firstVocalMs, IncomingOn incoming) {
             this.aDurMs = aDurMs;
             this.blendMs = blendMs;
             this.removalMs = removalMs;
@@ -1075,6 +1228,7 @@ public final class StemFusion {
             this.quiet = quiet == null ? NO_VOICE_MEASUREMENT : quiet;
             this.groove = groove == null ? NO_GROOVE_MEASUREMENT : groove;
             this.body = body == null ? NO_BODY_MEASUREMENT : body;
+            this.incoming = incoming == null ? NO_INCOMING_MEASUREMENT : incoming;
             this.firstVocalMs = firstVocalMs;
         }
     }
@@ -1209,6 +1363,14 @@ public final class StemFusion {
         public final long lowEndEndMs;
         public final long arriveStartMs;
         public final long arriveEndMs;
+        /** Round 6's second pass: true when the hold at unity was extended because the incoming's
+         *  own rhythm rows were not playing yet — the recede waits for the row that replaces it
+         *  (see {@link #rowStartMs}). */
+        public final boolean holdForIncoming;
+        /** The measured instants behind {@link #holdForIncoming}, ms of the incoming's own file
+         *  (-1 when nothing was measured), and the passage's own end for scale. */
+        public final long incomingDrumsMs;
+        public final long incomingBassMs;
 
         Plan(boolean valid, String reason, boolean slam, double aBarMs, double bBarMs,
              double barStepMs, double stretch, Relation relation, long junctionMs, long entryMs,
@@ -1219,7 +1381,8 @@ public final class StemFusion {
              double bodyLevelDb, double passageLevelDb, double passageDropDb, boolean phaseMatched,
              double phaseErrorMs, long skippedIntroMs, long firstVocalMs, long holdEndMs,
              long drumsEndMs, long lowEndEndMs, long arriveStartMs, long arriveEndMs,
-             boolean entryFromBeatGrid) {
+             boolean entryFromBeatGrid, boolean holdForIncoming, long incomingDrumsMs,
+             long incomingBassMs) {
             this.valid = valid;
             this.reason = reason == null ? "" : reason;
             this.slam = slam;
@@ -1264,6 +1427,9 @@ public final class StemFusion {
             this.arriveStartMs = arriveStartMs;
             this.arriveEndMs = arriveEndMs;
             this.entryFromBeatGrid = entryFromBeatGrid;
+            this.holdForIncoming = holdForIncoming;
+            this.incomingDrumsMs = incomingDrumsMs;
+            this.incomingBassMs = incomingBassMs;
         }
 
         /** How many 80 ms splices the table contains: three at {@link #swapMs} (the outgoing's
@@ -1306,7 +1472,7 @@ public final class StemFusion {
                     "%s; %s; the outgoing deck is cut on its bar line at %dms (%+dms from the"
                             + " distance alone; the search"
                             + " covered %dms back and %dms forward), B starts at %dms%s (%.0f ms of"
-                            + " wall-clock phase difference %s)%s; B's bed fades in over one bar, from"
+                            + " wall-clock phase difference %s)%s%s; B's bed fades in over one bar, from"
                             + " %dms to unity at %dms; the junction's bar is %s%s; the deck plays"
                             + " this file at x%.4f and the outgoing's carry was read at x%.4f inside"
                             + " it, so %dms of A taken from %dms fills %.0fms of the file's %dms"
@@ -1317,6 +1483,13 @@ public final class StemFusion {
                             : "",
                     phaseErrorMs, phaseMatched ? "matched to A's grid"
                             : "NOT matched (the plain bar line)",
+                    holdForIncoming
+                            ? String.format(Locale.US, ", and its rows wait: the hold is %dms because"
+                                    + " the incoming's own drums are not playing until %dms and its"
+                                    + " low end until %dms of ITS file (a recede that started before"
+                                    + " them would hand the pulse to nobody)",
+                            recede.length > 0 ? recede[0] : 0L, incomingDrumsMs, incomingBassMs)
+                            : "",
                     entryFromBeatGrid ? " [⚠️ from the incoming's BEAT grid: the bar lines it came"
                             + " with held none in the entry's window, so the beats are measured and"
                             + " the bar grouping is a guess]" : "",
@@ -1339,7 +1512,7 @@ public final class StemFusion {
         return new Plan(false, reason, false, aBarMs, bBarMs, bBarMs, 1d, null, -1L, -1L, -1L, -1L,
                 -1L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, lockError, 1d, false, false, false, false,
                 Double.NaN, Double.NaN, Double.NaN, false, Double.NaN, 0L, -1L, -1L, -1L, -1L, -1L,
-                -1L, false);
+                -1L, false, false, -1L, -1L);
     }
 
     /**
@@ -1625,6 +1798,55 @@ public final class StemFusion {
         int[] shape = shapeFor(stepMs, stretch, cap);
         int holdSteps = shape[0];
         int lowEndFadeSteps = shape[1];
+        // ⚠️ Round 6's second pass: the recede WAITS for the row that replaces it. A row of A's may
+        // not start to fade before the incoming's own row of the same kind is playing, or the passage
+        // hands the pulse to nobody — the device's own pair faded A's drums at 5260ms into a track
+        // whose first ~3 s have no drums, and the acceptance measured a 2832ms hole in the pulse.
+        // The hold grows in whole steps, so the gesture's shape (hold, then the drums' one-step fade,
+        // then the low end's two) is unchanged: it is the same recede, later. A pair whose incoming
+        // rows do not start playing inside the passage this pair can afford is refused BY THIS NAME,
+        // rather than accepted and measured as a hole.
+        long incomingDrumsMs = -1L;
+        long incomingBassMs = -1L;
+        boolean holdForIncoming = false;
+        if (!slam && in.incoming != NO_INCOMING_MEASUREMENT) {
+            int barSteps = Math.max(1, Math.round((float) stepMs));
+            int maxSteps = maxStepsFor(stepMs, stretch, cap, in.removalMs, in.contentStartMs);
+            long reach = in.contentStartMs + (long) maxSteps * barSteps;
+            incomingDrumsMs = in.incoming.firstPlayingMs(StemGesture.Stem.DRUMS.row(),
+                    in.contentStartMs, reach);
+            incomingBassMs = in.incoming.firstPlayingMs(StemGesture.Stem.BASS.row(),
+                    in.contentStartMs, reach);
+            long late = Math.max(incomingDrumsMs, incomingBassMs);
+            if (incomingDrumsMs < 0L || incomingBassMs < 0L) {
+                return invalid(String.format(Locale.US,
+                        "the incoming's own %s do not start playing inside the %dms passage this"
+                                + " pair can afford (from the incoming's own %dms, the passage holds"
+                                + " %d steps of %.1fms and then needs %d more for A's low end's own"
+                                + " fade): A's rows would fade before the rows that replace them are"
+                                + " on, which is a hole in the passage's pulse rather than a"
+                                + " hand-over — measured on the same pair as the incoming's own"
+                                + " separated rows, and the reason is named rather than left to the"
+                                + " acceptance",
+                        incomingDrumsMs < 0L ? "drums" : "low end", (long) maxSteps * barSteps,
+                        in.contentStartMs, maxSteps, stepMs, lowEndFadeSteps), aBar, bBar, lock);
+            }
+            int needed = (int) Math.ceil((late - in.contentStartMs) / (double) barSteps);
+            if (needed + lowEndFadeSteps > maxSteps) {
+                return invalid(String.format(Locale.US,
+                        "the incoming's own %s only start playing at %dms of its file, and the"
+                                + " passage this pair can afford holds %d steps of %.1fms (from its"
+                                + " own %dms) with %d more needed for A's low end's fade — the wait"
+                                + " does not fit, and a recede that starts without them is the hole"
+                                + " in the passage's pulse this clause exists to refuse",
+                        incomingDrumsMs > incomingBassMs ? "drums" : "low end", late,
+                        maxSteps, stepMs, in.contentStartMs, lowEndFadeSteps), aBar, bBar, lock);
+            }
+            if (needed > holdSteps) {
+                holdSteps = needed;
+                holdForIncoming = true;
+            }
+        }
         int steps = slam ? SLAM_STEPS : holdSteps + lowEndFadeSteps;
         // How many steps of the table carry the outgoing's own rows: all of them, for a slam (its
         // one cut is the window's own end) and for a fusion too (its rows reach the floor ON the
@@ -1738,7 +1960,8 @@ public final class StemFusion {
                 entryChoice[1] == 1L, entryChoice[2] / 1000d,
                 entryChoice.length > 3 ? entryChoice[3] : 0L, in.firstVocalMs, holdEnd, drumsEnd,
                 lowEndEnd, arriveStart, arriveEnd,
-                entryChoice.length > 4 && entryChoice[4] == 1L);
+                entryChoice.length > 4 && entryChoice[4] == 1L, holdForIncoming, incomingDrumsMs,
+                incomingBassMs);
     }
 
     /** The lock clause's own words, so {@link #refusal} and {@link #plan} refuse a pair for the

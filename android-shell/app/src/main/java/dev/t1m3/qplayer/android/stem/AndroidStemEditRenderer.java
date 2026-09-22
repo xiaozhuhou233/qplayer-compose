@@ -582,11 +582,18 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         // ⚠️ Every bar line the fusion is given is in ms, and the renderer's are in seconds (see
         // {@link #inMs}): the conversion happens once, here, for both of the plans below.
         double[] headBarsMs = inMs(headBars);
+        // ⚠️ Round 6's second pass, and the reason the recede waits: where the incoming's OWN
+        // rhythm rows start playing, measured off the head this render has already separated. A
+        // pair whose incoming intro is voice and pad has no drums to hand the passage's pulse to
+        // until its drop, and fading A's drums before that is the pulse hole the acceptance then
+        // measures (the device's own Lose My Mind -> AGUDO).
+        StemFusion.IncomingOn incomingOn = (row, fromMs, toMs) -> StemFusion.rowStartMs(
+                headStems[row], StemModel.MODEL_RATE, fromMs, toMs, bBeatMs);
         StemFusion.Plan plan = StemFusion.plan(new StemFusion.Input(aDurMs, request.blendMs,
                 request.removalMs, request.incomingContentStartMs, aBeatMs,
                 request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
                 headBarsMs, StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT, body,
-                firstVocalMs));
+                firstVocalMs, incomingOn));
         if (!plan.valid) {
             refusedWhy[0] = WHY_PLAN;
             Logger.info("transition: DJ edit for {}: no fusion — {}. The render is today's edit",
@@ -594,9 +601,15 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
             return null;
         }
         Logger.info("transition: DJ edit for {}: the two backgrounds can be fused — {}. Its own"
-                        + " bar grid came from {} of the outgoing track's low end decoded in"
-                        + " {}ms",
+                        + " bar grid came from {} of the outgoing track's low end decoded in {}ms",
                 request.title(), plan.describe(), gridText(aBeatMs), probeMs);
+        if (plan.holdForIncoming) {
+            Logger.info("transition: DJ edit for {}: A's rows WAIT for the incoming's own — its"
+                            + " drums are not playing until {}ms and its low end until {}ms of its"
+                            + " own file, so the passage holds them at unity until then (a recede"
+                            + " that started before them would hand the pulse to nobody)",
+                    request.title(), plan.incomingDrumsMs, plan.incomingBassMs);
+        }
 
         long[] material = StemFusion.materialWindow(plan);
         long separateStarted = System.currentTimeMillis();
@@ -618,7 +631,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         StemFusion.Plan chosen = StemFusion.plan(new StemFusion.Input(aDurMs, request.blendMs,
                 request.removalMs, request.incomingContentStartMs, aBeatMs,
                 request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
-                headBarsMs, quiet, groove, body, firstVocalMs));
+                headBarsMs, quiet, groove, body, firstVocalMs, incomingOn));
         if (!chosen.valid) {
             refusedWhy[0] = WHY_PLAN;
             Logger.info("transition: DJ edit for {}: no fusion — the junction could not be placed"
