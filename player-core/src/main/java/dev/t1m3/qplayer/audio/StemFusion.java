@@ -141,6 +141,26 @@ public final class StemFusion {
     }
 
     /**
+     * The version of the fusion's own arithmetic, and it is part of every DJ edit's cache key.
+     *
+     * <p>A finished edit on disk is played rather than re-rendered (that is the contract the whole
+     * cache exists for), so without this a pair refused — or fused — under one rule set would
+     * <b>shadow</b> the same pair under the next one: the boundary would keep playing the old file
+     * and never ask again. That is not hypothetical. On the device the pair {@code AGUDO -> Lose My
+     * Mind} was refused by the entry search while the renderer handed the incoming's bar lines over
+     * in the wrong unit (seconds for milliseconds); a plain edit was written; the beat probe then
+     * healed the incoming's grid, and the boundary kept playing that plain file — the pair only
+     * fused-attempted after the file was deleted by hand. The version is in the key rather than in
+     * the file name's suffix because it has to be invisible to a lookup:
+     * {@code DjEditBaseName(key#r<version>)} finds nothing where the old file sits, the render runs
+     * once more, and the cache's own cap evicts the old name.
+     *
+     * <p>Bump it whenever a change here alters what a render produces (not for a comment): the cost
+     * is one re-render per edit, in the pre-cache lane, where there are minutes of margin.
+     */
+    public static final int RULE_VERSION = 2;
+
+    /**
      * The shape one pair's own step leaves room for: {@code {holdSteps, lowEndFadeSteps}} of the
      * round-6 gesture, ms of the outgoing's file being the budget.
      *
@@ -1166,6 +1186,11 @@ public final class StemFusion {
         public final float junctionPassageDropDb;
         /** The entry was the phase-matched bar line rather than the fallback. */
         public final boolean phaseMatched;
+        /** The entry's lines came from the incoming's <b>beat grid</b> rather than from the bar
+         *  lines the caller measured ({@link #entryLines}): the beats are measured, the bar
+         *  grouping is a guess. Reported so a caller whose own lines were unusable — empty, short,
+         *  or in the wrong unit — finds out from the log rather than from a refusal. */
+        public final boolean entryFromBeatGrid;
         /** The worst wall-clock phase difference at the seam, ms. */
         public final double phaseErrorMs;
         /** How much of the incoming's intro the deck skips, ms (0 when it starts where it always
@@ -1193,7 +1218,8 @@ public final class StemFusion {
              boolean grooveAtJunction, boolean bodyLevelAtJunction, boolean bodyMeasured,
              double bodyLevelDb, double passageLevelDb, double passageDropDb, boolean phaseMatched,
              double phaseErrorMs, long skippedIntroMs, long firstVocalMs, long holdEndMs,
-             long drumsEndMs, long lowEndEndMs, long arriveStartMs, long arriveEndMs) {
+             long drumsEndMs, long lowEndEndMs, long arriveStartMs, long arriveEndMs,
+             boolean entryFromBeatGrid) {
             this.valid = valid;
             this.reason = reason == null ? "" : reason;
             this.slam = slam;
@@ -1237,6 +1263,7 @@ public final class StemFusion {
             this.lowEndEndMs = lowEndEndMs;
             this.arriveStartMs = arriveStartMs;
             this.arriveEndMs = arriveEndMs;
+            this.entryFromBeatGrid = entryFromBeatGrid;
         }
 
         /** How many 80 ms splices the table contains: three at {@link #swapMs} (the outgoing's
@@ -1279,7 +1306,7 @@ public final class StemFusion {
                     "%s; %s; the outgoing deck is cut on its bar line at %dms (%+dms from the"
                             + " distance alone; the search"
                             + " covered %dms back and %dms forward), B starts at %dms%s (%.0f ms of"
-                            + " wall-clock phase difference %s); B's bed fades in over one bar, from"
+                            + " wall-clock phase difference %s)%s; B's bed fades in over one bar, from"
                             + " %dms to unity at %dms; the junction's bar is %s%s; the deck plays"
                             + " this file at x%.4f and the outgoing's carry was read at x%.4f inside"
                             + " it, so %dms of A taken from %dms fills %.0fms of the file's %dms"
@@ -1290,6 +1317,9 @@ public final class StemFusion {
                             : "",
                     phaseErrorMs, phaseMatched ? "matched to A's grid"
                             : "NOT matched (the plain bar line)",
+                    entryFromBeatGrid ? " [⚠️ from the incoming's BEAT grid: the bar lines it came"
+                            + " with held none in the entry's window, so the beats are measured and"
+                            + " the bar grouping is a guess]" : "",
                     entryMs, bedFadeMs,
                     bodyMeasured
                             ? String.format(Locale.US, "at the track's own body level (%.2f dBFS"
@@ -1309,7 +1339,7 @@ public final class StemFusion {
         return new Plan(false, reason, false, aBarMs, bBarMs, bBarMs, 1d, null, -1L, -1L, -1L, -1L,
                 -1L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, lockError, 1d, false, false, false, false,
                 Double.NaN, Double.NaN, Double.NaN, false, Double.NaN, 0L, -1L, -1L, -1L, -1L, -1L,
-                -1L);
+                -1L, false);
     }
 
     /**
@@ -1560,8 +1590,12 @@ public final class StemFusion {
         if (!(in.aBeatMs > 0d) || in.aBarLinesMs == null || in.aBarLinesMs.length == 0) {
             return invalid("no bar grid for the outgoing track", aBar, bBar);
         }
-        if (!(in.bBeatMs > 0d) || in.bBarLinesMs == null || in.bBarLinesMs.length == 0) {
-            return invalid("no bar grid for the incoming track", aBar, bBar);
+        // ⚠️ The incoming's LINES are optional, its BEAT GRID is not: those lines are a measurement of
+        // its separated head, which can be short, can be empty, and has been handed over in the wrong
+        // unit at least once (see {@link #entryLines}); the beat grid is what the relation and the
+        // phase match are read from, and the entry falls back to lines built out of it.
+        if (!(in.bBeatMs > 0d)) {
+            return invalid("no beat grid for the incoming track", aBar, bBar);
         }
         if (!(in.blendMs > 0L)) {
             return invalid("the boundary's blend length is not known", aBar, bBar);
@@ -1667,8 +1701,11 @@ public final class StemFusion {
         long[] entryChoice = entry(in, junction, stepMs, slam ? 1 : relation.p);
         long entry = entryChoice[0];
         if (entry < 0L) {
-            return invalid("no bar line of the incoming track inside its own two-bar window",
-                    aBar, bBar, lock);
+            // ⚠️ The refusal says WHAT it looked at, because the version that did not cost a device
+            // run: the renderer's own line reported nine bar lines for the incoming track and this
+            // one reported none, and neither line said where those lines were or in what unit.
+            return invalid("no bar line of the incoming track inside its own two-bar window"
+                    + entryWhy(in, stepMs), aBar, bBar, lock);
         }
         long fusionEnd = entry + windowMs;
         if (fusionEnd > in.removalMs) {
@@ -1700,7 +1737,8 @@ public final class StemFusion {
                 choice.measured, choice.bodyDb, choice.passageDb, choice.dropDb,
                 entryChoice[1] == 1L, entryChoice[2] / 1000d,
                 entryChoice.length > 3 ? entryChoice[3] : 0L, in.firstVocalMs, holdEnd, drumsEnd,
-                lowEndEnd, arriveStart, arriveEnd);
+                lowEndEnd, arriveStart, arriveEnd,
+                entryChoice.length > 4 && entryChoice[4] == 1L);
     }
 
     /** The lock clause's own words, so {@link #refusal} and {@link #plan} refuse a pair for the
@@ -1816,47 +1854,101 @@ public final class StemFusion {
      * lock is off (with {@code speed = periodB/periodA} every bar line of the incoming's grid
      * has the same phase, so every candidate ties and the first one wins either way).
      *
-     * @return {@code {entryMs, phaseMatched ? 1 : 0, phaseErrorUs}} — entryMs is -1 when there is
-     *         no bar line to place the deck on
+     * @return {@code {entryMs, phaseMatched ? 1 : 0, phaseErrorUs, skippedIntroMs,
+     *         entryFromBeatGrid ? 1 : 0}} — entryMs is -1 when there is no bar line to place the
+     *         deck on
      */
     private static long[] entry(Input in, long junctionMs, double stepMs, int p) {
-        double bBarMs = in.bBeatMs * BEATS_PER_BAR;
         // The lines the deck may start on: the COMMON grid's — every `p` bars of the incoming's own
         // grid (every bar for a unison pair and a slam, which is bit-for-bit round 18's and round
         // 4's candidate set), spaced `stepMs` apart.
         long gridStep = Math.max(1L, Math.round(stepMs));
-        long from = in.contentStartMs;
         long to = in.contentStartMs + 2L * gridStep;
-        long skipped = 0L;
         // ⚠️ Round 5: the intro skip. When the incoming's voice comes in long after its content
         // starts, the deck starts at the common line a runway BEFORE that voice instead of at the
         // beginning — the intro is never played, and the voice lands a bar or two into a track that
         // is already playing (「直接词接词」). Only the lines up to the voice's own line are
         // candidates, and the whole move is bounded by the removal window below.
-        if (!(in.firstVocalMs > 0L) || in.firstVocalMs - in.contentStartMs < VOCAL_SKIP_MIN_MS
-                || in.bBarLinesMs == null) {
-            return search(in, junctionMs, gridStep, from, to, 0L);
-        }
+        boolean lateVoice = in.firstVocalMs > 0L
+                && in.firstVocalMs - in.contentStartMs >= VOCAL_SKIP_MIN_MS;
+        if (lateVoice) to = Math.max(to, in.firstVocalMs + gridStep);
+        double[] lines = entryLines(in, gridStep, p, to);
+        boolean fromBeatGrid = lines != in.bBarLinesMs;
+        long[] plain = search(in, junctionMs, gridStep, in.contentStartMs,
+                in.contentStartMs + 2L * gridStep, 0L, lines, fromBeatGrid);
+        if (!lateVoice || lines == null) return plain;
         long line = -1L;
-        for (double bar : in.bBarLinesMs) {
+        for (double bar : lines) {
             long at = Math.round(bar);
             if (at > in.firstVocalMs) continue;
             if (line < 0L || at > line) line = at;
         }
-        if (line < 0L || line <= in.contentStartMs) {
-            return search(in, junctionMs, gridStep, from, to, 0L);
-        }
+        if (line < 0L || line <= in.contentStartMs) return plain;
         long start = Math.max(in.contentStartMs, line - (long) VOCAL_SKIP_RUNWAY_BARS * gridStep);
-        long[] skip = search(in, junctionMs, gridStep, start, line + 1L, in.firstVocalMs);
-        if (skip[0] < 0L) return search(in, junctionMs, gridStep, from, to, 0L);
-        skipped = line - skip[0];
-        return new long[]{skip[0], skip[1], skip[2], skipped};
+        long[] skip = search(in, junctionMs, gridStep, start, line + 1L, in.firstVocalMs, lines,
+                fromBeatGrid);
+        if (skip[0] < 0L) return plain;
+        long skipped = line - skip[0];
+        return new long[]{skip[0], skip[1], skip[2], skipped, skip[4]};
+    }
+
+    /**
+     * The bar lines the entry search may use, ms: the ones the caller measured when they hold a
+     * line where the deck can start, and otherwise the common grid built from the incoming's own
+     * <b>beat</b> grid ({@code phase + k * p * bBar}).
+     *
+     * <p>Why there is a fallback at all: the caller's lines are a measurement of the incoming's
+     * separated <em>head</em>, and three things make that measurement hold nothing in the entry
+     * window while the beat grid — which every fusion needs anyway ({@link #LOCK_TOLERANCE}) — is
+     * exact. A head shorter than {@code contentStart + 2} bars (a decode that stopped early, which
+     * this app has produced: its own beat probe was once cut short by a deadline); a downbeat
+     * estimate that landed at the far end of the head; or an array that crossed a unit boundary
+     * (seconds read as ms — the device's {@code AGUDO -> Lose My Mind} held nine lines at
+     * 0.900…18.340 and the fusion read them as 0.9…18.34 ms, which is outside every window that
+     * starts at a content start of 240). The last one is a bug in a caller and is fixed there; this
+     * is the answer that keeps a wrong-united array from costing a fusion, and it is <em>said
+     * out loud</em>: the plan reports {@link Plan#entryFromBeatGrid}, and the log then says the
+     * beats are measured and the bar grouping is a guess ({@link #barLinesOfBeatGrid}'s own note).
+     */
+    private static double[] entryLines(Input in, long gridStep, int p, long to) {
+        double[] given = in.bBarLinesMs;
+        if (given != null) {
+            for (double bar : given) {
+                long at = Math.round(bar);
+                if (at >= in.contentStartMs && at < to) return given;
+            }
+        }
+        if (!(in.bBeatMs > 0d) || p < 1) return given;
+        // `p` bars of the incoming's own grid is one step of the common grid, and
+        // barLinesOfBeatGrid lays a line every `4 * beatMs`, so handing it `p` beats gives exactly
+        // the common grid's lines — over the two-step window, and over the intro skip's own reach
+        // when the voice comes late (the fallback must serve both or it would answer one of them).
+        return barLinesOfBeatGrid(p * in.bBeatMs, in.bPhaseMs, in.contentStartMs - gridStep,
+                Math.max(gridStep, to - in.contentStartMs + 2L * gridStep));
+    }
+
+    /** Why the entry search found nothing, for the refusal's own log line: the window, what the
+     *  caller's array held, and that the beat grid gave nothing either. A refusal that does not say
+     *  this is the one that cost a device run — the renderer's line said nine bar lines and the
+     *  planner said none, and nothing in either line said where they were or in what unit. */
+    private static String entryWhy(Input in, double stepMs) {
+        long gridStep = Math.max(1L, Math.round(stepMs));
+        double[] lines = in.bBarLinesMs;
+        String held = lines == null ? "no array at all"
+                : lines.length == 0 ? "an empty array"
+                : String.format(Locale.US, "%d of them, from %.3f to %.3f", lines.length,
+                        lines[0], lines[lines.length - 1]);
+        return String.format(Locale.US, ": the window is [%d, %d) ms (the incoming's own content"
+                        + " start plus two steps of %.0fms), the bar lines it came with are %s, and"
+                        + " its beat grid (%.1fms beats, %.1fms phase) gave no line in it either",
+                in.contentStartMs, in.contentStartMs + 2L * gridStep, stepMs, held, in.bBeatMs,
+                in.bPhaseMs);
     }
 
     /** The entry search itself: the candidate line in {@code [from, to)} whose beat phase, on the
      *  grid the two tracks share, lands closest to the outgoing's at the junction. */
     private static long[] search(Input in, long junctionMs, long gridStep, long from, long to,
-                                 long firstVocalMs) {
+                                 long firstVocalMs, double[] lines, boolean fromBeatGrid) {
         long first = -1L;
         long best = -1L;
         double bestError = Double.MAX_VALUE;
@@ -1867,25 +1959,28 @@ public final class StemFusion {
         // that in fact coincide (round 5).
         double sharedBeat = Math.min(in.aBeatMs, in.bBeatMs);
         double phaseA = phaseWall(junctionMs - in.aPhaseMs, sharedBeat);
-        for (double bar : in.bBarLinesMs) {
-            long at = Math.round(bar);
-            if (at < from || at >= to) continue;
-            if (firstVocalMs > 0L && at > firstVocalMs) continue;
-            if (first < 0L || at < first) first = at;
-            double phaseB = phaseWall(at - in.bPhaseMs, sharedBeat) / in.speed;
-            double error = phaseDistance(phaseA, phaseB, sharedBeat);
-            if (error < bestError) {
-                bestError = error;
-                best = at;
+        if (lines != null) {
+            for (double bar : lines) {
+                long at = Math.round(bar);
+                if (at < from || at >= to) continue;
+                if (firstVocalMs > 0L && at > firstVocalMs) continue;
+                if (first < 0L || at < first) first = at;
+                double phaseB = phaseWall(at - in.bPhaseMs, sharedBeat) / in.speed;
+                double error = phaseDistance(phaseA, phaseB, sharedBeat);
+                if (error < bestError) {
+                    bestError = error;
+                    best = at;
+                }
             }
         }
-        if (best < 0L) return new long[]{-1L, 0L, 0L, 0L};
+        long grid = fromBeatGrid ? 1L : 0L;
+        if (best < 0L) return new long[]{-1L, 0L, 0L, 0L, grid};
         if (bestError > PHASE_MATCH_MS) {
             // The fallback is the fallback, and it is logged as one: a match that is not a match
             // would put the two grids together by a number nobody measured.
-            return new long[]{first, 0L, Math.round(bestError * 1000d), 0L};
+            return new long[]{first, 0L, Math.round(bestError * 1000d), 0L, grid};
         }
-        return new long[]{best, 1L, Math.round(bestError * 1000d), 0L};
+        return new long[]{best, 1L, Math.round(bestError * 1000d), 0L, grid};
     }
 
     /** The distance from the nearest beat of a grid, ms, in {@code [0, period)}. */

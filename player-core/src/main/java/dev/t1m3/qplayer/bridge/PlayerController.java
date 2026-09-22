@@ -21,6 +21,7 @@ import dev.t1m3.qplayer.audio.MixNaturaliser;
 import dev.t1m3.qplayer.audio.SilenceProfile;
 import dev.t1m3.qplayer.audio.SilenceProfiler;
 import dev.t1m3.qplayer.audio.StemEditRenderer;
+import dev.t1m3.qplayer.audio.StemFusion;
 import dev.t1m3.qplayer.audio.TransitionChooser;
 import dev.t1m3.qplayer.audio.TransitionContext;
 import dev.t1m3.qplayer.audio.TransitionKind;
@@ -4404,7 +4405,25 @@ public final class PlayerController {
      */
     private String djEditPath(String trackKey, long removalMs) {
         if (trackKey == null || trackKey.isEmpty()) return null;
-        return diskCache.djEditPath(trackKey + "@" + removalMs);
+        return diskCache.djEditPath(djEditKey(trackKey + "@" + removalMs));
+    }
+
+    /**
+     * The text every DJ edit's file name is derived from, with the <b>fusion's own rule version</b>
+     * appended ({@link StemFusion#RULE_VERSION}).
+     *
+     * <p>Why the version is in the key rather than in the name's suffix: a finished edit on disk is
+     * played, not re-rendered, so a pair refused (or fused) by one rule set would shadow the same
+     * pair under the next one — the boundary would never ask again. On the device the pair
+     * {@code AGUDO -> Lose My Mind} was refused by the entry search while the renderer handed the
+     * incoming's bar lines over in the wrong unit; the plain edit it wrote kept the pair from
+     * fusing even after the beat probe healed the incoming's grid, and it only fused-attempted once
+     * that file was deleted by hand. Putting the version in the KEY is what makes the old file
+     * invisible: {@code djEditBaseName} hashes it into a different name, the lookup finds nothing,
+     * the render runs once more, and the cache's own cap evicts the old name in time.
+     */
+    static String djEditKey(String key) {
+        return key == null ? null : key + "#r" + StemFusion.RULE_VERSION;
     }
 
     /** A finished DJ edit and the times its own file name carries: where the bridge the render
@@ -4509,22 +4528,29 @@ public final class PlayerController {
         String dir = diskCache.djEditDir();
         for (long w : windows) {
             if (outgoing != null) {
-                String base = diskCache.djEditBaseName(key + "@" + w + "|" + outgoing);
+                String base = diskCache.djEditBaseName(djEditKey(key + "@" + w + "|" + outgoing));
                 if (base != null && dir != null) {
-                    for (String name : diskCache.djEditNames()) {
-                        if (!name.startsWith(base)) continue;
-                        File file = new File(dir, name);
-                        if (!file.isFile()) continue;
-                        // Every number the render baked into the name, read back here because
-                        // this is the only place that ever sees the file: the bridge's start and
-                        // the vocal return (round 12), plus — only on a fusion render — the
-                        // entry, the junction and the fusion's end. A name with none of the last
-                        // three is today's edit, and the boundary behaves as it always did.
-                        return new EditRef(file.getAbsolutePath(), suffixTime(name, "-b", base),
-                                suffixTime(name, "-v", base),
-                                suffixTime(name, "-e", base),
-                                suffixTime(name, "-j", base),
-                                suffixTime(name, "-f", base));
+                    // ⚠️ Two passes, the FUSION edits first: a plain edit re-rendered into a
+                    // fusion one leaves BOTH files in the directory (the fusion render's name
+                    // carries -e/-j/-f, the plain one does not), and `File.list` order is not a
+                    // contract. The better file has to win, or a re-render would be invisible.
+                    for (int pass = 0; pass < 2; pass++) {
+                        for (String name : diskCache.djEditNames()) {
+                            if (!name.startsWith(base)) continue;
+                            if (name.contains("-e") != (pass == 0)) continue;
+                            File file = new File(dir, name);
+                            if (!file.isFile()) continue;
+                            // Every number the render baked into the name, read back here because
+                            // this is the only place that ever sees the file: the bridge's start and
+                            // the vocal return (round 12), plus — only on a fusion render — the
+                            // entry, the junction and the fusion's end. A name with none of the last
+                            // three is today's edit, and the boundary behaves as it always did.
+                            return new EditRef(file.getAbsolutePath(), suffixTime(name, "-b", base),
+                                    suffixTime(name, "-v", base),
+                                    suffixTime(name, "-e", base),
+                                    suffixTime(name, "-j", base),
+                                    suffixTime(name, "-f", base));
+                        }
                     }
                 }
             }
@@ -4532,6 +4558,32 @@ public final class PlayerController {
             if (plain != null && new File(plain).isFile()) return new EditRef(plain, -1L, -1L);
         }
         return null;
+    }
+
+    /**
+     * Whether a DJ edit on disk is a <b>plain</b> one whose own render recorded that it could not
+     * fuse for want of a beat grid that this request now has — in which case it is stale and the
+     * render below runs again.
+     *
+     * <p>The marker is the renderer's own: a name with none of {@code -e/-j/-f} is today's edit,
+     * and one that carries {@code -x1} or {@code -x2} says the fusion was asked for and refused
+     * because the incoming's (1) or the outgoing's (2) beat grid was missing. Codes 3, 4 and 5 —
+     * the pre-decode clause for another reason, the plan, the render's own acceptance — were
+     * decided by the files or by the material and answer the same way on a re-render, so those
+     * files stay: re-rendering them would be a render per boundary for nothing.
+     *
+     * @return the marker's code when the file should be re-rendered, else 0
+     */
+    static int staleGridRefusal(String name, String base, BeatProfile grid,
+                                BeatProfile outgoingGrid) {
+        if (name.contains("-e")) return 0;               // a FUSION edit: nothing to re-decide
+        int code = (int) suffixTime(name, "-x", base);
+        if (code != 1 && code != 2) return 0;
+        boolean incomingKnown = grid != null && grid.periodMs() > 0d;
+        boolean outgoingKnown = outgoingGrid != null && outgoingGrid.periodMs() > 0d;
+        if (code == 1 && incomingKnown) return 1;
+        if (code == 2 && outgoingKnown) return 2;
+        return 0;
     }
 
     /** The number a DJ edit's file name carries after {@code marker}, or -1: the whole reason
@@ -4632,6 +4684,10 @@ public final class PlayerController {
         final BeatProfile outgoingGrid = outgoing != null ? beatProfileOf(outgoing) : null;
         final String key = TransitionPlan.trackKey(t);
         if (key == null || key.isEmpty()) return;
+        // The incoming track's own beat grid, read here rather than below because the existence
+        // check needs it: whether an edit on disk is stale is a question about the grids (see
+        // staleGridRefusal).
+        final BeatProfile grid = beatProfileOf(t);
         // What already exists, at the name this request would produce. A bridged edit and a plain
         // one are different names, so a pair that could bridge is not skipped just because a
         // round-12 edit for the same track is already lying there — and a pair that cannot bridge
@@ -4643,17 +4699,28 @@ public final class PlayerController {
         final String wantedBase = diskCache.djEditBaseName(wanted);
         if (wantedBase != null) {
             for (String name : diskCache.djEditNames()) {
-                if (name.startsWith(wantedBase)) {
+                if (!name.startsWith(wantedBase)) continue;
+                // ⚠️ Round 6: a plain edit whose own render recorded WHY it is plain (a `-x` code)
+                // is re-rendered when the reason was a missing beat grid and this request now has
+                // one. `-x1`/`-x2` are exactly the refusals a profile supplies later; every other
+                // code was decided by the files or the material, which re-rendering cannot change —
+                // so this is one re-render per healed pair, not one per boundary.
+                int stale = staleGridRefusal(name, wantedBase, grid, outgoingGrid);
+                if (stale == 0) {
                     Logger.info("transition: the DJ edit for {} is already rendered ({}), so this"
                             + " boundary plays it", t.title, name);
                     return;
                 }
+                Logger.info("transition: the DJ edit for {} on disk ({}) was rendered when the {}"
+                                + " beat grid was missing, and it is measured now — re-rendering it"
+                                + " (the old file stays playable until this one is written; a fusion"
+                                + " render names itself with -e/-j/-f and wins the lookup)",
+                        t.title, name, stale == 1 ? "incoming track's" : "outgoing track's");
             }
         }
         // The ratio the incoming deck will play at, measured here rather than at the boundary:
         // the carried bass has to be stretched by it to be heard at the outgoing track's own
         // tempo, and the render happens minutes before the boundary decides anything.
-        final BeatProfile grid = beatProfileOf(t);
         final double speed = MixNaturaliser.between(outgoingGrid, grid, removalMs).speed();
         // The window: the user's blend length plus the head of this track the deck will skip
         // before the blend begins, so the vocals-out part covers the blend that will really be

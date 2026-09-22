@@ -722,11 +722,21 @@ public class PlayerControllerPlaybackTest {
      */
     private static void writeFusionEdit(PlayerController controller, long outgoingId,
                                         long incomingId) throws Exception {
-        String key = "n" + incomingId + "@" + controller.blendDurationMs() + "|n" + outgoingId;
+        // ⚠️ The key the boundary looks an edit up by carries the fusion's own RULE_VERSION (see
+        // PlayerController.djEditKey): a file written under an older rule set is invisible on
+        // purpose, so a test that means to be found has to write the versioned name.
+        String key = PlayerController.djEditKey("n" + incomingId + "@" + controller
+                .blendDurationMs() + "|n" + outgoingId);
         File dir = new File(controller.diskCache.djEditDir());
         dir.mkdirs();
         Files.write(new File(dir, controller.diskCache.djEditBaseName(key)
                 + "-v16000-e1200-j100000-f106000.m4a").toPath(), new byte[]{0, 1, 2, 3});
+        // ⚠️ And the file a re-render leaves BESIDE it: the plain edit the same pair used to have
+        // (this is what a pair re-rendered from a plain edit into a fusion one looks like on disk —
+        // the renderer writes a different NAME, it does not overwrite). The lookup must prefer the
+        // fusion one whichever order the directory lists them in.
+        Files.write(new File(dir, controller.diskCache.djEditBaseName(key)
+                + "-x1-v16000.m4a").toPath(), new byte[]{0, 1, 2, 3});
     }
 
     /** No stem path in a unit test's host: it can render nothing, which is the ordinary "there is
@@ -834,6 +844,63 @@ public class PlayerControllerPlaybackTest {
             AppDirs.setBase(oldBase);
             AppDirs.setCacheBase(oldCacheBase);
         }
+    }
+
+    /**
+     * ⚠️ Round 6's shadowing fix, as a decision table. A plain DJ edit on disk is played rather than
+     * re-rendered — the contract the whole edit cache exists for — and the device paid for it: the
+     * pair {@code AGUDO -> Lose My Mind} was refused by the entry search while the renderer handed
+     * the incoming's bar lines over in the wrong unit, its plain edit was written, the beat probe
+     * then healed the incoming's grid, and the boundary kept playing that plain file. The pair only
+     * fused-attempted after the file was deleted by hand.
+     *
+     * <p>The renderer records WHY it is plain ({@code -x<code>} in the name, see
+     * {@code AndroidStemEditRenderer}'s WHY_*): 1 and 2 are the missing-grid refusals, which a later
+     * profile supplies. Those two are re-rendered, and nothing else is — a refusal the files
+     * themselves decided answers the same way on a re-render, so re-rendering it would be a render
+     * per boundary for nothing.
+     */
+    @Test
+    public void aPlainEditIsReRenderedOnlyWhenItsRefusalWasAMissingGrid() {
+        String base = "1234";
+        BeatProfile known = new BeatProfile(120d, 0L, 0.8f);
+        assertEquals("the incoming's grid was missing and it is here now", 1,
+                PlayerController.staleGridRefusal(base + "-x1-v16000.m4a", base, known, known));
+        assertEquals("and not when it is still missing", 0,
+                PlayerController.staleGridRefusal(base + "-x1-v16000.m4a", base, null, known));
+        assertEquals("the outgoing's grid was missing and it is here now", 2,
+                PlayerController.staleGridRefusal(base + "-x2-v16000.m4a", base, known, known));
+        assertEquals("and not when it is still missing", 0,
+                PlayerController.staleGridRefusal(base + "-x2-v16000.m4a", base, known, null));
+        assertEquals("the pre-decode clause for another reason: the files decide that, not a grid",
+                0, PlayerController.staleGridRefusal(base + "-x3-v16000.m4a", base, known, known));
+        assertEquals("the plan refused: the material decides that", 0,
+                PlayerController.staleGridRefusal(base + "-x4-v16000.m4a", base, known, known));
+        assertEquals("the render's own acceptance refused", 0,
+                PlayerController.staleGridRefusal(base + "-x5-v16000.m4a", base, known, known));
+        assertEquals("a FUSION edit has nothing to re-decide", 0,
+                PlayerController.staleGridRefusal(
+                        base + "-v16000-e1200-j100000-f106000.m4a", base, known, known));
+        assertEquals("an edit that never asked to fuse stands", 0,
+                PlayerController.staleGridRefusal(base + "-v16000.m4a", base, known, known));
+        assertEquals("an old plain edit (no marker at all) stands: the rule version in the key is "
+                        + "what retires those", 0,
+                PlayerController.staleGridRefusal(base + ".m4a", base, known, known));
+    }
+
+    /** The fusion's own rule version is part of the cache key, so an edit rendered under an older
+     *  rule set is invisible to the lookup and gets rendered once more — that is what retires the
+     *  device's plain file (see {@link dev.t1m3.qplayer.audio.StemFusion#RULE_VERSION}). */
+    @Test
+    public void theFusionRuleVersionIsPartOfTheEditKey() {
+        String key = "n22@15000|n11";
+        assertFalse("the versioned key must not hash to the unversioned name",
+                PlayerController.djEditKey(key).equals(key));
+        assertTrue(PlayerController.djEditKey(key),
+                PlayerController.djEditKey(key).endsWith("#r"
+                        + dev.t1m3.qplayer.audio.StemFusion.RULE_VERSION));
+        assertEquals("and it is stable for one rule set",
+                PlayerController.djEditKey(key), PlayerController.djEditKey(key));
     }
 
     private static void waitForPauseCalls(FakeAudioBackend backend, int target,

@@ -290,10 +290,16 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         //    way it can fail leaves the render below exactly where it was.
         //    The clamp count is the render's own: whichever render happens, it is the one in here.
         int[] clipped = new int[1];
+        // ⚠️ WHY no fusion is being made, as a small code, for the file NAME (round 6's shadowing
+        // fix): 0 = not attempted, 1 = the incoming's beat grid is missing, 2 = the outgoing's,
+        // 3 = the pre-decode clause refused for some other reason, 4 = the plan refused, 5 = the
+        // render did not pass its own acceptance. Codes 1 and 2 are the ones a beat profile can
+        // supply later, which is what makes a plain edit re-renderable (see PlayerController).
+        int[] refusedWhy = new int[1];
         Fusion fusion = null;
         if (request.canFuse()) {
             fusion = attemptFusion(weights, request, format, stems, inBars, plan, windowSec,
-                    clipped, cancelled);
+                    clipped, refusedWhy, cancelled);
             if (cancelled[0]) return null;
         }
 
@@ -428,6 +434,11 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                         fusion != null ? fusion.plan.entryMs : -1L,
                         fusion != null ? fusion.plan.junctionMs : -1L,
                         fusion != null ? fusion.plan.fusionEndMs : -1L)
+                // ⚠️ And, when no fusion is in this file, WHY not: round 6's shadowing fix. A plain
+                // edit whose refusal was a missing beat grid is one a later profile can lift, and
+                // the boundary has to be able to tell that from a refusal about the files
+                // themselves — otherwise the pair is never asked again (see the class's WHY_*).
+                + (fusion == null && refusedWhy[0] > 0 ? "-x" + refusedWhy[0] : "")
                 + ".m4a");
         AacFileWriter writer = new AacFileWriter(named, format.rate, 2);
         boolean wrote = false;
@@ -517,14 +528,22 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
      */
     private Fusion attemptFusion(StemModel.Candidate weights, Request request, Format format,
                                  float[][][] headStems, double[] headBars, DjEdit.Plan edit,
-                                 double windowSec, int[] clipped, boolean[] cancelled)
+                                 double windowSec, int[] clipped, int[] refusedWhy,
+                                 boolean[] cancelled)
             throws Exception {
         double aBeatMs = request.outgoingBeatPeriodMs;
         double bBeatMs = request.beatPeriodMs;
         long aDurMs = Math.round(probeDurationMs(request.outgoingSourcePath));
+        // ⚠️ The two grid clauses are checked HERE as well as inside `refusal`, because they are the
+        // two refusals a later beat profile can lift and the caller records which one it was: the
+        // messages are not parsed (they are prose for a human), the conditions are the same ones the
+        // clause tests first.
+        if (!(bBeatMs > 0d)) refusedWhy[0] = WHY_INCOMING_GRID;
+        else if (!(aBeatMs > 0d)) refusedWhy[0] = WHY_OUTGOING_GRID;
         String refused = StemFusion.refusal(aDurMs, request.blendMs, request.removalMs,
                 request.incomingContentStartMs, aBeatMs, bBeatMs, request.speed);
         if (refused != null) {
+            if (refusedWhy[0] == 0) refusedWhy[0] = WHY_PRE_DECODE;
             Logger.info("transition: DJ edit for {}: no fusion — {}. The render is today's edit"
                             + " (the outgoing's grid {}, the incoming's {}, a {}ms blend starting"
                             + " the incoming at {}ms of its own file, played at x{})",
@@ -560,12 +579,16 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         long firstVocalMs = StemFusion.vocalStartMs(
                 headStems[StemGesture.Stem.VOCALS.row()], StemModel.MODEL_RATE, 0L,
                 DjEdit.SILENT_FRAME_DBFS);
+        // ⚠️ Every bar line the fusion is given is in ms, and the renderer's are in seconds (see
+        // {@link #inMs}): the conversion happens once, here, for both of the plans below.
+        double[] headBarsMs = inMs(headBars);
         StemFusion.Plan plan = StemFusion.plan(new StemFusion.Input(aDurMs, request.blendMs,
                 request.removalMs, request.incomingContentStartMs, aBeatMs,
                 request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
-                headBars, StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT, body,
+                headBarsMs, StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT, body,
                 firstVocalMs));
         if (!plan.valid) {
+            refusedWhy[0] = WHY_PLAN;
             Logger.info("transition: DJ edit for {}: no fusion — {}. The render is today's edit",
                     request.title(), plan.reason);
             return null;
@@ -595,8 +618,9 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         StemFusion.Plan chosen = StemFusion.plan(new StemFusion.Input(aDurMs, request.blendMs,
                 request.removalMs, request.incomingContentStartMs, aBeatMs,
                 request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
-                headBars, quiet, groove, body, firstVocalMs));
+                headBarsMs, quiet, groove, body, firstVocalMs));
         if (!chosen.valid) {
+            refusedWhy[0] = WHY_PLAN;
             Logger.info("transition: DJ edit for {}: no fusion — the junction could not be placed"
                     + " on the separated material ({}). The render is today's edit",
                     request.title(), chosen.reason);
@@ -673,6 +697,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                     tail, false, separateMs, outgoingMaster, bodyDb);
             if (fusion.report.acceptable) return fusion;
         }
+        refusedWhy[0] = WHY_ACCEPTANCE;
         Logger.warn("transition: DJ edit for {}: the fusion did not pass its own measurement, so"
                         + " it is NOT in this edit — the render falls back to today's (the bridge"
                         + " if it passes its own measurement, the plain edit-with-vocal-gate"
@@ -904,8 +929,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
 
     /** The bridge's placement, from the outgoing's and the incoming's own bar grids — never the
      *  beat grid's phase (see {@link StemGesture#barLines}). */
-    private StemBridge.Plan planBridge(Request request, double[] inBars, double beatSecIn,
-                                       double removalSec, double windowSec) {
+    private StemBridge.Plan planBridge(Request request, double[] inBars, double beatSecIn,                                       double removalSec, double windowSec) {
         double barSec = beatSecIn > 0 ? beatSecIn * StemBridge.BEATS_PER_BAR : 0d;
         StemBridge.Plan plan = StemBridge.plan(inBars, barSec, removalSec, windowSec);
         Logger.info("transition: DJ edit for {}: bridge plan — {}, from the incoming track's own"
@@ -919,6 +943,17 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
      * extension this platform has instead of a structure pass. Empty when the low end gave no
      * offset — then there is no line for anything to land on and the callers say so rather than
      * guessing one.
+     *
+     * <p>⚠️ <b>The unit is SECONDS, relative to {@code fromSec}.</b> That is what this method's own
+     * consumers read them in ({@link DjEdit#firstBarAtOrAfter}'s {@code atSec},
+     * {@link StemBridge#plan}'s {@code removalSec}) — and it is <em>not</em> what
+     * {@link StemFusion} reads: every bar line in the fusion is absolute millisecond
+     * ({@link StemFusion#barLinesOfLowBand} converts exactly here). An array handed across that
+     * boundary unconverted is a search in the wrong place: on the device's {@code AGUDO -> Lose My
+     * Mind} the nine lines sat at 0.9…18.34 s, the fusion's own {@code entryMs} window started at
+     * 240 <em>ms</em>, no line was inside it, and the pair was refused with "no bar line of the
+     * incoming track inside its own two-bar window" although this same call had just logged nine
+     * lines. Hence {@link #inMs} at every fusion site.
      *
      * <p><b>Where there is no low end to measure.</b> A downbeat estimate needs a low band, and a
      * real device run supplied a track whose separated head has none: {@code 1410815174}'s bass
@@ -947,8 +982,13 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                         beatPhaseSec, beatSec, DjEdit.BEATS_PER_BAR)
                 : null;
         if (downbeat == null || Double.isNaN(downbeat)) {
-            double[] grid = StemFusion.barLinesOfBeatGrid(beatSec * 1000d, beatPhaseSec * 1000d,
-                    fromSec * 1000d, windowSec * 1000d);
+            // ⚠️ The fallback's lines come from StemFusion, which works in ms — and this method's
+            // own contract is SECONDS (see its javadoc), so they are converted here rather than
+            // returned as they come. That disagreement was a real defect: on a track whose low end
+            // had nothing to measure, the edit plan and the bridge read ms as seconds and silently
+            // fell back to "no bar line", while the fusion read the same array in its own unit.
+            double[] grid = inSeconds(StemFusion.barLinesOfBeatGrid(beatSec * 1000d,
+                    beatPhaseSec * 1000d, fromSec * 1000d, windowSec * 1000d));
             Logger.info("transition: DJ edit: the separated low end of {} has nothing to measure a"
                             + " downbeat from (its loud tenth is {} dBFS, under the {} dBFS floor)"
                             + " — its {} bar lines come from the beat grid itself ({}-BPM, first"
@@ -968,6 +1008,30 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 Math.round(windowSec * 1000d), Math.round(downbeat * 1000d),
                 String.format(java.util.Locale.US, "%.1f", loudTenth));
         return bars;
+    }
+
+    /**
+     * The lines {@link #barLinesOf} produced, in the unit {@link StemFusion} reads: absolute ms.
+     *
+     * <p>The two units are one conversion apart and the failure they cause is silent in the log (a
+     * fusion that searched at 0.9 ms instead of 900 ms simply refused and said "no bar line"), so the
+     * conversion is a named call rather than a {@code * 1000d} at the call site — it is the trap, and
+     * it should be visible in the diff that crosses it.
+     */
+    private static double[] inMs(double[] seconds) {
+        if (seconds == null) return null;
+        double[] out = new double[seconds.length];
+        for (int i = 0; i < out.length; i++) out[i] = seconds[i] * 1000d;
+        return out;
+    }
+
+    /** The other direction of {@link #inMs}, for a helper that answered in ms (see
+     *  {@link StemFusion#barLinesOfBeatGrid}). */
+    private static double[] inSeconds(double[] ms) {
+        if (ms == null) return null;
+        double[] out = new double[ms.length];
+        for (int i = 0; i < out.length; i++) out[i] = ms[i] / 1000d;
+        return out;
     }
 
     /** The plan for the window: the return ends on the first bar line at or after the removal
@@ -1153,6 +1217,16 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
     /** A cap on the window the junction estimate decodes, seconds: the estimate is over the low
      *  band of a few bars and a decode is cheap, but nothing here should be unbounded. */
     private static final long PROBE_MAX_SEC = 40L;
+
+    /** Why this render did not fuse, as the small code the file name carries
+     *  ({@code -x<code>} — see {@link #reasonLog}). 1 and 2 are the ones a later beat profile can
+     *  lift, so they are the two a boundary re-renders for; 3, 4 and 5 were decided by the files
+     *  themselves or by the material, which no profile change alters. */
+    private static final int WHY_INCOMING_GRID = 1;
+    private static final int WHY_OUTGOING_GRID = 2;
+    private static final int WHY_PRE_DECODE = 3;
+    private static final int WHY_PLAN = 4;
+    private static final int WHY_ACCEPTANCE = 5;
 
     /** The separated head's length in ms, for the log line above: the removal window plus
      *  one bar of this track and a second of slack, capped. */

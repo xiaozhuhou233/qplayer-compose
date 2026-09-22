@@ -228,8 +228,18 @@ public class StemFusionTest {
         assertTrue(StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 35_000L, 15_000L,
                 500d, 0d, 500d, 0d, 1d, new double[0], bars(2000d, 0d, 120),
                 StemFusion.NO_VOICE_MEASUREMENT)).reason.contains("outgoing track"));
+        // ⚠️ Round 6: the incoming's measured LINES are not a clause any more — only its beat grid
+        // is. A null (or empty) array is a head decode that stopped early or a downbeat estimate that
+        // found nothing, and the entry falls back to lines built from the beat grid itself (see
+        // StemFusionEntryWindowTest for the device pair that made this a bug rather than a
+        // nicety). What still refuses, and refuses by name, is a track with no grid at all.
+        StemFusion.Plan headless = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 35_000L,
+                15_000L, 500d, 0d, 500d, 0d, 1d, bars(2000d, 0d, 120), null,
+                StemFusion.NO_VOICE_MEASUREMENT));
+        assertTrue(headless.describe(), headless.valid);
+        assertTrue("and the plan says its entry came from the beat grid", headless.entryFromBeatGrid);
         assertTrue(StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 35_000L, 15_000L,
-                500d, 0d, 500d, 0d, 1d, bars(2000d, 0d, 120), null,
+                500d, 0d, 0d, 0d, 1d, bars(2000d, 0d, 120), bars(2000d, 0d, 120),
                 StemFusion.NO_VOICE_MEASUREMENT)).reason.contains("incoming track"));
         assertTrue(StemFusion.plan(new StemFusion.Input(240_000L, 0L, 35_000L, 15_000L,
                 500d, 0d, 500d, 0d, 1d, bars(2000d, 0d, 120), bars(2000d, 0d, 120),
