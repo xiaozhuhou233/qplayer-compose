@@ -863,28 +863,41 @@ public class PlayerControllerPlaybackTest {
     @Test
     public void aPlainEditIsReRenderedOnlyWhenItsRefusalWasAMissingGrid() {
         String base = "1234";
+        // The names carry the CURRENT rule version: without it every file is stale by definition
+        // (see anAcceptanceRefusalFromAnOlderRuleSetIsStale), which is what makes these cases about
+        // the grid codes at all.
+        String v = "-r" + dev.t1m3.qplayer.audio.StemFusion.RULE_VERSION;
         BeatProfile known = new BeatProfile(120d, 0L, 0.8f);
         assertEquals("the incoming's grid was missing and it is here now", 1,
-                PlayerController.staleGridRefusal(base + "-x1-v16000.m4a", base, known, known));
+                PlayerController.staleGridRefusal(base + "-x1-v16000" + v + ".m4a", base, known,
+                        known));
         assertEquals("and not when it is still missing", 0,
-                PlayerController.staleGridRefusal(base + "-x1-v16000.m4a", base, null, known));
+                PlayerController.staleGridRefusal(base + "-x1-v16000" + v + ".m4a", base, null,
+                        known));
         assertEquals("the outgoing's grid was missing and it is here now", 2,
-                PlayerController.staleGridRefusal(base + "-x2-v16000.m4a", base, known, known));
+                PlayerController.staleGridRefusal(base + "-x2-v16000" + v + ".m4a", base, known,
+                        known));
         assertEquals("and not when it is still missing", 0,
-                PlayerController.staleGridRefusal(base + "-x2-v16000.m4a", base, known, null));
+                PlayerController.staleGridRefusal(base + "-x2-v16000" + v + ".m4a", base, known,
+                        null));
         assertEquals("the pre-decode clause for another reason: the files decide that, not a grid",
-                0, PlayerController.staleGridRefusal(base + "-x3-v16000.m4a", base, known, known));
+                0, PlayerController.staleGridRefusal(base + "-x3-v16000" + v + ".m4a", base, known,
+                        known));
         assertEquals("the plan refused: the material decides that", 0,
-                PlayerController.staleGridRefusal(base + "-x4-v16000.m4a", base, known, known));
-        assertEquals("the render's own acceptance refused", 0,
-                PlayerController.staleGridRefusal(base + "-x5-v16000.m4a", base, known, known));
+                PlayerController.staleGridRefusal(base + "-x4-v16000" + v + ".m4a", base, known,
+                        known));
+        assertEquals("the render's own acceptance refused, under THIS rule set: the loop is"
+                        + " deterministic, so that verdict stands until the rule changes", 0,
+                PlayerController.staleGridRefusal(base + "-x5-v16000" + v + ".m4a", base, known,
+                        known));
         assertEquals("a FUSION edit has nothing to re-decide", 0,
                 PlayerController.staleGridRefusal(
-                        base + "-v16000-e1200-j100000-f106000.m4a", base, known, known));
+                        base + "-v16000-e1200-j100000-f106000" + v + ".m4a", base, known, known));
         assertEquals("an edit that never asked to fuse stands", 0,
-                PlayerController.staleGridRefusal(base + "-v16000.m4a", base, known, known));
-        assertEquals("an old plain edit (no marker at all) stands: the rule version in the key is "
-                        + "what retires those", 0,
+                PlayerController.staleGridRefusal(base + "-v16000" + v + ".m4a", base, known,
+                        known));
+        assertEquals("and an old plain edit (no marker at all) is stale by definition",
+                PlayerController.STALE_LEGACY,
                 PlayerController.staleGridRefusal(base + ".m4a", base, known, known));
     }
 
@@ -909,6 +922,40 @@ public class PlayerControllerPlaybackTest {
      * treated it as today's finished edit, so no render was ever attempted for that direction until
      * the file was deleted by hand. A name with no {@code -r<current>} is stale by definition.
      */
+    /**
+     * ⚠️ And the case that cost two manual deletions: a file the render's own acceptance refused
+     * ({@code -x5}), stamped with an OLDER rule version. `staleGridRefusal` keeps codes 3/4/5 —
+     * within a version, because the loop is deterministic and bounded, so the same inputs give the
+     * same attempts — and it is the version that makes such a file re-renderable, because with the
+     * wait's retry loop an acceptance refusal is a measurement of one bounded set of attempts, not a
+     * property of the pair. The device's own name is the fixture: a later rule set may pass where
+     * that one could not, so it must not be able to hide the render.
+     */
+    @Test
+    public void anAcceptanceRefusalFromAnOlderRuleSetIsStale() {
+        String base = "942288643";
+        String older = "-v18340-x5-r" + (dev.t1m3.qplayer.audio.StemFusion.RULE_VERSION - 1);
+        String current = "-v18340-x5-r" + dev.t1m3.qplayer.audio.StemFusion.RULE_VERSION;
+        BeatProfile known = new BeatProfile(120d, 0L, 0.8f);
+        assertEquals("the device's own file: refused by an older rule set, so it must re-render",
+                PlayerController.STALE_LEGACY,
+                PlayerController.staleGridRefusal(base + older + ".m4a", base, known, known));
+        assertEquals("while the same refusal under THIS rule set stands: the loop is deterministic,"
+                        + " so re-rendering it every boundary would be a render for nothing",
+                0, PlayerController.staleGridRefusal(base + current + ".m4a", base, known, known));
+        assertEquals("nor is an old PLAIN edit without any marker a verdict",
+                PlayerController.STALE_LEGACY,
+                PlayerController.staleGridRefusal("1071493184-v17045.m4a", "1071493184", known,
+                        known));
+        // The grid refusals keep their own meaning, under the current version.
+        assertEquals("the incoming's grid was missing and it is measured now", 1,
+                PlayerController.staleGridRefusal(base + "-x1" + current + ".m4a", base, known,
+                        known));
+        assertEquals("and the outgoing's", 2,
+                PlayerController.staleGridRefusal(base + "-x2" + current + ".m4a", base, known,
+                        known));
+    }
+
     @Test
     public void anEditWithoutTheRuleVersionIsStale() {
         assertTrue(PlayerController.carriesRuleVersion(

@@ -157,8 +157,20 @@ public final class StemFusion {
      *
      * <p>Bump it whenever a change here alters what a render produces (not for a comment): the cost
      * is one re-render per edit, in the pre-cache lane, where there are minutes of margin.
+     *
+     * <p>⚠️ <b>Version 3 exists for one thing: an acceptance refusal is a measurement, not a
+     * verdict.</b> Version 2 retired the plain edits written under the units defect. Version 3
+     * retires the {@code -x5} files — the render's own acceptance refused the fusion — written
+     * before the wait's retry loop existed: with the loop, "the acceptance refused this pair" means
+     * "this bounded set of attempts, on this rule set, did not pass", and the next rule set may pass
+     * where this one could not. The device's {@code 942288643-v18340-x5-r2.m4a} hid a fusion exactly
+     * that way, and deleting it by hand was needed twice. So any change to the loop's bound
+     * ({@link #FUSION_WAIT_EXTRA_STEPS}), to the acceptance's clauses, or to the planner's
+     * arithmetic must bump this number: the key then keeps the old file from being found, and
+     * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
+     * name.
      */
-    public static final int RULE_VERSION = 2;
+    public static final int RULE_VERSION = 3;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with

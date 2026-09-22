@@ -810,7 +810,7 @@ public final class PlayerController {
      *  carries no rule version at all (see {@link StemFusion#RULE_VERSION}). Not one of the
      *  grid codes, because no grid answers for it — what it is a plain edit OF is not in its
      *  name. */
-    private static final int STALE_LEGACY = -1;
+    static final int STALE_LEGACY = -1;
     /** The most a beat-aligned entry may move the incoming track from where its own
      *  content starts. A grid is one period and one phase for a whole track, and the
      *  phase is the least certain part of it: past a few hundred milliseconds the
@@ -4585,16 +4585,29 @@ public final class PlayerController {
      *
      * <p>The marker is the renderer's own: a name with none of {@code -e/-j/-f} is today's edit,
      * and one that carries {@code -x1} or {@code -x2} says the fusion was asked for and refused
-     * because the incoming's (1) or the outgoing's (2) beat grid was missing. Codes 3, 4 and 5 —
-     * the pre-decode clause for another reason, the plan, the render's own acceptance — were
-     * decided by the files or by the material and answer the same way on a re-render, so those
-     * files stay: re-rendering them would be a render per boundary for nothing.
+     * because the incoming's (1) or the outgoing's (2) beat grid was missing — a beat profile
+     * supplies those later, so those two are re-rendered the moment the grid is measured.
+     *
+     * <p>⚠️ <b>Codes 3, 4 and 5 stay — but only within one RULE VERSION, and that is not a
+     * technicality.</b> 3 is the pre-decode clause for another reason (the ratio, the cost bound,
+     * the file's own length), 4 is the plan, 5 is the render's own acceptance; a re-render with the
+     * same inputs answers the same way for 3 and 4 (they are arithmetic on the same files), and for
+     * <b>5 it is the rule set that decides whether that is true</b>: since the wait's retry loop
+     * exists, "the acceptance refused this pair" is a measurement of ONE bounded set of attempts on
+     * one passage, not a property of the pair — a later rule set can pass where it failed, exactly
+     * as {@code 6beb4f8}'s loop passes where the pre-loop code could not (the device's
+     * {@code 942288643-v18340-x5-r2.m4a} had to be deleted by hand twice for this). So a refusal is
+     * re-renderable when the RULE VERSION changes (the version is in the edit's key — see
+     * {@link #djEditKey} — so those files are simply not found again), and the version must be
+     * bumped by anyone who changes the loop's bound, the acceptance's clauses or the planner's
+     * arithmetic.
      *
      * @return the marker's code when the file should be re-rendered, else 0
      */
     static int staleGridRefusal(String name, String base, BeatProfile grid,
                                 BeatProfile outgoingGrid) {
         if (name.contains("-e")) return 0;               // a FUSION edit: nothing to re-decide
+        if (!carriesRuleVersion(name)) return STALE_LEGACY;   // an older rule set: not a verdict
         int code = (int) suffixTime(name, "-x", base);
         if (code != 1 && code != 2) return 0;
         boolean incomingKnown = grid != null && grid.periodMs() > 0d;
