@@ -18,6 +18,10 @@ public class StemBridgeTest {
 
     private static final int RATE = 44_100;
 
+    private static void println(String format, Object... args) {
+        System.out.println(String.format(java.util.Locale.US, format, args));
+    }
+
     /** {@code assertTrue(why, condition)} in the order this file reads it. */
     private static void ok(boolean condition, String why) {
         assertTrue(why, condition);
@@ -240,7 +244,7 @@ public class StemBridgeTest {
         StemBridge.Report report = StemBridge.measure(layer, source, head, vocals, vocals, RATE,
                 plan, 1d, beatSec, beatSec);
         ok(report.acceptable, report.describe());
-        ok(report.beatsWithAttack >= report.beats - 1, report.describe());
+        ok(report.beatsWithLowEnd >= report.beats - 1, report.describe());
         assertEquals(0d, report.pitchOffsetSemitones, 1e-9);
         ok(report.alignment >= StemBridge.ALIGNMENT_FLOOR, report.describe());
         assertEquals(0, report.alignmentLagSamples);
@@ -337,6 +341,60 @@ public class StemBridgeTest {
                 plan, 1d, beatSec, beatSec);
         bad(report.acceptable, report.describe());
         ok(report.failures.contains("hole"), report.failures);
+    }
+
+    /**
+     * ⚠️ Round 4's calibration, on the material a real device refused: a carried layer that is a
+     * <b>legato bass line</b>. The device's own numbers, from its outgoing track 34364062: the
+     * carried layer is at −14.1 dBFS (one copy, alignment 1.0, no doubling) and its per-beat peaks
+     * sit only +0.5 / +1.8 / +2.0 / +3.3 / +0.5 / +0.5 / +0.7 / +1.0 dB above their own beat
+     * medians — so an <em>attack</em> test ("a frame 6 dB above the window's median") counted 0 of 7
+     * beats and refused a bridge that is exactly what the bridge is for. The clause asks whether the
+     * low end is there; this is what a bass line that is there looks like.
+     */
+    @Test
+    public void aLegatoBassCarryIsNotAHole() {
+        double beatSec = 0.5d;
+        double barSec = beatSec * 4;
+        double windowSec = 22d;
+        // A sustained low line with a slow swell: no attack on any beat, i.e. no per-beat peak more
+        // than a dB or two above the beat's own level (the device measured +0.5..+3.3 dB).
+        int frames = (int) Math.round(12d * RATE);
+        float[][] tail = new float[2][frames];
+        for (int i = 0; i < frames; i++) {
+            double swell = 0.5d + 0.05d * Math.sin(2 * Math.PI * i / (RATE * 1.7d));
+            float v = (float) (swell * Math.sin(2 * Math.PI * 55d * i / RATE));
+            tail[0][i] = v;
+            tail[1][i] = v;
+        }
+        StemBridge.Plan plan = StemBridge.plan(bars(barSec, windowSec), barSec, 20d, windowSec);
+        ok(plan.fits, plan.reason);
+        double fromSec = StemBridge.sourceFromSec(bars(barSec, 12d), barSec);
+        float[][] layer = StemBridge.layer(tail, RATE, plan, 1d, fromSec);
+        float[][] source = slice(tail, fromSec, plan.lengthSec());
+        float[][] head = pad(plan.lengthSec(), 220d, 0.12d);
+        float[][] quiet = new float[2][layer[0].length];
+        StemBridge.Report report = StemBridge.measure(layer, source, head, quiet, quiet, RATE,
+                plan, 1d, beatSec, beatSec);
+        println("%s", report.describe());
+        // Every beat has the low end, and the levels are what the device measured: one copy of a
+        // line 20+ dB above the level the clause's own per-beat test would call absent.
+        ok(report.beatsWithLowEnd == report.beats, report.describe());
+        ok(report.longestGapMs == 0d, report.describe());
+        ok(report.medianLevel > -20d, report.describe());
+        ok(report.acceptable, report.describe());
+        // And the same layer with a real dropout in it is still refused: the clause kept its teeth.
+        for (int ch = 0; ch < 2; ch++) {
+            int half = layer[0].length / 2;
+            for (int i = half - layer[0].length / 8; i < half + layer[0].length / 8; i++) {
+                layer[ch][i] = 0f;
+            }
+        }
+        StemBridge.Report holey = StemBridge.measure(layer, source, head, quiet, quiet, RATE,
+                plan, 1d, beatSec, beatSec);
+        println("%s", holey.describe());
+        bad(holey.acceptable, holey.describe());
+        ok(holey.failures.contains("hole"), holey.failures);
     }
 
     private static float[][] slice(float[][] pcm, double fromSec, double lengthSec) {

@@ -305,6 +305,30 @@ public final class StemFusion {
      *  which is the trap this constant's own doc is here to keep a later reader out of. */
     public static final double GROOVE_FLOOR_DBFS = -25d;
 
+    /** How far above the window's own median a frame has to be to count as an <b>attack</b> in the
+     *  pulse clause, dB.
+     *
+     *  <p>⚠️ Round 4 measured this clause on a pair a real device refused — {@code 1460801818 ->
+     *  34364062}, whose only failing clause was this one ("the passage's own pulse has a 1676.0ms
+     *  hole with a 419.0ms period") — and the verdict was <b>right</b>, which is why the clause is
+     *  unchanged. The numbers, from the device's own audio, per beat of the outgoing's separated
+     *  rows over the passage the table carries: its drums peak at <b>−28.2 / −24.6 dBFS</b> on the
+     *  first two beats (42 dB above their own median, −70.6) and then read <b>−71.7 / −74.7 /
+     *  −65.1 / −69.8 / −71.6 / −66.5 / −66.4</b> for the rest — the drums hit twice and stop; its
+     *  bass is at the floor for the whole passage (−70.5 peak, −79.7 median); the incoming's own
+     *  drums are at −62 dBFS in its intro and its bass is a sustained line (−13 dBFS with per-beat
+     *  peaks 0.5–2 dB above their own medians). So the passage has two beats of rhythm and then
+     *  ~2 s with none in either backing, which is exactly the hazard this clause exists for (an
+     *  outgoing whose rhythm has stopped), and the 5-beat hole it reports is the material's.
+     *
+     *  <p>What the calibration <em>did</em> show is that the floor is measured against the whole
+     *  window's mixture, so a sparse outgoing bar is judged against the incoming's louder later
+     *  material. Under a per-source floor (each source's rhythm rows against their own median,
+     *  either counting as an attack) the same material still leaves a 2-beat hole — 841 ms against
+     *  the 673 ms this clause allows — so the verdict is the same either way and the change was not
+     *  made. A reader changing this should start from those two numbers. */
+    public static final double PULSE_ATTACK_DB = 6d;
+
     /** The floor a decoded window's low band has to be above for its downbeat to be estimated at
      *  all, dBFS. Under it there is nothing for the estimate to find, and the four candidate
      *  phases score the same nothing. */
@@ -574,6 +598,18 @@ public final class StemFusion {
          *  the same amount. Reported, never a requirement. */
         public final long junctionShiftMs;
 
+        /** The ratio the incoming deck plays this file at — and the ratio the outgoing's carried
+         *  material was stretched by on the way in, which is the same number by construction (see
+         *  {@link #carried}): playback at this ratio returns the carry to the outgoing track's own
+         *  tempo and pitch.
+         *
+         *  <p>A field because it is what a log line has to quote, and quoting something else is
+         *  how the round-3 line came to print a ratio of 1.4649 for a pair whose deck played at
+         *  x1.0: {@code windowMs / sourceSpanMs} is <em>three bars of the incoming's grid over two
+         *  bars plus a splice of the outgoing's</em>, a bar-count ratio that is above 1 on every
+         *  pair and means nothing. */
+        public final double speed;
+
         /** How far the two grids are apart as heard, as a fraction of the incoming's beat
          *  ({@link #lockError}); at most {@link #LOCK_TOLERANCE} in every valid plan. */
         public final double lockError;
@@ -591,7 +627,7 @@ public final class StemFusion {
         Plan(boolean valid, String reason, double aBarMs, double bBarMs, long junctionMs,
              long entryMs, long swapMs, long bassMs, long fusionEndMs, long windowMs,
              long sourceSpanMs, long materialFromMs, long materialWindowMs, long searchBandMs,
-             long junctionShiftMs, double lockError, boolean quietAtJunction,
+             long junctionShiftMs, double lockError, double speed, boolean quietAtJunction,
              boolean grooveAtJunction, boolean phaseMatched, double phaseErrorMs) {
             this.valid = valid;
             this.reason = reason == null ? "" : reason;
@@ -611,6 +647,7 @@ public final class StemFusion {
             this.searchBandMs = searchBandMs;
             this.junctionShiftMs = junctionShiftMs;
             this.lockError = lockError;
+            this.speed = speed > 0d ? speed : 1d;
             this.quietAtJunction = quietAtJunction;
             this.grooveAtJunction = grooveAtJunction;
             this.phaseMatched = phaseMatched;
@@ -632,19 +669,21 @@ public final class StemFusion {
                     "fusion: A cut on its bar line at %dms (%+dms from the distance alone; the"
                             + " search covered +/-%dms), B starts at %dms (%.0f ms of wall-clock"
                             + " phase difference %s, the grids locked to %.2f%%); drums swap at %dms,"
-                            + " low end at %dms, all A gone at %dms (%dms = %d bars of %.0fms); the"
-                            + " passage is %dms of A from %dms, played back at x%.4f, separated over"
-                            + " %dms from %dms; B's bed fades in over one bar, from %dms to unity at"
-                            + " %dms; the junction's bar is %s and %s",
+                            + " low end at %dms, all A gone at %dms (%dms = %d bars of %.0fms); B's"
+                            + " bed fades in over one bar, from %dms to unity at %dms; the"
+                            + " junction's bar is %s and %s; the deck plays this file at x%.4f and"
+                            + " the outgoing's carry was stretched by that same x%.4f inside it, so"
+                            + " %dms of A taken from %dms fills %.0fms of the file's %dms window,"
+                            + " separated over %dms from %dms",
                     junctionMs, junctionShiftMs, searchBandMs, entryMs, phaseErrorMs,
                     phaseMatched ? "matched to A's grid" : "NOT matched (the plain bar line)",
                     lockError * 100d, swapMs, bassMs, fusionEndMs, windowMs, FUSION_BARS, bBarMs,
-                    sourceSpanMs, sourceFromMs,
-                    sourceSpanMs > 0 ? windowMs / (double) sourceSpanMs : 1d,
-                    materialWindowMs, materialFromMs, entryMs, bedFadeMs,
+                    entryMs, bedFadeMs,
                     quietAtJunction ? "voice-free for a beat" : "not measured voice-free",
                     grooveAtJunction ? "carrying the outgoing's groove"
-                            : "NOT measured carrying a groove");
+                            : "NOT measured carrying a groove",
+                    speed, speed, sourceSpanMs, sourceFromMs, sourceSpanMs * speed, windowMs,
+                    materialWindowMs, materialFromMs);
         }
     }
 
@@ -654,7 +693,7 @@ public final class StemFusion {
 
     private static Plan invalid(String reason, double aBarMs, double bBarMs, double lockError) {
         return new Plan(false, reason, aBarMs, bBarMs, -1L, -1L, -1L, -1L, -1L, 0L, 0L, 0L, 0L, 0L,
-                0L, lockError, false, false, false, Double.NaN);
+                0L, lockError, 1d, false, false, false, Double.NaN);
     }
 
     /**
@@ -716,6 +755,37 @@ public final class StemFusion {
                     Math.max(0L, Math.round(aDurMs - CUT_BACK_MS)));
         }
         return null;
+    }
+
+    /**
+     * A track's own bar lines from its <b>beat grid</b>: {@code phase + k*beatsPerBar*period},
+     * absolute ms, over {@code [fromMs, fromMs + windowMs]}.
+     *
+     * <p>The fallback for a track whose <em>separated low end</em> has nothing to measure a downbeat
+     * from — a real one arrived with a device run: {@code 1410815174}'s head has a loud tenth of
+     * <b>−68.3 dBFS</b> on its separated bass (under the {@link #LOW_BAND_FLOOR_DBFS} floor this
+     * class's own estimate uses), i.e. its first 18 s have no low end at all, so a downbeat
+     * estimated from it would be one of four coin flips and every bar line the renderer places from
+     * it is a guess dressed as a measurement.
+     *
+     * <p>The bar <em>grouping</em> is still a guess here ({@link StemGesture#barLines}'s own note:
+     * a bar line spaced a bar apart from the beat phase is wrong three times in four) — but the
+     * grid's phase and period are <em>measured</em>, so the lines land on the track's beats, which
+     * is what the fusion's cuts have to land on (the phase match to the outgoing's grid is asked
+     * about the beat phase, not about the bar). A caller that has a measured downbeat should use
+     * it; this is what a caller does when it has not.
+     */
+    public static double[] barLinesOfBeatGrid(double beatMs, double phaseMs, double fromMs,
+                                              double windowMs) {
+        if (!(beatMs > 0d) || !(windowMs > 0d)) return new double[0];
+        double barMs = beatMs * BEATS_PER_BAR;
+        double at = phaseMs + Math.floor((fromMs - phaseMs) / barMs) * barMs;
+        while (at < fromMs) at += barMs;
+        java.util.ArrayList<Double> lines = new java.util.ArrayList<>();
+        for (; at <= fromMs + windowMs; at += barMs) lines.add(at);
+        double[] out = new double[lines.size()];
+        for (int i = 0; i < out.length; i++) out[i] = lines.get(i);
+        return out;
     }
 
     /**
@@ -794,8 +864,10 @@ public final class StemFusion {
     }
 
     /** The level the loudest tenth of a window's low-band cells sit above, dBFS — "is there a low
-     *  end in this window at all", asked so that a sparse kick pattern does not read as silence. */
-    static double loudTenthDb(float[] envelope) {
+     *  end in this window at all", asked so that a sparse kick pattern does not read as silence.
+     *  Public because the renderer asks the same question about the <em>incoming</em> track's head
+     *  before it trusts a downbeat estimated from it (see {@link #barLinesOfBeatGrid}). */
+    public static double loudTenthDb(float[] envelope) {
         if (envelope == null || envelope.length == 0) return -240d;
         float[] sorted = envelope.clone();
         java.util.Arrays.sort(sorted);
@@ -935,8 +1007,8 @@ public final class StemFusion {
         }
         return new Plan(true, "", aBar, bBar, junction, entry, entry + Math.round(bBar),
                 entry + 2L * Math.round(bBar), fusionEnd, windowMs, sourceSpan, materialFrom,
-                materialWindow, searchBand, junction - target, lock, quiet[0], groove[0],
-                entryChoice[1] == 1L, entryChoice[2] / 1000d);
+                materialWindow, searchBand, junction - target, lock, in.speed, quiet[0],
+                groove[0], entryChoice[1] == 1L, entryChoice[2] / 1000d);
     }
 
     /** The lock clause's own words, so {@link #refusal} and {@link #plan} refuse a pair for the
@@ -1594,7 +1666,7 @@ public final class StemFusion {
             for (int b = 0; b < r.beats; b++) {
                 boolean attack = false;
                 for (int f = b * perBeat; f < Math.min(levels.length, (b + 1) * perBeat); f++) {
-                    if (levels[f] > median + 6d) {
+                    if (levels[f] > median + PULSE_ATTACK_DB) {
                         attack = true;
                         break;
                     }

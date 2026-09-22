@@ -103,6 +103,35 @@ public final class StemBridge {
      *  about +6 dB; one copy over the other's material stays near the louder one. */
     public static final double DOUBLING_LIMIT_DB = 3.5d;
 
+    /** How far below the carried layer's own median a beat may sit and still count as having the
+     *  low end <em>in</em> it, dB — the clause is about a hole in the low end, not about a kick on
+     *  every beat.
+     *
+     *  <p>⚠️ It was an <em>attack</em> test until round 4 ("a frame more than {@code
+     *  DOUBLING_LIMIT_DB}-ish above the window's median"), and a real device run showed what that
+     *  measures: on the pair {@code 34364062 -> 1410815174} the carried layer is the outgoing's own
+     *  last bars of bass, −14.1 dBFS, one copy with its source (alignment 1.0, no doubling), and
+     *  its per-beat peaks are only <b>+0.5 / +1.8 / +2.0 / +3.3 / +0.5 / +0.5 / +0.7 / +1.0 dB</b>
+     *  above their own beat medians — a legato bass line, which is what a bass line usually is. A
+     *  test that needs +6 dB counted <b>0 of 7 beats</b> and refused a bridge that is exactly what
+     *  the bridge is for (the outgoing track's own low end continuing under the incoming's head).
+     *  The question this clause actually asks is whether the low end is <em>there</em>, so it is
+     *  asked as presence: a beat whose own level is more than this far under the layer's median is
+     *  a hole, and a hole is what the clause refuses.
+     *
+     *  <p>20 dB, and not a number tuned to that one line: the same material's own beats vary by
+     *  ~10 dB between them (a bass line changing register), so any threshold in that range would be
+     *  a fit to one track, while the thing the clause must catch — the outgoing's last bars having
+     *  no bass in them at all, so the two bars under the incoming's head are near-silence — is a
+     *  dropout of tens of dB, and every beat of it reads at the floor.
+     *
+     *  <p>The measurement is each beat's own <em>peak</em> against the <em>source's</em> typical
+     *  beat peak (see {@link Report#medianLevel}): the peak because a bass line that is a burst per
+     *  beat has a silent median inside every beat, and the source because a hole large enough to
+     *  matter would otherwise pull the layer's own reference into itself and the test would read
+     *  the bridge as present throughout. */
+    public static final double PULSE_HOLE_DB = 20d;
+
     private StemBridge() {}
 
     /** Where the bridge goes in the incoming track's own file, and whether it fits there. */
@@ -363,15 +392,19 @@ public final class StemBridge {
          *  so what the listener hears is the outgoing track's own pitch. Reported rather than
          *  hidden, which is all the number has ever been for. */
         public double pitchOffsetSemitones;
-        /** Beats of the slower of the two grids that carry a low-end attack, over all of them. */
-        public int beatsWithAttack;
+        /** Beats of the slower of the two grids the carried low end is <em>in</em> (its own level
+         *  within {@link #PULSE_HOLE_DB} of the layer's median), over all of them. */
+        public int beatsWithLowEnd;
         public int beats;
-        /** The longest stretch of the bridge with no low-end attack at all, ms — the pulse's
-         *  continuity, on material whose period is known. */
+        /** The longest stretch of the bridge the carried low end has left for, ms — the carry's
+         *  continuity, on material whose period is known. That, and not a kick on every beat, is
+         *  what this clause refuses: see {@link #PULSE_HOLE_DB}. */
         public double longestGapMs;
         /** The period the gap was judged against: the slower of the two grids. */
         public double judgedPeriodMs;
-        /** The bridge's own median frame level, dBFS — the floor an "attack" is measured against. */
+        /** The level the carried material's typical beat reaches, dBFS: the median of the SOURCE's
+         *  own per-beat peaks, floored at {@link #VOCAL_FLOOR_DBFS} — what the carry claims to be,
+         *  and the reference the per-beat presence test is measured against. */
         public double medianLevel;
         /** True when every clause of the acceptance holds. */
         public boolean acceptable;
@@ -385,11 +418,11 @@ public final class StemBridge {
                             + " head %.1f dBFS under it); vocals: incoming %.1f, outgoing %.1f"
                             + " dBFS; one copy (carries %.3f of its source, peaking at lag %d);"
                             + " no doubling (the sum is %+.1f dB above the louder contribution at"
-                            + " worst); pitch artefact %+.2f semitones; pulse: %d of %d beats carry"
-                            + " a low-end attack, longest gap %.0fms of a %.0fms period",
+                            + " worst); pitch artefact %+.2f semitones; the low end: %d of %d beats"
+                            + " have it, longest gap %.0fms of a %.0fms period",
                     carriedDb, sourceDb, incomingDb, incomingVocalDb, outgoingVocalAlignment,
                     alignment, alignmentLagSamples, doublingDb, pitchOffsetSemitones,
-                    beatsWithAttack, beats, longestGapMs, judgedPeriodMs)
+                    beatsWithLowEnd, beats, longestGapMs, judgedPeriodMs)
                     + (acceptable ? "" : " -- NOT ACCEPTABLE: " + failures);
         }
     }
@@ -429,6 +462,26 @@ public final class StemBridge {
             }
         }
         return samples == 0 ? -240d : DjEdit.db(Math.sqrt(energy / samples));
+    }
+
+    /** The loudest frame of one beat, dBFS — what a beat has of the low end at all, whether the
+     *  line is a burst per beat or a legato note. {@code -240} when the range is empty. */
+    static double peak(double[] levels, int from, int to) {
+        if (levels == null || from >= to || from < 0) return -240d;
+        double peak = -240d;
+        for (int i = from; i < Math.min(to, levels.length); i++) peak = Math.max(peak, levels[i]);
+        return peak;
+    }
+
+    /** Every beat's own peak, dBFS — the shape of a material's low end, one entry per beat. */
+    static double[] beatPeaks(double[] levels, int perBeat) {
+        if (levels == null || levels.length == 0 || perBeat < 1) return new double[0];
+        int beats = Math.max(1, levels.length / perBeat);
+        double[] out = new double[beats];
+        for (int b = 0; b < beats; b++) {
+            out[b] = peak(levels, b * perBeat, Math.min(levels.length, (b + 1) * perBeat));
+        }
+        return out;
     }
 
     /** The median of a frame-level array, dBFS. */
@@ -472,39 +525,45 @@ public final class StemBridge {
         int[] lag = new int[1];
         r.alignment = alignmentAtZeroLag(carried, carriedSource, rate, windowSec, lag);
         r.alignmentLagSamples = lag[0];
-        // The pulse, judged on the SUM as it will be heard (the carried layer over the incoming's
-        // own head): the material's grid is known, so "no beat here" is a fact rather than an
-        // inference.
-        float[][] sum = add(carried, incomingHead);
+        // The carried low end's own continuity, per beat — the clause's subject is the LAYER (is
+        // the low end still there), so that is what it measures, in its own frames and against its
+        // own level: see PULSE_HOLE_DB for the pair that showed an attack test cannot be that
+        // question (a legato bass line has no attack on any beat, and is not a hole).
         double period = Math.max(beatSecIn > 0d ? beatSecIn : 0d, beatSecOut > 0d ? beatSecOut : 0d);
         r.judgedPeriodMs = period * 1000d;
         if (period > 0d) {
-            double[] levels = frameLevelsDb(sum, rate, windowSec);
-            r.medianLevel = median(levels);
+            double[] levels = frameLevelsDb(carried, rate, windowSec);
             int perBeat = Math.max(1, (int) Math.round(period / FRAME_SEC));
             r.beats = Math.max(1, levels.length / perBeat);
-            int attacks = 0;
+            // The reference is the MATERIAL's own typical beat — the median of the SOURCE's per-beat
+            // peaks — and not anything the layer reports about itself: a hole big enough to matter
+            // drags the layer's own median into the hole, and a test against that reads the whole
+            // bridge as present (measured: silencing the middle half of a four-second layer does
+            // exactly that). The floor keeps a source that is itself near-silence — the ending the
+            // bridge must not be built on — from making the test a tautology.
+            r.medianLevel = Math.max(
+                    median(beatPeaks(frameLevelsDb(carriedSource, rate, windowSec), perBeat)),
+                    VOCAL_FLOOR_DBFS);
+            int present = 0;
             double longest = 0d;
             double run = 0d;
             for (int b = 0; b < r.beats; b++) {
-                boolean attack = false;
-                for (int f = b * perBeat; f < Math.min(levels.length, (b + 1) * perBeat); f++) {
-                    // An attack is a frame clearly above the bridge's own median level: the one
-                    // measure that does not depend on the material's instrumentation.
-                    if (levels[f] > r.medianLevel + 6d) {
-                        attack = true;
-                        break;
-                    }
-                }
-                if (attack) {
-                    attacks++;
+                // A beat's own peak, not its median: a low line that is a burst per beat (the
+                // ordinary bass line) has a silent median inside every beat, and a legato line has a
+                // flat one — the peak is what both of them have in common, and what a beat the low
+                // end has left has none of.
+                double beatPeak = peak(levels, b * perBeat,
+                        Math.min(levels.length, (b + 1) * perBeat));
+                boolean here = beatPeak > r.medianLevel - PULSE_HOLE_DB;
+                if (here) {
+                    present++;
                     run = 0d;
                 } else {
                     run += period;
                     longest = Math.max(longest, run);
                 }
             }
-            r.beatsWithAttack = attacks;
+            r.beatsWithLowEnd = present;
             r.longestGapMs = longest * 1000d;
         }
         StringBuilder bad = new StringBuilder();
@@ -538,8 +597,10 @@ public final class StemBridge {
                     .append(fmt(r.doublingDb)).append(" dB above the louder of them); ");
         }
         if (period > 0d && r.longestGapMs > 1.6d * r.judgedPeriodMs) {
-            bad.append("the pulse has a ").append(fmt(r.longestGapMs)).append("ms hole with a ")
-                    .append(fmt(r.judgedPeriodMs)).append("ms period; ");
+            bad.append("the carried low end has a ").append(fmt(r.longestGapMs)).append("ms hole"
+                    + " with a ").append(fmt(r.judgedPeriodMs)).append("ms period (")
+                    .append(r.beatsWithLowEnd).append(" of ").append(r.beats)
+                    .append(" beats have it); ");
         }
         r.acceptable = bad.length() == 0;
         r.failures = bad.toString();

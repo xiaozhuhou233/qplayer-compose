@@ -432,6 +432,56 @@ public class StemFusionTest {
                 swap + StemFusion.CUT_MS / 2), 1e-9);
     }
 
+    /**
+     * ⚠️ Round 4's log fix, pinned: the line used to print {@code windowMs / sourceSpanMs} as "played
+     * back at x…" — three bars of the incoming's grid over two bars plus a splice of the outgoing's,
+     * a bar-count ratio that is above 1 on every pair. On the device's pair it printed
+     * <b>x1.4649</b> for a deck that played the file at <b>x1.0000</b>. Both numbers are the deck's
+     * ratio now, and this pins that they are.
+     */
+    @Test
+    public void theDescribeReportsTheDecksRatioAndNotABarCountRatio() {
+        // A pair locked at x1.25: B's beat is 1.25 of A's and the deck plays the file that much
+        // faster, so the carry is stretched by the same 1.25 (which is what makes playback return it
+        // to the outgoing's tempo and pitch).
+        StemFusion.Plan plan = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 35_000L,
+                15_000L, 400d, 0d, 500d, 0d, 1.25d, bars(1600d, 0d, 150), bars(2000d, 0d, 120),
+                StemFusion.NO_VOICE_MEASUREMENT));
+        assertTrue(plan.reason, plan.valid);
+        assertEquals(1.25d, plan.speed, 1e-9);
+        assertEquals(0d, plan.lockError, 1e-9);
+        assertTrue(plan.describe(), plan.describe().contains("x1.2500"));
+        assertFalse("the bar-count ratio must not be in the line: " + plan.describe(),
+                plan.describe().contains("x1.83"));
+        // At that ratio the take fills exactly the incoming's two bars and the splice it is cut on.
+        assertEquals(2 * 2000d + StemFusion.CUT_MS, plan.sourceSpanMs * plan.speed, 1.0d);
+    }
+
+    /**
+     * The fallback a track with no low end needs (round 4): {@code 1410815174}, from the device run,
+     * reads a loud tenth of −68.3 dBFS on its separated head's bass, so a downbeat estimate on it is
+     * a coin flip; its bar lines come from the beat grid instead. The beats are then the measured
+     * ones and the bar grouping is the guess.
+     */
+    @Test
+    public void aTrackWithNoLowEndGetsItsBarLinesFromItsBeatGrid() {
+        double[] grid = StemFusion.barLinesOfBeatGrid(416.734694d, 45d, 0d, 18_800d);
+        assertEquals(12, grid.length);
+        assertEquals(45d, grid[0], 1e-6);
+        assertEquals(45d + 4 * 416.734694d, grid[1], 1e-6);
+        // Whatever the phase, a two-bar window holds a line: that is what the entry search needs,
+        // and what its refusal ("no bar line of the incoming track inside its own two-bar window")
+        // must not be able to say when the track has a grid.
+        for (double phase = 0d; phase < 1666.9d; phase += 137d) {
+            double[] lines = StemFusion.barLinesOfBeatGrid(416.734694d, phase, 40d, 3334d);
+            boolean inside = false;
+            for (double at : lines) if (at >= 40d && at < 40d + 3334d) inside = true;
+            assertTrue("a line inside [40, 3374) for a phase of " + phase, inside);
+        }
+        assertEquals(0, StemFusion.barLinesOfBeatGrid(0d, 0d, 0d, 1000d).length);
+        assertEquals(0, StemFusion.barLinesOfBeatGrid(400d, 0d, 0d, 0d).length);
+    }
+
     @Test
     public void theOutgoingVoiceIsNeverInTheTable() {
         StemFusion.Plan plan = fixture();

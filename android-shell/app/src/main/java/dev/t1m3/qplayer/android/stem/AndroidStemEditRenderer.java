@@ -616,8 +616,8 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         } else {
             Logger.info("transition: DJ edit for {}: the junction at {}ms is the nearest bar line"
                             + " and no candidate bar within {}ms of the target had the outgoing's"
-                            + " groove playing (the passage is %s); the make-up gain below is what"
-                            + " answers a junction like this",
+                            + " groove playing; the passage there is {} — the make-up gain below is"
+                            + " what answers a junction like this",
                     request.title(), chosen.junctionMs, chosen.searchBandMs,
                     chosen.quietAtJunction ? "voice-free for a beat" : "not measured voice-free");
         }
@@ -884,10 +884,21 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         return plan;
     }
 
-    /** One track's bar lines over a window, from its separated bass stem's low end: the
-     *  documented extension this platform has instead of a structure pass. Empty when the low
-     *  end gave no offset — then there is no line for anything to land on and the callers say so
-     *  rather than guessing one. */
+    /**
+     * One track's bar lines over a window, from its separated bass stem's low end: the documented
+     * extension this platform has instead of a structure pass. Empty when the low end gave no
+     * offset — then there is no line for anything to land on and the callers say so rather than
+     * guessing one.
+     *
+     * <p><b>Where there is no low end to measure.</b> A downbeat estimate needs a low band, and a
+     * real device run supplied a track whose separated head has none: {@code 1410815174}'s bass
+     * reads a loud tenth of −68.3 dBFS over its first 18 s, so the estimator would be picking one of
+     * four beat phases out of noise and every line placed from it would be a guess wearing a
+     * measurement's clothes. When the loud tenth is under {@link StemFusion#LOW_BAND_FLOOR_DBFS}
+     * the lines come from the track's own <em>beat grid</em> instead ({@link
+     * StemFusion#barLinesOfBeatGrid}) and the log says which source it was: the beats are measured,
+     * the bar grouping is not.
+     */
     private static double[] barLinesOf(float[][][] stems, int rate, double beatSec,
                                        double beatPhaseSec, double fromSec, double windowSec,
                                        String who) {
@@ -900,19 +911,32 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 new float[][]{stems[StemGesture.Stem.BASS.row()][0],
                         stems[StemGesture.Stem.BASS.row()][1]},
                 rate, StemGesture.CELL_SEC);
-        Double downbeat = StemGesture.downbeatOffsetSec(lowBand, fromSec, StemGesture.CELL_SEC,
-                beatPhaseSec, beatSec, DjEdit.BEATS_PER_BAR);
+        double loudTenth = StemFusion.loudTenthDb(lowBand);
+        Double downbeat = loudTenth >= StemFusion.LOW_BAND_FLOOR_DBFS
+                ? StemGesture.downbeatOffsetSec(lowBand, fromSec, StemGesture.CELL_SEC,
+                        beatPhaseSec, beatSec, DjEdit.BEATS_PER_BAR)
+                : null;
         if (downbeat == null || Double.isNaN(downbeat)) {
-            Logger.info("transition: DJ edit: the low end of {} gave no downbeat offset, so there"
-                    + " is no bar grid for it", who);
-            return new double[0];
+            double[] grid = StemFusion.barLinesOfBeatGrid(beatSec * 1000d, beatPhaseSec * 1000d,
+                    fromSec * 1000d, windowSec * 1000d);
+            Logger.info("transition: DJ edit: the separated low end of {} has nothing to measure a"
+                            + " downbeat from (its loud tenth is {} dBFS, under the {} dBFS floor)"
+                            + " — its {} bar lines come from the beat grid itself ({}-BPM, first"
+                            + " beat {}ms), so the beats are measured and the bar grouping is a"
+                            + " guess",
+                    who, String.format(java.util.Locale.US, "%.1f", loudTenth),
+                    (int) StemFusion.LOW_BAND_FLOOR_DBFS, grid.length,
+                    Math.round(60d / beatSec), Math.round(beatPhaseSec * 1000d));
+            return grid;
         }
         double bpm = 60d / beatSec;
         double[] bars = StemGesture.barLines(bpm, downbeat, DjEdit.BEATS_PER_BAR, fromSec,
                 windowSec);
-        Logger.info("transition: DJ edit: {}BPM for {}, {} bar lines inside the {}ms window",
+        Logger.info("transition: DJ edit: {}BPM for {}, {} bar lines inside the {}ms window, off a"
+                        + " measured downbeat at {}ms (the low end's loud tenth is {} dBFS)",
                 String.format(java.util.Locale.US, "%.1f", bpm), who, bars.length,
-                Math.round(windowSec * 1000d));
+                Math.round(windowSec * 1000d), Math.round(downbeat * 1000d),
+                String.format(java.util.Locale.US, "%.1f", loudTenth));
         return bars;
     }
 
