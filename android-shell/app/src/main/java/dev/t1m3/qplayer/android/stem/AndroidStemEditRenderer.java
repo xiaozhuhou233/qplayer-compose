@@ -226,6 +226,14 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         final float[][] head = new float[2][(int) headFrames];
         long[] decoded = new long[1];
         boolean[] cancelled = new boolean[1];
+        // ⚠️ The render's phases, timed where they happen so the total can be CHECKED against
+        // them: [0] the outgoing probe's decode, [1] the outgoing tail's separation, [2] the fusion
+        // attempt in all (the junction search plus the wait's retry renders), [3] the head's own
+        // decode. Without an additive ledger a render's seconds cannot be placed — the device's
+        // 154 s outlier had ~73 s that no existing line accounted for, and that number decides
+        // whether overlapping the encode with the model is worth building at all.
+        long[] phases = new long[4];
+        long headDecodeStart = System.currentTimeMillis();
         boolean completed = decode(request.sourcePath, 2, 0L, head[0].length, request.stillWanted,
                 cancelled, (pcm, frames) -> {
                     for (int ch = 0; ch < head.length && ch < pcm.length; ch++) {
@@ -244,6 +252,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
             return null;
         }
         final float[][] headWindow = trim(head, (int) decoded[0]);
+        phases[3] = System.currentTimeMillis() - headDecodeStart;
 
         // 2. The separation, at the rate and on the grid the model was trained for.
         float[][] headForModel = resample(headWindow, format.rate, StemModel.MODEL_RATE);
@@ -298,8 +307,10 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         int[] refusedWhy = new int[1];
         Fusion fusion = null;
         if (request.canFuse()) {
+            long fusionStart = System.currentTimeMillis();
             fusion = attemptFusion(weights, request, format, stems, inBars, plan, windowSec,
-                    clipped, refusedWhy, cancelled);
+                    clipped, refusedWhy, phases, cancelled);
+            phases[2] = System.currentTimeMillis() - fusionStart;
             if (cancelled[0]) return null;
         }
 
@@ -478,13 +489,21 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 if (!out.equals(named)) deleteQuietly(out);
             }
         }
-        Logger.info("transition: DJ edit for {}: the render's own accounting — the model {}ms"
-                        + " (this head's separation), the head's encode {}ms, the body's"
-                        + " decode+encode {}ms, and the file's bytes written in {}ms in all"
-                        + " (the model and MediaCodec are independent, so an overlap would make the"
-                        + " wall clock max(model, encode) instead of their sum)",
-                request.title(), separateMs, headEncodeMs, bodyEncodeMs,
-                System.currentTimeMillis() - startedAt);
+        // ⚠️ The ledger adds up, and what it cannot place is the answer: the phases below sum to the
+        // render's total minus whatever is left, and the leftover is what the device's 154 s outlier
+        // had ~73 s of. (Model and MediaCodec are independent — an overlap makes the wall clock
+        // max(model, encode) instead of their sum — so the split decides whether the overlap is
+        // worth building at all.)
+        long totalMs = System.currentTimeMillis() - startedAt;
+        long phasesSum = phases[0] + phases[1] + phases[2] + phases[3] + separateMs
+                + headEncodeMs + bodyEncodeMs;
+        Logger.info("transition: DJ edit for {}: the render's own accounting — head decode {}ms,"
+                        + " model+head separation {}ms, probe decode {}ms, tail separation {}ms,"
+                        + " the fusion attempt in all {}ms (junction search + the wait's retries),"
+                        + " head encode {}ms, body decode+encode {}ms; the phases sum to {}ms of the"
+                        + " render's {}ms in all, leaving {}ms outside every phase",
+                request.title(), phases[3], separateMs, phases[0], phases[1], phases[2],
+                headEncodeMs, bodyEncodeMs, phasesSum, totalMs, totalMs - phasesSum);
         long bytes = named.length();
         if (bytes < MIN_EDIT_BYTES) {
             Logger.warn("transition: DJ edit for {} came out at {} bytes, which is not a"
@@ -554,7 +573,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
     private Fusion attemptFusion(StemModel.Candidate weights, Request request, Format format,
                                  float[][][] headStems, double[] headBars, DjEdit.Plan edit,
                                  double windowSec, int[] clipped, int[] refusedWhy,
-                                 boolean[] cancelled)
+                                 long[] phases, boolean[] cancelled)
             throws Exception {
         double aBeatMs = request.outgoingBeatPeriodMs;
         double bBeatMs = request.beatPeriodMs;
@@ -592,6 +611,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
             return null;
         }
         long probeMs = System.currentTimeMillis() - probeStarted;
+        phases[0] = probeMs;
 
         // ⚠️ Round 5: the outgoing's body level and where the incoming's voice first comes in are
         // both measurable BEFORE the separation — the body off the decoded probe window, the voice
@@ -677,7 +697,9 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
             material[1] = Math.min(room, material[1] + waitExtraMs);
         }
         long separateStarted = System.currentTimeMillis();
+        long tailStart = System.currentTimeMillis();
         Tail tail = separateTail(weights, request, format, material[0], material[1], cancelled);
+        phases[1] = System.currentTimeMillis() - tailStart;
         if (tail == null || cancelled[0]) return null;
         long separateMs = System.currentTimeMillis() - separateStarted;
 
