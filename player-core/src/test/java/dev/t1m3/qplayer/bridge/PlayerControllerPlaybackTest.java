@@ -672,29 +672,53 @@ public class PlayerControllerPlaybackTest {
         assertFalse(PlayerController.djEditNameBelongsTo("123", null));
     }
 
-    /** The second guard: the times an edit's name carries are positions in the incoming track's
-     *  own file, so an anchor at or past this track's length says the file describes another track. */
+    /**
+     * The second guard: the times an edit's name carries are positions in the files of the pair it
+     * was rendered for — the incoming's, except the junction, which is the OUTGOING track's own bar
+     * line. A number at or past the end of the file it belongs to says the edit describes other
+     * tracks.
+     *
+     * <p>⚠️ The last two assertions are the device's own failure: a slam edit for a 98.2 s incoming
+     * and a 179.9 s outgoing carries {@code -j164257}, which is a perfectly ordinary position in
+     * the outgoing's file and impossible in the incoming's. Judged as one timeline it reads as "a
+     * file for another track" and the edit is thrown away — which is exactly what happened to the
+     * first stem edit this project ever wrote.
+     */
     @Test
-    public void anEditsAnchorsHaveToFitInsideTheTrackTheyClaim() {
-        Track track = new Track();
-        track.source = Track.Source.NETEASE;
-        track.neteaseId = 22L;
-        track.title = "incoming";
-        track.durationMs = 120_000L;
-        assertTrue("the anchors a render writes for this track are inside it",
-                PlayerController.editAnchorsFitDuration(track, 3_000L, 16_000L, 1_200L, 100_000L,
-                        106_000L));
+    public void anEditsAnchorsHaveToFitInsideTheFilesTheyBelongTo() {
+        Track incoming = new Track();
+        incoming.source = Track.Source.NETEASE;
+        incoming.neteaseId = 22L;
+        incoming.title = "incoming";
+        incoming.durationMs = 98_200L;
+        Track outgoing = new Track();
+        outgoing.source = Track.Source.NETEASE;
+        outgoing.neteaseId = 11L;
+        outgoing.title = "outgoing";
+        outgoing.durationMs = 179_885L;
+        assertTrue("a slam edit of this pair is inside both files (the device's own numbers)",
+                PlayerController.editAnchorsFitDuration(incoming, outgoing, -1L, 16_203L, 1_895L,
+                        164_257L, 4_019L));
+        assertTrue("the same junction with the outgoing's length unknown checks nothing",
+                PlayerController.editAnchorsFitDuration(incoming, null, -1L, 16_203L, 1_895L,
+                        164_257L, 4_019L));
         assertTrue("a plain edit carries no anchors at all (-1), which is not a mismatch",
-                PlayerController.editAnchorsFitDuration(track, -1L, -1L, -1L, -1L, -1L));
-        assertFalse("a vocal return past the end belongs to a longer track",
-                PlayerController.editAnchorsFitDuration(track, -1L, 130_000L, -1L, -1L, -1L));
-        assertFalse("... and so does a junction one millisecond past it",
-                PlayerController.editAnchorsFitDuration(track, -1L, -1L, -1L, 120_001L, -1L));
+                PlayerController.editAnchorsFitDuration(incoming, outgoing, -1L, -1L, -1L, -1L, -1L));
+        assertFalse("a vocal return past the INCOMING's end belongs to a longer track",
+                PlayerController.editAnchorsFitDuration(incoming, outgoing, -1L, 130_000L, -1L, -1L,
+                        -1L));
+        assertFalse("an entry past the incoming's end too",
+                PlayerController.editAnchorsFitDuration(incoming, outgoing, -1L, -1L, 98_200L, -1L,
+                        -1L));
+        assertFalse("and a junction past the OUTGOING's end is not this pair's either",
+                PlayerController.editAnchorsFitDuration(incoming, outgoing, -1L, -1L, -1L, 179_885L,
+                        -1L));
         Track unmeasured = new Track();
         unmeasured.title = "no length known";
         assertTrue("a track whose length nobody knows checks nothing (the platform's own reading of"
                         + " the armed file is the decisive guard)",
-                PlayerController.editAnchorsFitDuration(unmeasured, -1L, 999_999L, -1L, -1L, -1L));
+                PlayerController.editAnchorsFitDuration(unmeasured, unmeasured, -1L, 999_999L, -1L,
+                        -1L, -1L));
     }
 
     /**

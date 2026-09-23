@@ -4656,20 +4656,25 @@ public final class PlayerController {
                                     suffixTime(name, "-b", base), suffixTime(name, "-v", base),
                                     suffixTime(name, "-e", base), suffixTime(name, "-j", base),
                                     suffixTime(name, "-f", base));
-                            // ⚠️ And the identity check a hash cannot answer: an edit is this
-                            // track's own audio, and the times in its name are positions in that
-                            // track's file, so an anchor outside this track's length says the file
-                            // describes another track. Cheap, and it catches what the name alone
+                            // ⚠️ And the identity check a hash cannot answer: an edit is these two
+                            // tracks' own audio, and the times in its name are positions in their
+                            // files — the incoming's, except the junction, which is the outgoing's
+                            // own bar line. A number outside the file it belongs to says the edit
+                            // describes other tracks. Cheap, and it catches what the name alone
                             // cannot (see editAnchorsFitDuration).
-                            if (!editAnchorsFitDuration(t, ref.bridgeStartMs, ref.vocalReturnEndMs,
-                                    ref.entryMs, ref.junctionMs, ref.fusionEndMs)) {
-                                Logger.warn("transition: the DJ edit {} is not usable for {} — the"
-                                                + " times in its name (bridge {}ms, vocal {}ms, entry"
-                                                + " {}ms, junction {}ms, fusion end {}ms) do not fit"
-                                                + " the track's own {}ms, so this file describes"
-                                                + " another track; the boundary will not play it",
+                            Track outgoingTrack = outgoingOfBoundary();
+                            if (!editAnchorsFitDuration(t, outgoingTrack, ref.bridgeStartMs,
+                                    ref.vocalReturnEndMs, ref.entryMs, ref.junctionMs,
+                                    ref.fusionEndMs)) {
+                                Logger.warn("transition: the DJ edit {} is not usable for {} — its"
+                                                + " times (bridge {}ms, vocal {}ms, entry {}ms, fusion"
+                                                + " end {}ms of the incoming's {}ms file; junction"
+                                                + " {}ms of the outgoing's {}ms file) do not fit the"
+                                                + " files they belong to, so this edit describes other"
+                                                + " tracks; the boundary will not play it",
                                         name, t.title, ref.bridgeStartMs, ref.vocalReturnEndMs,
-                                        ref.entryMs, ref.junctionMs, ref.fusionEndMs, t.durationMs);
+                                        ref.entryMs, ref.fusionEndMs, t.durationMs, ref.junctionMs,
+                                        outgoingTrack != null ? outgoingTrack.durationMs : 0L);
                                 continue;
                             }
                             return ref;
@@ -4766,25 +4771,36 @@ public final class PlayerController {
     }
 
     /**
-     * Whether every time an edit's name carries could be a position in <em>this</em> track's own
-     * file: the anchors are ms into the incoming track (the render writes the track it was asked
-     * for, so its timeline is the track's timeline), and a number at or past the track's length
-     * cannot describe it.
+     * Whether every time an edit's name carries could be a position in the file it claims to
+     * describe: {@code -b}, {@code -v}, {@code -e} and {@code -f} are positions in the
+     * <em>incoming</em> track's own file (the render writes the track it was asked for, so its
+     * timeline is the track's timeline), and {@code -j} is a position in the <b>outgoing</b>
+     * track's file — the bar line that track's live deck is cut on (see {@link EditRef}). A number
+     * at or past the length of the file it belongs to cannot describe that file.
+     *
+     * <p>⚠️ <b>The junction belongs to the OTHER track, and assuming otherwise refused a real
+     * edit.</b> A junction 164 257 ms into a 179.9 s outgoing is ordinary; judged against the
+     * <em>incoming</em> (98.2 s here) it reads as "this file describes another track" and a correct
+     * slam edit is thrown away — measured on the device, where exactly that happened to the first
+     * stem edit this project ever wrote. So the two timelines are checked separately, each against
+     * the length of the track whose file it is.
      *
      * <p>Cheap, needs no decoder, and it is the second half of the edit's identity: the name's hash
-     * says which pair asked for it, and these numbers say whether the file can be that track at
-     * all. A track whose length is unknown (0) answers true — nothing to check against, and the
-     * decisive check is the platform's own reading of the armed file
-     * ({@link #checkEditDuration}, {@code AudioBackend.incomingDuration}).
+     * says which pair asked for it, and these numbers say whether the file can be the tracks it
+     * names at all. A length nobody knows (0) checks nothing for that side, and the decisive check
+     * is the platform's own reading of the armed file ({@link #checkEditDuration},
+     * {@code AudioBackend.incomingDuration}).
      */
-    static boolean editAnchorsFitDuration(Track t, long bridgeStartMs, long vocalReturnEndMs,
-                                          long entryMs, long junctionMs, long fusionEndMs) {
-        if (t == null) return true;
-        long duration = t.durationMs;
-        if (duration <= 0L) return true;                 // nothing to check against
-        return fitsInside(duration, bridgeStartMs) && fitsInside(duration, vocalReturnEndMs)
-                && fitsInside(duration, entryMs) && fitsInside(duration, junctionMs)
-                && fitsInside(duration, fusionEndMs);
+    static boolean editAnchorsFitDuration(Track incoming, Track outgoing, long bridgeStartMs,
+                                          long vocalReturnEndMs, long entryMs, long junctionMs,
+                                          long fusionEndMs) {
+        long inDuration = incoming != null ? incoming.durationMs : 0L;
+        boolean incomingOk = inDuration <= 0L
+                || (fitsInside(inDuration, bridgeStartMs) && fitsInside(inDuration, vocalReturnEndMs)
+                        && fitsInside(inDuration, entryMs) && fitsInside(inDuration, fusionEndMs));
+        long outDuration = outgoing != null ? outgoing.durationMs : 0L;
+        boolean outgoingOk = outDuration <= 0L || fitsInside(outDuration, junctionMs);
+        return incomingOk && outgoingOk;
     }
 
     /** An anchor is "inside" when it is unset (-1) or strictly before the track's end, ms. */
