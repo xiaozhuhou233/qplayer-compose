@@ -56,13 +56,32 @@ import java.util.function.BooleanSupplier;
  * match, a decode that fails, a refused muxer, a cancelled render — each of those returns
  * false, the caller logs it, and the boundary blends the plain stream exactly as it did
  * before this feature existed.
+ *
+    * <p><b>The render's cost, decided (round 6, eighth pass): it belongs to the MATERIAL, not to
+    * this code.</b> The measured ledger on the device: body decode+encode 32.6 s (38 %), model+head
+    * separation 24.3 s (28 %), 21.5 s outside every phase (25 % — the bridge path's own tail
+    * separation, which the ledger now times, plus the app's playback and IO), the rest ≈ 7.9 s;
+    * memory 394–425 MB PSS while it renders, so nothing thrashes. The two-encoder-session overlap
+    * (encode the body to a temp file under the model, then remux with the body offset by the head's
+    * duration) would buy <i>min</i>(model, encode) ≈ 16–34 s — and is NOT built: a second
+    * encoder session brings its own AAC priming/padding, i.e. a possible 20–50 ms gap or click at
+    * the join of EVERY transition, which is a worse outcome than a render that is 24 s too slow.
+    * Arming needs `render < outgoing duration`, a material choice (the library's median track is
+    * 209 s; the pair that failed was 158 s). It comes back only if a PASSING fusion fails to arm
+    * because of it, with that pair's two numbers: render seconds vs outgoing seconds. The free
+    * alternative — buffer the body's PCM while the model runs and encode it in one session after the
+    * head, hiding the decode only and risking no seam at all — is worth it only if the decoder's
+    * share of the body's phase dominates the encoder's, which is why that phase is now split in two
+    * in the ledger.
  */
 public final class AndroidStemEditRenderer implements StemEditRenderer {
 
     /** Where the user puts the model: the app's own private storage, alone in a directory
-     *  of its own. The line a missing model writes names the directory and the
-     *  {@code adb push} that fills it, because model delivery is deliberately not
-     *  implemented (a 98 MB download must never be the default). */
+    *  of its own. The line a missing model writes names the directory and the
+    *  {@code adb push} that fills it, because model delivery is deliberately not
+    *  implemented (a 98 MB download must never be the default). 
+ */
+
     public static final String MODELS_DIR = "models";
 
     /** The AAC bitrate the edit is encoded at. High, because this file is not only the
@@ -229,10 +248,12 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         // ⚠️ The render's phases, timed where they happen so the total can be CHECKED against
         // them: [0] the outgoing probe's decode, [1] the outgoing tail's separation, [2] the fusion
         // attempt in all (the junction search plus the wait's retry renders), [3] the head's own
-        // decode. Without an additive ledger a render's seconds cannot be placed — the device's
+        // decode, [4] the BRIDGE's own tail separation (a render that takes the bridge path leaves
+        // the fusion's [1] at zero — which is how the first device ledger showed this gap), and
+        // [5] the part of the body's phase that was the AAC encoder rather than the decoder. Without an additive ledger a render's seconds cannot be placed — the device's
         // 154 s outlier had ~73 s that no existing line accounted for, and that number decides
         // whether overlapping the encode with the model is worth building at all.
-        long[] phases = new long[4];
+        long[] phases = new long[6];
         long headDecodeStart = System.currentTimeMillis();
         boolean completed = decode(request.sourcePath, 2, 0L, head[0].length, request.stillWanted,
                 cancelled, (pcm, frames) -> {
@@ -330,8 +351,10 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 double durationMs = probeDurationMs(request.outgoingSourcePath);
                 if (durationMs > 0d) {
                     long fromMs = Math.max(0L, Math.round(durationMs - tailMs));
+                    long bridgeTailStart = System.currentTimeMillis();
                     Tail separated = separateTail(weights, request, format, fromMs,
                             Math.round(tailMs), cancelled);
+                    phases[4] = System.currentTimeMillis() - bridgeTailStart;
                     float[][][] tail = separated == null ? null : separated.stems;
                     if (tail != null && !cancelled[0]) {
                         double tailSec = tail[0][0].length / (double) StemModel.MODEL_RATE;
@@ -474,7 +497,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
             headEncodeMs = System.currentTimeMillis() - headEncodeStart;
             long bodyEncodeStart = System.currentTimeMillis();
             if (!decodeBody(request.sourcePath, editedForSource[0].length, writer,
-                    request.stillWanted)) {
+                    request.stillWanted, phases)) {
                 Logger.info("transition: DJ edit for {} cancelled while writing the body (the"
                         + " queue moved on)", request.title());
                 return null;
@@ -495,15 +518,17 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         // max(model, encode) instead of their sum — so the split decides whether the overlap is
         // worth building at all.)
         long totalMs = System.currentTimeMillis() - startedAt;
-        long phasesSum = phases[0] + phases[1] + phases[2] + phases[3] + separateMs
+        long phasesSum = phases[0] + phases[1] + phases[2] + phases[3] + phases[4] + separateMs
                 + headEncodeMs + bodyEncodeMs;
         Logger.info("transition: DJ edit for {}: the render's own accounting — head decode {}ms,"
                         + " model+head separation {}ms, probe decode {}ms, tail separation {}ms,"
                         + " the fusion attempt in all {}ms (junction search + the wait's retries),"
-                        + " head encode {}ms, body decode+encode {}ms; the phases sum to {}ms of the"
-                        + " render's {}ms in all, leaving {}ms outside every phase",
-                request.title(), phases[3], separateMs, phases[0], phases[1], phases[2],
-                headEncodeMs, bodyEncodeMs, phasesSum, totalMs, totalMs - phasesSum);
+                        + " the bridge's tail separation {}ms, head encode {}ms, body decode+encode"
+                        + " {}ms (of which the AAC encoder {}ms and the decoder {}ms); the phases sum"
+                        + " to {}ms of the render's {}ms in all, leaving {}ms outside every phase",
+                request.title(), phases[3], separateMs, phases[0], phases[1], phases[2], phases[4],
+                headEncodeMs, bodyEncodeMs, phases[5], bodyEncodeMs - phases[5], phasesSum, totalMs,
+                totalMs - phasesSum);
         long bytes = named.length();
         if (bytes < MIN_EDIT_BYTES) {
             Logger.warn("transition: DJ edit for {} came out at {} bytes, which is not a"
@@ -1446,7 +1471,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
      *  {@code skipFrames} frames, which the rendered head already covered. Streamed to the
      *  encoder rather than held — a five-minute song is a hundred megabytes of float. */
     private boolean decodeBody(String path, int skipFrames, AacFileWriter writer,
-                               BooleanSupplier wanted) throws Exception {
+                               BooleanSupplier wanted, long[] encodeMs) throws Exception {
         long[] seen = new long[1];
         boolean[] cancelled = new boolean[1];
         boolean completed = decode(path, 2, 0L, -1, wanted, cancelled, (pcm, frames) -> {
@@ -1456,7 +1481,15 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 from = (int) Math.min(frames, skipFrames - seen[0]);
             }
             seen[0] += frames;
-            if (from < frames) writer.write(slice(pcm, from, frames - from));
+            if (from < frames) {
+                // ⚠️ The encoder's share of this phase, kept apart from the decoder's: if the DECODE
+                // is what dominates the body, the cheap overlap (buffer the body's PCM while the
+                // model runs, one encoder session, no seam at all) is the one worth having — and
+                // this number, not the phase's total, is what says so.
+                long at = System.currentTimeMillis();
+                writer.write(slice(pcm, from, frames - from));
+                encodeMs[0] += System.currentTimeMillis() - at;
+            }
         });
         return completed && !cancelled[0];
     }
