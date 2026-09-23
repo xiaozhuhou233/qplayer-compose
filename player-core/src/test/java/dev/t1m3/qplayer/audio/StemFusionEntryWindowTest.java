@@ -86,17 +86,23 @@ public class StemFusionEntryWindowTest {
                 && entry < CONTENT_START_MS + 2L * B_BAR_MS);
         assertTrue("the plan says where its entry came from: " + plan.describe(),
                 plan.describe().contains("BEAT grid"));
-        // ⚠️ And why that matters to the passage rather than to one number: every instant the table
-        // places is `entry + k*step`, so an entry on the incoming's own grid is what puts the swaps
-        // and the arrival on the incoming's bar lines — the rows the pulse clause measures. An entry
-        // 900 ms off (0.900 instead of 900) puts them 900 ms off the beats the material is playing.
-        long step = Math.round(plan.barStepMs);
-        for (long at : new long[]{plan.arriveStartMs, plan.arriveEndMs, plan.holdEndMs,
-                plan.fusionEndMs}) {
-            assertEquals("the table's instant at " + at + "ms is on the incoming's own grid", 0L,
-                    ((at - (long) B_PHASE_MS) % B_BAR_MS + B_BAR_MS) % B_BAR_MS);
-            assertEquals("and on the entry's own step", 0L, (at - plan.entryMs) % step);
-        }
+        // ⚠️ And why that matters to the passage rather than to one number: the deck starts on a line
+        // of the incoming's OWN grid, which is what puts B's arrival — the row the pulse clause
+        // measures — on the beats the material under it is playing. An entry 900 ms off (0.900
+        // instead of 900) would start the file's arrival 900 ms away from the incoming's own bars.
+        //
+        // ⚠️ Round 6's eleventh pass: B's arrival START is the only one of the table's instants that
+        // is still on that grid — the arrival's END is A's own file ending (the copy's length after
+        // the entry, JUNCTION_XFADE_MS as the deck plays it) and the window's end is the gesture's own
+        // span, so neither is a bar line of B's grid any more. What the incoming's grid decides is
+        // where B's kit begins.
+        assertEquals("the arrival begins on the incoming's own grid", 0L,
+                ((plan.arriveStartMs - (long) B_PHASE_MS) % B_BAR_MS + B_BAR_MS) % B_BAR_MS);
+        assertEquals("and it begins at the deck's own entry", plan.entryMs, plan.arriveStartMs);
+        assertEquals("it ends at A's own ending", plan.holdEndMs, plan.arriveEndMs);
+        assertEquals("which is the entry plus the copy as the deck plays it",
+                plan.entryMs + Math.round(StemFusion.JUNCTION_XFADE_MS * (B_BEAT_MS / A_BEAT_MS)),
+                plan.arriveEndMs);
     }
 
     /** The other way this happens on a real track: the head decode stopped before the incoming's
