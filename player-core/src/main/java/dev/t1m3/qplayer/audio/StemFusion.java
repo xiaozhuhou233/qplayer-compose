@@ -177,19 +177,33 @@ public final class StemFusion {
      * <p>Bump it whenever a change here alters what a render produces (not for a comment): the cost
      * is one re-render per edit, in the pre-cache lane, where there are minutes of margin.
      *
-     * <p>⚠️ <b>Version 3 exists for one thing: an acceptance refusal is a measurement, not a
-     * verdict.</b> Version 2 retired the plain edits written under the units defect. Version 3
-     * retires the {@code -x5} files — the render's own acceptance refused the fusion — written
-     * before the wait's retry loop existed: with the loop, "the acceptance refused this pair" means
-     * "this bounded set of attempts, on this rule set, did not pass", and the next rule set may pass
-     * where this one could not. The device's {@code 942288643-v18340-x5-r2.m4a} hid a fusion exactly
-     * that way, and deleting it by hand was needed twice. So any change to the loop's bound
-     * ({@link #FUSION_WAIT_EXTRA_STEPS}), to the acceptance's clauses, or to the planner's
-     * arithmetic must bump this number: the key then keeps the old file from being found, and
+     * <p>⚠️ <b>THE STANDING RULE: any change to the planner's arithmetic, to the acceptance's
+     * clauses, or to the constants that feed them is a bump of this number.</b> Not just the
+     * "important" changes — this is a checklist item, because the failure mode is silent and has
+     * now cost three device runs. A user's word for it:
+     *
+     * <ul>
+     *   <li><b>2 → 3</b> — the wait's retry loop made "the acceptance refused this pair" a
+     *       measurement of one bounded rule set rather than a verdict on the pair, so the
+     *       {@code -x5} files written before the loop had to be retired. The device's
+     *       {@code 942288643-v18340-x5-r2.m4a} hid a fusion until it was deleted by hand.</li>
+     *   <li><b>3 → 4</b> — the SLAM path's three fixes (its instants from the slam instead of
+     *       the fusion shape, an empty span reading as unknown rather than digital silence, and the
+     *       splice's window grown by {@code CUT_MS}) changed what a render produces for every
+     *       unrelated-tempo pair. The renderer was changed and the version was not, so the device's
+     *       {@code 1153167801-b3939-v16203-x5-r3.m4a} — a plain refusal written by the pre-slam code
+     *       and stamped with the then-current version — was played as today's edit and
+     *       <b>the render for the asked direction never ran at all</b>.</li>
+     * </ul>
+     *
+     * <p>The price is one re-render per pair, once, in the pre-lane where there are minutes of
+     * margin — which is a great deal cheaper than a run spent on an edit the current rules would
+     * not have written. A version bump is how the old file stops being found at all (the version is
+     * part of the edit's cache key, see {@code PlayerController.djEditKey}), and
      * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
      * name.
      */
-    public static final int RULE_VERSION = 3;
+    public static final int RULE_VERSION = 4;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with
