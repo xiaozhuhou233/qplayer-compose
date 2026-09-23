@@ -45,7 +45,7 @@ public class StemFusionIncomingWaitTest {
         double[] bBars = new double[9];
         for (int i = 0; i < bBars.length; i++) bBars[i] = 900d + i * BAR_MS;
         return new StemFusion.Input(96_816L, blendMs, removalMs, 240L, 566.4d, 0d, BEAT_MS, 355d,
-                1d, aBars, bBars, StemFusion.NO_VOICE_MEASUREMENT,
+                BEAT_MS / 566.4d, aBars, bBars, StemFusion.NO_VOICE_MEASUREMENT,
                 StemFusion.NO_GROOVE_MEASUREMENT, StemFusion.NO_BODY_MEASUREMENT, -1L, incoming);
     }
 
@@ -376,8 +376,12 @@ public class StemFusionIncomingWaitTest {
         for (int i = 0; i < aBars.length; i++) aBars[i] = 1_185.6d + i * 2_265.6d;
         double[] bBars = new double[9];
         for (int i = 0; i < bBars.length; i++) bBars[i] = 900d + i * BAR_MS;
+        // ⚠️ The deck's ratio IS the bar ratio on this pair: the device's own coherent render
+        // ("the carry stretched by the bar ratio", x0.965722) has MixNaturaliser stretching the
+        // incoming, and the deck at anything else is the incoherence `plan` refuses (see
+        // StemFusionTest.theDecksRatioAndTheCarrysRatioMustAgree).
         return new StemFusion.Input(96_816L, 15_000L, removalMs, 240L, 566.4d, 0d, BEAT_MS, 355d,
-                1d, aBars, bBars, StemFusion.NO_VOICE_MEASUREMENT,
+                BEAT_MS / 566.4d, aBars, bBars, StemFusion.NO_VOICE_MEASUREMENT,
                 StemFusion.NO_GROOVE_MEASUREMENT, StemFusion.NO_BODY_MEASUREMENT, -1L, incoming,
                 extra);
     }

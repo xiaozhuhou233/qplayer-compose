@@ -627,12 +627,17 @@ public class StemFusionTest {
         assertEquals("the low end's fade is twice as long, so its -6 dB is twice as far in",
                 Math.round(4d / 3d * step), lowEndSix, 15L);
         assertEquals(Math.round(1d / 3d * step), arriveSix, 15L);
-        // The coexistence the user asked to keep (rule 3): the stretch over which BOTH backings are
-        // within 6 dB of their own level — B's drums on their way up and A's on their way down.
+        // The coexistence the user asked to keep (rule 3), as the TABLE'S GAINS give it: the stretch
+        // over which both backings' gains are within 6 dB of their own levels — B's drums on their
+        // way up, A's on their way down — which is 1.33 steps, an identity of the spans. It is a
+        // BOUND on what a listener hears, not that number: the prototype's instrument on the device's
+        // own material reads 1750 ms in all with a 450 ms longest run (reproduced as 1750/530 by
+        // fusion/coexist.py, the same instrument) because the rows' own material — the incoming's kit
+        // arriving late, the bed carrying the passage — is what decides the audible part.
         long from = plan.arriveStartMs + arriveSix;
         long to = plan.holdEndMs + drumsSix;
-        println("the overlap where both backings are within 6 dB of unity: %dms (one step is %dms)",
-                to - from, step);
+        println("the table's own gain overlap (both backings within 6 dB of their own level): %dms"
+                        + " (one step is %dms)", to - from, step);
         assertTrue("both sides are near unity for more than one step: " + (to - from),
                 to - from > step);
     }
@@ -693,26 +698,60 @@ public class StemFusionTest {
      */
     @Test
     public void theDescribeReportsTheDecksRatioAndNotABarCountRatio() {
-        // A pair locked at x1.25: B's beat is 1.25 of A's and the deck plays the file that much
-        // faster, so the carry is stretched by the same 1.25 (which is what makes playback return it
-        // to the outgoing's tempo and pitch).
+        // ⚠️ A 4% bar mismatch with the deck at x1.0 is no longer a plan at all — it is the
+        // incoherence `plan` refuses (see theDecksRatioAndTheCarrysRatioMustAgree) — so the pair
+        // that exercises the describe line is the COHERENT one: B's beat is 4% longer than A's and
+        // the deck plays the file 4% faster, which is what returns the carry to the outgoing's own
+        // tempo and pitch.
         StemFusion.Plan plan = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 35_000L,
-                15_000L, 500d, 0d, 520d, 0d, 1d, bars(2000d, 0d, 120), bars(2080d, 0d, 120),
+                15_000L, 500d, 0d, 520d, 0d, 1.04d, bars(2000d, 0d, 120), bars(2080d, 0d, 120),
                 StemFusion.NO_VOICE_MEASUREMENT));
         assertTrue(plan.reason, plan.valid);
-        // The deck plays at x1.0 (the controller applies the tempo lock only inside its ±8% clamp
-        // and this pair is already within RELATION_TOLERANCE of the unison), while the carry is read
-        // at the bar ratio — two different numbers, which is the whole point of the line.
-        assertEquals(1d, plan.speed, 1e-9);
-        assertEquals(1.04d, plan.stretch, 1e-9);
+        assertEquals("the deck's own ratio", 1.04d, plan.speed, 1e-9);
+        assertEquals("and the carry's — the same number, which is the point of the clause",
+                1.04d, plan.stretch, 1e-9);
         assertEquals(0.0385d, plan.relation.error, 0.001d);
-        assertTrue(plan.describe(), plan.describe().contains("x1.0000"));
         assertTrue(plan.describe(), plan.describe().contains("x1.0400"));
         assertFalse("the bar-count ratio must not be in the line: " + plan.describe(),
                 plan.describe().contains("x1.83"));
         // At that ratio the take fills exactly the table's own span plus the tail it is cut on:
         // four steps of 2080 ms at x1.04, which is the window the deck plays.
         assertEquals(plan.windowMs + StemFusion.CUT_MS, plan.sourceSpanMs * plan.stretch, 2.0d);
+    }
+
+    /**
+     * ⚠️ The coupling, pinned: the deck's ratio and the carry's ratio are ONE decision, and a pair
+     * whose deck will not take the ratio the carry needs is not a fusion either way — at the bar
+     * ratio the outgoing's material is played at a tempo that is not its own, at the deck's ratio
+     * its bar boundaries slide against the incoming's beats. The device's own AGUDO -> Lose My Mind
+     * is the case: its bar ratio is 0.9622 while a profile the deck may not stretch leaves the deck
+     * at 1.0 (3.93% apart), and both numbers are in the refusal.
+     */
+    @Test
+    public void theDecksRatioAndTheCarrysRatioMustAgree() {
+        double aBeat = 566.4d;
+        double bBeat = 545d;
+        double barRatio = bBeat / aBeat;
+        StemFusion.Plan incoherent = StemFusion.plan(new StemFusion.Input(96_816L, 15_000L, 15_240L,
+                240L, aBeat, 0d, bBeat, 355d, 1d, bars(2_265.6d, 1_185.6d, 60),
+                bars(2_180d, 900d, 9), StemFusion.NO_VOICE_MEASUREMENT));
+        assertFalse(incoherent.describe(), incoherent.valid);
+        assertTrue(incoherent.reason, incoherent.reason.contains("x1.0000"));
+        assertTrue("the carry's own ratio is named too: " + incoherent.reason,
+                incoherent.reason.contains(String.format(java.util.Locale.US, "x%.4f", barRatio)));
+        assertTrue("and how far apart they are: " + incoherent.reason,
+                incoherent.reason.contains(String.format(java.util.Locale.US, "%.2f%%",
+                        100d * (1d / barRatio - 1d))));
+        assertTrue("and what the answer is: " + incoherent.reason,
+                incoherent.reason.contains("not a fusion"));
+        // The same pair with the deck at the carry's ratio (the device's coherent render) plans, and
+        // the carry is read at exactly the deck's ratio.
+        StemFusion.Plan coherent = StemFusion.plan(new StemFusion.Input(96_816L, 15_000L, 15_240L,
+                240L, aBeat, 0d, bBeat, 355d, barRatio, bars(2_265.6d, 1_185.6d, 60),
+                bars(2_180d, 900d, 9), StemFusion.NO_VOICE_MEASUREMENT));
+        assertTrue(coherent.describe(), coherent.valid);
+        assertEquals(barRatio, coherent.stretch, 1e-9);
+        assertEquals(barRatio, coherent.speed, 1e-9);
     }
 
     /**

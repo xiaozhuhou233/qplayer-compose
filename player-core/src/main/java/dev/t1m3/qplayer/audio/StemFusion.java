@@ -1954,9 +1954,51 @@ public final class StemFusion {
         // FUSION_BARS of them (one for a slam).
         double stepMs = slam ? bBar : relation.barStepMs(in.bBeatMs);
         double stretch = slam ? in.speed : relation.stretch(in.aBeatMs, in.bBeatMs);
+        // ⚠️ THE CARRY'S RATIO AND THE DECK'S RATIO ARE ONE DECISION, NOT TWO. `stretch` is what A's
+        // material is pre-lengthened by INSIDE the file, and it is the bar ratio for every relation
+        // — that is what puts A's bar boundaries on the incoming's grid, which is what the relation
+        // is FOR. `speed` is what the deck plays the file at, and it is the listener's conversion
+        // back: A's carry is heard at A's own tempo only when the two agree. A pair whose deck
+        // ratio is not the carry's ratio (an unlocked relation 1 with a profile too weak for
+        // MixNaturaliser to stretch the incoming, or a platform that refuses the tempo) is
+        // therefore not a fusion at all, whichever way it is written: with the bar ratio the
+        // outgoing's material is played at a tempo that is not its own (3.9% and 0.66 semitones on
+        // the device's AGUDO -> Lose My Mind, whose deck ratio is 1.0 while its bar ratio is
+        // 0.9622), and with the deck's ratio its bar boundaries slide against the incoming's beats
+        // (0.34 s over the four-step passage) — one detuned, one off the grid. It is refused here,
+        // with both numbers in the reason, because the fix is upstream: a profile the deck may
+        // stretch, or a pair whose grids really do hold. A LOCKED relation cannot reach this clause
+        // — its stretch IS the deck's ratio, bit for bit round 18 — and a relative pair's bar ratio
+        // is within the relation's own tolerance of it (measured: 1.6% on the 1:2 pair, 1.7% on the
+        // 1:1-unlocked one), so nothing that fuses today changes.
+        double carryError = Math.abs(stretch - in.speed) / Math.max(1e-9d, stretch);
+        if (carryError > LOCK_TOLERANCE + 1e-12) {
+            return invalid(String.format(Locale.US,
+                    "the deck plays this file at x%.4f while the outgoing's material has to be read"
+                            + " at x%.4f to land on the incoming's own grid (%.2f%% apart, where the"
+                            + " lock's own tolerance is %.0f%%): at the deck's ratio the carry's bar"
+                            + " boundaries slide against the incoming's beats, and at the carry's"
+                            + " ratio the outgoing's material is played at a tempo that is not its"
+                            + " own — either way it is not a fusion, and the answer is a profile the"
+                            + " deck may stretch (or a pair whose grids hold)",
+                    in.speed, stretch, carryError * 100d, LOCK_TOLERANCE * 100d), aBar, bBar, lock);
+        }
         // ⚠️ Round 6's shape, and the budget decides how much of it fits: the full gesture is a
         // hold at unity plus the low end's own fade, and all of it has to be separated out of the
-        // outgoing's own file like anything else. A pair whose step is so long that the full shape
+        // outgoing's own file like anything else.
+        //
+        // ⚠️ The 1.33 steps above is a bound on the AUDIBLE coexistence, not the number itself.
+        // Measured on the device's own material (AGUDO -> Lose My Mind, the incoming's deck starting
+        // at 900 ms, one step 2 188 ms, hold 2 — `fusion/coexist.py`, the same instrument the
+        // prototype used, each row against its own frame level):
+        //   • the whole backing (drums + low end + bed): 1750 ms in all, longest run 530 ms         //     — the prototype's own 1750/450, reproduced to the millisecond of total;
+        //   • the bed alone: 1530 / 220 ms, the low end alone: 220 / 80 ms, the drums alone:
+        //     0 / 0 ms (the incoming's kit is not playing until ~8 4xx ms, which is past the window
+        //     the drums' own row gets) — so what the listener hears as the coexistence is carried by
+        //     the bed and the low end, and the drums' row contributes nothing on that pair.
+        // A longer hold is not the lever it looks like: one more step measured 2070 ms total and a
+        // SHORTER longest run (490 ms), i.e. ~0.3 s more in all and no more continuity, because the
+        // limit is the incoming's own material rather than the gesture. A pair whose step is so long that the full shape
         // does not fit gets ONE step of hold rather than no fusion at all — still a recede.
         long cap = slam ? FUSION_TAIL_MAX_MS : tailMaxMs(relation);
         // ⚠️ The shape, from the one call the pre-decode clause uses too (see {@link #shapeFor}).
@@ -2167,8 +2209,9 @@ public final class StemFusion {
         long holdEnd = entry + (long) holdSteps * barStep;
         // ⚠️ The incoming arrives UNDER the outgoing's hold, not after it: its rise starts one step
         // before the hold ends, so it reaches unity exactly where the outgoing starts to recede. That
-        // is what gives the passage its coexistence — both backings within 6 dB of their own level
-        // for MORE than a step (measured: one and a third) — which is the identity the user asked to
+        // is what gives the passage its coexistence — the TABLE'S OWN GAINS are within 6 dB of their
+        // levels for 1.33 steps (an identity of the spans, not a measurement of the audio) — which is
+        // the bound the user asked to
         // keep (rule 3 of round 6: the fade must not dominate). With a one-step hold the rise starts
         // at the entry itself.
         long arriveStart = entry + (long) Math.max(0, holdSteps - 1) * barStep;
