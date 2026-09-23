@@ -392,6 +392,35 @@ public class StemFusionTest {
     }
 
     /**
+     * ⚠️ <b>The incoming side of the gesture, pinned as numbers.</b> The pending placement change
+     * (the junction moves to the outgoing's own file end, so A's own ending is heard instead of a
+     * passage cut out of it) touches the A side only: how long the file's copy of A is, and where
+     * A's rows stop. B's side — the bed's rise, the drums' and low end's arrival, the window and
+     * where the body takes over — is the SAME search and the SAME table it is today, so these
+     * numbers must not move: a change to one of them is a change to the incoming track's part of the
+     * gesture, which the user has not asked for and did not approve.
+     *
+     * <p>They are literals on purpose. If a later change makes one of them fail, that change is
+     * either the placement (and then B's side has moved with it, which is the bug this pins) or a
+     * deliberate new gesture (and then the user's approval is what has to be checked, not this test).
+     */
+    @Test
+    public void theIncomingSidesLinesArePinnedForThePlacementChange() {
+        StemFusion.Plan plan = fixture();
+        assertEquals("the deck still starts on the incoming's own bar line", 16_000L, plan.entryMs);
+        assertEquals("B's bed still rises from the entry over one bar of ITS grid", 18_000L,
+                plan.bedFadeMs);
+        assertEquals("its drums and low end still arrive one step before the hold's end",
+                plan.holdEndMs - Math.round(plan.barStepMs), plan.arriveStartMs);
+        assertEquals("and reach unity where the hold does", plan.holdEndMs, plan.arriveEndMs);
+        assertEquals("the window is still the table's own span", 8_000L, plan.windowMs);
+        assertEquals("and B's rows are at unity where the body's own audio takes over",
+                plan.entryMs + plan.windowMs, plan.fusionEndMs);
+        assertEquals("the arrival's own length is still one step", Math.round(plan.barStepMs),
+                plan.arriveEndMs - plan.arriveStartMs);
+    }
+
+    /**
      * The four pairings the round-18 prototype measured on real material, with the numbers the
      * harness's own scan produced (`D:\qplayer-dev\harness\fusion\{grids,qpair-scan}.json`):
      * the grids, the blend and the content start are the harness's, and the verdict is what this
