@@ -289,6 +289,108 @@ public class StemFusionTest {
         assertNull(StemFusion.refusal(240_000L, 20_000L, 35_000L, 15_000L, 500d, 500d, 1d));
     }
 
+    /** A pair in no relation at all: 600 ms against 500 ms is 20% from 1 and 40% from 3:2, so
+     *  {@link StemFusion#relationOf} answers null and the plan is a SLAM. */
+    private static StemFusion.Plan slamFixture() {
+        StemFusion.Plan plan = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 35_000L,
+                15_000L, 600d, 0d, 500d, 0d, 1d, bars(2400d, 0d, 120), bars(2000d, 0d, 120),
+                StemFusion.NO_VOICE_MEASUREMENT));
+        assertTrue(plan.reason, plan.valid);
+        assertTrue(plan.describe(), plan.slam);
+        return plan;
+    }
+
+    /**
+     * ⚠️ <b>A slam's own acceptance, end to end.</b> Nothing in this file ever measured a slam before
+     * round 6's tenth pass, which is why two arithmetic defects shipped: the arrival instants came
+     * from the FUSION shape's two-step hold while a slam's window is one step plus its splice, so the
+     * "after their swap" span began past the window's end, held no samples, and answered −240 dBFS —
+     * and every slam on the device was refused with "the incoming's own drums never arrive
+     * (-240.0 dBFS after their swap)" while the same slice, read at the slam's own instants, holds the
+     * incoming's real kit at −10.3 dBFS. This test fails exactly that way without the fix.
+     */
+    @Test
+    public void aSlamPassesItsOwnAcceptance() {
+        StemFusion.Plan plan = slamFixture();
+        StemFusion.Report report = run(plan, 1d, true, cleanOutgoing(30d), cleanIncoming(30d),
+                0.5d, 0.5d, true);
+        println("%s", report.describe());
+        assertTrue(report.describe(), report.acceptable);
+        assertFalse("the refusal the device saw: " + report.failures,
+                report.failures.contains("never arrive"));
+        // The arrival span IS empty on a slam — the incoming's rows arrive on the line that ends the
+        // file's window, and the body's own audio continues there — so the measurement reports
+        // "unknown" rather than the floor, and the clause declines instead of refusing.
+        assertTrue("an empty span is not digital silence: " + report.incomingDrumsAfterDb,
+                Double.isNaN(report.incomingDrumsAfterDb));
+        assertTrue("nor the low end's: " + report.incomingBassAfterDb,
+                Double.isNaN(report.incomingBassAfterDb));
+        // The rows it CAN measure are the carried ones, and they are the table's.
+        assertEquals(report.sourceDrumsDb, report.carriedDrumsDb, 3d);
+        assertEquals(report.sourceBassDb, report.carriedBassDb, 3d);
+        assertEquals(StemFusion.A_OTHER_DB, report.carriedMelodyDb - report.sourceMelodyDb, 3d);
+        // The pulse clause is skipped for a slam by design (its window is one bar and its gesture is a
+        // cut), which is why the report says 0 of 0 beats rather than 0 of N.
+        assertEquals(0, report.beats);
+        assertTrue(report.describe(), report.stepMeasured);
+        assertTrue(report.describe(),
+                Math.abs(report.junctionStepDb) <= StemFusion.JUNCTION_STEP_MAX_DB);
+    }
+
+    /**
+     * ⚠️ And the slam's splice RUNS. Its rows fall from unity to the floor over {@link
+     * StemFusion#CUT_MS} from the line — an equal-power hand-over, the arrival rising as the
+     * departure falls — which needs the window to contain it: `fusionEndMs` is the END of the splice,
+     * not the line, so `gainAt`'s own guard lets the splice happen. Before the fix the window ended ON
+     * the line, the guard sent [swap, swap + CUT) to the floor, and the outgoing's rows went unity →
+     * exactly 0 in one sample: the instantaneous cut the user ruled out (「不要让它戛然而止」),
+     * measured on the device's own render as a 0.3227 jump against the signal's own 99.9th percentile
+     * of 0.2648 (1.2x) where the spliced line reads 0.0913 (0.3x).
+     */
+    @Test
+    public void theSlamSpliceRunsPastItsOwnLine() {
+        StemFusion.Plan plan = slamFixture();
+        long swap = plan.swapMs;
+        assertEquals("the window contains the splice: fusionEnd is its END",
+                StemFusion.CUT_MS, plan.fusionEndMs - swap);
+        assertEquals(swap, plan.holdEndMs);
+        assertEquals("the incoming arrives over the same splice",
+                swap + StemFusion.CUT_MS, plan.arriveEndMs);
+        assertEquals("and A's rows are at unity up to the line",
+                1d, StemFusion.gainAt(plan, true, StemGesture.Stem.DRUMS, swap), 1e-9);
+        assertEquals("half way through the splice they are at cos(pi/4)",
+                Math.cos(Math.PI / 4),
+                StemFusion.gainAt(plan, true, StemGesture.Stem.DRUMS,
+                        swap + StemFusion.CUT_MS / 2), 1e-6);
+        assertEquals("and at the floor where it ends", 0d,
+                StemFusion.gainAt(plan, true, StemGesture.Stem.DRUMS, swap + StemFusion.CUT_MS),
+                1e-9);
+        assertEquals("the arriving side mirrors it", 0d,
+                StemFusion.gainAt(plan, false, StemGesture.Stem.DRUMS, swap), 1e-9);
+        assertEquals(Math.sin(Math.PI / 4),
+                StemFusion.gainAt(plan, false, StemGesture.Stem.DRUMS,
+                        swap + StemFusion.CUT_MS / 2), 1e-6);
+        assertEquals("and is at unity where it ends", 1d,
+                StemFusion.gainAt(plan, false, StemGesture.Stem.DRUMS, swap + StemFusion.CUT_MS),
+                1e-9);
+        // Monotone on both sides, so no element comes back and the sum only falls.
+        for (StemGesture.Stem row : new StemGesture.Stem[]{StemGesture.Stem.DRUMS,
+                StemGesture.Stem.BASS}) {
+            double previous = Double.MAX_VALUE;
+            for (long at = plan.entryMs; at <= plan.fusionEndMs; at += 5L) {
+                double g = StemFusion.gainAt(plan, true, row, at);
+                assertTrue(row + " must never rise again", g <= previous + 1e-9);
+                previous = g;
+            }
+            double rising = -1d;
+            for (long at = plan.entryMs; at <= plan.fusionEndMs; at += 5L) {
+                double g = StemFusion.gainAt(plan, false, row, at);
+                assertTrue(row + " must never fall again", g >= rising - 1e-9);
+                rising = g;
+            }
+        }
+    }
+
     /**
      * The four pairings the round-18 prototype measured on real material, with the numbers the
      * harness's own scan produced (`D:\qplayer-dev\harness\fusion\{grids,qpair-scan}.json`):
@@ -488,10 +590,18 @@ public class StemFusionTest {
                 StemFusion.NO_VOICE_MEASUREMENT));
         assertTrue(plan.reason, plan.valid);
         assertTrue("it is a SLAM", plan.slam);
-        assertEquals("one bar of the incoming's own grid", Math.round(bBeatMs * 4),
-                plan.windowMs);
+        // ⚠️ One bar of the incoming's own grid PLUS the splice: the elements change hands on the
+        // line at `swapMs` and the 80 ms splice that de-clicks that hand-over runs to `swap + CUT`,
+        // so the file has to contain it (round 6, tenth pass — without the CUT the guard sent the
+        // splice's own samples to the floor and the rows fell unity → 0 in one sample).
+        assertEquals("one bar of the incoming's own grid plus its splice",
+                Math.round(bBeatMs * 4) + StemFusion.CUT_MS, plan.windowMs);
         assertEquals("every element changes hands on the same line", plan.swapMs, plan.bassMs);
-        assertEquals(plan.swapMs, plan.fusionEndMs);
+        assertEquals("and all of A is gone where the splice ends", plan.swapMs + StemFusion.CUT_MS,
+                plan.fusionEndMs);
+        assertEquals("the incoming's arrival is that same splice", plan.swapMs,
+                plan.arriveStartMs);
+        assertEquals(plan.swapMs + StemFusion.CUT_MS, plan.arriveEndMs);
         assertEquals("and the carry's stretch is the deck's own ratio", 1d, plan.stretch, 1e-9);
     }
 

@@ -101,7 +101,26 @@ public final class StemFusion {
      *  no beat matching at all — the outgoing's rows play for one bar of the incoming's own grid and
      *  everything changes hands on that bar line, which is where the incoming's grid is solid. The
      *  one cost of no relation is that this cut lands wherever it lands in the outgoing's own bar;
-     *  that is what a DJ's slam mix does, and it is why the gesture is still a cut and not a fade. */
+     *  that is what a DJ's slam mix does, and it is why the gesture is still a cut and not a fade.
+     *
+      * ⚠️ <b>A SLAM cuts, and it is the only gesture that does — on the user's own instruction.</b>
+      * Round 5's listening produced two sentences and they are about different paths: for the
+      * unrelated-tempo pairs the user asked for the join itself (「速度无关的也要接，不要淡入淡出」 — "no
+      * fading in and out"), and round 6's listening ruled against cuts for the FUSION path (「不要让它
+      * 戛然而止」 — do not stop it dead). A fusion can fade because the two grids are related and
+      * a bar is a musical span to fade over; a slam's grids are unrelated, so there IS no such span —
+      * any length would be a made-up time, which is what a fade would be too. What a slam owes the
+      * ear is a hand-over that does not click, and that is the {@link #CUT_MS} equal-power
+      * cross-fade on the line: measured on the device's own render, the sample-to-sample jump across
+      * the line is 0.0913 with the splice against the signal's own 99.9th percentile of 0.2648
+      * (0.3x, no dip), where an instantaneous cut reads 0.3227 (1.2x). So: keep the cut, run the
+      * splice.
+      *
+      * <p>And the window is that one step PLUS the splice — `fusionEndMs` is where A is exactly gone,
+      * i.e. `swap + CUT_MS` — because the file has to contain the hand-over it is named for. Without
+      * the extra 80 ms `gainAt`'s own guard sent the splice's samples to the floor and the outgoing's
+      * rows fell unity → exactly 0 in one sample.
+     */
     public static final int SLAM_STEPS = 1;
 
     /** How long each unity/0 change takes. 80 ms: long enough not to click, short enough that the
@@ -2108,7 +2127,16 @@ public final class StemFusion {
         // one cut is the window's own end) and for a fusion too (its rows reach the floor ON the
         // window's last step, so the material has to last that far).
         int cutSteps = slam ? SLAM_STEPS : steps;
-        long windowMs = Math.round(steps * stepMs);
+        // ⚠️ A SLAM's window is one step PLUS the splice: every element changes hands on the line
+        // at `swapMs`, and the 80 ms splice that de-clicks that hand-over runs from the line to
+        // {@code swap + CUT_MS}. When the window ended ON the line (it did until round 6's tenth
+        // pass) the splice had nowhere to happen: `gainAt`'s own guard sent [swap, swap + CUT) to the
+        // floor, so the outgoing's rows fell from unity to exactly 0 in one sample — the
+        // instantaneous cut the user ruled out (「不要让它戛然而止」), measured on the device's own render as
+        // a 0.3227 sample-to-sample jump against the signal's own 99.9th percentile of 0.2648 (1.2x).
+        // With the splice inside the window the same line reads 0.0913 (0.3x) and no dip. The take
+        // grows by the same CUT_MS (see sourceSpan, which has always counted it).
+        long windowMs = slam ? Math.round(SLAM_STEPS * stepMs + CUT_MS) : Math.round(steps * stepMs);
         // The material the take needs: the rows are cut at `swapMs` (which for a slam is the
         // window's own end) plus the splice, in the outgoing's own file.
         long sourceSpan = (long) Math.ceil((cutSteps * stepMs + CUT_MS)
@@ -2214,13 +2242,27 @@ public final class StemFusion {
         // the bound the user asked to
         // keep (rule 3 of round 6: the fade must not dominate). With a one-step hold the rise starts
         // at the entry itself.
-        long arriveStart = entry + (long) Math.max(0, holdSteps - 1) * barStep;
-        long arriveEnd = arriveStart + (long) B_ARRIVAL_FADE_STEPS * barStep;
+        long arriveStart = slam ? entry + barStep : entry + (long) Math.max(0, holdSteps - 1) * barStep;
+        long arriveEnd = slam ? entry + barStep + CUT_MS
+                : arriveStart + (long) B_ARRIVAL_FADE_STEPS * barStep;
+        // ⚠️ A SLAM's instants come from the SLAM's shape, not the fusion's. `shapeFor` hands every
+        // pair a two-step hold, and on a slam that put `holdEnd`/`arriveEnd` at entry + 2 steps while
+        // the window is one step plus the splice — so the "after their swap" slice began past the
+        // window's end, held 0 samples, and {@link StemBridge#levelDb} answered −240 for it: every
+        // slam on the device was refused with "the incoming's own drums never arrive (-240.0 dBFS
+        // after their swap)" while the same slice read at the slam's own instants holds the
+        // incoming's real kit at −10.3 dBFS. A slam's rows are at unity to its line, the incoming's
+        // arrive at it over the splice, and all of A is gone where the splice ends.
         long drumsEnd = entry + (long) (holdSteps + A_DRUMS_FADE_STEPS) * barStep;
         long lowEndEnd = entry + (long) (holdSteps + lowEndFadeSteps) * barStep;
         long swap = slam ? entry + barStep : holdEnd;
         long bass = slam ? swap : holdEnd;
-        long drawEnd = slam ? entry + barStep : lowEndEnd;
+        long drawEnd = slam ? entry + barStep + CUT_MS : lowEndEnd;
+        if (slam) {
+            holdEnd = swap;
+            drumsEnd = drawEnd;
+            lowEndEnd = drawEnd;
+        }
         return new Plan(true, "", slam, aBar, bBar, stepMs, stretch, relation, junction, entry, swap,
                 bass, drawEnd, windowMs, sourceSpan, materialFrom, materialWindow, forward, back,
                 junction - target, lock, in.speed, choice.quiet, choice.groove, choice.bodyAtLine,
@@ -3046,6 +3088,8 @@ public final class StemFusion {
         long carryEndIn = plan.fusionEndMs > 0L ? plan.fusionEndMs - plan.entryMs : bassIn;
         long arriveIn = plan.arriveStartMs > 0L ? plan.arriveStartMs - plan.entryMs : swapIn;
         long arrivedIn = plan.arriveEndMs > 0L ? plan.arriveEndMs - plan.entryMs : swapIn;
+        // The material's own end, ms: the window the render holds, which is where every span stops.
+        long endMs = Math.round(m.frames * 1000d / rate);
         double windowSec = m.frames / (double) rate;
 
         r.carriedDrumsDb = StemBridge.levelDb(carried(m, StemGesture.Stem.DRUMS.row()), rate,
@@ -3142,14 +3186,18 @@ public final class StemFusion {
         // The incoming's own rows, as the table places them.
         float[][] inDrums = gated(m.incoming, StemGesture.Stem.DRUMS, plan, edit, rate, m.frames);
         float[][] inBass = gated(m.incoming, StemGesture.Stem.BASS, plan, edit, rate, m.frames);
-        r.incomingDrumsBeforeDb = StemBridge.levelDb(inDrums, rate, arriveIn / 1000d);
-        r.incomingDrumsAfterDb = StemBridge.levelDb(slice(inDrums, (int) framewise(arrivedIn, rate),
-                Math.max(0, m.frames - (int) framewise(arrivedIn, rate))), rate,
-                (m.frames - framewise(arrivedIn, rate)) / (double) rate);
-        r.incomingBassBeforeDb = StemBridge.levelDb(inBass, rate, arriveIn / 1000d);
-        r.incomingBassAfterDb = StemBridge.levelDb(slice(inBass, (int) framewise(arrivedIn, rate),
-                Math.max(0, m.frames - (int) framewise(arrivedIn, rate))), rate,
-                (m.frames - framewise(arrivedIn, rate)) / (double) rate);
+        // ⚠️ AN EMPTY SPAN IS "UNKNOWN", NOT "DIGITAL SILENCE" (round 6, tenth pass). A clause must
+        // never fail because the window it was handed holds no samples: on a SLAM the incoming's
+        // rows arrive ON the line that ends its window, so there is nothing after them to measure
+        // inside the file — the body's own audio continues there, and the file is one continuous
+        // source by construction — and the old arithmetic read that as −240 dBFS and refused every
+        // slam with "the incoming's own drums never arrive". The spans are therefore measured in
+        // frames first, and a span that is empty reports NaN, which every clause below treats as
+        // "not measured" rather than as a floor.
+        r.incomingDrumsBeforeDb = levelOfSpan(inDrums, rate, 0L, arriveIn, m.frames);
+        r.incomingDrumsAfterDb = levelOfSpan(inDrums, rate, arrivedIn, endMs, m.frames);
+        r.incomingBassBeforeDb = levelOfSpan(inBass, rate, 0L, arriveIn, m.frames);
+        r.incomingBassAfterDb = levelOfSpan(inBass, rate, arrivedIn, endMs, m.frames);
         r.incomingVocalDb = StemBridge.levelDb(m.incomingVocals != null
                 && StemGesture.Stem.VOCALS.row() < m.incomingVocals.length
                 ? m.incomingVocals[StemGesture.Stem.VOCALS.row()] : new float[0][], rate,
@@ -3244,19 +3292,19 @@ public final class StemFusion {
             bad.append("the melodic carry is the outgoing's voice (it aligns ")
                     .append(fmt(r.voiceAlignmentMelody)).append(" with its vocal stem); ");
         }
-        if (r.incomingDrumsBeforeDb > SILENT_DBFS) {
+        if (!Double.isNaN(r.incomingDrumsBeforeDb) && r.incomingDrumsBeforeDb > SILENT_DBFS) {
             bad.append("the incoming's own drums are not silent before their swap (")
                     .append(fmt(r.incomingDrumsBeforeDb)).append(" dBFS); ");
         }
-        if (!(r.incomingDrumsAfterDb > SILENT_DBFS)) {
+        if (!Double.isNaN(r.incomingDrumsAfterDb) && !(r.incomingDrumsAfterDb > SILENT_DBFS)) {
             bad.append("the incoming's own drums never arrive (")
                     .append(fmt(r.incomingDrumsAfterDb)).append(" dBFS after their swap); ");
         }
-        if (r.incomingBassBeforeDb > SILENT_DBFS) {
+        if (!Double.isNaN(r.incomingBassBeforeDb) && r.incomingBassBeforeDb > SILENT_DBFS) {
             bad.append("the incoming's own low end is not silent before its swap (")
                     .append(fmt(r.incomingBassBeforeDb)).append(" dBFS); ");
         }
-        if (!(r.incomingBassAfterDb > SILENT_DBFS)) {
+        if (!Double.isNaN(r.incomingBassAfterDb) && !(r.incomingBassAfterDb > SILENT_DBFS)) {
             bad.append("the incoming's own low end never arrives (")
                     .append(fmt(r.incomingBassAfterDb)).append(" dBFS after its swap); ");
         }
@@ -3294,6 +3342,29 @@ public final class StemFusion {
         r.acceptable = bad.length() == 0;
         r.failures = bad.toString();
         return r;
+    }
+
+    /**
+     * One row's level over the span {@code [fromMs, endMs)} of a material window, dBFS — or NaN when
+     * the span holds no samples at all.
+     *
+     * <p>The distinction matters exactly once and it cost every slam on the device: a span that
+     * starts at or past the window's end used to be measured anyway, and {@link
+     * StemBridge#levelDb} answers −240 dBFS for an empty slice, which reads as "digital silence" in
+     * every clause that consumes it. "There is nothing to measure here" and "there is silence here"
+     * are different claims, and only the second one may refuse a fusion.
+     */
+    private static double levelOfSpan(float[][] pcm, int rate, long fromMs, long toMs, int limit) {
+        if (pcm == null || pcm.length == 0) return Double.NaN;
+        int from = (int) Math.round(fromMs * rate / 1000d);
+        int to = Math.min(limit, (int) Math.round(toMs * rate / 1000d));
+        int frames = to - from;
+        if (frames <= 0 || from >= limit) return Double.NaN;
+        float[][] span = slice(pcm, from, frames);
+        if (span == null || span.length == 0 || span[0] == null || span[0].length == 0) {
+            return Double.NaN;
+        }
+        return StemBridge.levelDb(span, rate, span[0].length / (double) rate);
     }
 
     /** One row's level clause: not more than {@link #CARRY_TOLERANCE_DB} below where the table
