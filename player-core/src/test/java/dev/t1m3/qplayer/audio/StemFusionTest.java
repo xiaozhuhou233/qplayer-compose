@@ -559,11 +559,18 @@ public class StemFusionTest {
     }
 
     /**
-     * ⚠️ Round 5's intro skip (「直接词接词」): the incoming track's voice arrives 12 s in (a rap
-     * track's vocal-free intro, measured on the device's {@code 34364062}: its first sustained
-     * vocal second is at 12 125 ms), so the deck starts at the common line a runway before that
-     * voice instead of at the content start — and its voice arrives right after the outgoing's,
-     * with the dead intro never played. When the voice is there from the start, nothing moves.
+     * ⚠️ Round 5's intro skip, read the way round 6's third pass reads it: the incoming track's
+     * voice arrives 12 s in (a rap track's vocal-free intro, measured on the device's
+     * {@code 34364062}: its first sustained vocal second is at 12 125 ms), so the deck starts at
+     * the common line a runway before that voice instead of at the content start — and its voice
+     * arrives right after the outgoing's, with the dead intro never played. When the voice is there
+     * from the start, nothing moves.
+     *
+     * <p>⚠️ And {@code skippedIntroMs} is the number the entry itself shows: the deck's first sample
+     * is 10 000 ms into the file, so 10 000 ms of intro are not played. (Until round 6's third pass
+     * it reported the distance to the voice's own bar line — 2 000 — which reads as "2 000 ms of
+     * intro skipped" beside an entry of 10 000. The extra numbers are in {@link #plan}, which now
+     * also prints how far the voice still is from the landing.)
      */
     @Test
     public void aDeadIntroIsSkippedAndAVoiceFromTheStartIsNot() {
@@ -575,10 +582,14 @@ public class StemFusionTest {
         assertTrue(skipped.reason, skipped.valid);
         assertEquals("the line a runway before the voice (12 000) is the deck's start", 10_000L,
                 skipped.entryMs);
-        assertEquals("and 2 000 ms of intro were skipped", 2_000L, skipped.skippedIntroMs);
+        assertEquals("so 10 000 ms of intro are never played", 10_000L, skipped.skippedIntroMs);
         assertEquals(12_125L, skipped.firstVocalMs);
+        assertEquals("and no skip was declined", -1L, skipped.declinedIntroMs);
         assertTrue(plan(skipped), skipped.fusionEndMs <= 40_000L);
-        assertTrue(skipped.describe(), skipped.describe().contains("skipping 2000ms of its intro"));
+        assertTrue(skipped.describe(),
+                skipped.describe().contains("skipping 10000ms of its intro"));
+        assertTrue(skipped.describe(),
+                skipped.describe().contains("2125ms after the deck starts"));
 
         // The voice from the start: the entry is where it always was.
         StemFusion.Plan immediate = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 40_000L,
@@ -588,6 +599,83 @@ public class StemFusionTest {
         assertTrue(immediate.reason, immediate.valid);
         assertEquals(0L, immediate.entryMs);
         assertEquals(0L, immediate.skippedIntroMs);
+    }
+
+    /**
+     * ⚠️ Round 6's third pass, the lower bound: the skip is about a FEW bars of instrumental, so
+     * what it asks is one bar of the incoming track's own grid — not round 5's flat 8 000 ms, which
+     * is four bars of a 120 BPM record and so left every track whose voice came in at two or three
+     * bars playing its whole intro. The bound is a bar count, so it means the same thing at any
+     * tempo: a voice 0.75 bars in is nothing to skip, a voice two bars in is one bar of intro the
+     * deck can start a bar later for.
+     */
+    @Test
+    public void aFewBarsOfIntroAreSkippedAndUnderOneBarIsNot() {
+        double[] aBars = bars(2000d, 0d, 120);
+        double[] bBars = bars(2000d, 0d, 120);
+        // The voice 1 500 ms in (0.75 of a 2 000 ms bar): under the one-bar bound, so no skip.
+        StemFusion.Plan under = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 20_000L,
+                0L, 500d, 0d, 500d, 0d, 1d, aBars, bBars,
+                StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT,
+                StemFusion.NO_BODY_MEASUREMENT, 1_500L));
+        assertTrue(under.reason, under.valid);
+        assertEquals(0L, under.entryMs);
+        assertEquals(0L, under.skippedIntroMs);
+
+        // A two-bar intro (the voice at 4 000 ms): the deck starts one bar later, at 2 000, so one
+        // bar of instrumental is never played and the voice is a bar into the track.
+        StemFusion.Plan fewBars = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 20_000L,
+                0L, 500d, 0d, 500d, 0d, 1d, aBars, bBars,
+                StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT,
+                StemFusion.NO_BODY_MEASUREMENT, 4_000L));
+        assertTrue(fewBars.reason, fewBars.valid);
+        assertEquals(2_000L, fewBars.entryMs);
+        assertEquals(2_000L, fewBars.skippedIntroMs);
+        assertTrue(fewBars.describe(), fewBars.describe().contains("2000ms after the deck starts"));
+    }
+
+    /**
+     * ⚠️ Round 6's third pass, the ceiling — and this is the clause the pass exists for: the landing
+     * is taken only when a deck started there still leaves the whole passage inside the window the
+     * incoming track's voice is held out for.
+     *
+     * <p>The same material twice, and the only difference is that window. With a 40 s window the
+     * landing at 10 000 ms is paid for. With the window a 17 s blend actually gives it (17 000 ms of
+     * it, and a passage of 8 000 ms), the same landing would put the passage's end at 18 000 ms —
+     * <b>past the window</b> — and until this pass that made the plan <b>invalid</b>: the pair lost
+     * its fusion entirely, i.e. a track whose voice came in late was played by the round-17 edit
+     * rather than fused with its intro intact. Now the skip is simply not taken, the deck starts
+     * where it always did, and the fusion stands — with the landing it refused reported as
+     * {@code declinedIntroMs} rather than dropped.
+     */
+    @Test
+    public void aSkipTheVocalWindowCannotPayForIsNotTakenAndTheFusionStands() {
+        double[] bBars = bars(2000d, 0d, 120);
+        StemFusion.Plan paid = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 40_000L,
+                0L, 500d, 0d, 500d, 0d, 1d, bars(2000d, 0d, 120), bBars,
+                StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT,
+                StemFusion.NO_BODY_MEASUREMENT, 12_125L));
+        assertTrue(paid.reason, paid.valid);
+        assertEquals(10_000L, paid.entryMs);
+        assertEquals(-1L, paid.declinedIntroMs);
+
+        StemFusion.Plan tooLate = StemFusion.plan(new StemFusion.Input(240_000L, 17_000L, 17_000L,
+                0L, 500d, 0d, 500d, 0d, 1d, bars(2000d, 0d, 120), bBars,
+                StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT,
+                StemFusion.NO_BODY_MEASUREMENT, 12_125L));
+        assertTrue("the pair keeps its fusion: " + tooLate.reason, tooLate.valid);
+        assertEquals("the deck starts where it always did", 0L, tooLate.entryMs);
+        assertEquals(0L, tooLate.skippedIntroMs);
+        assertEquals("and the landing it refused is named", 10_000L, tooLate.declinedIntroMs);
+        assertTrue("which the window cannot pay for: " + plan(tooLate),
+                tooLate.declinedIntroMs + tooLate.windowMs > tooLate.removalMs);
+        assertTrue("while the fusion that IS planned fits it", tooLate.valid);
+        assertTrue(plan(tooLate), tooLate.fusionEndMs <= tooLate.removalMs);
+        assertEquals(12_125L, tooLate.firstVocalMs);
+        assertTrue(tooLate.describe(), tooLate.describe().contains("does NOT skip to it"));
+        assertTrue(tooLate.describe(),
+                tooLate.describe().contains(tooLate.removalMs + "ms the incoming's voice is held"
+                        + " out for"));
     }
 
     /** A plan's own evidence, for a message. */

@@ -202,6 +202,13 @@ public final class StemFusion {
      *       bump is what makes those files re-render instead of being played with the old window:
      *       a listener's 过渡时长 would otherwise look like it was still being over-cut on exactly
      *       the pairs they had already heard.</li>
+     *   <li><b>5 → 6</b> — round 6's third pass: the intro skip's landing is content-driven
+     *       ({@link #VOCAL_SKIP_MIN_BARS} bars of the incoming track's own grid instead of a flat
+     *       8 000 ms, and the window the incoming's voice is out for as its ceiling), so pairs whose
+     *       incoming voice comes in after one or two bars now start the deck later than they did,
+     *       and pairs whose voice comes in so late that a landing cannot pay for the passage now
+     *       KEEP their fusion instead of losing it to a refused landing. Both are audible
+     *       differences; a file written before this bump is played with the old entry.</li>
      * </ul>
      *
      * <p>The price is one re-render per pair, once, in the pre-lane where there are minutes of
@@ -211,7 +218,7 @@ public final class StemFusion {
      * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
      * name.
      */
-    public static final int RULE_VERSION = 5;
+    public static final int RULE_VERSION = 6;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with
@@ -687,17 +694,31 @@ public final class StemFusion {
      *  decode window can hold (see {@code AndroidStemEditRenderer.probeWindow}). */
     public static final long QUIET_BODY_REACH_MS = 30_000L;
 
-    /** How long the incoming's voice may be absent at the start before its intro is skipped and the
-     *  deck is started later instead, ms (round 5, the user's 「在某些情况下你也可以直接跳过下一首歌
-     *  的无关紧要前奏 比如某些说唱歌曲，直接词接词」).
+    /** How much of the incoming's own intro there has to be before the deck starts later instead
+     *  of at the content start, in <b>bars of the incoming's own grid</b> (round 6's third pass;
+     *  the user's 「让 ai 决定过渡时…接在第二首歌的哪里，不如直接跳过一些小节到人声部分」).
      *
-     *  <p>Measured on the four tracks of the device run — the first <em>sustained</em> second of
-     *  the separated vocal row over each track's head: {@code 1460801818} 0 ms, {@code 34364062}
-     *  <b>12 125 ms</b>, {@code 1410815174} 0 ms, {@code 2700280437} 0 ms. One of the four has an
-     *  intro worth skipping and it is 12.1 s of vocal-free bars (a rap track: the 「词接词」 case
-     *  exactly); the other three have their voice within a few hundred ms. 8 000 ms sits in that
-     *  gap, and an intro shorter than one runway bar or two is not worth skipping anyway. */
-    public static final long VOCAL_SKIP_MIN_MS = 8_000L;
+     *  <p>⚠️ <b>Why a bar count and no longer round 5's flat 8 000 ms.</b> The complaint is about a
+     *  <em>few bars</em> of instrumental before the voice, and 8 000 ms is four bars of a 120 BPM
+     *  record (three and a half at 100, five and a half at 168) — a threshold in milliseconds is a
+     *  different musical rule on every track. What the skip is really about is the runway the
+     *  landing keeps: the voice has to be far enough in that a deck can still start a bar before
+     *  it, which is one bar of that track's own grid at any tempo.
+     *
+     *  <p><b>Measured over the library the harness has decoded</b> ({@code fusion/intro.py}: the
+     *  app's own {@link #vocalStartMs} rule — 25 ms frames, a 1 000 ms median above −50 dBFS — on
+     *  the same separation the render makes, over each track's first 20 s): of 17 tracks, <b>12</b>
+     *  sing at once ({@code audio_owa} 0, {@code audio_losemymind} 0, {@code audio_unhappy} 0,
+     *  {@code audio_heard} 0, {@code audio_squabble} 0, {@code audio_agudo} 0, {@code audio_pianzhi}
+     *  0, {@code audio_zhenhai} 0, {@code audio_huai} 100, {@code audio_inmyhead} 750, {@code
+     *  audio_obsessed} 1 200, {@code audio_violet} 2 150 ms — the two over one bar are 0.36 and
+     *  1.07 bars of their own grids, so neither is an intro) and <b>5</b> have a real one
+     *  ({@code audio_hurtyou} 9 225, {@code audio_roundtown} 12 100, {@code audio_coldplay} 13 175,
+     *  {@code audio_outoflove} 13 175, {@code audio_paradise} 14 175 ms). <b>Nothing in the library
+     *  sits between 2.2 s and 9.2 s</b>, so on this material one bar and 8 000 ms choose the same
+     *  five tracks — the difference is that the bar count is the rule the user asked for and cannot
+     *  be tripped by a tempo. */
+    public static final int VOCAL_SKIP_MIN_BARS = 1;
 
     /** How many common-grid bars of runway the deck keeps before the incoming's first vocal, when
      *  its intro is skipped: the deck starts a bar or two early so the voice lands on a beat of a
@@ -1544,11 +1565,39 @@ public final class StemFusion {
         public final boolean entryFromBeatGrid;
         /** The worst wall-clock phase difference at the seam, ms. */
         public final double phaseErrorMs;
-        /** How much of the incoming's intro the deck skips, ms (0 when it starts where it always
-         *  did) — round 5's 「词接词」, with {@link #firstVocalMs} it was skipped for. */
+        /** How much of the incoming's intro the deck skips, ms — how much later than its own
+         *  content start its first sample is, 0 when it starts where it always did (round 5's
+         *  「词接词」, with {@link #firstVocalMs} it was skipped for). */
         public final long skippedIntroMs;
         /** Where the incoming's voice first comes in, ms of its own file, or -1 when unknown. */
         public final long firstVocalMs;
+        /** The landing the intro skip wanted but did NOT take, ms of the incoming's own file, or
+         *  -1 when no skip was declined: the voice comes in late enough to skip to, but a deck
+         *  started there would run the passage past the window the incoming's voice is held out
+         *  for ({@link #removalMs}), so {@link #entryMs} stayed where it always was.
+         *
+         *  <p>⚠️ This is a clause the plan does not fail on, and that is the whole point of it:
+         *  the same landing used to be taken and then refused by {@code fusionEnd <= removalMs},
+         *  which made the plan <b>invalid</b> — so a pair whose incoming voice came in late lost
+         *  its fusion altogether instead of merely keeping the intro. Measured on the real planner
+         *  over the library's own numbers ({@code fusion/PlanDump3}, at the user's 17 s blend and a
+         *  40 ms content start), <b>5 of 14 inputs were refused the old way</b> ({@code
+         *  audio_roundtown}, {@code audio_outoflove}, {@code audio_paradise} and the half-bar phases
+         *  of {@code audio_coldplay} and {@code 34364062}) and all of them plan a fusion now.
+         *
+         *  <p>And the ceiling is not a constant: it is that window, which at the user's own settings
+         *  (17 s blend, 17 040 ms of window) comes to <b>8 864–10 482 ms</b> for the library's own
+         *  bars (a passage of four bars: 2 044 ms bars → 8 864, 2 385 → 9 884, 3 750 → 9 539). So an
+         *  intro is skipped up to about 9–10 s in; a voice later than that keeps its intro (and now
+         *  keeps its fusion), because the passage itself has to fit inside the same window the
+         *  incoming's voice is held out for — and it is what the round-20 gate asks of every
+         *  render. */
+        public final long declinedIntroMs;
+        /** How long the incoming track plays with its vocals out — the window a fusion has to fit
+         *  inside, and the ceiling an intro skip is measured against ({@link #declinedIntroMs}).
+         *  Carried here for the log: the renderer's own line then says the window in the same
+         *  sentence as the landing it refuses. */
+        public final long removalMs;
 
         /** Round 6's gesture instants, in the file's own timeline: the outgoing's rows hold at
          *  unity until {@link #holdEndMs}, its drums reach the floor at {@link #drumsEndMs} and its
@@ -1579,7 +1628,7 @@ public final class StemFusion {
              double phaseErrorMs, long skippedIntroMs, long firstVocalMs, long holdEndMs,
              long drumsEndMs, long lowEndEndMs, long arriveStartMs, long arriveEndMs,
              boolean entryFromBeatGrid, boolean holdForIncoming, long incomingDrumsMs,
-             long incomingBassMs) {
+             long incomingBassMs, long declinedIntroMs, long removalMs) {
             this.valid = valid;
             this.reason = reason == null ? "" : reason;
             this.slam = slam;
@@ -1618,6 +1667,8 @@ public final class StemFusion {
             this.phaseErrorMs = phaseErrorMs;
             this.skippedIntroMs = skippedIntroMs;
             this.firstVocalMs = firstVocalMs;
+            this.declinedIntroMs = declinedIntroMs;
+            this.removalMs = removalMs;
             this.holdEndMs = holdEndMs;
             this.drumsEndMs = drumsEndMs;
             this.lowEndEndMs = lowEndEndMs;
@@ -1685,7 +1736,13 @@ public final class StemFusion {
                             + " window, separated over %dms from %dms",
                     head, shapes, junctionMs, junctionShiftMs, searchBackMs, searchBandMs, entryMs,
                     skippedIntroMs > 0L ? String.format(Locale.US, " (skipping %dms of its intro:"
-                            + " its voice first comes in at %dms)", skippedIntroMs, firstVocalMs)
+                            + " its voice first comes in at %dms of its file, %dms after the deck"
+                            + " starts)", skippedIntroMs, firstVocalMs, firstVocalMs - entryMs)
+                            : declinedIntroMs > 0L ? String.format(Locale.US, " (its voice first"
+                            + " comes in at %dms, but the deck does NOT skip to it: a landing on"
+                            + " %dms would run this passage to %dms, past the %dms the incoming's"
+                            + " voice is held out for, so it starts where it always did)",
+                            firstVocalMs, declinedIntroMs, declinedIntroMs + windowMs, removalMs)
                             : "",
                     phaseErrorMs, phaseMatched ? "matched to A's grid"
                             : "NOT matched (the plain bar line)",
@@ -1718,7 +1775,7 @@ public final class StemFusion {
         return new Plan(false, reason, false, aBarMs, bBarMs, bBarMs, 1d, null, -1L, -1L, -1L, -1L,
                 -1L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, lockError, 1d, false, false, false, false,
                 Double.NaN, Double.NaN, Double.NaN, false, Double.NaN, 0L, -1L, -1L, -1L, -1L, -1L,
-                -1L, false, false, -1L, -1L);
+                -1L, false, false, -1L, -1L, -1L, 0L);
     }
 
     /**
@@ -2235,9 +2292,11 @@ public final class StemFusion {
 
         // The entry: the incoming's own bar line the deck starts on — on the COMMON grid (every
         // `p` of its bars) whose phase, played back at `speed`, lands closest to the outgoing's at
-        // the junction, or, when the incoming's voice comes in long after its content starts, the
-        // line a runway before that voice (round 5's intro skip: 「直接词接词」).
-        long[] entryChoice = entry(in, junction, stepMs, slam ? 1 : relation.p);
+        // the junction, or, when the incoming's voice comes in after its own intro, the line a
+        // runway before that voice (round 5's intro skip, round 6's third pass: 「不如直接跳过一些
+        // 小节到人声部分」). `windowMs` is handed over because the skip's own ceiling is the window
+        // the incoming's voice is held out for — see `entry`.
+        long[] entryChoice = entry(in, junction, stepMs, slam ? 1 : relation.p, windowMs);
         long entry = entryChoice[0];
         if (entry < 0L) {
             // ⚠️ The refusal says WHAT it looked at, because the version that did not cost a device
@@ -2293,7 +2352,7 @@ public final class StemFusion {
                 entryChoice.length > 3 ? entryChoice[3] : 0L, in.firstVocalMs, holdEnd, drumsEnd,
                 lowEndEnd, arriveStart, arriveEnd,
                 entryChoice.length > 4 && entryChoice[4] == 1L, holdForIncoming, incomingDrumsMs,
-                incomingBassMs);
+                incomingBassMs, entryChoice.length > 5 ? entryChoice[5] : -1L, in.removalMs);
     }
 
     /** The lock clause's own words, so {@link #refusal} and {@link #plan} refuse a pair for the
@@ -2410,22 +2469,34 @@ public final class StemFusion {
      * has the same phase, so every candidate ties and the first one wins either way).
      *
      * @return {@code {entryMs, phaseMatched ? 1 : 0, phaseErrorUs, skippedIntroMs,
-     *         entryFromBeatGrid ? 1 : 0}} — entryMs is -1 when there is no bar line to place the
-     *         deck on
+     *         entryFromBeatGrid ? 1 : 0, declinedIntroMs}} — entryMs is -1 when there is no bar
+     *         line to place the deck on, and declinedIntroMs is the landing an intro skip wanted
+     *         but could not take (-1 when no skip was declined; see {@link Plan#declinedIntroMs})
      */
-    private static long[] entry(Input in, long junctionMs, double stepMs, int p) {
+    private static long[] entry(Input in, long junctionMs, double stepMs, int p, long windowMs) {
         // The lines the deck may start on: the COMMON grid's — every `p` bars of the incoming's own
         // grid (every bar for a unison pair and a slam, which is bit-for-bit round 18's and round
         // 4's candidate set), spaced `stepMs` apart.
         long gridStep = Math.max(1L, Math.round(stepMs));
         long to = in.contentStartMs + 2L * gridStep;
-        // ⚠️ Round 5: the intro skip. When the incoming's voice comes in long after its content
-        // starts, the deck starts at the common line a runway BEFORE that voice instead of at the
-        // beginning — the intro is never played, and the voice lands a bar or two into a track that
-        // is already playing (「直接词接词」). Only the lines up to the voice's own line are
-        // candidates, and the whole move is bounded by the removal window below.
+        // ⚠️ Round 5's intro skip, round 6's third pass: when the incoming's voice comes in after
+        // its own intro, the deck starts at the common line a runway BEFORE that voice instead of
+        // at the beginning — the bars of instrumental are never played, and the voice lands a bar
+        // into a track that is already playing (「直接跳过一些小节到人声部分」). Only the lines up to
+        // the voice's own line are candidates.
+        //
+        // The lower bound is one bar of the incoming track's own grid (see VOCAL_SKIP_MIN_BARS),
+        // and the CEILING is not a constant at all: the landing plus the whole passage has to stay
+        // inside the window the incoming's voice is held out for (`removalMs`, the same clause the
+        // plan checks below), so the skip is taken only when a deck started there leaves the
+        // passage inside that window. ⚠️ That is why the ceiling is asked HERE rather than left to
+        // the `fusionEnd <= removalMs` clause: a landing that broke the clause used to make the
+        // whole plan invalid — i.e. a pair whose incoming voice came in late lost its fusion
+        // altogether rather than merely keeping its intro — and the ask is that a skip which would
+        // break a clause simply does not happen. A declined skip is reported (declinedIntroMs), not
+        // silently dropped.
         boolean lateVoice = in.firstVocalMs > 0L
-                && in.firstVocalMs - in.contentStartMs >= VOCAL_SKIP_MIN_MS;
+                && in.firstVocalMs - in.contentStartMs >= introSkipMinMs(in, gridStep);
         if (lateVoice) to = Math.max(to, in.firstVocalMs + gridStep);
         double[] lines = entryLines(in, gridStep, p, to);
         boolean fromBeatGrid = lines != in.bBarLinesMs;
@@ -2442,9 +2513,42 @@ public final class StemFusion {
         long start = Math.max(in.contentStartMs, line - (long) VOCAL_SKIP_RUNWAY_BARS * gridStep);
         long[] skip = search(in, junctionMs, gridStep, start, line + 1L, in.firstVocalMs, lines,
                 fromBeatGrid);
-        if (skip[0] < 0L) return plain;
-        long skipped = line - skip[0];
-        return new long[]{skip[0], skip[1], skip[2], skipped, skip[4]};
+        // ⚠️ And the skip has to MOVE the deck, not merely re-choose the same line: the landing is
+        // chosen by its own phase search over its own window, so on a pair it can land on the line
+        // the un-fused entry would have taken (or, for a relative pair whose plain entry is a later
+        // step of the common grid, even earlier). Either way there is no skip to report and the
+        // plain entry stands — the alternative is a deck that starts earlier than the plan without a
+        // fusion would have, logged as "skipping 0ms".
+        if (skip[0] < 0L || skip[0] <= plain[0]) return plain;
+        // The ceiling: the landing plus the whole passage has to stay inside the window the
+        // incoming's voice is held out for, which is the same clause the plan asks below
+        // (`fusionEnd <= removalMs`) — asked here so that a landing which cannot pay for itself
+        // leaves the entry where it was instead of making the plan invalid. A declined skip is
+        // reported ({@link #declined}), not silently dropped.
+        if (skip[0] > in.removalMs - windowMs) return declined(plain, skip[0]);
+        // ⚠️ What "skipped" means, and it is read off the number the listener can check: how much
+        // later than its own content start the deck's first sample is. (Round 5 measured it to the
+        // voice's own bar line instead, i.e. the runway plus the gap between that line and the
+        // landing — a number that reads as "2 000 ms of intro skipped" while the deck in fact
+        // starts 10 000 ms in. The log line prints both, so nothing is lost.)
+        long skipped = skip[0] - in.contentStartMs;
+        return new long[]{skip[0], skip[1], skip[2], skipped, skip[4], -1L};
+    }
+
+    /** The landing the deck would have started on had the intro skip been taken, as the refusal
+     *  {@link #entry} returns: the entry stays where it always was, and the number is the skip's
+     *  own evidence for the log. */
+    private static long[] declined(long[] plain, long wouldBe) {
+        return new long[]{plain[0], plain[1], plain[2], plain[3], plain[4], wouldBe};
+    }
+
+    /** The least intro worth skipping, ms: {@link #VOCAL_SKIP_MIN_BARS} bars of the incoming
+     *  track's own grid — never less than one line of the common grid the landing moves by, so a
+     *  pair whose relation makes a step several bars wide cannot be "skipped" by less than its own
+     *  quantisation. */
+    private static long introSkipMinMs(Input in, long gridStep) {
+        if (!(in.bBeatMs > 0d)) return gridStep;
+        return Math.max(gridStep, Math.round(VOCAL_SKIP_MIN_BARS * BEATS_PER_BAR * in.bBeatMs));
     }
 
     /**
