@@ -8,10 +8,13 @@
 ## 零、接手须知（新会话先读这一段，约 45 行，够开工）
 
 **状态**：分支 `feat/ai-dj-transition`（**`main` 一直没动**，仍是 `5efc1ba`）。
-最近一次发布：tag `ai-dj-transition-2026-09-24a`（**192,179,303 bytes ≈ 192 MB**，sha256 见发布说明），
-`https://github.com/xiaozhuhou233/qplayer-compose/releases/download/ai-dj-transition-2026-09-24a/app-debug.apk`
+最近一次发布：tag `ai-dj-transition-2026-09-24b`（**192,179,303 bytes ≈ 192 MB**，
+sha256 `e124dfae…`，发行说明里有人声窗口/长度的全部数字），
+`https://github.com/xiaozhuhou233/qplayer-compose/releases/download/ai-dj-transition-2026-09-24b/app-debug.apk`
 （能装的是 **debug** 包；release 是未签名的）。发布用 `gh`，`github.com:443` 在本机被拦，
 **必须走本地代理 `127.0.0.1:7890`**；资产 URL 要**从 `gh` 输出里原样复制**（前几轮手打错过账号名）。
+**24b 相对 24a 只有两处改动**（第 20 轮，2026-09-24，见第七节：人声/变调窗口按「出曲还在响」的时刻收尾 +
+长度归滑动条）；`RULE_VERSION` 4→5，所以旧编辑文件会重渲一次。
 
 **模型随 APK 交付（第 19 轮，2026-09-24）**：htdemucs-quarter 模型现在**打在 APK 的
 `assets/models/htdemucs-quarter.onnx` 里**，App 在**首次渲染**（preload 通道）把它复制到自己的
@@ -30,8 +33,10 @@
 **这个功能是什么**：切歌时的 AI 过渡（DJ 式融合）。已实现并**在真机上验证过机制**的部分：
 双播放器交叉淡化；按配对选择过渡方式（CROSSFADE / SILENCE_TRIM / FADE_OUT_IN / QUICK_FADE / CUT 五种都出现过，
 按你曲库 1260 个有序配对统计为 CROSSFADE 76% / FADE_OUT_IN 24%）；出曲压成 −10dB 垫底、82% 处 −66dB；
-入曲人声**等到融合结束+1 秒的小节线**才回来；调性过渡是**两侧相向的阶梯**（每步一个整调，读到平台确认）；
-低频在 15% 处交接；节拍对齐；`过渡时长` 滑块 4–30 秒（默认 15）。
+**入曲人声只压到「出曲还听得见」的那一段**（发货的 DJ 形状自己过 −60dB 地板在 ramp 的 75.2%，
+第 20 轮起窗口就在这里收尾，回来仍落在其后的第一条小节线上；对称曲线仍是整个 ramp，融合仍是整窗）；
+调性过渡是**两侧相向的阶梯**（每步一个整调，读到平台确认；融合编辑是单次写回）；
+低频在 15% 处交接；节拍对齐；`过渡时长` 滑块 4–30 秒（默认 15）**长度归它，不再被 8 秒封顶或静音裁切顶掉**。
 
 **第 18 轮加了「融合过渡」**：过渡段不再靠 A 的原混音以 −10dB 垫底与 B 的伴奏交叉，而是**把两首歌
 的去人声伴奏在预渲染文件里拼成一小段**——交界点起 A 的鼓/贝斯接着打，B 的床在一小节内**淡入**
@@ -2562,6 +2567,59 @@ PlayerControllerPlaybackTest` = **105 个用例 0 失败**。`StemBridge.stretch
 **仍未被人耳听过**；模型交付之外的老问题（启动掉帧、桥没在真机放过、B站圆角、17% 双可闻等）
 仍都在 §零 的清单里。
 
+
+
+
+### 第 20 轮（2026-09-24）：人声/变调窗口跟着「出曲还在响」的时刻收尾；长度归滑动条
+
+**用户听完 24b 之前的两条**（当天在设备上一边听一边提的）：「现在再第二首歌切割人声有点切太多了」、
+「过渡长短并没有按照设置中的滑动条来」；第三条是把两条串起来的原则：「人声和变调被切割的太久了，
+上一首歌结束时声音很小时隔一小会过渡段就应该停止只放伴奏，更应该回复变调和人声……现在只剩下时间的问题」。
+
+**诊断（全部来自设备自己的日志，改之前就对上）**：
+1. 人声窗口 = `混合时长 + 入曲歌头`，回来在 `窗口+1000ms` 后的第一条小节线。17 s 滑动条 + 400 ms 歌头
+   → 用户手机上 24a 原文 `will hold its vocals out for 17400ms — the user's 17000ms blend plus the 400ms
+   of its own head …`；本机 15 s 那段是 `… for 15000ms … plus the 0ms …` 与
+   `vocals return at 17.128s (a bar line at or after the blend's end plus 1000ms)`。
+2. 长度三个机制各自为政：`DEGRADED` 的 **8 000 ms 封顶**（`harness/r20/*.logcat` 原文
+   `CROSSFADE 重叠=medium 8000ms, curve=DJ_BLEND (DEGRADED: … the blend is cut to 8000ms rather than …`）、
+   `SILENCE_TRIM` 的 **250 ms 缝**（只要尾巴 ≥1 200 ms 就切；当天实测 1 260/1 340/1 920/5 300 ms 四种尾巴）、
+   以及融合自己的 `min(计划, 剩余−250)`。
+
+**改法（两处）**：
+- `FadeCurve.outLeftAt`：从曲线自己的增益二分出「出曲离开段落」的时刻（DJ 形状 **75.2%**，
+  对称曲线≈整个 ramp，融合 = `JUNCTION_XFADE_MS`）；`DjEdit.vocalOutMs(blend, curve)` 把它变成窗口，
+  渲染端按它写 `-v`（`Request.vocalOutMs`，负值=退回整窗，给老调用方和融合路），
+  播放端 `vocalInBlendMs` 的界与 `logBackingBeforeVocals` 的判据都跟着它走。
+  4/17/30 s → **3 008 / 12 785 / 22 562 ms**，回来仍在小节线（17 s → 文件里 15.05 s）。
+- 长度：`capWithoutEdit` → `noteWithoutEdit`（**8 000 ms 封顶删掉，`DEGRADED` 这句保留**）；
+  `trimOnlyWhenABlendWouldRunIntoIt`（尾巴 − 250 ms 必须**长于**形状已经待在地板上的那段才切缝；
+  17 s 时门槛 **4 465 ms**：5 300 ms 仍切，3 140/1 340 ms 不切）；融合 ramp 短于计划时把数字写进日志。
+  `QUICK_FADE` 1 000 ms 不动（只在有曲子短于 90 s 时出现，用户曲库 98–202 s）。
+- `RULE_VERSION` 4→5（窗口烤进文件，旧文件必须重渲）。
+
+**真机（K20 Pro `efaa83b2`，24b，过渡方式=0/17 s/曲线=2；两次跑三个边界）**：
+`CROSSFADE 重叠=long 16944ms … (… the blend is NOT shortened for it any more (the user's 17000ms stands …))`；
+`CROSSFADE 重叠=long 17129ms, curve=DJ_BLEND` + `the DJ edit for 1410815174 will hold its vocals out for
+12825ms — the 40ms of its own head …, plus the 12785ms of the 17000ms blend …, so the voice comes back
+4215ms before the blend's own end` + 文件 `vocals at exactly zero for the first 14.55s …, then back over
+0.50s ending at 15.05s (a bar line of the incoming track)`（`-v15047`）；
+`SILENCE_TRIM 重叠=short 250ms (… measured to end in 5300ms of silence …)`。
+变调：`the modulation section is 0ms long … the pitch is back at the incoming track's own by 16469ms of
+its own file, 2000ms before its vocals arrive at 18773ms …`（融合编辑=单次写回）。
+**未验证**：8e（`R5CY10P6MJF`）当天没连上，全部证据在 K20 Pro；这台设备上**没有一对普通曲子真的变了调**
+（`no pitch: … not trustworthy (D minor/0.23 …)`），所以 17 s 下**阶梯式 glide 的听感没被听到**；
+**听感由用户判断**。渲染文件里人声窗口的**实测**（把渲染结果喂回模型复测）这一轮也没做。
+
+**测试**：`mvn -pl player-core test` **272 跑 1 失败**（仍是既有的 `SettingsCatalogTest`）。
+新增：`theOutgoingTracksOwnExitIsReadOffEachShape`、`everyShapesOutgoingLevelNeverRises`、
+`theWindowEndsWhenTheOutgoingTrackHasLeftNotWhenTheBlendDoes`、
+`anUneditedBlendKeepsTheUsersLengthAndSaysSo`、`aTrimStandsOnlyWhenABlendWouldRunIntoTheDeadAir`。
+本轮 harness：`D:\qplayer-dev\harness\r26\`（`run26.sh`/`run26b.sh` 两次真机跑、`r26*/logcat`、发行说明）。
+
+**下一步仍开着**：§零 缺陷 1 的收尾（让每种编辑都带 `-e`）；「出曲自己提前安静」还可以再量一层
+（现在只按曲线自己的 −60dB 交点收尾，**没有量出曲自己的电平包络**：文件末尾本来就是轻声淡出的曲子，
+人声可以收得更早——这是这轮**故意没做**的一层，也是用户那句「上一首歌结束时声音很小时」最直接的形式）。
 
 
 
