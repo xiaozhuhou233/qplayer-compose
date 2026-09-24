@@ -374,13 +374,22 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         long removalMs = request.removalMs;
         long spanMs = returnSpanMs(request.beatPeriodMs);
         long headMs = removalMs + spanMs;
+        // ⚠️ Round 20: the window (what gets decoded and separated) stays the blend's own length,
+        // but the GATE ends where the outgoing track leaves the passage — `request.vocalOutMs`,
+        // the shape's own answer (DjEdit.vocalOutMs), which is 75.2% of a DJ-shape blend. The
+        // window is not shortened with it: a fusion's passage has to fit inside the window, and
+        // the probe below asks the gate's own question rather than the window's.
+        long vocalOutMs = request.vocalOutMs;
         Logger.info("transition: rendering the DJ edit for {} — vocals at exactly zero for the"
-                        + " first {}ms (the whole blend), back on a bar line inside the next {}ms"
-                        + " (never earlier than {}ms after the blend ends); source {}Hz, window"
-                        + " {}ms from the file's own start (so the file's timeline is the track's"
-                        + " timeline)",
-                request.title(), removalMs, spanMs, DjEdit.VOCAL_RETURN_MARGIN_MS, format.rate,
-                headMs);
+                        + " first {}ms ({} of the user's {}ms blend, which is where the outgoing"
+                        + " track's own level has left the passage; it is the whole blend only on"
+                        + " the symmetric curves, which hold the outgoing to their last sample),"
+                        + " back on a bar line inside the next {}ms (never earlier than {}ms after"
+                        + " that); source {}Hz, window {}ms from the file's own start (so the"
+                        + " file's timeline is the track's timeline)",
+                request.title(), vocalOutMs,
+                vocalOutMs < removalMs ? "a part" : "all", request.blendMs, spanMs,
+                DjEdit.VOCAL_RETURN_MARGIN_MS, format.rate, headMs);
 
         // 1. The head, decoded from the file's start. Starting at zero is what keeps every
         //    offset the transition machinery already computes — the content start, the
@@ -435,21 +444,27 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         //    so the whole stem path is skipped and the incoming plays its own stream. The
         //    saving is everything after this point — the body decode, the encode, the mux
         //    and the file — which is most of the second half of a render.
-        double removalSec = removalMs / 1000.0;
+        //
+        //    ⚠️ Round 20 asks this over the GATE's own stretch, not the window's: the gate ends
+        //    where the outgoing track leaves the passage, and a track whose voice only arrives
+        //    after that instant needs nothing stripped at all — its voice is allowed there. The
+        //    window is still what gets decoded and separated (the fusion's room depends on it),
+        //    so this is a cheaper question, not a smaller render.
+        double removalSec = vocalOutMs / 1000.0;
         DjEdit.Presence presence = DjEdit.presence(stems[StemGesture.Stem.VOCALS.row()],
                 StemModel.MODEL_RATE, removalSec);
         if (!presence.sings) {
             Logger.info("transition: DJ edit for {} not needed — its first {}ms is measured to"
                             + " have no vocals in it, so there is nothing to strip and the"
                             + " incoming plays its own stream: {}",
-                    request.title(), removalMs, presence.describe());
+                    request.title(), vocalOutMs, presence.describe());
             return null;
         }
         Logger.info("transition: DJ edit for {}: its first {}ms does sing — {}", request.title(),
-                removalMs, presence.describe());
+                vocalOutMs, presence.describe());
 
         // 4. The incoming's grid and where the voice comes back: the first bar line at or after
-        //    the removal window. The offset is estimated from the separated BASS stem's low end
+        //    the gate's end. The offset is estimated from the separated BASS stem's low end
         //    — the documented extension this platform has instead of a structure pass — and
         //    never from the beat grid's phase, which is a different question and wrong three
         //    times in four.
@@ -457,7 +472,14 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         double beatSecIn = request.beatPeriodMs > 0 ? request.beatPeriodMs / 1000.0 : 0d;
         double[] inBars = barLinesOf(stems, StemModel.MODEL_RATE, beatSecIn,
                 request.beatPhaseMs / 1000.0, 0d, windowSec, request.title());
-        DjEdit.Plan plan = editPlan(inBars, request, windowSec, removalSec, headMs);
+        // The window's own plan, kept for the fusion path: a fusion's passage has to stay
+        // instrumental for its whole length (that is the feature), and its window is bounded by
+        // the same vocal-free window, so its gate stays where round 17 put it. Every other path
+        // uses the gate above.
+        DjEdit.Plan windowPlan = editPlan(inBars, request, windowSec, removalMs / 1000.0, headMs);
+        DjEdit.Plan plan = vocalOutMs < removalMs
+                ? editPlan(inBars, request, windowSec, removalSec, headMs)
+                : windowPlan;
 
         // 5. The fusion (round 18): the two backgrounds combined into ONE passage instead of two
         //    decks ramping against each other. Attempted before the bridge and instead of it —
@@ -474,7 +496,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         Fusion fusion = null;
         if (request.canFuse()) {
             long fusionStart = System.currentTimeMillis();
-            fusion = attemptFusion(weights, request, format, stems, inBars, plan, windowSec,
+            fusion = attemptFusion(weights, request, format, stems, inBars, windowPlan, windowSec,
                     clipped, refusedWhy, phases, cancelled);
             phases[2] = System.currentTimeMillis() - fusionStart;
             if (cancelled[0]) return null;
@@ -556,7 +578,11 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         float[][] edited;
         if (fusion != null) {
             // The fusion rendered its own head inside the attempt (its per-row schedule and its
-            // carried material are on it), and the count in `clipped` is that render's.
+            // carried material are on it), and the count in `clipped` is that render's. Its gate is
+            // the WINDOW's own (round 20's clause): the passage is instrumental for its whole
+            // length, so everything measured against it below — the bridge's vocal reading, the
+            // acceptance, the `-v` this file is named with — has to be the plan that was rendered.
+            plan = windowPlan;
             edited = fusion.edited;
         } else {
             edited = DjEdit.renderHead(stems, StemModel.MODEL_RATE, windowSec, plan, clipped,
@@ -1372,33 +1398,38 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         return out;
     }
 
-    /** The plan for the window: the return ends on the first bar line at or after the removal
-     *  window PLUS the margin the user's rule needs ({@link DjEdit#VOCAL_RETURN_MARGIN_SEC}), and
-     *  without a grid it ends at that instant itself.
+    /** The plan for the window: the return ends on the first bar line at or after the gate's end
+     *  PLUS the margin the user's rule needs ({@link DjEdit#VOCAL_RETURN_MARGIN_SEC}), and without
+     *  a grid it ends at that instant itself.
      *
-     *  <p>⚠️ Round 17: the search starts at {@code removal + margin} rather than at the removal
-     *  window. The margin is what keeps the voice at exactly zero for the whole blend — the old
-     *  search could (and did, whenever the blend length was a whole number of bars) land the
-     *  return exactly ON the blend's end, which put the last half second of the lift inside the
-     *  blend. {@link DjEdit#plan} enforces the same floor, so a bar line the caller hands in
-     *  earlier than that is ignored rather than honoured. */
+     *  <p>⚠️ Round 20: the search starts at {@code vocalOut + margin}, and {@code vocalOut} is the
+     *  instant the outgoing track has left the passage — {@link DjEdit#vocalOutMs} of the blend,
+     *  i.e. 75.2% of a DJ-shape one and the whole blend on a symmetric curve. Round 17 anchored
+     *  the same margin on the blend's own end, which put the incoming track's voice out for ~18 s
+     *  of a 17 s 过渡时长 and is the report this round answers. The margin keeps its meaning: it
+     *  is what keeps the voice at exactly zero for the stretch where the outgoing can still be
+     *  heard, and the old search could (and did, whenever the blend length was a whole number of
+     *  bars) land the return exactly on that instant, which put the last half second of the lift
+     *  inside the two-voice stretch. {@link DjEdit#plan} enforces the same floor, so a bar line
+     *  the caller hands in earlier than that is ignored rather than honoured. */
     private DjEdit.Plan editPlan(double[] inBars, Request request, double windowSec,
                                  double removalSec, long headMs) {
         double earliest = removalSec + DjEdit.VOCAL_RETURN_MARGIN_SEC;
         if (inBars == null || inBars.length == 0) {
             Logger.info("transition: DJ edit for {}: no bar grid for this track, so the vocals"
-                            + " return {}ms after the {}ms blend ends, at the margin's own"
-                            + " instant (no bar line to land on)",
-                    request.title(), DjEdit.VOCAL_RETURN_MARGIN_MS, request.removalMs);
+                            + " return {}ms after the outgoing track has left the passage (at"
+                            + " {}ms), at the margin's own instant (no bar line to land on)",
+                    request.title(), DjEdit.VOCAL_RETURN_MARGIN_MS, Math.round(removalSec * 1000d));
             return DjEdit.plan(removalSec, Double.NaN);
         }
         double at = DjEdit.firstBarAtOrAfter(inBars, earliest);
         Logger.info("transition: DJ edit for {}: vocals return {}",
                 request.title(), Double.isNaN(at)
-                        ? "at the end of the window plus the " + DjEdit.VOCAL_RETURN_MARGIN_MS
+                        ? "at the end of the gate plus the " + DjEdit.VOCAL_RETURN_MARGIN_MS
                                 + "ms margin (no bar line in it)"
                         : "at " + String.format(java.util.Locale.US, "%.3f", at) + "s (a bar line"
-                                + " at or after the blend's end plus "
+                                + " at or after " + String.format(java.util.Locale.US, "%.3f", removalSec)
+                                + "s, where the outgoing track has left the passage, plus "
                                 + DjEdit.VOCAL_RETURN_MARGIN_MS + "ms)");
         return DjEdit.plan(removalSec, at);
     }

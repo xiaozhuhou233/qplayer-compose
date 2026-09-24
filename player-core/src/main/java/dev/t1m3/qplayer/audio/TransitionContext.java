@@ -215,7 +215,7 @@ public final class TransitionContext {
      * <p>The fact lives here rather than in the chooser because the chooser is a decision over
      * facts: it may not touch the filesystem, and the only thing that may is the controller, which
      * already stats this pair's edit at exactly this instant for its own reasons
-     * ({@code PlayerController.capWithoutEdit}). The chooser only has to say what it wants the
+     * ({@code PlayerController.noteWithoutEdit}). The chooser only has to say what it wants the
      * kind to be.
      *
      * <p>False is the whole ordinary world: no renderer at all (a host with no stem code), no

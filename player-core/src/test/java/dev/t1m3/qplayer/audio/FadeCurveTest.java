@@ -284,4 +284,64 @@ public class FadeCurveTest {
         assertEquals(0L, FadeCurve.DJ_BLEND.bothAudibleMs(0L));
         assertEquals(0L, FadeCurve.EQUAL_POWER.bothAudibleMs(-5L));
     }
+
+    /**
+     * Round 20: when the outgoing track has left the passage, as a share of the ramp. This is the
+     * instant the incoming track's rendered file lets its voice back in ({@code DjEdit.vocalOutMs}),
+     * so it is the one number that decides whether the listener hears a voice too early (over a
+     * still-audible outgoing track) or too late (the 「切割人声有点切太多了」 report).
+     */
+    @Test
+    public void theOutgoingTracksOwnExitIsReadOffEachShape() {
+        // The DJ shape: 10 dB down by three tenths and at the -60 dB floor by 75.2% of the ramp —
+        // the number the round's device logs print (12427ms of a 16525ms ramp).
+        double dj = FadeCurve.DJ_BLEND.outLeftAt(LONG_MS);
+        assertEquals("the DJ shape leaves at 75.2% of its ramp", 0.752d, dj, 0.002d);
+        assertTrue("... and that is where its own level is at the floor, not before",
+                FadeCurve.gainDb(FadeCurve.DJ_BLEND.outGain((float) dj))
+                        <= FadeCurve.INAUDIBLE_DB);
+        // The symmetric shapes hold the outgoing track at its own level to the ramp's own end —
+        // their gain only passes the floor in the ramp's last thousandth (15 ms of a 15 s blend),
+        // so the whole ramp is the two-voice stretch and the voice may not come back inside it.
+        for (FadeCurve symmetric : new FadeCurve[] {FadeCurve.LINEAR, FadeCurve.EQUAL_POWER}) {
+            double at = symmetric.outLeftAt(LONG_MS);
+            assertTrue(symmetric + " fades the outgoing track only at the ramp's own end, so its"
+                    + " answer is the whole ramp, was " + at, at > 0.998d);
+            assertTrue(symmetric + ": the window is the blend itself, to within one 25ms frame",
+                    DjEdit.vocalOutMs(LONG_MS, symmetric) >= LONG_MS - 25L);
+        }
+        // A fusion's hand-over is a duration rather than a share, so its answer moves with the
+        // ramp: 2000ms of a 15s blend, and a quarter of a 2s one.
+        assertEquals(0.1333d, FadeCurve.FUSION.outLeftAt(LONG_MS), 0.001d);
+        assertEquals(0.5d, FadeCurve.FUSION.outLeftAt(4_000L), 0.001d);
+        // And the three lengths the round is judged on, on the shape every ordinary boundary gets:
+        // 75.2% of the blend, to the millisecond the search resolves it to.
+        assertEquals("a 4s blend", 3_008L, DjEdit.vocalOutMs(4_000L, FadeCurve.DJ_BLEND), 3L);
+        assertEquals("the user's 17s blend", 12_785L,
+                DjEdit.vocalOutMs(17_000L, FadeCurve.DJ_BLEND), 3L);
+        assertEquals("a 30s blend", 22_562L,
+                DjEdit.vocalOutMs(30_000L, FadeCurve.DJ_BLEND), 3L);
+        // A ramp of nothing has no stretch in it at all.
+        assertEquals(0L, DjEdit.vocalOutMs(0L, FadeCurve.DJ_BLEND));
+        assertEquals(0L, DjEdit.vocalOutMs(-1L, FadeCurve.DJ_BLEND));
+    }
+
+    /** The search {@link FadeCurve#outLeftAt} runs is only valid while the shape is monotone
+     *  non-increasing — the property every curve here is documented to have, checked at the
+     *  resolution the measurement itself uses so a future shape cannot quietly break it. */
+    @Test
+    public void everyShapesOutgoingLevelNeverRises() {
+        for (FadeCurve curve : FadeCurve.values()) {
+            float previous = Float.MAX_VALUE;
+            for (int i = 0; i <= 1000; i++) {
+                float t = i / 1000f;
+                // The raw gain, not its dB: `gainDb` floors at INAUDIBLE_DB, and that floor is a
+                // constant a shape still falling to zero would read as a rise.
+                float gain = curve.outGain(t, LONG_MS);
+                assertTrue(curve + " rose at t=" + t + ": " + previous + " -> " + gain,
+                        gain <= previous + 1e-9f);
+                previous = gain;
+            }
+        }
+    }
 }

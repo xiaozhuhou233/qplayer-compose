@@ -166,7 +166,24 @@ public final class TransitionPlan {
      * what the settings say: at one second there is no middle to hold.
      */
     public FadeCurve curveOr(FadeCurve configured) {
-        if (curve != null) return curve;
+        return effectiveCurve(curve, overlapMs, configured);
+    }
+
+    /**
+     * {@link #curveOr}'s answer for a shape nobody named — the same three rules, callable without a
+     * plan because round 20's render needs it <em>before</em> the boundary exists: the incoming
+     * track's rendered file gates its voice for the share of the blend the outgoing track can still
+     * be heard in, and that share is a property of the curve the boundary will ramp along
+     * ({@link FadeCurve#outLeftAt}). A caller that computed the gate from the wrong shape would put
+     * the voice back 25% early on a symmetric ramp (or hold it out for 25% too long on the DJ one),
+     * so the rule lives in one place and both callers read it.
+     *
+     * @param named      the curve a decision named, or null
+     * @param overlapMs  the overlap the boundary will use
+     * @param configured the 淡化曲线 setting
+     */
+    public static FadeCurve effectiveCurve(FadeCurve named, long overlapMs, FadeCurve configured) {
+        if (named != null) return named;
         if (overlapMs >= OVERLAP_MEDIUM_MS) return FadeCurve.DJ_BLEND;
         return configured != null ? configured : FadeCurve.LINEAR;
     }

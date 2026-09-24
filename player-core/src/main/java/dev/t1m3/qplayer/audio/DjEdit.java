@@ -40,31 +40,82 @@ public final class DjEdit {
     public static final long RETURN_RAMP_MS = Math.round(RETURN_RAMP_SEC * 1000d);
 
     /**
-     * How long after the end of the blend the voice <em>starts</em> coming back: twice
+     * How long after the two-voice stretch is over the voice <em>starts</em> coming back: twice
      * {@link #RETURN_RAMP_SEC}, so the return ramp (half a second) plus half a second of the
      * incoming track's backing alone.
      *
-     * <p><b>Round 17, and it is the user's whole rule.</b> 「过渡完再放人声」 — bring the vocals
-     * after the transition is over — so the removal window is not the blend any more: the
-     * voice is at <b>exactly zero</b> for the entire blend, and the lift begins after it has
-     * ended. The margin is the smallest one that can promise that: the ramp is
-     * {@link #RETURN_RAMP_SEC} long and it may not start before the blend ends, so the return
-     * has to <em>finish</em> at or after {@code blend end + RETURN_RAMP_SEC} — and a margin of
-     * exactly one ramp means the first sample of the lift is the first sample after the blend.
-     * Half a second more is spent at zero so the promise does not rest on a rounding.
+     * <p><b>Round 20, and it is the user's own rule read on the right clock.</b> The rule has
+     * always been 「过渡完再放人声」 — bring the vocals after the transition is over. Round 17
+     * read "the transition" as <em>the whole blend</em>: the voice was at exactly zero for every
+     * millisecond of it, and with a 17 s 过渡时长 that left the incoming track singing nothing
+     * for 16.6 s and lifting back at 17.1 s — the listener's 「现在再第二首歌切割人声有点切太多了」.
+     * The stretch the rule is about is the one in which two voices could <em>stack</em>, and
+     * with the shipped DJ shape that is not the whole ramp: the outgoing track is 10 dB down
+     * within the first three tenths of it and at {@link FadeCurve#INAUDIBLE_DB} by
+     * {@link FadeCurve#outLeftAt}'s own answer — 75.2% of the ramp, measured on the shape rather
+     * than assumed. Past that instant there is no second voice left to stack with, so past it
+     * the incoming track may sing (and does, {@link #vocalOutMs} being where the window now
+     * ends).
      *
-     * <p>Before this, the window ended <em>at</em> the blend's end and the ramp reached back
+     * <p>The margin is unchanged in shape and in value — one {@link #RETURN_RAMP_SEC} of ramp
+     * plus the same half second of slack; only the instant it is added to moved, from "the end of
+     * the blend" to "the instant the outgoing left the passage". It is still the smallest margin
+     * that can promise the rule: the lift is one ramp long and may not start before the outgoing
+     * is gone, so the return has to <em>finish</em> at or after
+     * {@code vocalOut + RETURN_RAMP_SEC}, and half a second more is spent at zero so the promise
+     * does not rest on a rounding.
+     *
+     * <p>Before round 17 the window ended <em>at</em> the blend's end and the ramp reached back
      * into its last half second, so the incoming track's voice rose through the end of the
-     * blend — the "人声混合得很乱" the user reported, with the outgoing track's own vocals
-     * (which this app cannot remove) still at whatever the curve left them at.
+     * blend — the 「人声混合得很乱」 the listener reported, with the outgoing track's own vocals
+     * (which this app cannot remove) still at whatever the curve left them at. That stays
+     * prevented by construction: the curve is at the inaudible floor before this window ends.
      *
      * <p>⚠️ Where the return actually lands is the renderer's answer: the first bar line of the
-     * incoming track at or after {@code removal + this margin}, so it is usually later than the
+     * incoming track at or after {@code vocalOut + this margin}, so it is usually later than the
      * margin and never earlier. See {@code AndroidStemEditRenderer.editPlan}. */
     public static final double VOCAL_RETURN_MARGIN_SEC = 2d * RETURN_RAMP_SEC;
 
     /** {@link #VOCAL_RETURN_MARGIN_SEC} in milliseconds. */
     public static final long VOCAL_RETURN_MARGIN_MS = Math.round(VOCAL_RETURN_MARGIN_SEC * 1000d);
+
+    /**
+     * <b>How much of a blend of {@code blendMs} the outgoing track can still be heard in</b> —
+     * the window the incoming track's voice is held out of its rendered file for, in
+     * milliseconds of the blend's own ramp.
+     *
+     * <p>This is the instant the whole vocal window is anchored on, and it is the shape's own
+     * answer ({@link FadeCurve#outLeftAt}) rather than a constant, because the answer differs by
+     * curve and being wrong is audible in both directions: too long and the incoming track is
+     * silent long after the transition is over — the report this rule answers, where a 17 s
+     * 过渡时长 put the voice out for 16.6 s and back at 17.1 s — and too short and the voice
+     * returns while the outgoing track is still plainly audible underneath it.
+     *
+     * <p>The numbers it produces on the shipped shapes:
+     * <ul>
+     *   <li>{@link FadeCurve#DJ_BLEND} — every overlap of
+     *       {@link TransitionPlan#OVERLAP_MEDIUM_MS} or more, i.e. every ordinary boundary at the
+     *       default 过渡时长: <b>75.2%</b> of the blend. A 4 s blend therefore holds the voice out
+     *       for 3.0 s, a 17 s one for 12.8 s and a 30 s one for 22.6 s, and the return ramp then
+     *       lands on the first bar line at or after {@code out + VOCAL_RETURN_MARGIN_MS};</li>
+     *   <li>{@link FadeCurve#LINEAR} / {@link FadeCurve#EQUAL_POWER}: <b>the whole blend</b>,
+     *       to within the ramp's own last thousandth (15 ms of a 15 s blend) — those shapes hold
+     *       the outgoing track at its own level until there, so a short blend on a symmetric curve
+     *       keeps the window it had before this rule existed;</li>
+     *   <li>{@link FadeCurve#FUSION}: {@code JUNCTION_XFADE_MS} of the ramp — but the fusion path
+     *       does <b>not</b> use this number. Its file carries the outgoing track's own material
+     *       through the whole passage and the passage is instrumental by design (that is the
+     *       feature), so a fusion's gate keeps the window's own end; see
+     *       {@code StemEditRenderer.Request.vocalOutMs} and {@code AndroidStemEditRenderer}'s
+     *       fusion clause.</li>
+     * </ul>
+     */
+    public static long vocalOutMs(long blendMs, FadeCurve curve) {
+        if (blendMs <= 0L) return 0L;
+        FadeCurve shape = curve != null ? curve : FadeCurve.DJ_BLEND;
+        long out = Math.round(shape.outLeftAt(blendMs) * blendMs);
+        return Math.max(0L, Math.min(blendMs, out));
+    }
 
     /** A 25 ms frame of the vocal stem this far below full scale counts as "nothing
      *  singing there" (the same floor the round-7 stem measurements used). */
@@ -96,24 +147,26 @@ public final class DjEdit {
     public static final int BEATS_PER_BAR = 4;
 
     /**
-     * When the vocals go back in: the removal window, and the ramp that ends on the first bar
+     * When the vocals go back in: the vocal-out window, and the ramp that ends on the first bar
      * line after it.
      *
-     * <p>{@code returnEnd} is at or after {@code removal + }{@link #VOCAL_RETURN_MARGIN_SEC} and
-     * {@code returnStart} follows from it, so the gain is exactly zero for the whole blend and
-     * the lift happens entirely after it (round 17 — see the margin's own note). The half second
-     * the ramp lasts is the "gradually approach the vocals" half of the feature: the voice is
-     * lifted back to unity and lands on the bar line rather than being switched on.
+     * <p>{@code returnEnd} is at or after {@code window + }{@link #VOCAL_RETURN_MARGIN_SEC} and
+     * {@code returnStart} follows from it, so the gain is exactly zero while the outgoing track
+     * can still be heard and the lift happens entirely after that (round 20 — the window's own
+     * end is {@link #vocalOutMs}, the shape's answer, not the blend's end; see the margin's own
+     * note). The half second the ramp lasts is the "gradually approach the vocals" half of the
+     * feature: the voice is lifted back to unity and lands on the bar line rather than being
+     * switched on.
      */
     public static final class Plan {
-        /** Where the vocals start coming back, seconds into the window — at or after the end
-         *  of the blend. */
+        /** Where the vocals start coming back, seconds into the window — at or after the
+         *  instant the outgoing track left the passage. */
         public final double returnStartSec;
-        /** Where they are back at unity — a bar line of the incoming track, at or after the
-         *  end of the blend plus the margin. */
+        /** Where they are back at unity — a bar line of the incoming track, at or after
+         *  that instant plus the margin. */
         public final double returnEndSec;
         /** True when {@link #returnEndSec} is an actual bar line rather than the plain
-         *  end of the removal window plus the margin (no grid, or no measurement). */
+         *  end of the vocal-out window plus the margin (no grid, or no measurement). */
         public final boolean onBarLine;
 
         Plan(double returnStartSec, double returnEndSec, boolean onBarLine) {
@@ -122,8 +175,8 @@ public final class DjEdit {
             this.onBarLine = onBarLine;
         }
 
-        /** The vocal gain at {@code t} seconds into the window: 0 through the blend,
-         *  then the ramp, then 1 for the rest of the track. */
+        /** The vocal gain at {@code t} seconds into the window: 0 while the outgoing can be
+         *  heard, then the ramp, then 1 for the rest of the track. */
         public double vocalGainAt(double t) {
             if (t <= returnStartSec) return 0;
             if (t >= returnEndSec) return 1;
@@ -143,15 +196,18 @@ public final class DjEdit {
     /**
      * The plan for one window.
      *
-     * @param removalSec    how long the incoming track plays without its vocals — the
-     *                      blend the user asked for (see the 过渡时长 setting)
+     * @param removalSec    how long the incoming track plays without its vocals — <b>the stretch
+     *                      of the blend in which the outgoing track can still be heard</b>
+     *                      ({@link #vocalOutMs} of the boundary's blend length, see round 20's
+     *                      note on the margin: this is not the blend's own length any more, it is
+     *                      the part of it that still carries a second voice)
      * @param returnEndSec  where the vocals are back at unity, in seconds into the
      *                      window: the first bar line at or after
      *                      {@code removalSec + }{@link #VOCAL_RETURN_MARGIN_SEC} when the
      *                      incoming track's grid is known, otherwise that same instant
      *                      itself. Anything EARLIER than the margin is ignored: a return
-     *                      inside the blend, or in its last instant, is exactly what round 17
-     *                      exists to stop — see {@link #firstBarAtOrAfter}.
+     *                      inside the two-voice stretch, or in its last instant, is exactly
+     *                      what this floor exists to stop — see {@link #firstBarAtOrAfter}.
      */
     public static Plan plan(double removalSec, double returnEndSec) {
         double removal = Math.max(0.05, removalSec);

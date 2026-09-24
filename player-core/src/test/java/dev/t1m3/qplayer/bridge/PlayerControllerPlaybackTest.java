@@ -4,6 +4,7 @@ import dev.t1m3.qplayer.audio.AudioBackend;
 import dev.t1m3.qplayer.audio.BeatProfile;
 import dev.t1m3.qplayer.audio.FadeCurve;
 import dev.t1m3.qplayer.audio.IncomingMix;
+import dev.t1m3.qplayer.audio.SilenceProfile;
 import dev.t1m3.qplayer.audio.StemEditRenderer;
 import dev.t1m3.qplayer.customapi.CustomSong;
 import dev.t1m3.qplayer.model.Track;
@@ -651,6 +652,141 @@ public class PlayerControllerPlaybackTest {
     }
 
     /**
+     * Round 20, report two, first half: <b>the user's 过渡时长 governs an ordinary blend even when
+     * there is no rendered edit for the incoming track.</b>
+     *
+     * <p>Until this round a boundary with no edit was cut to a fixed 8 000 ms ({@code DEGRADED}),
+     * whatever the setting said, because the incoming deck then plays its track's own master and its
+     * voice is in the blend. That cap was written against the pre-round-17 shape, which held the
+     * outgoing track at its own level until three quarters of the window; the shape that ships takes
+     * it 10 dB down within three tenths and to the floor by 75.2%, so the cap no longer buys what it
+     * was written for — and the listener's 「过渡长短并没有按照设置中的滑动条来」 is what it cost.
+     * The note stays; the length is the setting's.
+     */
+    @Test
+    public void anUneditedBlendKeepsTheUsersLengthAndSaysSo() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        try {
+            String line = decisionLineForOrdinaryPair(false, -1L);
+            System.out.println("no edit for the incoming track: " + line);
+            assertTrue("the boundary must still blend: " + line, line.contains("CROSSFADE"));
+            assertTrue("the blend must be the user's own length, not the old 8000ms cap: " + line,
+                    line.contains("重叠=long " + ORDINARY_BLEND_MS + "ms"));
+            assertTrue("... and the old cap must be gone from the line: " + line,
+                    !line.contains("重叠=medium 8000ms"));
+            assertTrue("the decision must still say the incoming track's voice is in it: " + line,
+                    line.contains("DEGRADED: no DJ edit"));
+            assertTrue("... and must name what the shape does about it: " + line,
+                    line.contains("10dB down"));
+        } finally {
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
+    /**
+     * Round 20, report two, second half: <b>a trim stands only when the outgoing track's measured
+     * dead air is longer than the stretch of the user's blend the DJ shape spends at the floor.</b>
+     * The two device numbers, on one pair and one setting:
+     * <ul>
+     *   <li>a 3 140 ms tail against a 17 s 过渡时长: the shape is at its floor from 12 785 ms of the
+     *       ramp, so the tail sits inside the 4 215 ms it has already spent leaving — a blend never
+     *       reaches that silence, and trimming there spends the user's setting on a silence nobody
+     *       would have heard;</li>
+     *   <li>a 5 300 ms tail against the same setting: the outgoing track's music stops while the
+     *       shape is still at −10…−45 dB, so the trim is doing its job and the seam stays.</li>
+     * </ul>
+     */
+    @Test
+    public void aTrimStandsOnlyWhenABlendWouldRunIntoTheDeadAir() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        try {
+            String shortTail = decisionLineForOrdinaryPair(false, 3_140L);
+            System.out.println("3140ms of tail silence, a " + ORDINARY_BLEND_MS + "ms blend: "
+                    + shortTail);
+            assertTrue("a tail inside the shape's own exit must not buy a 250ms seam: " + shortTail,
+                    shortTail.contains("CROSSFADE"));
+            assertTrue("... and the line must say why the trim was not taken: " + shortTail,
+                    shortTail.contains("does not apply to this setting"));
+
+            String longTail = decisionLineForOrdinaryPair(false, 5_300L);
+            System.out.println("5300ms of tail silence, a " + ORDINARY_BLEND_MS + "ms blend: "
+                    + longTail);
+            assertTrue("a tail longer than the shape's own exit is exactly what the trim is for: "
+                    + longTail, longTail.contains("SILENCE_TRIM"));
+        } finally {
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
+    /** The 过渡时长 these tests set and assert against, in one place so a change to it cannot make
+     *  an assertion vacuous without a compile-visible edit here. 17 s is the setting the listener's
+     *  report was written against. */
+    private static final long ORDINARY_BLEND_MS = 17_000L;
+
+    /**
+     * One decision line for an ORDINARY pair — two grids the tempo lock can bring together, both
+     * tracks long enough that neither the short-track rule nor the length rules touch them — with
+     * no rendered edit, optionally with the outgoing track measured to end in {@code tailMs} of
+     * silence. Everything else is the scaffolding {@link #decisionLineForBoundary} uses: real
+     * controller methods, a fake audio backend, and a stem renderer that renders nothing.
+     */
+    private String decisionLineForOrdinaryPair(boolean withEdit, long outgoingTailMs)
+            throws Exception {
+        Path base = temporaryFolder.newFolder("ordinary-" + outgoingTailMs + "-" + withEdit)
+                .toPath();
+        AppDirs.setBase(base.toString());
+        AppDirs.setCacheBase(base.resolve("cache").toString());
+        Files.write(base.resolve("queue.json"), ("{\"playIndex\":0,\"positionMs\":0,"
+                + "\"playMode\":0,\"tracks\":["
+                + "{\"source\":\"NETEASE\",\"neteaseId\":11,\"title\":\"outgoing\","
+                + "\"durationMs\":150000},"
+                + "{\"source\":\"NETEASE\",\"neteaseId\":22,\"title\":\"incoming\","
+                + "\"durationMs\":150000}]}").getBytes(StandardCharsets.UTF_8));
+        Logger.clear();
+        FakeAudioBackend backend = new FakeAudioBackend();
+        PlayerController controller =
+                new PlayerController(backend, track -> { }, NeteaseClient.INSTANCE);
+        try {
+            controller.setStemEditRenderer(new FakeStemEditRenderer());
+            controller.setBlendDurationMs(ORDINARY_BLEND_MS);
+            // 120 against 121BPM: the lock pulls the second onto the first, so this pair is the
+            // ordinary overlapping one (the clashing 120/145 pair is the other test's business).
+            writeBeatProfile(controller, 11L, 120.0d);
+            writeBeatProfile(controller, 22L, 121.0d);
+            writeCachedAudio(controller, 11L);
+            writeCachedAudio(controller, 22L);
+            if (outgoingTailMs >= 0L) writeSilenceProfile(controller, 11L, outgoingTailMs);
+            controller.playQueueIndex(0);
+            // Inside the decision lead, with room for the longest plan (the lead is ~45s).
+            backend.position = backend.duration() - 40_000L;
+            controller.pump();
+            StringBuilder lines = new StringBuilder();
+            for (String line : Logger.snapshot()) {
+                if (line.contains("transition: slot 0 -> 1:")) lines.append(line).append('\n');
+            }
+            assertTrue("no boundary was decided at all — this test's setup is wrong, not the rule: "
+                    + Logger.snapshot(), lines.length() > 0);
+            return lines.toString();
+        } finally {
+            controller.shutdown();
+        }
+    }
+
+    /** The outgoing track's measured ending: {@code tailMs} of silence and nothing else measured
+     *  (no head silence, no plain stretch), so neither the deck's entry nor the plain-ending rule
+     *  moves the blend these tests are about. */
+    private static void writeSilenceProfile(PlayerController controller, long neteaseId,
+                                            long tailMs) throws Exception {
+        File file = new File(controller.diskCache.silencePath("n" + neteaseId));
+        file.getParentFile().mkdirs();
+        Files.write(file.toPath(), new SilenceProfile(0L, tailMs, 0L, 0).toBytes());
+    }
+
+    /**
      * The first of the three edit-identity guards, and the one that needs no platform: the base a
      * pair looks its edit up by is {@code abs(hashCode)} as DIGITS, the lookup is a directory scan,
      * and a plain prefix test therefore hands a pair whose hash is a prefix of another pair's the
@@ -808,7 +944,7 @@ public class PlayerControllerPlaybackTest {
     /**
      * One boundary's decision line, decided by the running controller, with or without a rendered
      * FUSION edit for the incoming track — the whole path the change lives on: the controller
-     * stats the edit ({@code capWithoutEdit} already did, at this same instant), hands the fact to
+     * stats the edit ({@code noteWithoutEdit} already did, at this same instant), hands the fact to
      * the chooser, and the chooser answers the kind.
      *
      * <p>The two tracks have measured grids that clash, their audio is "on disk" so the play path

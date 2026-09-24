@@ -552,6 +552,60 @@ public enum FadeCurve {
         return ms + "ms of the " + rampMs + "ms ramp (" + pct + "%)";
     }
 
+    /**
+     * <b>The instant the outgoing track has left the passage</b>, as a share of the ramp:
+     * the first {@code t} at which this shape's outgoing gain is at or below {@code withinDb}
+     * dB — the point past which nothing of the outgoing track can be heard any more, however
+     * loud it was authored. (On the symmetric shapes that instant is the ramp's own end: their
+     * gain passes the floor 0.1% before it, so the answer is 0.999 — a fifteenth of a second of a
+     * 15 s blend, and the whole ramp as the window that reads it rounds.)
+     *
+     * <p><b>Why this is a property of the curve and not a constant.</b> The incoming track's
+     * voice is held out of its rendered file for exactly as long as two voices could stack —
+     * i.e. as long as the outgoing track can still be heard — and that instant is decided by
+     * the shape the boundary ramps along, not by the blend's length. Written as one number it
+     * would be wrong for whichever curve it was not measured on: {@link #DJ_BLEND}'s exit is at
+     * its floor by 82% of the ramp (so a 17 s blend leaves the outgoing inaudible from 12.8 s),
+     * while {@link #LINEAR} and {@link #EQUAL_POWER} hold the outgoing all the way to the last
+     * sample (so the voice must stay out for the whole blend). Hard-coding the DJ figure would
+     * return the incoming's voice 25% before the end of a symmetric ramp, with the outgoing
+     * track still plainly audible underneath it — the defect this measurement exists to avoid,
+     * in the other direction.
+     *
+     * <p>{@link #FUSION} is answered through the ramp-aware {@link #outGain(float, long)}
+     * overload: its hand-over is a fixed {@link #JUNCTION_XFADE_MS}, so its share of the ramp
+     * depends on the ramp's own length, and the share for a fusion of this length is what comes
+     * back.
+     *
+     * <p>Bisection rather than a closed form: every shape here is monotone non-increasing in
+     * {@code t} (which is what makes the search valid, and is asserted by the curve suite), and
+     * one method that reads the shape's own gains cannot drift away from the shape the way four
+     * hand-derived constants would. Forty halvings resolve the instant far below one sample of
+     * any ramp this app builds.
+     *
+     * @param withinDb the level that counts as gone — {@link #INAUDIBLE_DB} wherever this is
+     *                 used as "the voice may come back now"
+     * @return 0 when the outgoing is already gone at the ramp's top, 1 when it is still audible
+     *         at its end (then the whole ramp is the two-voice stretch)
+     */
+    public double outLeftAt(long rampMs, float withinDb) {
+        if (gainDb(outGain(0f, rampMs)) <= withinDb) return 0d;
+        if (gainDb(outGain(1f, rampMs)) > withinDb) return 1d;
+        double lo = 0d;
+        double hi = 1d;
+        for (int i = 0; i < 40; i++) {
+            double mid = 0.5d * (lo + hi);
+            if (gainDb(outGain((float) mid, rampMs)) <= withinDb) hi = mid; else lo = mid;
+        }
+        return hi;
+    }
+
+    /** {@link #outLeftAt(long, float)} at {@link #INAUDIBLE_DB} — the boundary's own question:
+     *  "when has the outgoing track left this passage, as a share of its ramp". */
+    public double outLeftAt(long rampMs) {
+        return outLeftAt(rampMs, INAUDIBLE_DB);
+    }
+
     /** Chinese name for the settings UI. */
     public String label() {
         return label;

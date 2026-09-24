@@ -125,9 +125,36 @@ public interface StemEditRenderer {
         public final String outBasePath;
         /** The incoming track, for the log lines. */
         public final Track track;
-        /** How long the incoming track plays with its vocals removed: the user's own
-         *  blend length (the 过渡时长 setting), ms. */
+        /** How long the incoming track plays with its vocals removed at most: the user's own
+         *  blend length (the 过渡时长 setting) plus the head the deck skips, ms — the render's own
+         *  window, and the room a fusion has to fit in.
+         *
+         *  <p>⚠️ Round 20: the gate's own end is {@link #vocalOutMs}, not this. This is the
+         *  window the render decodes, separates and writes, and it is deliberately kept at the
+         *  blend's own length: a fusion's passage has to fit inside {@code [contentStart, this]},
+         *  the incoming's "does its head sing at all" probe reads it, and shrinking it would take
+         *  room away from the fusion for no audible gain. See {@link #vocalOutMs}. */
         public final long removalMs;
+        /**
+         * The last instant at which the incoming track's voice is held at <b>exactly zero</b>,
+         * ms into this track's own file — the end of the stretch in which the outgoing track can
+         * still be heard, plus the head the incoming deck skips
+         * ({@link DjEdit#vocalOutMs} of the boundary's blend, at the file's own origin).
+         *
+         * <p>Round 20's whole point: the user's rule is 「过渡完再放人声」 — bring the voice after
+         * the transition — and the stretch it is about is the one where two voices could stack,
+         * which the shipped DJ shape ends at 75.2% of its ramp, not at its end. A 17 s 过渡时长
+         * therefore leaves the voice out for 12.8 s of the blend instead of 16.6 s, and the lift
+         * lands on the first bar line at or after {@code this + VOCAL_RETURN_MARGIN_MS}.
+         *
+         * <p>A negative value means "the window's own end" — today's round-17 behaviour, kept for
+         * every caller that has no shape to measure (a bare {@code Request} built by a test, or a
+         * host whose caller predates this field) and for the renderer's own fusion path, whose
+         * file carries the outgoing track's material through the whole passage and whose
+         * instrumental passage is the feature ({@code AndroidStemEditRenderer} raises it back to
+         * the window when the render turns out to be a fusion).
+         */
+        public final long vocalOutMs;
         /** The incoming track's beat period, ms, or 0 when no grid was measured — then
          *  there are no bar lines and the vocals come back at the end of the window. */
         public final double beatPeriodMs;
@@ -195,10 +222,21 @@ public interface StemEditRenderer {
                        double beatPeriodMs, double beatPhaseMs, String outgoingSourcePath,
                        double outgoingBeatPeriodMs, double outgoingBeatPhaseMs, double speed,
                        long blendMs, long incomingContentStartMs, BooleanSupplier stillWanted) {
+            this(sourcePath, outBasePath, track, removalMs, beatPeriodMs, beatPhaseMs,
+                    outgoingSourcePath, outgoingBeatPeriodMs, outgoingBeatPhaseMs, speed,
+                    blendMs, incomingContentStartMs, -1L, stillWanted);
+        }
+
+        public Request(String sourcePath, String outBasePath, Track track, long removalMs,
+                       double beatPeriodMs, double beatPhaseMs, String outgoingSourcePath,
+                       double outgoingBeatPeriodMs, double outgoingBeatPhaseMs, double speed,
+                       long blendMs, long incomingContentStartMs, long vocalOutMs,
+                       BooleanSupplier stillWanted) {
             this.sourcePath = sourcePath;
             this.outBasePath = outBasePath;
             this.track = track;
             this.removalMs = removalMs;
+            this.vocalOutMs = vocalOutMs > 0L && vocalOutMs < removalMs ? vocalOutMs : removalMs;
             this.beatPeriodMs = beatPeriodMs;
             this.beatPhaseMs = beatPhaseMs;
             this.outgoingSourcePath = outgoingSourcePath;

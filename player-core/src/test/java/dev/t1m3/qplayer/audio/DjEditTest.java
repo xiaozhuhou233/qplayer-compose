@@ -93,6 +93,59 @@ public class DjEditTest {
         assertEquals(1.0, plan.vocalGainAt(plan.returnEndSec), 1e-9);
     }
 
+    /**
+     * Round 20's own rule, composed end to end: the window the incoming track's voice is held out
+     * of its file is the stretch the <em>outgoing</em> track can still be heard in, and the return
+     * then lands on a bar line after it — not after the blend, which is where round 17 put it and
+     * what the listener reported as 「现在再第二首歌切割人声有点切太多了」.
+     */
+    @Test
+    public void theWindowEndsWhenTheOutgoingTrackHasLeftNotWhenTheBlendDoes() {
+        // A bar grid at the library's ordinary tempo (144 BPM, a 1.667s bar), so the return lands
+        // where a real one would rather than on a made-up instant.
+        double barSec = 1.667d;
+        double[] bars = new double[40];
+        for (int i = 0; i < bars.length; i++) bars[i] = i * barSec;
+        for (long blend : new long[] {4_000L, 17_000L, 30_000L}) {
+            long window = DjEdit.vocalOutMs(blend, FadeCurve.DJ_BLEND);
+            double windowSec = window / 1000d;
+            double at = DjEdit.firstBarAtOrAfter(bars, windowSec + DjEdit.VOCAL_RETURN_MARGIN_SEC);
+            DjEdit.Plan plan = DjEdit.plan(windowSec, at);
+            println("a %dms blend: the outgoing is audible for %.3fs, the voice is back at %.3fs"
+                            + " (the blend's own end is %.3fs, so the voice returns %.3fs earlier)",
+                    blend, windowSec, plan.returnEndSec, blend / 1000d,
+                    blend / 1000d - plan.returnEndSec);
+            assertEquals("the return lands on a bar line of the incoming track",
+                    at, plan.returnEndSec, 1e-9);
+            assertEquals("the voice is at exactly zero for the whole window", 0.0,
+                    plan.vocalGainAt(windowSec), 1e-9);
+            assertTrue("the lift may not start inside the two-voice stretch, was "
+                            + plan.returnStartSec + " against " + windowSec,
+                    plan.returnStartSec >= windowSec);
+            // What allows the return there at all: the shape has the outgoing track at its floor
+            // by the window's own end (measured a frame later, so the comparison is not the
+            // crossing point itself).
+            assertTrue("the outgoing track must be inaudible when the window ends",
+                    FadeCurve.gainDb(FadeCurve.DJ_BLEND.outGain((window + 2L) / (float) blend))
+                            <= FadeCurve.INAUDIBLE_DB);
+            if (blend >= 17_000L) {
+                // On the user's own length the voice is back well before the ramp ends — the whole
+                // point of the round. (On a 4s blend the first bar line after the window simply is
+                // past the blend's end, which is the "later than the margin, never earlier"
+                // half of the return's own rule.)
+                assertTrue("the voice must be back before the blend ends on a " + blend
+                                + "ms setting, was " + plan.returnEndSec,
+                        plan.returnEndSec < blend / 1000d);
+            }
+        }
+        // A symmetric curve holds the outgoing track to the ramp's own end, so its window is the
+        // blend itself and a short blend on one keeps exactly round 17's timing.
+        assertEquals(17_000L, DjEdit.vocalOutMs(17_000L, FadeCurve.EQUAL_POWER), 25L);
+        assertTrue("the DJ shape must cut the window short and the symmetric one must not",
+                DjEdit.vocalOutMs(4_000L, FadeCurve.DJ_BLEND)
+                        < DjEdit.vocalOutMs(4_000L, FadeCurve.EQUAL_POWER));
+    }
+
     @Test
     public void noGridMeansTheReturnIsTheWindowPlusTheMargin() {
         DjEdit.Plan plan = DjEdit.plan(12.0, Double.NaN);

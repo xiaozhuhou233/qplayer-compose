@@ -114,7 +114,7 @@ public final class HeuristicTransitionChooser implements TransitionChooser {
         //        its hand-over is the short changeover and not a musical blend).
         //
         //    This is the boundary's own rule, and the evidence is the file: the controller
-        //    stats it at exactly this instant for its own reasons (`capWithoutEdit`), with the
+        //    stats it at exactly this instant for its own reasons (`noteWithoutEdit`), with the
         //    same lookup the arm will use, so the kind is decided from the thing that will
         //    really be played rather than from a measurement that predicts it.
         //
