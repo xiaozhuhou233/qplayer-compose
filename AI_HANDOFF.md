@@ -8,13 +8,15 @@
 ## 零、接手须知（新会话先读这一段，约 45 行，够开工）
 
 **状态**：分支 `feat/ai-dj-transition`（**`main` 一直没动**，仍是 `5efc1ba`）。
-最近一次发布：tag `ai-dj-transition-2026-09-24b`（**192,179,303 bytes ≈ 192 MB**，
-sha256 `e124dfae…`，发行说明里有人声窗口/长度的全部数字），
-`https://github.com/xiaozhuhou233/qplayer-compose/releases/download/ai-dj-transition-2026-09-24b/app-debug.apk`
+最近一次发布：tag `ai-dj-transition-2026-09-24c`（**192,179,303 bytes ≈ 192 MB**，
+sha256 `7e32232d…`，发行说明里是「入曲从哪一拍进场」的全部数字），
+`https://github.com/xiaozhuhou233/qplayer-compose/releases/download/ai-dj-transition-2026-09-24c/app-debug.apk`
 （能装的是 **debug** 包；release 是未签名的）。发布用 `gh`，`github.com:443` 在本机被拦，
 **必须走本地代理 `127.0.0.1:7890`**；资产 URL 要**从 `gh` 输出里原样复制**（前几轮手打错过账号名）。
-**24b 相对 24a 只有两处改动**（第 20 轮，2026-09-24，见第七节：人声/变调窗口按「出曲还在响」的时刻收尾 +
-长度归滑动条）；`RULE_VERSION` 4→5，所以旧编辑文件会重渲一次。
+**发版前先 `gh release view <tag>`**：24b 那个 release 对象是 09-19 建的、24c 这次是空的（都核对过）。
+**24c 相对 24b 只有一处改动**（第 21 轮，2026-09-24，见第七节：入曲的落点由素材决定 —— 跳过前奏、
+落在人声前的小节线；`VOCAL_SKIP_MIN_MS 8000` → `VOCAL_SKIP_MIN_BARS 1` + 落点受「人声窗口」约束）；
+`RULE_VERSION` 5→6，所以旧编辑文件会重渲一次。
 
 **模型随 APK 交付（第 19 轮，2026-09-24）**：htdemucs-quarter 模型现在**打在 APK 的
 `assets/models/htdemucs-quarter.onnx` 里**，App 在**首次渲染**（preload 通道）把它复制到自己的
@@ -38,6 +40,16 @@ sha256 `e124dfae…`，发行说明里有人声窗口/长度的全部数字）�
 调性过渡是**两侧相向的阶梯**（每步一个整调，读到平台确认；融合编辑是单次写回）；
 低频在 15% 处交接；节拍对齐；`过渡时长` 滑块 4–30 秒（默认 15）**长度归它，不再被 8 秒封顶或静音裁切顶掉**。
 
+**第 21 轮让「入曲从哪一拍进场」由素材决定**（用户：「不如直接跳过一些小节到人声部分」）：融合/slam
+的落点（编辑文件名的 `-e`，播放端一律照用）除了「相位对齐的公共网格小节线」之外，多了一条**内容**判据 ——
+入曲分离人声 row 上第一段**持续**人声（`vocalStartMs`，25ms 帧 / 1000ms 中位 > −50dBFS）出现得
+**≥ 1 小节**（`VOCAL_SKIP_MIN_BARS`，按入曲自己的拍格算；旧的是固定 8 000ms）时，deck 落在它前一条
+小节线再退一个 runway 小节，前奏整段不放；**上界是「入曲人声被压住的窗口」`removalMs`**（17s 设置下
+8 864–10 482ms，取决于入曲小节）——**落不进去就不跳**（deck 照旧从原处进场，日志写 `declinedIntroMs`）。
+`skippedIntroMs` 现在是 deck 真正跳过的量（比内容起点晚多少），不再是从落点到人声那条线的距离。
+**边界侧零改动**（deck 起点 = 编辑自己的 `-e`）。实测：`fusion/intro.py`（17 首，app 自己的规则）+
+`fusion/PlanDump3`（真 planner，17s 设置，14 个输入 → 旧判法有 5 个整个融合被拒）。
+
 **第 18 轮加了「融合过渡」**：过渡段不再靠 A 的原混音以 −10dB 垫底与 B 的伴奏交叉，而是**把两首歌
 的去人声伴奏在预渲染文件里拼成一小段**——交界点起 A 的鼓/贝斯接着打，B 的床在一小节内**淡入**
 （用户听过后点名要的），然后 A 的鼓、贝斯各自在自己的小节线上**用 80ms 拼接切走**（不是淡出），
@@ -47,6 +59,19 @@ B 的鼓/贝斯在同一时刻切进来；出曲的**人声 row 从不参与携�
 前提：模型在位（`files/models/htdemucs-quarter.onnx`，sha256 `427b9588…`）、两首**节拍锁得住**
 （周期差 ≤2%，即同一速度族）、且 A 的交界处**还有律动**（`StemFusion` 在 ±2 小节内优先挑这样的位置）。
 任一不满足就**原样退回第 17 轮的行为**，不报错。
+
+**⚠️ 第 21 轮之后，落点这件事还卡在两个「第 20 轮的数」上（要真跳 12–14 秒的前奏就得先决定它们）**：
+- **渲染会提前返回**：第 17 轮那条省成本的规则（`DjEdit.presence`：前 `vocalOutMs` 里人声不到 5% ⇒
+  「不用做编辑」⇒ 直接放原始流）在落点规则**之前**，所以入曲人声晚于 `vocalOutMs`（17s 设置下
+  **12 785ms**）的歌**根本走不到落点规则**。真机原文（24c，两次跑）：A COLD PLAY
+  `not needed — its first 13045ms is measured to have no vocals in it`、Ice Cream Man
+  `not needed — its first 12785ms … (99% at or below -50 dBFS)` → 边界照旧放它们的前奏。
+  用户库里 12–14 秒前奏的那几首（A COLD PLAY 13.2s / Out Of Love 13.2s / Paradise 14.2s）都在这一档。
+- **上界 = 人声窗口**：17s 设置下只有 **8 864–10 482ms**（= 17 040 − 四小节 passage），所以 12–14 秒的
+  前奏**即使渲染走到了也会被判 declined**（Round Town 12.1s 真机上一对是这样被否的）。
+  要让它们也跳，得让**融合的人声窗口跟着落点走**（门从文件绝对时间 `[0, removalMs)` 改成
+  `[entry, entry + blend)`，于是 deck 起点后移多少、文件里就多压多少）—— 这是改第 20 轮的规则，
+  本轮**按要求没碰**。改它的代价是分离/编码窗口按比例变长，收益是 `blend` 不再因为落点而被截断。
 
 **已知缺陷 / 未验证（下一轮优先）**：
 1. **渲染文件的"去人声"在某些文件上从 ~13.4 秒起失效**（计划 16.7 秒）：第 18 轮找到候选根因——
@@ -2631,6 +2656,81 @@ its own file, 2000ms before its vocals arrive at 18773ms …`（融合编辑=单
 **下一步仍开着**：§零 缺陷 1 的收尾（让每种编辑都带 `-e`）；「出曲自己提前安静」还可以再量一层
 （现在只按曲线自己的 −60dB 交点收尾，**没有量出曲自己的电平包络**：文件末尾本来就是轻声淡出的曲子，
 人声可以收得更早——这是这轮**故意没做**的一层，也是用户那句「上一首歌结束时声音很小时」最直接的形式）。
+
+### 第 21 轮（2026-09-24）：入曲从哪一拍进场 —— 落点由素材决定（跳过前奏，落在人声前的小节线）
+
+**用户的原始要求**：「能否让 ai 决定过渡时包括过渡完接在第二首歌的哪里，不如直接跳过一些小节到人声部分」
+—— 过渡结束后接在第二首歌的什么位置，应当由系统按素材决定，而不是一律从歌头开始。
+
+**落点规则没变**（第 5 轮那条）：`StemFusion.vocalStartMs` 在入曲分离人声 row 上找第一段**持续**人声
+（25ms 帧、连续 1000ms 的中位 > −50dBFS），落在它**前一条**公共网格小节线、再留一个 runway 小节、相位对齐。
+变的（`entry()`）是**成立条件**：
+
+1. **下界：`VOCAL_SKIP_MIN_MS 8000` → `VOCAL_SKIP_MIN_BARS 1`**（入曲自己的一小节 = 4 拍，按它自己的
+   拍格换算）。8 000ms 在 120BPM 是四小节、100BPM 三小节半 —— 毫秒阈值等于每首歌一条不同的规则。
+2. **上界不是常数，是「入曲人声被压住的窗口」`removalMs`**：落点 + 整段 passage 必须留在它之内，
+   而且**这里是问的，不是留给下面那条 judgement**：`entry + windowMs <= removalMs` 过去会让**整个
+   plan 失效**（见第 3 条）。落不进去 ⇒ **不跳**（deck 从原处进场），并把被否的落点写进日志
+   （`Plan.declinedIntroMs` + `describe()` 里那句「does NOT skip to it …」）。
+3. ⚠️ **这同时是一个 bug 修复**：旧的判法先取落点、再被 `fusionEnd <= removalMs` 判死 —— 于是
+   「入曲人声来得晚」的对子**连融合都没了**（退回第 17 轮编辑、前奏照放）。真 planner + 真素材
+   （`fusion/PlanDump3`，17s 设置，14 个输入）：**旧判法 5 个被拒**（Round Town / Out Of Love /
+   Paradise / A COLD PLAY 与 Ice Cream Man 的半小节相位），现在都能规划。
+4. `skippedIntroMs` 改成 deck **真正跳过**的量（比自己的内容起点晚多少）；旧口径是「到人声那条小节线
+   的距离」，会在 `B starts at 10000ms` 旁边写「skipped 2000ms」。`describe()` 两个数都给。
+   `Plan` 新增 `removalMs`（日志用）与 `declinedIntroMs`。
+5. `RULE_VERSION 5 → 6`（两种差别都能听出来）。
+
+**没碰**：entry 仍是相位对齐的公共网格小节线（runway 是候选窗口）；passage、人声门、融合/slam 各自的
+entry 逻辑、素材窗口都不动；**边界侧零改动**（deck 起点 = 编辑自己的 `-e`，`PlayerController` 从文件名
+读回来）。**也没有让 AI 选择器参与**：stem onset + 小节线就能回答，多一次 LLM 往返无法复核。
+
+**实测（保真）**：
+- `fusion/intro.py`（用 app 自己的规则跑 harness 解码的 17 首，20s head）：12 首在 2 150ms 内就唱
+  （10 首 ≤ 750ms），5 首有真前奏（Hurt You 9 225 / Round Town 12 100 / A COLD PLAY 13 175 /
+  Out Of Love 13 175 / Paradise 14 175 ms），**2.2–9.2s 之间一首都没有**。
+- `fusion/PlanDump3`（真 planner，17s + 40ms 内容起点）：上界 = `17 040 − 四小节` = **8 864–10 482ms**
+  （按入曲小节）；例：Hurt You（人声 9 225，小节 2 292）→ 落点 9 170、`skipped 9 130`；
+  Round Town / Out Of Love / Paradise → **declined**；A COLD PLAY 相位 0 时跳 9 501、半小节相位被否。
+- `fusion/PlanDump3Old`（同一输入跑 **HEAD 之前**的源码）：5/14 REFUSED（原文
+  `the fusion would run 3235ms past the 17040ms the incoming's vocals are out for` 等）。
+
+**真机（K20 Pro `efaa83b2`，24c，`sha256 7e32232d…`，三次跑，过渡方式=自动/17s/曲线=DJ）**：
+- `A COLD PLAY → unhappy`：**融合真的播了**。`DJ edit for unhappy: … SLAM … B starts at 1895ms`；
+  `slot 1 -> 2: CROSSFADE 重叠=long 17000ms, curve=FUSION`；`that edit is a FUSION — the incoming deck
+  starts at 1895ms of its own file instead of 1895ms (the same position this boundary's alignment
+  chose)` —— unhappy 人声 0ms，本来没有前奏可跳（负例）。
+- `unhappy → Hurt You`：**跳过 5 203ms 被规划出来**（设备自己量的）：
+  `B starts at 5203ms (skipping 5203ms of its intro: its voice first comes in at 9200ms of its file,
+  3997ms after the deck starts)`。但这对的边界判定是 `slot 2 -> 0: FADE_OUT_IN (… tempo UNRELATED
+  (117.4 vs 93.4BPM, the incoming at x1.2568 (outside the clamp)))` —— **重叠被整体否掉**，编辑没被播。
+- `A COLD PLAY → Hurt You`（×1.077，配对可重叠）：**跳过被上界否掉**，原文
+  `B starts at 65ms (its voice first comes in at 9200ms, but the deck does NOT skip to it: a landing on
+  7771ms would run this passage to 18046ms, past the 17000ms the incoming's voice is held out for, so it
+  starts where it always did)` —— 同一对素材在**旧代码下是「整个融合被拒」**，现在融合保留。
+  注意这条**同时量到一个关键事实**：相关速度对走的是**四步 fusion**（窗口 10 275ms = 4×2 569），
+  于是 17s 下上界只有 **6 725ms**；同一首 Hurt You 在第一跑里走 **slam**（窗口 2 568ms）时上界是
+  14 432ms、落点 5 203ms 跳得进。**上界跟着手势长短变**（slam 一小节 / fusion 四步），这是设计，不是常量。
+- `A COLD PLAY`、`Ice Cream Man`（两次跑）：渲染**根本没走到落点** —— 原文
+  `DJ edit for A COLD PLAY not needed — its first 13045ms is measured to have no vocals in it`、
+  `DJ edit for Ice Cream Man not needed — its first 12785ms … (99% at or below -50 dBFS)`。原因见 §零 那两条。
+
+**测试**：`mvn -pl player-core test` **274 跑 1 失败**（仍是既有的 `SettingsCatalogTest`）。新增 3 个：
+`aDeadIntroIsSkippedAndAVoiceFromTheStartIsNot`、`aFewBarsOfIntroAreSkippedAndUnderOneBarIsNot`、
+`aSkipTheVocalWindowCannotPayForIsNotTakenAndTheFusionStands`。
+本轮 harness：`D:\qplayer-dev\harness\r27\`（`run27.sh`/`run27b.sh`/`run27c.sh` 三次真机跑 + logcat +
+发行说明）、`fusion/intro.py`、`fusion/PlanDump3.java`、`oldbuild/PlanDump3Old.java`。
+
+**没听到 / 不知道的**：**没有任何一次真的听到「跳过后进场」**（上面三条原因各挡住一种情况）；
+**听感由用户判断**；离线用的入曲相位多数是假设值（例：A COLD PLAY 相位 0 跳得进、半小节相位被否）；
+`extendHold` 重试循环现在不会因为「落点超窗」而提前结束（窗口变大会把 skip 变成 declined），
+所以同一对的不同 attempt 可能落在不同 entry —— 每次 attempt 自洽，写进文件的是被接受的那一次。
+
+**下一步（都在这轮的量里）**：① 让 `DjEdit.presence` 那条「前窗没人声 ⇒ 不用编辑」先问一句
+「落点本来跳得进吗、这一对能融合吗」，否则 12–14 秒前奏的歌永远走不到落点规则；② 让融合的人声窗口
+跟着落点走（`[entry, entry+blend)`），否则 17s 下上界只有 6.7–10.5s；③ 顺带记一笔：
+渲染端给「速度无关」对子规划的 **SLAM 编辑，边界侧 `PairFit` 判 UNRELATED 就一律走 FADE_OUT_IN**
+（第一跑原文），所以 slam 那条路写出来的文件**没人播** —— 这是第 5 轮与 P7 之间的旧矛盾，本轮没动。
 
 
 
