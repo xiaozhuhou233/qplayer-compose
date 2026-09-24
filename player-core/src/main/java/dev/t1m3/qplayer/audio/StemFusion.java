@@ -194,6 +194,14 @@ public final class StemFusion {
      *       {@code 1153167801-b3939-v16203-x5-r3.m4a} — a plain refusal written by the pre-slam code
      *       and stamped with the then-current version — was played as today's edit and
      *       <b>the render for the asked direction never ran at all</b>.</li>
+     *   <li><b>4 → 5</b> — round 20 changed the <em>gate</em> every render writes: the incoming
+     *       track's voice is held out for the stretch of the blend in which the outgoing track can
+     *       still be heard ({@link DjEdit#vocalOutMs}, 75.2% of a DJ-shape blend) rather than for
+     *       the whole blend, so every file written before it carries a {@code -v} that is ~4 s late
+     *       on a 17 s setting. The version is in every edit's key — not only a fusion's — so this
+     *       bump is what makes those files re-render instead of being played with the old window:
+     *       a listener's 过渡时长 would otherwise look like it was still being over-cut on exactly
+     *       the pairs they had already heard.</li>
      * </ul>
      *
      * <p>The price is one re-render per pair, once, in the pre-lane where there are minutes of
@@ -203,7 +211,7 @@ public final class StemFusion {
      * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
      * name.
      */
-    public static final int RULE_VERSION = 4;
+    public static final int RULE_VERSION = 5;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with
