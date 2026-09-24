@@ -55,7 +55,7 @@ public class StemFusionIncomingWaitTest {
             row == StemGesture.Stem.DRUMS.row() ? 8_415L : 240L;
 
     @Test
-    public void theHoldWaitsButPlacesNothingOnThePlacedJunction() {
+    public void theHoldWaitsForTheIncomingRowsAndTheGestureKeepsItsShape() {
         StemFusion.Plan plain = StemFusion.plan(input(StemFusion.NO_INCOMING_MEASUREMENT, 15_240L));
         StemFusion.Plan waited = StemFusion.plan(input(DEVICE, 15_240L));
         assertTrue(plain.describe(), plain.valid);
@@ -63,36 +63,30 @@ public class StemFusionIncomingWaitTest {
         // Without the measurement the design's own hold is untouched, bit for bit: that is what
         // every caller that does not measure still gets.
         assertFalse(plain.holdForIncoming);
-        // With it, the measurement is read and reported (the incoming's own kit arrives at 8 415 ms
-        // of ITS file; its low end from the first beat) and the wait engages.
+        assertEquals(2L * BAR_MS, plain.holdEndMs - plain.entryMs);
+        // With it, the hold grows to the step the incoming's own kit arrives in: 900 + 4*2180 =
+        // 9 620 ms ≥ 8 415, and the shape after it is the same recede.
         assertTrue(waited.describe(), waited.holdForIncoming);
         assertEquals(8_415L, waited.incomingDrumsMs);
         assertEquals(240L, waited.incomingBassMs);
-        // ⚠️ Round 6's eleventh pass: ON THIS PATH THE HOLD PLACES NOTHING. Every A-side instant is
-        // A's own file ending and every B-side instant is one step back from it, so the two plans
-        // agree on all of them — nothing keys the hold, it cannot move a cut, and the coincidence of
-        // the old arithmetic (holdEnd at entry + n steps) is exactly what the placement removed.
-        assertEquals("the wait does not move A's ending", plain.holdEndMs, waited.holdEndMs);
-        assertEquals("nor B's arrival", plain.arriveStartMs, waited.arriveStartMs);
-        assertEquals(plain.arriveEndMs, waited.arriveEndMs);
-        assertEquals(plain.junctionMs, waited.junctionMs);
-        assertEquals(plain.entryMs, waited.entryMs);
-        assertEquals("A's rows end at A's own file ending either way", 2_824L, waited.holdEndMs);
-        assertEquals("and that is the entry plus the copy", waited.entryMs
-                + Math.round(StemFusion.JUNCTION_XFADE_MS * (BEAT_MS / 566.4d)), waited.holdEndMs);
-        // What the wait DOES move is the window's own length — the table runs `holdSteps` steps,
-        // and after A's rows have ended the file is today's content, so this is a cost and a report,
-        // not an instant: 4 steps plain, 6 steps waited (ceil((8415 - 240)/2180) + 2 = 6).
-        assertEquals("the window is the whole gesture", 4L * BAR_MS, plain.windowMs);
-        assertEquals("and the wait lengthens it, placing nothing", 6L * BAR_MS, waited.windowMs);
-        assertEquals(waited.entryMs + waited.windowMs, waited.fusionEndMs);
+        assertEquals("the hold is four steps", 4L * BAR_MS, waited.holdEndMs - waited.entryMs);
+        assertTrue("and it covers the incoming's kit: " + waited.describe(),
+                waited.holdEndMs >= waited.incomingDrumsMs);
+        assertEquals("the drums' fade is still one step", BAR_MS,
+                waited.drumsEndMs - waited.holdEndMs);
+        assertEquals("the low end's is still two", 2L * BAR_MS,
+                waited.lowEndEndMs - waited.holdEndMs);
+        assertEquals("and the rise is one step, ending where the recede starts", BAR_MS,
+                waited.arriveEndMs - waited.arriveStartMs);
+        assertEquals(waited.holdEndMs, waited.arriveEndMs);
+        assertEquals("the window is the whole gesture", 6L * BAR_MS, waited.windowMs);
+        assertEquals(waited.lowEndEndMs, waited.fusionEndMs);
         assertTrue("and the passage still fits the incoming's vocal-free window",
                 waited.fusionEndMs <= 15_240L);
-        assertTrue("the plan says what it waited for, and that the hold places nothing: "
-                        + waited.describe(),
-                waited.describe().contains("the incoming's own drums are not playing until 8415ms")
-                        && waited.describe().contains("the hold places nothing"));
-        // The rows it can still move are monotone and reach their floor at A's own ending.
+        assertTrue("the plan says what it waited for: " + waited.describe(),
+                waited.describe().contains("the hold is 8720ms because the incoming's own drums"
+                        + " are not playing until 8415ms"));
+        // The bands' recede is still monotone and still reaches the floor on its own step.
         for (StemGesture.Stem row : new StemGesture.Stem[]{StemGesture.Stem.DRUMS,
                 StemGesture.Stem.BASS, StemGesture.Stem.OTHER}) {
             double previous = Double.MAX_VALUE;
@@ -101,33 +95,25 @@ public class StemFusionIncomingWaitTest {
                 assertTrue(row + " must never rise again", g <= previous + 1e-9);
                 previous = g;
             }
-            assertEquals(row + " is at its own level on A's last sample",
+            assertEquals(row + " is at its own level through the hold",
                     row == StemGesture.Stem.OTHER ? Math.pow(10d, StemFusion.A_OTHER_DB / 20d) : 1d,
                     StemFusion.gainAt(waited, true, row, waited.holdEndMs), 1e-9);
-            assertEquals(row + " and gone the sample after it", 0d,
-                    StemFusion.gainAt(waited, true, row, waited.holdEndMs + 1L), 1e-9);
         }
     }
 
     @Test
-    public void theWaitItselfOnlyLengthensTheWindowNow() {
-        // ⚠️ Rewritten for the placement (round 6's eleventh pass). The wait used to be rounded up to
-        // a whole step of the table and that step WAS the hold; there is no hold to place any more,
-        // so what the wait's own step count decides is how long the file carries the table after A's
-        // rows have ended. A kit that arrives one beat later than the design's hold still costs a
-        // whole step — of the window.
+    public void theWaitItselfIsPlacedOnTheStepTheIncomingArrivesIn() {
+        // A kit that arrives one beat later than the design's hold still costs a whole step: the
+        // instants are the table's own lines, so the wait is rounded up, never down.
         StemFusion.Plan plan = StemFusion.plan(input((row, fromMs, toMs) ->
                 row == StemGesture.Stem.DRUMS.row() ? 4_700L : 240L, 15_240L));
         assertTrue(plan.describe(), plan.valid);
-        // ceil((4700 - 240)/2180) = 3 steps of wait + the design's 2 low-end steps + 2 hold = 7?
-        // No: the wait replaces the hold (3 >= 2), so the shape is 3 + 2 = 5 steps of window.
-        assertEquals("5 steps of window", 5L * BAR_MS, plan.windowMs);
-        assertEquals("and A's ending is still A's own file's end", 2_824L, plan.holdEndMs);
+        assertEquals("4 700ms is inside the second step, so the hold is three", 3L * BAR_MS,
+                plan.holdEndMs - plan.entryMs);
         StemFusion.Plan same = StemFusion.plan(input((row, fromMs, toMs) ->
                 row == StemGesture.Stem.DRUMS.row() ? 4_360L : 240L, 15_240L));
-        assertEquals("a kit already there at the design's hold's own end costs no step",
-                4L * BAR_MS, same.windowMs);
-        assertEquals(same.holdEndMs, plan.holdEndMs);
+        assertEquals("a kit already there at the hold's own end costs nothing", 2L * BAR_MS,
+                same.holdEndMs - same.entryMs);
         assertFalse(same.holdForIncoming);
     }
 
@@ -161,14 +147,12 @@ public class StemFusionIncomingWaitTest {
                 tooLate.reason.contains("the wait does not fit"));
         // And the affordable passage is what decides: with a removal window long enough for the
         // seventh step, the same late incoming arrives and the plan is made — the wait is a
-        // preference the window can pay for, not a refusal by reflex. What it buys is window, not an
-        // instant: A's ending is the same number in every one of the three plans here.
+        // preference the window can pay for, not a refusal by reflex.
         StemFusion.Plan fits = StemFusion.plan(input((row, fromMs, toMs) ->
                 row == StemGesture.Stem.DRUMS.row() ? 240L + 5L * BAR_MS : 240L, 16_271L,
                 20_000L));
         assertTrue(fits.describe(), fits.valid);
-        assertEquals("a 11 140ms kit is 5 steps of wait + 2 of shape", 7L * BAR_MS, fits.windowMs);
-        assertEquals(2_824L, fits.holdEndMs);
+        assertEquals(5L * BAR_MS, fits.holdEndMs - fits.entryMs);
         assertTrue(fits.holdForIncoming);
     }
 
@@ -199,34 +183,39 @@ public class StemFusionIncomingWaitTest {
     }
 
     /**
-     * ⚠️ Rewritten for the placement (round 6's eleventh pass): the search band and the gesture no
-     * longer share a budget, because there is no search. On the device's own {@code squabble up ->
-     * AGUDO} — the pair this test was written for — the design's full 4-step gesture fits the cap
-     * (9 062 + the two leads = 11 062 of 12 000), the band's line is inside it, and the plan is made
-     * with the shape the design asks for. And the pair whose bar was wider than every affordable
-     * band — the case that used to be REFUSED by the search's own message — is a plan now: its
-     * junction is A's ending, which no band can be too narrow for.
+     * ⚠️ The other rule the passage's own span fights with, on the device's own numbers:
+     * {@code squabble up -> AGUDO} is refused in the plan with
+     * "no line of the outgoing's grid is inside the 12000ms the passage can be taken from (the
+     * search covers 429ms back and 428ms forward of 142742 outside it)". The pair: a 2 305 ms bar
+     * (576.3 ms beats) against AGUDO's 566.4 ms (1.75% out of it, inside LOCK_TOLERANCE, so the
+     * unison cap of 12 000 applies), a 15 s blend, a 157 992 ms outgoing — i.e. the target is
+     * 142 742 ms, the design's own 4-step gesture needs 9 142 ms of the outgoing's file, and what
+     * is left of the cap is a ±429 ms band while the outgoing's bar lines are 2 305 ms apart. No
+     * line, and a pair nobody's rule has anything against: the passage and the search's OWN band
+     * come out of the same cap, so the gesture gives — the low end's fade first, still a fade.
      */
     @Test
-    public void theSearchBandNoLongerShortensOrRefusesAnything() {
+    public void theGestureGivesWhenTheSearchBandIsWhatThePassageSqueezed() {
         StemFusion.Plan plan = StemFusion.plan(squabbleInput());
         assertTrue(plan.describe(), plan.valid);
-        assertEquals("A's rows end at A's own ending", 2_900L, plan.holdEndMs);
-        assertEquals("with both fades at zero — there is no give left to make", 0L,
+        assertEquals("the low end's fade is one step, not two", Math.round(plan.barStepMs),
                 plan.lowEndEndMs - plan.holdEndMs);
-        assertFalse("and the old give-up note is gone from the line: " + plan.describe(),
+        assertEquals("and the hold is the design's own two", 2L * Math.round(plan.barStepMs),
+                plan.holdEndMs - plan.entryMs);
+        assertTrue("the log says what the gesture gave up: " + plan.describe(),
                 plan.describe().contains("its low end's fade is ONE step"));
-        assertEquals("the passage is the design's own four steps", 4L,
+        // The junction is a line of the outgoing's own grid inside the band the shortened gesture
+        // leaves, and the passage is still three steps of the incoming's.
+        assertEquals("the passage is three steps of the incoming's grid", 3d,
                 plan.windowMs / plan.barStepMs, 0.01d);
-        assertEquals(157_992L - StemFusion.JUNCTION_XFADE_MS, plan.junctionMs);
-        // A pair whose bar is wider than any band a 12 s cap can leave: it plans, and what shapes it
-        // is the cap's own arithmetic (a 4 531 ms step cannot afford the design's 4-step gesture, so
-        // `shapeFor` gives one step of hold and one of low end — 2 steps of window) and nothing else.
-        StemFusion.Plan wide = StemFusion.plan(wideBarInput());
-        assertTrue(wide.describe(), wide.valid);
-        assertEquals(2L, wide.windowMs / wide.barStepMs, 0.01d);
-        assertEquals(120_000L - StemFusion.JUNCTION_XFADE_MS, wide.junctionMs);
-        assertEquals(wide.entryMs + Math.round(StemFusion.JUNCTION_XFADE_MS), wide.holdEndMs);
+        // A pair whose bar is wider than every affordable band is still refused — by the search's
+        // own message, which now names the shortened gesture.
+        StemFusion.Plan tooWide = StemFusion.plan(wideBarInput());
+        assertFalse(tooWide.describe(), tooWide.valid);
+        assertTrue(tooWide.reason, tooWide.reason.contains("no line of the outgoing's grid is"
+                + " inside"));
+        assertTrue("and it says the gesture was already at its shortest: " + tooWide.reason,
+                tooWide.reason.contains("already shortened to its shortest"));
     }
 
     /** The device's own failing pair, in milliseconds: a 2 305.2 ms bar against AGUDO's 566.4 ms
@@ -317,19 +306,18 @@ public class StemFusionIncomingWaitTest {
     public void theCallerCanExtendTheHoldOneStepAtATime() {
         StemFusion.Plan base = StemFusion.plan(input(StemFusion.NO_INCOMING_MEASUREMENT, 15_240L));
         assertTrue(base.describe(), base.valid);
+        long step = Math.round(base.barStepMs);
+        assertEquals("the design's own hold", 2L * step, base.holdEndMs - base.entryMs);
         for (int extra = 1; extra <= StemFusion.FUSION_WAIT_EXTRA_STEPS; extra++) {
             StemFusion.Plan more = StemFusion.plan(withExtra(extra, 15_240L));
             assertTrue(more.describe(), more.valid);
-            // ⚠️ Round 6's eleventh pass: the caller's steps are counted exactly like the design's —
-            // they still buy window (and are still bounded by the same clauses) — but they place no
-            // instant, so the loop's lever is a length, not a position. That is what makes the worst
-            // case (no extension kept) today's behaviour by construction.
-            assertEquals("the caller's step is one more step of window",
-                    (4L + extra) * BAR_MS, more.windowMs);
-            assertEquals("and A's ending does not move", base.holdEndMs, more.holdEndMs);
-            assertEquals(base.arriveStartMs, more.arriveStartMs);
-            assertEquals(base.arriveEndMs, more.arriveEndMs);
-            assertEquals(base.junctionMs, more.junctionMs);
+            assertEquals("the caller's step is one more step of the same recede",
+                    (2L + extra) * step, more.holdEndMs - more.entryMs);
+            assertEquals("and the shape after it is unchanged", step,
+                    more.drumsEndMs - more.holdEndMs);
+            assertEquals("the low end's two as well", 2L * step, more.lowEndEndMs - more.holdEndMs);
+            assertEquals("the passage grows with it", (4L + extra) * step, more.fusionEndMs
+                    - more.entryMs);
         }
         // A step the incoming's own vocal-free window cannot pay for is refused by the same clause
         // the design's steps are — the loop stops extending there rather than breaking a rule.
@@ -342,8 +330,8 @@ public class StemFusionIncomingWaitTest {
         // floor for the shortening, exactly as the measurement's own are.
         StemFusion.Plan withWait = StemFusion.plan(withExtra(1, 15_240L, DEVICE));
         assertTrue(withWait.describe(), withWait.valid);
-        assertTrue("the wait's own step (6) is at least the caller's (5)",
-                withWait.windowMs >= (4L + 1L) * BAR_MS);
+        assertTrue("the wait's own step (4) is at least the caller's (3)",
+                withWait.holdEndMs - withWait.entryMs >= 4L * step);
     }
 
     /**

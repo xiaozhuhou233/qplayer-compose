@@ -71,67 +71,13 @@ public final class StemFusion {
      *  end swapped) and each one needs a bar to be heard as a state rather than as an edit. */
     public static final int FUSION_BARS = 4;
 
-    /**
-     * ⚠️ <b>How much of the outgoing's own ending the file carries (round 6, eleventh pass): the
-     * user's requirement is that the outgoing track plays IN FULL</b> — 「前一首歌过渡时还是要播放完整
-     * 别一半中断了」 — so the junction is A's own file end and the file carries A's <b>last</b>
-     * {@code FadeCurve.JUNCTION_XFADE_MS} as a copy, over exactly the window in which the boundary's
-     * deck-level hand-over crossfades the outgoing deck against this file. Both sides of that
-     * crossfade are then the same last two seconds of A, so their equal-gain sum is A's ending at
-     * unity and the hand-over is inaudible by construction. Deliberately the boundary's own number:
-     * if that change-over ever moves, this moves with it.
-     *
-     * <p><b>And because A's rows end there, the incoming's rhythm rows arrive AT that same instant
-     * rather than two steps later</b> ({"entry + JUNCTION_XFADE_MS"}): A's rows are gone from the
-     * file's 2 s and B's drums and low end would not be there until ~4.4 s, which is a 2 360 ms
-     * window with no rhythm in either backing — and the acceptance's pulse clause refuses exactly
-     * that (its own device precedent: a 2 305 ms hole on a 576 ms grid, refused). So B's kit rises
-     * over one step ENDING where A's file does, i.e. the two backings' rhythm overlaps across the
-     * hand-over by a step and the pulse is continuous. This is the fusion's own idea (the two
-     * backgrounds together) rather than a departure from it, and it is the one thing in the
-     * incoming's part of the gesture this change moves.
-     *
-     * <p><b>The three places where "in full" is approximate, all deliberate and all named.</b>
-     * (1) The copy is built from A's separated <em>rows</em> and the table has never carried the
-     * outgoing's vocal row (「避免过渡时出现人声」), so during the hand-over the listener hears A's
-     * live deck (voice included) crossfading against A's backing alone: the backing is exact to A's
-     * last sample, A's voice fades out over the two seconds (a cosine, up to −3 dB average,
-     * monotone), and B's voice is still gated for the whole removal window, so there is still one
-     * voice at a time. Carrying A's vocal row for the hand-over window is the one-line alternative.
-     * (2) The quiet-passage REFUSAL is suppressed for the placed junction (its measurement stays in
-     * the report, {@code Plan#bodyLevelAtJunction} is reported as {@code true}): the clause exists to
-     * choose a line that is not inside the outgoing's own fade, and the requirement is that a
-     * fade-ending is heard rather than refused. (3) The make-up gain stays: the copy is lifted
-     * towards A's own body by {@link #makeupDb} (bounded by {@link #MAKEUP_MAX_DB}), which is what
-     * makes the backing exact in <em>level</em> rather than only in phase, and the two copies' sum
-     * during the hand-over can therefore sit above A's authored level — up to about +0.7 dB on the
-     * `A COLD PLAY → unhappy` pair, where the lift measured ~1.2 dB, for the two seconds of the
-     * hand-over. The alternative (no make-up) would hand over 1.2 dB quiet, which is the audible
-     * defect the make-up exists to remove.
-     *
-     * <p>The acceptance's <b>pulse clause is kept unchanged</b> (this change is what makes it pass:
-     * the 2 360 ms gap between A's rows ending and B's kit arriving measured below and refused), and
-     * the ONLY thing in the incoming's part of the gesture that moves is the placement of its
-     * arrival lines (see above).
-     */
-    public static final long JUNCTION_XFADE_MS = 2_000L;
-
     /** How many steps of the table the outgoing's rows hold at <b>unity</b> before they start to
      *  recede (round 6). The hold is what keeps the file continuous with the outgoing's live deck
      *  for the whole of the deck-level handover — the boundary's own changeover is about a bar (see
      *  {@code FadeCurve.JUNCTION_XFADE_MS}) — so the two fades do not stack and A is never heard
      *  being cut. The full gesture is {@link #A_HOLD_STEPS} plus the low end's own fade; a pair
      *  whose bar is so long that four steps do not fit the separation budget gets one step of hold
-     *  (still: A recedes, never cuts), which is what {@link #plan} decides.
-     *
-     *  <p>⚠️ <b>On the placed junction (round 6, eleventh pass) this hold and the two fades below
-     *  measure ZERO</b>: A's rows are at unity to its own file's end, so the recede the three
-     *  constants describe has no span left — {@code Plan#recedeMs()} reports the copy's own length
-     *  as the hold and zero for both fades, and {@link #describe()} says "A's own ending, not a
-     *  recede". They are not dead: their SUM is still the gesture's own span
-     *  ({@code holdSteps + lowEndFadeSteps = FUSION_BARS} steps), i.e. the window's length (see the
-     *  window rule in {@link #plan}), and they still drive the band search that shortens the gesture
-     *  for a pair whose bars are wider than the affordable band. */
+     *  (still: A recedes, never cuts), which is what {@link #plan} decides. */
     public static final int A_HOLD_STEPS = 2;
 
     /** How many steps of the table the outgoing's <b>drums</b> take to fade to the floor (round 6:
@@ -248,12 +194,6 @@ public final class StemFusion {
      *       {@code 1153167801-b3939-v16203-x5-r3.m4a} — a plain refusal written by the pre-slam code
      *       and stamped with the then-current version — was played as today's edit and
      *       <b>the render for the asked direction never ran at all</b>.</li>
-     *   <li><b>4 → 5</b> — the junction moved to the outgoing's own file end (the user's
-     *       requirement that the previous song plays in full), the take became A's own last
-     *       {@link #JUNCTION_XFADE_MS}, the A-side spans went to zero, the incoming's rhythm arrival
-     *       moved to meet A's last sample, the window grew the widest-of-three rule, and the search's
-     *       two refusals (the band's and the quiet passage's) died with the search: what a render
-     *       produces changes for every pair.</li>
      * </ul>
      *
      * <p>The price is one re-render per pair, once, in the pre-lane where there are minutes of
@@ -263,7 +203,7 @@ public final class StemFusion {
      * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
      * name.
      */
-    public static final int RULE_VERSION = 5;
+    public static final int RULE_VERSION = 4;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with
@@ -1651,14 +1591,7 @@ public final class StemFusion {
                     ? entryMs + (long) BED_FADE_BARS * Math.round(bBarMs) : -1L;
             this.windowMs = windowMs;
             this.sourceSpanMs = sourceSpanMs;
-            // \u26a0\ufe0f The take's start in A's own file (round 6, eleventh pass): the file's instant
-            // `entry` is where the deck begins and the copy there has to be A's own ending, so the
-            // material is drawn FROM THE JUNCTION — A's `aDur - JUNCTION_XFADE_MS` — with the copy's
-            // own length as its span. (The placement before this one drew it `entry/speed` earlier,
-            // which is the lead the deck's own start offset would need if the deck had already been
-            // playing by the junction; the deck starts AT the file's entry, so the copy's start is
-            // the junction itself.)
-            this.sourceFromMs = valid ? Math.max(0L, junctionMs) : junctionMs;
+            this.sourceFromMs = junctionMs;
             this.materialFromMs = materialFromMs;
             this.materialWindowMs = materialWindowMs;
             this.searchBandMs = searchBandMs;
@@ -1711,14 +1644,7 @@ public final class StemFusion {
             long[] recede = recedeMs();
             String shapes = slam
                     ? "A's rows cut on its one line (a slam is the cut gesture)"
-                    : recede.length > 1 && recede[1] == 0L && recede[2] == 0L
-                            ? String.format(Locale.US, "A's own ending, not a recede: its rows are at"
-                                    + " unity to %dms (the file's copy of its last %dms, which the"
-                                    + " deck-level hand-over crossfades against A's own live deck);"
-                                    + " the incoming's drums and low end rise over %dms to %dms%s",
-                            recede[0], JUNCTION_XFADE_MS, arriveEndMs - arriveStartMs,
-                            arriveEndMs, "")
-                            : String.format(Locale.US, "A recedes, never cut: %dms at unity, then its drums"
+                    : String.format(Locale.US, "A recedes, never cut: %dms at unity, then its drums"
                             + " fade over %dms and its low end and melodic row over %dms; the"
                             + " incoming's drums and low end rise over %dms from %dms%s",
                     recede.length > 0 ? recede[0] : 0L, recede.length > 1 ? recede[1] : 0L,
@@ -1736,45 +1662,38 @@ public final class StemFusion {
                     ? String.format(Locale.US, "SLAM (the grids are in no relation, so nothing is"
                             + " beat-matched: one bar of the incoming's grid, every element changing"
                             + " hands on the same line at %dms)", swapMs)
-                    : String.format(Locale.US, "fusion %s: A's rows are at unity to %dms (its own"
-                            + " file's ending, which the deck-level hand-over crossfades against A's"
-                            + " own live deck) and B's drums and low end arrive there over %dms; the"
-                            + " table runs to %dms (%dms = %d steps of %.0fms)",
-                    relation == null ? "(no relation)" : relation.describe(), holdEndMs,
-                    arriveEndMs - arriveStartMs, fusionEndMs, windowMs,
-                    Math.round(windowMs / Math.max(1d, barStepMs)), barStepMs);
+                    : String.format(Locale.US, "fusion %s: drums swap at %dms, low end at %dms, all"
+                            + " A gone at %dms (%dms = %d steps of %.0fms)",
+                    relation == null ? "(no relation)" : relation.describe(), swapMs, bassMs,
+                    fusionEndMs, windowMs, slam ? SLAM_STEPS : FUSION_BARS, barStepMs);
             return String.format(Locale.US,
-                    "%s; %s; the outgoing deck is cut at %dms of its own file — its own ending less"
-                            + " the %dms hand-over, PLACED rather than searched (so nothing shifts it"
-                            + " and no band can refuse the pair), B starts at %dms%s (%.0f ms of"
+                    "%s; %s; the outgoing deck is cut on its bar line at %dms (%+dms from the"
+                            + " distance alone; the search"
+                            + " covered %dms back and %dms forward), B starts at %dms%s (%.0f ms of"
                             + " wall-clock phase difference %s)%s%s; B's bed fades in over one bar, from"
                             + " %dms to unity at %dms; the junction's bar is %s%s; the deck plays"
                             + " this file at x%.4f and the outgoing's carry was read at x%.4f inside"
                             + " it, so %dms of A taken from %dms fills %.0fms of the file's %dms"
                             + " window, separated over %dms from %dms",
-                    head, shapes, junctionMs, JUNCTION_XFADE_MS, entryMs,
+                    head, shapes, junctionMs, junctionShiftMs, searchBackMs, searchBandMs, entryMs,
                     skippedIntroMs > 0L ? String.format(Locale.US, " (skipping %dms of its intro:"
                             + " its voice first comes in at %dms)", skippedIntroMs, firstVocalMs)
                             : "",
                     phaseErrorMs, phaseMatched ? "matched to A's grid"
                             : "NOT matched (the plain bar line)",
                     holdForIncoming
-                            ? String.format(Locale.US, ", and its rows still wait: the window is"
-                                    + " %dms because the incoming's own drums are not playing until"
-                                    + " %dms and its low end until %dms of ITS file — on this path the"
-                                    + " hold places nothing (A's rows end at A's own file end either"
-                                    + " way), so what the wait moves is how long the file carries the"
-                                    + " table after them",
-                            windowMs, incomingDrumsMs, incomingBassMs)
+                            ? String.format(Locale.US, ", and its rows wait: the hold is %dms because"
+                                    + " the incoming's own drums are not playing until %dms and its"
+                                    + " low end until %dms of ITS file (a recede that started before"
+                                    + " them would hand the pulse to nobody)",
+                            recede.length > 0 ? recede[0] : 0L, incomingDrumsMs, incomingBassMs)
                             : "",
                     entryFromBeatGrid ? " [⚠️ from the incoming's BEAT grid: the bar lines it came"
                             + " with held none in the entry's window, so the beats are measured and"
                             + " the bar grouping is a guess]" : "",
                     entryMs, bedFadeMs,
                     bodyMeasured
-                            ? String.format(Locale.US, "there is no body-level clause on it: the"
-                                    + " junction is PLACED at A's own ending, so the quiet-passage"
-                                    + " refusal does not apply (the passage measures %.2f dBFS"
+                            ? String.format(Locale.US, "at the track's own body level (%.2f dBFS"
                                     + " against a body of %.2f)", junctionPassageLevelDb, bodyLevelDb)
                             : "not measured against a body",
                     grooveAtJunction ? " and carrying its groove" : "",
@@ -1910,9 +1829,7 @@ public final class StemFusion {
         double aBar = aBeatMs * BEATS_PER_BAR;
         double band = JUNCTION_SEARCH_BARS * aBar;
         long span = sourceSpanMs(bBeatMs, speed);
-        // \u26a0\ufe0f A's own ending is what the junction's step is measured against, so the probe has
-        // to reach A's last sample (the junction is `aDur - JUNCTION_XFADE_MS`).
-        long target = Math.round(aDurMs);
+        long target = Math.round(aDurMs - CUT_BACK_MS - blendMs);
         long from = Math.max(0L, Math.round(target - band - A_TAIL_SLACK_MS));
         long to = Math.min(aDurMs, Math.round(target + band + span + A_TAIL_LEAD_MS));
         return new long[]{from, Math.max(0L, to - from)};
@@ -2039,12 +1956,7 @@ public final class StemFusion {
         double aBar = in.aBeatMs * BEATS_PER_BAR;
         double bBar = in.bBeatMs * BEATS_PER_BAR;
         double lock = lockError(in.aBeatMs, in.bBeatMs, in.speed);
-        // ⚠️ THE JUNCTION IS A'S OWN ENDING (round 6, eleventh pass). The deck is no longer cut a
-        // blend before A's file runs out: it is cut {@link #JUNCTION_XFADE_MS} before the last
-        // sample — exactly the window the boundary's deck-level hand-over crossfades against this
-        // file — and the file carries those same two seconds as a copy.
-        long target = Math.round(in.aDurMs - JUNCTION_XFADE_MS);
-        long junction = target;
+        long target = Math.round(in.aDurMs - CUT_BACK_MS - in.blendMs);
 
         if (!(in.aBeatMs > 0d) || in.aBarLinesMs == null || in.aBarLinesMs.length == 0) {
             return invalid("no bar grid for the outgoing track", aBar, bBar);
@@ -2203,20 +2115,13 @@ public final class StemFusion {
         // message, which now says the gesture was already at its shortest.
         int shortestHold = Math.max(shortestHoldForCaller,
                 Math.max(1, holdForIncomingSteps));
+        boolean shortenedForBand = false;
         if (!slam) {
             // The question is the direct one — would the search have a candidate at all — and not
             // "is the band a whole bar wide": a band narrower than a bar still holds a line
             // whenever one happens to sit in it (the canonical 500 ms fixture leaves 1 920 ms of
             // band on 2 000 ms bars with a line 250 ms from the target, which is the plan the
             // design intends, and a blanket "band >= bar" rule broke it).
-            //
-            // ⚠️ The loop still runs and still shortens the gesture, but with the junction PLACED
-            // there is nothing left for the band to protect (round 6's eleventh pass): the pairing it
-            // was written for — `squabble up -> AGUDO`, where the design's four steps left the search
-            // a ±429 ms band on 2 305 ms bars — now plans with its full shape, because no line has to
-            // be found. Its only remaining effect is the window's LENGTH (`steps` below, which after
-            // A's rows have ended is today's content), and the flag the search's refusal used to read
-            // is gone with that refusal.
             while (!bandHasLine(in, target, cap, holdSteps + lowEndFadeSteps, stepMs, stretch)
                     && (lowEndFadeSteps > 1 || holdSteps > shortestHold)) {
                 if (lowEndFadeSteps > 1) {
@@ -2224,9 +2129,18 @@ public final class StemFusion {
                 } else {
                     holdSteps--;
                 }
+                shortenedForBand = true;
             }
+            // The flag means "the gesture could not be made to find a line", which is what the
+            // search's refusal has to say — a pair already at its shortest says it too.
+            shortenedForBand |= !bandHasLine(in, target, cap, holdSteps + lowEndFadeSteps, stepMs,
+                    stretch);
         }
         int steps = slam ? SLAM_STEPS : holdSteps + lowEndFadeSteps;
+        // How many steps of the table carry the outgoing's own rows: all of them, for a slam (its
+        // one cut is the window's own end) and for a fusion too (its rows reach the floor ON the
+        // window's last step, so the material has to last that far).
+        int cutSteps = slam ? SLAM_STEPS : steps;
         // ⚠️ A SLAM's window is one step PLUS the splice: every element changes hands on the line
         // at `swapMs`, and the 80 ms splice that de-clicks that hand-over runs from the line to
         // {@code swap + CUT_MS}. When the window ended ON the line (it did until round 6's tenth
@@ -2236,44 +2150,85 @@ public final class StemFusion {
         // a 0.3227 sample-to-sample jump against the signal's own 99.9th percentile of 0.2648 (1.2x).
         // With the splice inside the window the same line reads 0.0913 (0.3x) and no dip. The take
         // grows by the same CUT_MS (see sourceSpan, which has always counted it).
-        long gestureSpanMs = slam ? Math.round(SLAM_STEPS * stepMs + CUT_MS)
-                : Math.round(steps * stepMs);
-        // \u26a0\ufe0f THE WINDOW IS THE WIDEST OF THREE THINGS, not the gesture's span alone (round 6's
-        // eleventh pass): (a) the gesture's own span — the table's rows have to reach the floor
-        // inside the material; (b) the incoming's arrival reach, {@code arriveEnd - entry} — the
-        // arrival rises over its own step and its own instant has to be inside the window; and (c)
-        // the bed's rise, {@code BED_FADE_BARS} bar of the incoming's grid, which is the slowest
-        // arrival in the table. On the canonical fusion the gesture's four steps are the widest and
-        // (b)/(c) change nothing; on a SLAM the one-step-plus-{@link #CUT_MS} span is 1 986 ms while
-        // the copy of A's ending it has to cover is {@link #JUNCTION_XFADE_MS} = 2 000 ms — 14 ms
-        // short, which TRUNCATED A's ending (the copy's last 14 ms fell outside the material and the
-        // hand-over crossfaded 14 ms of nothing). Do not "simplify" this back to the span alone.
-        // \u26a0\ufe0f THE TAKE IS A'S OWN ENDING, not the passage: the copy is A's last
-        // {@link #JUNCTION_XFADE_MS}, which has to sit at the file's {@code [entry, entry +
-        // JUNCTION_XFADE_MS*speed)} — the instants the deck plays during the boundary's ramp, the
-        // file being pre-lengthened by {@code speed} (see {@code Material#speed}). The deck's own
-        // start is the file's {@code entry}, so the file's {@code entry} instant is where A's
-        // material must be the junction's own instant: the take therefore starts AT the junction
-        // ({@code aDur - JUNCTION_XFADE_MS}) and runs to aDur, and its span is the copy's own length
-        // in A's file. (Not `junction - entry/speed`: that lead would put A's material entry/speed ms
-        // BEFORE the junction at the file's entry — 900 ms on the device's pair — so the hand-over
-        // would crossfade A's live deck against a copy of A from a second earlier instead of against
-        // itself, and it would also spend entry/speed of the separation bound on material the file's
-        // first instant never plays.)
-        // The window the render separates adds {@link #A_TAIL_SLACK_MS} of lead on either side, the
-        // slack the take's own alignment wants. There is no search band any more.
-        long materialFrom = 0L;
-        long materialWindow = 0L;
-        long forward = 0L;
-        long back = 0L;
+        long windowMs = slam ? Math.round(SLAM_STEPS * stepMs + CUT_MS) : Math.round(steps * stepMs);
+        // The material the take needs: the rows are cut at `swapMs` (which for a slam is the
+        // window's own end) plus the splice, in the outgoing's own file.
+        long sourceSpan = (long) Math.ceil((cutSteps * stepMs + CUT_MS)
+                / (stretch > 0d ? stretch : 1d));
+        // ⚠️ The window the render will separate, paid for out of the cost bound:
+        // QUIET_SEARCH_MAX_MS back of the target (the quiet-passage search) and
+        // JUNCTION_SEARCH_BARS bars forward of it (the groove preference), plus the lead the take's
+        // alignment wants. A slow track's search is shorter rather than its separation longer — the
+        // budget is the clause.
+        long budget = cap - sourceSpan - 2L * A_TAIL_SLACK_MS;
+        if (budget < 0L) {
+            return invalid(String.format(Locale.US,
+                    "the passage is %.1fms of the incoming's file and the material A's rows need"
+                            + " from A is %dms, so the window to separate is at least %dms — over"
+                            + " the %.0fms one render may separate",
+                    steps * stepMs, sourceSpan, sourceSpan + 2L * A_TAIL_SLACK_MS, (double) cap),
+                    aBar, bBar, lock);
+        }
+        long forward = Math.min(Math.round(JUNCTION_SEARCH_BARS * aBar), Math.max(0L, budget / 2L));
+        long back = Math.min(QUIET_SEARCH_MAX_MS, Math.max(0L, budget - forward));
+        long materialFrom = Math.max(0L, target - back - A_TAIL_SLACK_MS);
+        long materialWindow = sourceSpan + back + forward + 2L * A_TAIL_SLACK_MS;
         if (in.contentStartMs < 0L) {
             return invalid("the incoming deck's own start is not known", aBar, bBar, lock);
         }
-        // \u26a0\ufe0f The junction is PLACED, so the search that used to CHOOSE it — the quiet-passage
-        // band, the groove preference, the nearest line — has nothing to choose, and its refusals
-        // are not this pair's business: a track that ends in a ten-second fade is exactly what the
-        // user asked to hear in full. The same measurements are still read, AT the junction, for the
-        // report (see below), and the quiet-passage refusal is suppressed there and only there.
+
+        // The junction: the bar line the deck is cut on, searched from `back` before the target to
+        // `forward` after it and preferred in the design's order — first a line the outgoing track
+        // is still PLAYING on (a track whose own last seconds are a fade must not have the fusion
+        // sit in that fade), then one where its groove is playing, then one where its voice is quiet
+        // for a beat, then the nearest. A line whose passage does not fit the material window is not
+        // a candidate at all.
+        Choice choice = nearestBar(in.aBarLinesMs, target, aBar, materialFrom,
+                materialFrom + materialWindow, sourceSpan, back, forward, in.quiet, in.groove,
+                in.body);
+        if (choice == null) {
+            return invalid(String.format(Locale.US,
+                    "no line of the outgoing's grid is inside the %dms the passage can be taken"
+                            + " from (the search covers %dms back and %dms forward of %d outside"
+                            + " it)%s",
+                    materialWindow, back, forward, target,
+                    shortenedForBand
+                            ? String.format(Locale.US, ", with the gesture already shortened to its"
+                                    + " shortest (%d steps of %.1fms: the incoming's own rows"
+                                    + " %s and the low end's fade is one step) because the passage"
+                                    + " and the search's own band are paid for out of the same"
+                                    + " %.0fms cap",
+                            steps, stepMs,
+                            holdForIncomingSteps > 0 ? "hold A's rows at unity until they arrive"
+                                    : "need no wait",
+                            (double) cap)
+                            : ""), aBar, bBar, lock);
+        }
+        if (choice.measured && choice.usable == 0) {
+            return invalid(String.format(Locale.US,
+                    "every bar line of the outgoing's grid the search reached (from %dms back of"
+                            + " the target to %dms forward of it) is a passage more than %.1f dB"
+                            + " below the track's own body: the body is %.2f dBFS and the best line"
+                            + " in the band (%dms, %+dms from the target) carries a passage of"
+                            + " %.2f dBFS, %+.2f dB down — that passage is the track's own fade, and"
+                            + " fusing it is the flatness this clause exists for",
+                    back, forward, QUIET_PASSAGE_DB, choice.bodyDb, choice.bestAt,
+                    choice.bestAt - target, choice.bestAtLevel, choice.bestAtDrop), aBar, bBar,
+                    lock);
+        }
+        long junction = choice.atMs;
+        if (junction + sourceSpan > in.aDurMs) {
+            return invalid(String.format(Locale.US,
+                    "the outgoing file ends %dms into the %dms the fusion's carried rows need from"
+                            + " it (they are cut on the bar line at %d of its own file and run to"
+                            + " its own low end's last cut)",
+                    in.aDurMs - junction, sourceSpan, junction), aBar, bBar, lock);
+        }
+
+        // The entry: the incoming's own bar line the deck starts on — on the COMMON grid (every
+        // `p` of its bars) whose phase, played back at `speed`, lands closest to the outgoing's at
+        // the junction, or, when the incoming's voice comes in long after its content starts, the
+        // line a runway before that voice (round 5's intro skip: 「直接词接词」).
         long[] entryChoice = entry(in, junction, stepMs, slam ? 1 : relation.p);
         long entry = entryChoice[0];
         if (entry < 0L) {
@@ -2283,20 +2238,17 @@ public final class StemFusion {
             return invalid("no bar line of the incoming track inside its own two-bar window"
                     + entryWhy(in, stepMs), aBar, bBar, lock);
         }
+        long fusionEnd = entry + windowMs;
+        if (fusionEnd > in.removalMs) {
+            return invalid(String.format(Locale.US,
+                    "the fusion would run %dms past the %dms the incoming's vocals are out for",
+                    fusionEnd - in.removalMs, in.removalMs), aBar, bBar, lock);
+        }
         long barStep = Math.round(stepMs);
-        // \u26a0\ufe0f A's rows end where A's FILE ends, and the incoming's rhythm arrives there with them
-        // (see {@link #JUNCTION_XFADE_MS}): the hold and both of A's fades have length zero — the
-        // same table with the spans at zero, which is what replaces the recede, A's own ending being
-        // the fade — and B's drums and low end rise over their one step ENDING at that instant, so
-        // the two backings overlap by a step and the passage's pulse is continuous. The instant is
-        // the file's own copy of A's last {@link #JUNCTION_XFADE_MS}, as the deck plays it (the file
-        // is pre-lengthened by {@code speed}; see {@code Material#speed}).
-        long aEnds = entry + Math.max(0L, Math.round(JUNCTION_XFADE_MS
-                * (in.speed > 0d ? in.speed : 1d)));
         // The gesture's own instants (round 6): the incoming's drums and low end rise over one step
-        // ENDING where the outgoing's rows end, and the outgoing's rows are at unity to that same
-        // instant — its hold and both of its fades measure zero (see {@code aEnds} above).
-        long holdEnd = aEnds;
+        // starting where the outgoing's hold ends, and the outgoing's rows recede from that same
+        // instant — its drums over one step, its low end and its melodic row over two.
+        long holdEnd = entry + (long) holdSteps * barStep;
         // ⚠️ The incoming arrives UNDER the outgoing's hold, not after it: its rise starts one step
         // before the hold ends, so it reaches unity exactly where the outgoing starts to recede. That
         // is what gives the passage its coexistence — the TABLE'S OWN GAINS are within 6 dB of their
@@ -2304,22 +2256,9 @@ public final class StemFusion {
         // the bound the user asked to
         // keep (rule 3 of round 6: the fade must not dominate). With a one-step hold the rise starts
         // at the entry itself.
-        // ⚠️ The incoming's arrival meets A's last sample (round 6, eleventh pass — decision (1)):
-        // A's rows end at {@code aEnds}, so B's drums and low end rise over their one step ENDING
-        // there. With the old lines (`entry + two steps`) the file had a 2 360 ms window with no
-        // rhythm in either backing, which the acceptance's pulse clause refuses. A slam keeps its own
-        // shape: its de-click splice starts ON its line, which is now that same instant. This is the
-        // ONE thing in the incoming's part of the gesture the placement moves.
-        long arriveStart = slam ? aEnds
-                : Math.max(entry, aEnds - (long) B_ARRIVAL_FADE_STEPS * barStep);
-        long arriveEnd = slam ? aEnds + CUT_MS : aEnds;
-        // ⚠️ The rise is one step of the incoming's grid OR the copy's own length, whichever is
-        // SHORTER, and it is never allowed to begin before the window does: a bar longer than the
-        // hand-over (2 180 ms against 2 000 on the device's own pair) would otherwise start the rise
-        // at `aEnds - step` — 644 ms on that pair, i.e. 256 ms BEFORE the file's entry, where
-        // {@code gainAt} answers "outside the window" (unity) for every one of the incoming's rows.
-        // The table would then be discontinuous at the entry and would disagree with itself about
-        // what the incoming is playing there, which is not a shape anybody chose.
+        long arriveStart = slam ? entry + barStep : entry + (long) Math.max(0, holdSteps - 1) * barStep;
+        long arriveEnd = slam ? entry + barStep + CUT_MS
+                : arriveStart + (long) B_ARRIVAL_FADE_STEPS * barStep;
         // ⚠️ A SLAM's instants come from the SLAM's shape, not the fusion's. `shapeFor` hands every
         // pair a two-step hold, and on a slam that put `holdEnd`/`arriveEnd` at entry + 2 steps while
         // the window is one step plus the splice — so the "after their swap" slice began past the
@@ -2328,53 +2267,20 @@ public final class StemFusion {
         // after their swap)" while the same slice read at the slam's own instants holds the
         // incoming's real kit at −10.3 dBFS. A slam's rows are at unity to its line, the incoming's
         // arrive at it over the splice, and all of A is gone where the splice ends.
-        // The window now has to hold all three (see {@code gestureSpanMs}).
-        long windowMs = Math.max(gestureSpanMs, Math.max(arriveEnd - entry,
-                (long) BED_FADE_BARS * Math.round(bBar)));
-        long fusionEnd = entry + windowMs;
-        if (fusionEnd > in.removalMs) {
-            return invalid(String.format(Locale.US,
-                    "the fusion would run %dms past the %dms the incoming's vocals are out for",
-                    fusionEnd - in.removalMs, in.removalMs), aBar, bBar, lock);
+        long drumsEnd = entry + (long) (holdSteps + A_DRUMS_FADE_STEPS) * barStep;
+        long lowEndEnd = entry + (long) (holdSteps + lowEndFadeSteps) * barStep;
+        long swap = slam ? entry + barStep : holdEnd;
+        long bass = slam ? swap : holdEnd;
+        long drawEnd = slam ? entry + barStep + CUT_MS : lowEndEnd;
+        if (slam) {
+            holdEnd = swap;
+            drumsEnd = drawEnd;
+            lowEndEnd = drawEnd;
         }
-        long drumsEnd = aEnds;
-        long lowEndEnd = aEnds;
-        long swap = aEnds;
-        long bass = aEnds;
-        long drawEnd = fusionEnd;
-        double ratio = in.speed > 0d ? in.speed : 1d;
-        long sourceFromMs = Math.max(0L, Math.round(in.aDurMs - JUNCTION_XFADE_MS));
-        long sourceSpan = Math.max(1L, Math.round(in.aDurMs) - sourceFromMs);
-        materialFrom = Math.max(0L, sourceFromMs - A_TAIL_SLACK_MS);
-        materialWindow = sourceSpan + 2L * A_TAIL_SLACK_MS;
-        // ⚠️ The cost bound, restored where the placement had dropped it, and still measured by the
-        // GESTURE'S own shape rather than by the take: the take is drawn from A's own ending and is
-        // now just JUNCTION_XFADE_MS plus the two leads of slack, while the shape is what the pair's
-        // step asks the file to hold. The pre-decode gate ({@link #refusal}) decides with this same
-        // arithmetic (see {@link #shapeFor}), and two rules of one file must not disagree about the
-        // same milliseconds.
-        long shapeSpan = (long) Math.ceil((Math.round(steps * stepMs) + CUT_MS)
-                / (stretch > 0d ? stretch : 1d));
-        if (shapeSpan + 2L * A_TAIL_SLACK_MS > cap) {
-            return invalid(String.format(Locale.US,
-                    "the passage is %.1fms of the incoming's file and the material A's rows need"
-                            + " from A is %dms, so the window to separate is at least %dms — over"
-                            + " the %.0fms one render may separate",
-                    steps * stepMs, shapeSpan, shapeSpan + 2L * A_TAIL_SLACK_MS, (double) cap),
-                    aBar, bBar, lock);
-        }
-        // The report's readings, AT the junction: the same measurements, asked about A's own ending.
-        boolean quietAtJunction = in.quiet != null && in.quiet.quietBeatAround(junction, in.bBeatMs);
-        boolean grooveAtJunction = in.groove != null
-                && in.groove.presentAround(junction, in.bBeatMs);
-        double bodyDb = in.body == null ? Double.NaN : in.body.bodyDb();
-        boolean bodyMeasured = !Double.isNaN(bodyDb);
-        double dropDb = in.body == null ? Double.NaN : in.body.passageDropDb(junction, sourceSpan);
-        double passageDb = Double.isNaN(dropDb) ? Double.NaN : bodyDb - dropDb;
         return new Plan(true, "", slam, aBar, bBar, stepMs, stretch, relation, junction, entry, swap,
                 bass, drawEnd, windowMs, sourceSpan, materialFrom, materialWindow, forward, back,
-                junction - target, lock, in.speed, quietAtJunction, grooveAtJunction, true,
-                bodyMeasured, bodyDb, passageDb, dropDb,
+                junction - target, lock, in.speed, choice.quiet, choice.groove, choice.bodyAtLine,
+                choice.measured, choice.bodyDb, choice.passageDb, choice.dropDb,
                 entryChoice[1] == 1L, entryChoice[2] / 1000d,
                 entryChoice.length > 3 ? entryChoice[3] : 0L, in.firstVocalMs, holdEnd, drumsEnd,
                 lowEndEnd, arriveStart, arriveEnd,
@@ -2715,12 +2621,9 @@ public final class StemFusion {
             switch (row) {
                 case DRUMS:
                 case BASS:
-                    // A's side ends with A's own file (the copy is only the hand-over); the incoming's
-                    // cut-over is its own arrival line, which for a slam is the same instant with its
-                    // de-click splice on it.
                     return fromOutgoing
-                            ? splice(fileMs, plan.holdEndMs, unity, 0d)
-                            : splice(fileMs, plan.arriveStartMs, 0d, unity);
+                            ? splice(fileMs, plan.swapMs, unity, 0d)
+                            : splice(fileMs, plan.swapMs, 0d, unity);
                 case OTHER:
                     return fromOutgoing ? splice(fileMs, plan.swapMs, other, 0d)
                             : bedGain(plan, fileMs);
@@ -3380,14 +3283,6 @@ public final class StemFusion {
         // its source (plus the make-up) and no further — a take that ended inside the fade fades
         // silence and reads tens of dB under that line, which is round 18's defect in its round-6
         // costume. A slam has no fade and is skipped (NaN).
-        // \u26a0\ufe0f Skipped when the A side's spans are zero-length: that is the placed junction, where
-        // A's own ending replaces the recede and there is no fade of the table's to measure (the
-        // copy's presence is what the "still there where the gesture takes over" clause verifies,
-        // at A's own last sample).
-        if (plan.drumsEndMs == plan.holdEndMs) {
-            r.carriedBassFadeDb = Double.NaN;
-            r.sourceBassFadeDb = Double.NaN;
-        }
         if (!Double.isNaN(r.carriedBassFadeDb)
                 && !(r.carriedBassFadeDb > r.sourceBassFadeDb + m.makeupDb - FADE_RMS_DB
                         - CARRY_FADE_TOLERANCE_DB)) {
