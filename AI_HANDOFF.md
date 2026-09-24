@@ -109,8 +109,11 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
   `app/build/generated/assets/stageStemModel/models/`（在 `build/` 里，git 看不见），再由 AGP 打进
   `assets/models/`。**文件不在、字节数不对或 hash 不对 ⇒ 构建失败**，失败信息里带路径/字节数/sha256 ——
   这是有意的：没有模型的 APK 装上以后功能静默失效。换一台机器（或 CI）用
-  `-PqplayerStemModel=<路径>` 或 `QPLAYER_STEM_MODEL=<路径>` 指过去；**CI 上没这个文件，所以
-  APK 的 CI 构建会失败**（除非先把模型放上去）。
+  `-PqplayerStemModel=<路径>` 或 `QPLAYER_STEM_MODEL=<路径>` 指过去；**CI 上没这个文件，所以模型这一关在
+  CI 上也会失败**（除非把模型放上去）—— 不过 **CI 的 android job 现在本来就失败**，而且更早一关就断了：
+  `gradle.properties` 里的 `org.gradle.java.home=C:\Program Files\Java\jdk-21` 是 Windows 路径，在 Linux
+  runner 上无效（2026-09-23 的几次 Release 运行全是这个错，与模型无关；desktop job 也是红的）。
+  发布**不依赖 CI**（一直是本机 build + `gh release create`）。
 - **发布用的 APK 要从干净的 `packageDebug` 取**：增量打包会把上一版 APK 的字节留在文件里
   （实测同一内容 **196.5MB vs 192.2MB**）。稳妥做法：删掉
   `app/build/outputs/apk/debug/app-debug.apk` 和 `app/build/intermediates/apk/debug/`，再
@@ -2547,9 +2550,12 @@ PlayerControllerPlaybackTest` = **105 个用例 0 失败**。`StemBridge.stretch
   播放照常（media_session 在、进程活着、全日志 0 个 crash）。
 - **测试**：`mvn -pl player-core test` **267 个用例，1 个失败**（仍是既有的
   `SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`）。
-- **未验证**：release variant 没打过（只打了 debug，但 assets 是 source set 级的，两个 variant 走同一
-  条路）；CI 上没试过（按设计会失败，除非把模型放上去）；用户手上那台 8e（`R5CY10P6MJF`）本轮
-  中途掉线，只用了 K20 Pro。
+- **未验证**：release variant 没打过（只打了 debug；`mergeReleaseAssets --dry-run` 的图里有
+  `stageStemModel`，两个 variant 走同一条路）；**CI 上没试过**（`Release` workflow 在
+  `release: published` 时会跑 —— 这次发版也触发了，和 9-23 那几次一样在「Build release APK」
+  就倒在 `org.gradle.java.home` 是 Windows 路径上，**没走到模型这一关**，所以「CI 上会因为缺模型而失败」
+  只是按代码推的，没有实机证据）；用户手上那台 8e（`R5CY10P6MJF`）本轮中途掉线，
+  设备验证全部在 K20 Pro 上完成；**没有真机的 release 包**（release 是未签名的，没法装）。
 
 **第 19 轮之后仍未做（不要以为已经做了）**：§零 缺陷 1 的收尾 —— **让每种编辑都带 `-e`**
 （融合路径已经带了，`-b` 桥和纯编辑还没有，人声从 13.4s 提前回来的候选根因）；融合段在真机上
