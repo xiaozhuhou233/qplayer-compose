@@ -21,7 +21,11 @@ import dev.t1m3.qplayer.audio.StemGesture;
 import dev.t1m3.qplayer.audio.StemModel;
 import dev.t1m3.qplayer.util.Logger;
 
+import java.io.BufferedOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
@@ -76,18 +80,25 @@ import java.util.function.BooleanSupplier;
  */
 public final class AndroidStemEditRenderer implements StemEditRenderer {
 
-    /** Where the user puts the model: the app's own private storage, alone in a directory
-    *  of its own. The line a missing model writes names the directory and the
-    *  {@code adb push} that fills it, because model delivery is deliberately not
-    *  implemented (a 98 MB download must never be the default). 
- */
-
+    /** Where the model is used from: the app's own private storage, alone in a directory of
+     *  its own. The APK carries the same file under {@code assets/models/} and the first render
+     *  of a session copies it out of there (see {@link #extractFromAssets}) — that is the
+     *  delivery path, because an APK handed to someone else has to work with no {@code adb push}
+     *  and no other manual step. A file put here by hand is still accepted exactly as before:
+     *  {@link StemModel#recognise} is the only gate either way, and it asks about the bytes.
+     */
     public static final String MODELS_DIR = "models";
 
-    /** The AAC bitrate the edit is encoded at. High, because this file is not only the
-     *  blend window: after the promotion it is the track the listener keeps hearing, so
-     *  the generation loss of a second encode has to not be the loudest thing about this
-     *  path. */
+    /** The suffix the extraction writes under while it is copying; the finished name is only
+     *  ever the verified file (the same "a file that exists is a finished edit" rule the rendered
+     *  edits follow, and the reason a half-written model can never be picked up). */
+    private static final String PART_SUFFIX = ".part";
+
+    /**
+     * The AAC bitrate the edit is encoded at. High, because this file is not only the
+     * blend window: after the promotion it is the track the listener keeps hearing, so the
+     * generation loss of a second encode has to not be the loudest thing about this
+     * path. */
     private static final int BITRATE = 192_000;
 
     /** The most frames one encoder input buffer takes. */
@@ -107,13 +118,19 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
     private static final long MIN_EDIT_BYTES = 100_000L;
 
     private final File modelsDir;
+    /** For the APK's own assets, which is where the model is delivered from. The application
+     *  context, not the activity that builds this renderer: the preload lane reaches it minutes
+     *  later, and nothing on that lane has any business holding a window. */
+    private final Context context;
     private final Object modelLock = new Object();
     private volatile StemModel.Candidate model;
     private volatile boolean modelChecked;
     private volatile boolean inertLogged;
 
     public AndroidStemEditRenderer(Context context) {
-        this.modelsDir = new File(context.getFilesDir(), MODELS_DIR);
+        Context application = context.getApplicationContext();
+        this.context = application != null ? application : context;
+        this.modelsDir = new File(this.context.getFilesDir(), MODELS_DIR);
     }
 
     // --- the model ----------------------------------------------------------
@@ -129,6 +146,15 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
      * never again. A feature that silently switched weights mid-session would be worse
      * than one that needs a restart.
      *
+     * <p><b>Where the file comes from (round 19).</b> A model that is not in private storage —
+     * missing, or present and refused by the manifest — is copied out of the APK's own assets
+     * first, on this same lane and inside this same once-per-process gate: a session that
+     * started with an empty {@code files/models/} has to end up with a usable model, and this
+     * gate is the only thing that ever looks. It is deliberately not a separate startup step
+     * and there is deliberately no way to re-open the gate: the model is a fact about the
+     * session, and a file that appears after the first render has been asked for is not picked
+     * up until the next launch (which is why the copy has to happen here, before the verdict).
+     *
      * <p>The lane runs at the lowest priority the process has and the caller sits behind
      * the controller's startup gate, so this hash — the one piece of startup work that is
      * pure CPU over a large file — never lands inside the first frames. How long it took
@@ -140,28 +166,24 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
             if (modelChecked) return model;
             for (StemModel.Candidate candidate : StemModel.candidates()) {
                 File file = new File(modelsDir, candidate.fileName);
-                if (!file.isFile()) continue;
-                long bytes = file.length();
-                long hashStartedAt = System.nanoTime();
-                String digest = StemModel.sha256(file);
-                long hashMs = (System.nanoTime() - hashStartedAt) / 1_000_000L;
-                StemModel.Candidate accepted =
-                        StemModel.recognise(candidate.fileName, bytes, digest);
+                StemModel.Candidate accepted = verified(file, candidate);
+                if (accepted == null) {
+                    // Nothing the manifest accepts is there — either no file at all, or one it
+                    // just refused (a truncated copy, an older model, a file from somewhere
+                    // else). Either way this build's own copy is the one to have, and the gate
+                    // is once per process, so it is taken here and then the same question is
+                    // asked again — of the file, at the name it will be read from, after the
+                    // rename that makes it that name. `renameTo` replaces a refused file, which
+                    // is what makes this the repair for a bad one and not just the first-run
+                    // path.
+                    if (!extractFromAssets(candidate)) continue;
+                    accepted = verified(file, candidate);
+                }
                 if (accepted != null) {
                     model = accepted;
                     modelChecked = true;
-                    Logger.info("transition: stem DJ edits are ON — {} verified in {} ({} bytes,"
-                                    + " sha256 {} hashed in {}ms); the separation runs on {} CPU"
-                                    + " threads with the arena allocator off, off the playback path",
-                            accepted.fileName, modelsDir.getAbsolutePath(), bytes,
-                            accepted.sha256, hashMs, StemModel.INTRA_OP_THREADS);
                     return model;
                 }
-                Logger.warn("transition: {} is present but does not match the manifest ({} bytes,"
-                                + " sha256 {}; expected {}) — refusing it, so the stem path stays"
-                                + " inert rather than feeding audio through weights this build"
-                                + " cannot identify",
-                        file.getAbsolutePath(), bytes, digest, candidate.sha256);
             }
             modelChecked = true;
             model = null;
@@ -169,20 +191,143 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         }
     }
 
-    /** The one line a missing model writes per process: what was looked for, where, and
-     *  the command that puts it there — since model delivery is not implemented, this line
-     *  <em>is</em> the delivery path. */
+    /**
+     * The manifest's verdict on one candidate file, and the two lines it says out loud: the
+     * hash it measured and the model it recognised, or the refusal and the numbers that did
+     * not agree. The gate is {@link StemModel#recognise} — name, byte count and digest, all
+     * three — and it is the only thing that ever admits a file, whether that file was put
+     * there by hand or copied out of the APK a moment ago.
+     */
+    private StemModel.Candidate verified(File file, StemModel.Candidate candidate) {
+        if (!file.isFile()) return null;
+        long bytes = file.length();
+        long hashStartedAt = System.nanoTime();
+        String digest = StemModel.sha256(file);
+        long hashMs = (System.nanoTime() - hashStartedAt) / 1_000_000L;
+        StemModel.Candidate accepted = StemModel.recognise(candidate.fileName, bytes, digest);
+        if (accepted != null) {
+            Logger.info("transition: stem DJ edits are ON — {} verified in {} ({} bytes,"
+                            + " sha256 {} hashed in {}ms); the separation runs on {} CPU"
+                            + " threads with the arena allocator off, off the playback path",
+                    accepted.fileName, modelsDir.getAbsolutePath(), bytes,
+                    accepted.sha256, hashMs, StemModel.INTRA_OP_THREADS);
+            return accepted;
+        }
+        Logger.warn("transition: {} is present but does not match the manifest ({} bytes,"
+                        + " sha256 {}; expected {}) — refusing it, so the stem path stays"
+                        + " inert rather than feeding audio through weights this build"
+                        + " cannot identify",
+                file.getAbsolutePath(), bytes, digest, candidate.sha256);
+        return null;
+    }
+
+    /**
+     * Copy one candidate out of this APK's {@code assets/models/} into private storage, where
+     * {@link #model} can verify it. True when the file is now in place.
+     *
+     * <p>This is the delivery path for an APK handed to someone else: the model is packaged by
+     * {@code android-shell/app/build.gradle.kts} (which refuses to build an APK without it) and
+     * this is the one step that puts it where the renderer reads it. It runs on the preload lane
+     * — the caller is {@code PlayerController}'s single preload worker, minutes before the
+     * boundary the render is for — so the ~1 s of copying and hashing is invisible, and it can
+     * never be on a playback path.
+     *
+     * <p>What it will not do: throw, block, or leave a file the manifest would refuse. A build
+     * with no such asset, a read that fails half way, a copy whose digest does not match — each
+     * writes one line, deletes what it wrote, and returns false, and the feature stays exactly
+     * as inert as it was before this method existed. The failure is loud in the log because the
+     * only other thing a missing model could do is make the transition quietly less good.
+     */
+    private boolean extractFromAssets(StemModel.Candidate candidate) {
+        final String assetPath = MODELS_DIR + "/" + candidate.fileName;
+        final File part = new File(modelsDir, candidate.fileName + PART_SUFFIX);
+        final File dest = new File(modelsDir, candidate.fileName);
+        if (!modelsDir.isDirectory() && !modelsDir.mkdirs()) {
+            Logger.warn("transition: the stem model cannot be extracted — {} is not a directory"
+                            + " and cannot be created; the stem path stays inert",
+                    modelsDir.getAbsolutePath());
+            return false;
+        }
+        final long startedAt = System.currentTimeMillis();
+        InputStream in;
+        try {
+            in = context.getAssets().open(assetPath);
+        } catch (Throwable noAsset) {
+            // A build made without the model staged (see build.gradle.kts, which refuses to
+            // make one) is the ordinary reason this happens, and it is not an error: there is
+            // nothing to copy, so this candidate is simply not available.
+            Logger.warn("transition: this APK carries no stem model at assets/{} ({}), and the"
+                            + " stem path takes no other source on a first run — it stays inert"
+                            + " and the boundary blends the plain stream",
+                    assetPath, noAsset.toString());
+            return false;
+        }
+        OutputStream out = null;
+        try {
+            out = new BufferedOutputStream(new FileOutputStream(part), 1 << 16);
+            byte[] buffer = new byte[1 << 20];
+            int read;
+            while ((read = in.read(buffer)) > 0) out.write(buffer, 0, read);
+            out.flush();
+            out.close();
+            out = null;
+            long bytes = part.length();
+            String digest = StemModel.sha256(part);
+            // The one question, asked of the copy rather than of the asset: it is the bytes on
+            // disk the render will read, and a truncated asset or a full disk shows up here
+            // rather than as a refused model on a device nobody can debug.
+            if (StemModel.recognise(candidate.fileName, bytes, digest) == null) {
+                Logger.warn("transition: the stem model copied out of assets/{} does not match"
+                                + " the manifest ({} bytes, sha256 {}; expected {} bytes, sha256"
+                                + " {}) — discarding the copy, so the stem path stays inert",
+                        assetPath, bytes, digest, candidate.bytes, candidate.sha256);
+                deleteQuietly(part);
+                return false;
+            }
+            if (!part.renameTo(dest)) {
+                Logger.warn("transition: the stem model was copied out of assets/{} but {} could"
+                                + " not be renamed to {}; the stem path stays inert",
+                        assetPath, part.getAbsolutePath(), dest.getAbsolutePath());
+                deleteQuietly(part);
+                return false;
+            }
+            // One line, with the numbers, because this is the step that decides whether a
+            // stranger's install has the feature: the bytes and the hash are what the manifest
+            // then re-checks on the line above, and the two together are the whole delivery
+            // story. (The file is hashed twice on this path — once here and once by the gate.
+            // Both are on the preload lane, once per process, against a render that costs tens
+            // of seconds; the alternative is a gate that trusts a number nobody measured.)
+            Logger.info("transition: the stem model was copied out of the APK — assets/{} -> {}"
+                            + " ({} bytes, sha256 {} verified in {}ms); it is in this app's own"
+                            + " files/models/ now, so the manifest check needs no file to be"
+                            + " pushed anywhere",
+                    assetPath, dest.getAbsolutePath(), bytes, digest,
+                    System.currentTimeMillis() - startedAt);
+            return true;
+        } catch (Throwable e) {
+            deleteQuietly(part);
+            Logger.warn("transition: the stem model could not be copied out of the APK's assets/{}"
+                            + " ({}) — the stem path stays inert and the boundary blends the"
+                            + " plain stream", assetPath, e.toString());
+            return false;
+        } finally {
+            try { in.close(); } catch (Throwable ignored) { }
+            if (out != null) try { out.close(); } catch (Throwable ignored) { }
+        }
+    }
+
+    /** The one line a missing model writes per process: what was looked for, where, and the
+     *  manifest it has to satisfy. Both sources are named, because they are the whole answer —
+     *  the APK's own {@code assets/models/} (a build that carries none says so on the line
+     *  above) and a file put in private storage by hand, which is still accepted. */
     private void logInertReason() {
         if (inertLogged) return;
         inertLogged = true;
-        Logger.info("transition: stem DJ edits are OFF — no verified model in {}. The blend is"
-                        + " exactly what it is without this feature. To try it (the only delivery"
-                        + " path there is; hf-mirror.com is reachable from this device):"
-                        + " adb push htdemucs-quarter.onnx /sdcard/ && adb shell run-as"
-                        + " dev.t1m3.qplayer.debug cp /sdcard/htdemucs-quarter.onnx files/models/"
-                        + " — that file name, {} bytes, sha256 {}; {}",
-                modelsDir.getAbsolutePath(), StemModel.QUARTER.bytes, StemModel.QUARTER.sha256,
-                StemModel.manifest());
+        Logger.info("transition: stem DJ edits are OFF — no verified model in {} and none could be"
+                        + " taken out of the APK's assets/{}. The blend is exactly what it is"
+                        + " without this feature. Any file with one of these names, sizes and"
+                        + " hashes is accepted wherever it comes from: {}",
+                modelsDir.getAbsolutePath(), MODELS_DIR, StemModel.manifest());
     }
 
     // --- the render ---------------------------------------------------------

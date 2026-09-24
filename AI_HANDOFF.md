@@ -8,10 +8,21 @@
 ## 零、接手须知（新会话先读这一段，约 45 行，够开工）
 
 **状态**：分支 `feat/ai-dj-transition`（**`main` 一直没动**，仍是 `5efc1ba`）。
-最近一次发布：tag `ai-dj-transition-2026-09-21c`，
-`https://github.com/xiaozhuhou233/qplayer-compose/releases/download/ai-dj-transition-2026-09-21c/app-debug.apk`
+最近一次发布：tag `ai-dj-transition-2026-09-24a`（**192,179,303 bytes ≈ 192 MB**，sha256 见发布说明），
+`https://github.com/xiaozhuhou233/qplayer-compose/releases/download/ai-dj-transition-2026-09-24a/app-debug.apk`
 （能装的是 **debug** 包；release 是未签名的）。发布用 `gh`，`github.com:443` 在本机被拦，
 **必须走本地代理 `127.0.0.1:7890`**；资产 URL 要**从 `gh` 输出里原样复制**（前几轮手打错过账号名）。
+
+**模型随 APK 交付（第 19 轮，2026-09-24）**：htdemucs-quarter 模型现在**打在 APK 的
+`assets/models/htdemucs-quarter.onnx` 里**，App 在**首次渲染**（preload 通道）把它复制到自己的
+`files/models/` 再照旧用 manifest（名字+字节数+sha256）验一遍 —— 所以**把 APK 发给别人，装完打开就有模型，
+不需要 adb push，也不需要任何手工步骤**。两条日志是这一条链路的证据：
+`the stem model was copied out of the APK … (97978156 bytes, sha256 427b9588…)` 与
+`stem DJ edits are ON — htdemucs-quarter.onnx verified in …`（真机原文见第七节第 19 轮）。
+**构建端**：模型**不在 git 里**（98MB，别人要 clone），打包时从
+`D:\qplayer-dev\htdemucs\htdemucs-quarter.onnx` 抄进 assets（Gradle 任务 `stageStemModel`），
+**文件不在或 hash 不对 ⇒ 构建直接失败**（故意的：没有模型的 APK 装上就是哑的，见第二节）。
+本机另外那个 `htdemucs.onnx`（half）**不打进 APK**。
 
 **做完一件事就发版**：`mvn -pl player-core install` + `:app:assembleDebug`（命令见第二节），
 然后 push 分支 + `gh release create` 把 debug APK 作为资产，并核对 HTTP 200。
@@ -93,6 +104,17 @@ G="/d/qplayer-dev/cache/gradle/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oe
 ```
 
 - **app 依赖的是 `player-core/target/*.jar`（`files(...)` 直接引用），不是 maven 仓库** —— 所以 `package`/`install` 都会更新它。
+- **构建前必须有模型**（第 19 轮起）：`D:\qplayer-dev\htdemucs\htdemucs-quarter.onnx`
+  （97,978,156 bytes，sha256 `427b9588…`）。Gradle 任务 `stageStemModel` 把它抄进
+  `app/build/generated/assets/stageStemModel/models/`（在 `build/` 里，git 看不见），再由 AGP 打进
+  `assets/models/`。**文件不在、字节数不对或 hash 不对 ⇒ 构建失败**，失败信息里带路径/字节数/sha256 ——
+  这是有意的：没有模型的 APK 装上以后功能静默失效。换一台机器（或 CI）用
+  `-PqplayerStemModel=<路径>` 或 `QPLAYER_STEM_MODEL=<路径>` 指过去；**CI 上没这个文件，所以
+  APK 的 CI 构建会失败**（除非先把模型放上去）。
+- **发布用的 APK 要从干净的 `packageDebug` 取**：增量打包会把上一版 APK 的字节留在文件里
+  （实测同一内容 **196.5MB vs 192.2MB**）。稳妥做法：删掉
+  `app/build/outputs/apk/debug/app-debug.apk` 和 `app/build/intermediates/apk/debug/`，再
+  `"$G" :app:packageDebug --no-daemon`，然后 `sha256sum` 记录。
 - adb：`C:\Users\xiaoz\Downloads\platform-tools\adb.exe`；装机 `adb install -r <apk>`。
 - **设备经常掉线**（`no devices/emulators found`）：每次动手前先 `adb devices`。
 - **adb 路径坑**：Git Bash 下 `adb shell ... /sdcard/x.png` 会被改写成 Windows 路径，必须
@@ -2458,6 +2480,78 @@ PlayerControllerPlaybackTest` = **105 个用例 0 失败**。`StemBridge.stretch
 代码一直在缩短 → 旧的桥 carry 实听是 speed²，最多 ±16%；该桥从未在真机放过，无回归可保）。
 本轮 harness：`D:\qplayer-dev\harness\fusion\`（PC 渲染/测量）、`harness\r18\run18.sh`（真机一次边界）+
 `harness\r18\fusion2.out`、`harness-check\`（曲线与文件名解析）、`FUSION-SPEC.md`（本轮规格，改过按它走）。
+
+### 第 19 轮（2026-09-24）：模型随 APK 交付 —— 装完打开就有，不用 adb push
+
+**用户的原始要求**：「apk我要给别的用户，你要保证模型会在apk安装时加载」——APK 要发给别人，
+所以模型必须在 APK 里、安装后自动就位，不允许 `adb push` 或任何手工步骤。
+
+**为什么以前不行（两条，都在代码里）**：① 模型是用户手工推到 `files/models/` 的，
+而 `logInertReason()` 那行日志在过去**就是**交付路径（它打印 adb push 命令）；②
+`AndroidStemEditRenderer.model()` 的核对**每进程只做一次**（98MB 哈希 ~1s），
+所以「进程运行中才出现的模型」要等重启才被看见 —— 这决定了复制必须发生在
+**本进程第一次问模型之前**，不能是一个更晚的启动步骤。
+
+**做法（最小改动，三处）**：
+1. **Gradle 把模型打进 assets**（`android-shell/app/build.gradle.kts`）：新任务类
+   `StageStemModel`（`@InputFile modelFile` / `@Input expectedBytes,expectedSha256` /
+   `@OutputDirectory outputDir`）把
+   `-PqplayerStemModel` > `$QPLAYER_STEM_MODEL` > `D:/qplayer-dev/htdemucs/htdemucs-quarter.onnx`
+   抄到 `models/<name>`，并用
+   `androidComponents.onVariants { it.sources.assets?.addGeneratedSourceDirectory(stageStemModel) { t -> t.outputDir } }`
+   接进每个 variant（debug/release 都有，打包会等它）。**校验发生在抄完之后、对将要打包的字节做**：
+   文件不存在 / 字节数不对 / sha256 不对 ⇒ `GradleException`，信息里有路径、字节数、sha256、
+   覆盖用的属性名，以及「为什么拒绝产出没有模型的 APK」。**98MB 不进 git**：输出目录是 AGP 的
+   `build/generated/assets/stageStemModel/`（`.gitignore` 已忽略 `**/build/`）。
+   `androidResources { noCompress += "onnx" }`：模型是已压缩过的浮点权重，存着不压（APK 大小可预期、
+   首跑复制是直读）。
+   ⚠️ **踩过的坑**：一开始用 `sourceSets["main"].assets.srcDir(stageStemModel)` —— Gradle **不报错、
+   也不建依赖**，`mergeDebugAssets` 照样 UP-TO-DATE，产出的 APK 里**没有模型**（正好是这一步要防的事）。
+   必须用 `addGeneratedSourceDirectory` 那条路。另外：`build.gradle.kts` 里 `java.security.MessageDigest`
+   的 `java` 会被解析成项目的 `JavaPluginExtension`，要在文件头 `import java.security.MessageDigest`。
+2. **首跑复制**（`AndroidStemEditRenderer`）：`model()` 的循环现在先问 manifest（`verified()`，
+   它就是原来的哈希+`StemModel.recognise`，日志原文不变），**不被接受时**才
+   `extractFromAssets(candidate)`：写到 `<name>.part` → 读完 → 对**复制出来的字节**做
+   `StemModel.recognise`（同一个门，不减弱）→ `renameTo(<name>)`。**文件缺失或存在但被 manifest 拒绝
+   都会走这条路**（`renameTo` 会替换被拒的文件），所以它同时是「坏文件的修复路径」。
+   日志一行带字节数+sha256+耗时。失败（asset 不在 / EACCES / digest 不对）只写一行 warn、删掉半成品、
+   返回 false —— 功能照旧 inert，**不抛异常、不阻塞播放**。`logInertReason()` 里
+   **adb push 那段已删除**（旧的 OFF 行现在说「asset 里没有、手工放的文件同样接受」+ 完整 manifest）。
+   `StemModel` 的 manifest 一个字没动（`recognise` 仍是唯一的门；三处数字必须一起改：
+   `StemModel.QUARTER`、`StemModelTest`、`build.gradle.kts` 顶部三个常量）。
+3. **改动面**：`build.gradle.kts`、`AndroidStemEditRenderer.java`、`ComposeQPlayerActivity.kt`
+   （只改 setStemEditRenderer 上方的注释）、`StemModel.java`（只改类注释）。
+   **没碰** `StemFusion`/`DjEdit`/`PlayerController`/`FadeCurve`。
+
+**真机证据（Redmi K20 Pro `efaa83b2`，2026-09-24；APK sha256 `d60c79ef…`，192,179,303 bytes）**：
+脚本 `D:\qplayer-dev\harness\r25\run25c.sh`（先 `rm -rf files/models`，或放一个 100KB 的假模型，
+再装新 APK → 起 App → 点首页播放键 → 收 `musicplayer` 日志）。两个用例的原文：
+- **干净设备（无模型）**：`the stem model was copied out of the APK — assets/models/htdemucs-quarter.onnx
+  -> /data/user/0/dev.t1m3.qplayer.debug/files/models/htdemucs-quarter.onnx (97978156 bytes,
+  sha256 427b9588287d85d78f212d9f6f4acbc42b626e28ef9d2d948fed78311f4aec20 verified in 212ms)`；
+  下一行 `stem DJ edits are ON — htdemucs-quarter.onnx verified in
+  /data/user/0/dev.t1m3.qplayer.debug/files/models (97978156 bytes, sha256 427b9588… hashed in 101ms)`；
+  之后**渲染真的跑完了**（67.3s，写出 `145287354-v17128-x4-r4.m4a`）。
+- **存在但被拒的文件（100KB 假模型）**：先 `… is present but does not match the manifest (102400 bytes,
+  sha256 f627ca4c…) — refusing it`，再上面那两行；`files/models/` 由 102400 bytes 变成 97978156 bytes。
+- 两份日志里 **`adb push` 出现 0 次**；复制+校验共 ~200ms（98MB，preload 通道），
+  两个用例的日志在 `harness\r25\r25b_final.logcat` 与 `r25a.logcat`。
+- **copy 失败也要 inert**（`harness\r25\run25b.sh`）：把 `files/models/` 建好再 `chmod 500`
+  （app 自己写不进去）→ `W … could not be copied out of the APK's assets/… (java.io.FileNotFoundException:
+  …htdemucs-quarter.onnx.part: open failed: EACCES (Permission denied))` → `I stem DJ edits are OFF …` →
+  `no DJ edit for <track> this time; the boundary blends the plain stream`；
+  播放照常（media_session 在、进程活着、全日志 0 个 crash）。
+- **测试**：`mvn -pl player-core test` **267 个用例，1 个失败**（仍是既有的
+  `SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`）。
+- **未验证**：release variant 没打过（只打了 debug，但 assets 是 source set 级的，两个 variant 走同一
+  条路）；CI 上没试过（按设计会失败，除非把模型放上去）；用户手上那台 8e（`R5CY10P6MJF`）本轮
+  中途掉线，只用了 K20 Pro。
+
+**第 19 轮之后仍未做（不要以为已经做了）**：§零 缺陷 1 的收尾 —— **让每种编辑都带 `-e`**
+（融合路径已经带了，`-b` 桥和纯编辑还没有，人声从 13.4s 提前回来的候选根因）；融合段在真机上
+**仍未被人耳听过**；模型交付之外的老问题（启动掉帧、桥没在真机放过、B站圆角、17% 双可闻等）
+仍都在 §零 的清单里。
+
 
 
 

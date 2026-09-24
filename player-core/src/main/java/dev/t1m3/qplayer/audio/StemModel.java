@@ -12,7 +12,9 @@ import java.util.List;
  *
  * <p>Nothing here touches a file or an ONNX runtime — it is the manifest, so it can be
  * read (and tested) without a device. The host finds a candidate under its own private
- * storage, hashes it, and asks {@link #recognise} whether the three facts agree; a file
+ * storage — copying it out of the APK's own {@code assets/models/} first when there is
+ * none, which is how a model travels inside an APK — hashes it, and asks
+ * {@link #recognise} whether the three facts agree; a file
  * the manifest does not recognise is refused and the feature stays inert, which is the
  * whole safety story of this path: an app that cannot prove which weights it loaded
  * must never feed audio through them.

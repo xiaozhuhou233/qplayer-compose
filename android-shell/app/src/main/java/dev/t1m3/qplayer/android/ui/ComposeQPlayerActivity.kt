@@ -356,9 +356,12 @@ class ComposeQPlayerActivity : ComponentActivity() {
         // The stem renderer for the DJ edit: the incoming track's own audio with its
         // vocals taken out of the blend window, rendered on the preload lane minutes
         // before the boundary and played as ONE file by the incoming deck (so nothing is
-        // ever switched mid-playback). It is inert unless a verified model is in the app's
-        // private files/models/ directory — see AndroidStemEditRenderer, whose missing-model
-        // log line carries the adb push that supplies one.
+        // ever switched mid-playback). The model that renders it ships INSIDE the APK
+        // (assets/models/htdemucs-quarter.onnx, staged by app/build.gradle.kts) and the
+        // renderer copies it into the app's private files/models/ on the preload lane the
+        // first time a render is asked for — so an installed APK needs no adb push and no
+        // other manual step. It stays inert until a file passes the manifest check
+        // (name + bytes + sha256) in AndroidStemEditRenderer.
         controller.setStemEditRenderer(
             dev.t1m3.qplayer.android.stem.AndroidStemEditRenderer(this)
         )
