@@ -579,10 +579,11 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         if (fusion != null) {
             // The fusion rendered its own head inside the attempt (its per-row schedule and its
             // carried material are on it), and the count in `clipped` is that render's. Its gate is
-            // the WINDOW's own (round 20's clause): the passage is instrumental for its whole
-            // length, so everything measured against it below — the bridge's vocal reading, the
-            // acceptance, the `-v` this file is named with — has to be the plan that was rendered.
-            plan = windowPlan;
+            // the COUPLING's own (round 25): the head was rendered with the plan built from the
+            // instant the outgoing's own rows leave the passage, so everything measured against it
+            // below — the `-v` this file is named with and the boundary's own vocal return — has to
+            // be that plan and not the plain path's window.
+            plan = fusion.gate;
             edited = fusion.edited;
         } else {
             edited = DjEdit.renderHead(stems, StemModel.MODEL_RATE, windowSec, plan, clipped,
@@ -738,12 +739,25 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         final float[][] edited;
         final StemFusion.Report report;
         final long separateMs;
+        /** The vocal gate this head was actually rendered with (round 25): the plain path's own
+         *  window plan for a caller that asks for nothing else, and the plan built around the
+         *  coupling's own instant — {@link StemFusion.Coupling#voiceGateMs} — for a fusion, which is
+         *  the number the file name's {@code -v} carries and the boundary reads its vocal return
+         *  from. */
+        final DjEdit.Plan gate;
 
-        Fusion(StemFusion.Plan plan, float[][] edited, StemFusion.Report report, long separateMs) {
+        Fusion(StemFusion.Plan plan, float[][] edited, StemFusion.Report report, long separateMs,
+               DjEdit.Plan gate) {
             this.plan = plan;
             this.edited = edited;
             this.report = report;
             this.separateMs = separateMs;
+            this.gate = gate;
+        }
+
+        /** Where this fusion's vocals are back at unity, ms into the incoming's own file. */
+        long vocalReturnEndMs() {
+            return Math.round(gate.returnEndSec * 1000d);
         }
     }
 
@@ -954,6 +968,36 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         }
         plan = chosen;
 
+        // ⚠️ Round 25, and this is the round's whole change: the coupling. The outgoing's own
+        // departure inside the passage is measurable NOW, because the tail the passage draws from has
+        // just been separated — and it is the single number the fusion's landing AND its vocal gate
+        // are written around (see StemFusion.entry). Measuring it here costs arithmetic on material
+        // already in memory; the re-plan is the same planner on the same measurements, so the
+        // junction cannot move (the junction is chosen from the body and groove measurements, which
+        // this does not touch) and the separated tail stays exactly the material the passage needs.
+        StemFusion.OutgoingExit exit = StemFusion.exitOf(tail.stems, StemModel.MODEL_RATE,
+                tail.startMs);
+        StemFusion.Plan coupled = StemFusion.plan(new StemFusion.Input(aDurMs, request.blendMs,
+                request.removalMs, request.incomingContentStartMs, aBeatMs,
+                request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
+                headBarsMs, quiet, groove, body, firstVocalMs, incomingOn, 0, exit));
+        if (!coupled.valid) {
+            refusedWhy[0] = WHY_PLAN;
+            Logger.info("transition: DJ edit for {}: no fusion — the coupling could not place the"
+                    + " landing on the separated material ({}). The render is today's edit",
+                    request.title(), coupled.reason);
+            return null;
+        }
+        Logger.info("transition: DJ edit for {}: the landing and the gate are one measured number —"
+                        + " {}. The incoming's voice is back at unity by {}ms of its file, and the"
+                        + " deck starts at {}ms of it{}",
+                request.title(), coupled.coupling.describe(coupled.entryMs, firstVocalMs,
+                        request.removalMs, coupled.windowMs),
+                coupled.coupling.voiceGateMs, coupled.entryMs,
+                coupled.coupling.heldMs > 0L ? " (it is HELD there: see the coupling's own line)"
+                        : "");
+        plan = coupled;
+
         boolean melody = !melodyIsTheVoice(tail, plan);
         if (!melody) {
             Logger.info("transition: DJ edit for {}: the outgoing's melodic row over this passage"
@@ -989,7 +1033,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         for (int extra = 0; extra <= StemFusion.FUSION_WAIT_EXTRA_STEPS; extra++) {
             StemFusion.Plan attempt = extra == 0 ? plan
                     : extendHold(request, extra, headStems, body, firstVocalMs, incomingOn, aBeatMs,
-                            bBeatMs, aBars, headBarsMs, aDurMs, quiet, groove);
+                            bBeatMs, aBars, headBarsMs, aDurMs, quiet, groove, exit);
             if (attempt == null) break;
             Fusion made = fusionWithMakeup(request, headStems, attempt, edit, windowSec, clipped,
                     tail, melodyFor, separateMs, outgoingMaster, bodyDb);
@@ -1066,7 +1110,23 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                                     DjEdit.Plan edit, double windowSec, int[] clipped, Tail tail,
                                     boolean melody, long separateMs, float[][] outgoingMaster,
                                     double bodyDb) {
-        Fusion first = renderFusion(request, headStems, plan, edit, windowSec, clipped, tail,
+        // ⚠️ Round 25: the gate this head is rendered with is the COUPLING's own instant, not the
+        // fixed window the plain path uses. The coupling measured when the outgoing's own rows leave
+        // the passage, and the incoming's voice is back at unity by then — the same number the
+        // landing was placed around (see StemFusion.entry). The window's own plan stays the answer
+        // for a plan that has no coupling measurement, and `edit` is the window's plan.
+        DjEdit.Plan gate = plan.coupling.voiceGateMs > 0L
+                ? DjEdit.planAt(plan.coupling.voiceGateMs / 1000d, false)
+                : edit;
+        if (plan.coupling.voiceGateMs > 0L && plan.coupling.voiceGateMs < request.removalMs) {
+            Logger.info("transition: DJ edit for {}: the fusion's own vocal gate is the coupling's"
+                            + " instant, not the window's end — the incoming's voice is back at"
+                            + " unity by {}ms of its file, where the outgoing's own rows have left,"
+                            + " instead of the {}ms the window alone would have held it out to"
+                            + " (the landing and the gate are one measured number)",
+                    request.title(), plan.coupling.voiceGateMs, request.removalMs);
+        }
+        Fusion first = renderFusion(request, headStems, plan, gate, windowSec, clipped, tail,
                 melody, separateMs, outgoingMaster, 0d, bodyDb);
         double makeup = StemFusion.makeupDb(
                 first.report.stepMeasured ? first.report.junctionStepDb : Double.NaN);
@@ -1085,7 +1145,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
             }
             return first;
         }
-        Fusion lifted = renderFusion(request, headStems, plan, edit, windowSec, clipped, tail,
+        Fusion lifted = renderFusion(request, headStems, plan, gate, windowSec, clipped, tail,
                 melody, separateMs, outgoingMaster, makeup, bodyDb);
         Logger.info("transition: DJ edit for {}: the fusion's junction measured {} dB against the"
                         + " outgoing track's own last {}ms — the voice the fusion removes was that"
@@ -1111,11 +1171,12 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                                               long firstVocalMs, StemFusion.IncomingOn incomingOn,
                                               double aBeatMs, double bBeatMs, double[] aBars,
                                               double[] headBarsMs, long aDurMs,
-                                              StemFusion.VocalQuiet quiet, StemFusion.Groove groove) {
+                                              StemFusion.VocalQuiet quiet, StemFusion.Groove groove,
+                                              StemFusion.OutgoingExit exit) {
         StemFusion.Plan attempt = StemFusion.plan(new StemFusion.Input(aDurMs, request.blendMs,
                 request.removalMs, request.incomingContentStartMs, aBeatMs,
                 request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
-                headBarsMs, quiet, groove, body, firstVocalMs, incomingOn, extra));
+                headBarsMs, quiet, groove, body, firstVocalMs, incomingOn, extra, exit));
         return attempt != null && attempt.valid ? attempt : null;
     }
 
@@ -1214,10 +1275,15 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 new StemFusion.Material(rate, frames, request.speed, makeupDb, carried, source,
                         incoming, incomingVocals,
                         copyOf(tail.stems[StemGesture.Stem.VOCALS.row()], takeFrame, spanFrames),
-                        head, outgoingMaster, reference),
+                        head, outgoingMaster, reference,
+                        // Round 25: the voice clause is judged over the stretch this file's own gate
+                        // holds the incoming's voice at exactly zero — the coupling's instant less the
+                        // return ramp — because the voice comes back AT the departure by design.
+                        Math.max(0L, plan.coupling.voiceGateMs - DjEdit.RETURN_RAMP_MS
+                                - plan.entryMs)),
                 melody, request.outgoingBeatPeriodMs / 1000d, request.beatPeriodMs / 1000d, guard);
         Logger.info("transition: DJ edit for {} — {}", request.title(), report.describe());
-        return new Fusion(plan, edited, report, separateMs);
+        return new Fusion(plan, edited, report, separateMs, edit);
     }
 
     /**

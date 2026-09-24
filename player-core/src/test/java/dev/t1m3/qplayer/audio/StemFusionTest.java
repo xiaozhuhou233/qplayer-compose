@@ -36,6 +36,41 @@ public class StemFusionTest {
                 aBeatMs, 0d, bBeatMs, 0d, 1d, aBars, bBars, StemFusion.NO_VOICE_MEASUREMENT);
     }
 
+    /**
+     * A <b>measured</b> departure for the coupling's fixtures: the outgoing's own rows leave the
+     * passage {@code afterJunctionMs} into it. The reading is reported as measured, which is exactly
+     * what the log has to tell apart from the gesture's own end ({@link #neverQuiet}).
+     */
+    private static StemFusion.OutgoingExit exit(long afterJunctionMs) {
+        return new StemFusion.OutgoingExit() {
+            @Override
+            public long goneAtMs(long fromMs, long spanMs) {
+                return fromMs + Math.min(Math.max(0L, afterJunctionMs), spanMs);
+            }
+
+            @Override
+            public boolean measured() {
+                return true;
+            }
+        };
+    }
+
+    /** The same as {@link #exit}, for a passage the rows never get quiet inside: the answer is the
+     *  passage's own end — the shape's own answer, but read off measured material. */
+    private static StemFusion.OutgoingExit neverQuiet() {
+        return exit(Long.MAX_VALUE / 4L);
+    }
+
+    /** A plan with one measured departure, on the canonical 120 BPM grids. */
+    private static StemFusion.Plan coupled(long removalMs, long firstVocalMs,
+                                           StemFusion.OutgoingExit exit) {
+        return StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, removalMs, 0L,
+                500d, 0d, 500d, 0d, 1d, bars(2000d, 0d, 120), bars(2000d, 0d, 120),
+                StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT,
+                StemFusion.NO_BODY_MEASUREMENT, firstVocalMs, StemFusion.NO_INCOMING_MEASUREMENT, 0,
+                exit));
+    }
+
     @Test
     public void theAnchorsAreWhereTheSpecPutsThem() {
         // A and B both on a 500 ms beat (120 BPM), so a bar is 2000 ms and the tempo lock is exact
@@ -559,123 +594,285 @@ public class StemFusionTest {
     }
 
     /**
-     * ⚠️ Round 5's intro skip, read the way round 6's third pass reads it: the incoming track's
-     * voice arrives 12 s in (a rap track's vocal-free intro, measured on the device's
-     * {@code 34364062}: its first sustained vocal second is at 12 125 ms), so the deck starts at
-     * the common line a runway before that voice instead of at the content start — and its voice
-     * arrives right after the outgoing's, with the dead intro never played. When the voice is there
-     * from the start, nothing moves.
+     * ⚠️ <b>Round 25's coupling, and the fixture the round is judged on.</b> The landing is not a
+     * line a runway before the incoming's voice any more (round 21): it is the line that puts the
+     * incoming's own first sustained voice where the outgoing's own rows have left the passage. The
+     * outgoing's departure here is the gesture's own end (no separated material is handed in, which
+     * is {@link StemFusion#NO_EXIT_MEASUREMENT} — the fallback, and the round-6 behaviour bit for
+     * bit), i.e. 8 000 ms into the passage, so the deck starts at 12 125 − 8 000 = 4 125, snapped
+     * down to the grid's 4 000.
      *
-     * <p>⚠️ And {@code skippedIntroMs} is the number the entry itself shows: the deck's first sample
-     * is 10 000 ms into the file, so 10 000 ms of intro are not played. (Until round 6's third pass
-     * it reported the distance to the voice's own bar line — 2 000 — which reads as "2 000 ms of
-     * intro skipped" beside an entry of 10 000. The extra numbers are in {@link #plan}, which now
-     * also prints how far the voice still is from the landing.)
+     * <p>⚠️ What this replaced, and why the old number was a defect: the round-21 landing was
+     * 10 000 (the line a runway before the voice) and the voice then arrived 2 125 ms into the ramp
+     * while the outgoing's own material runs for 8 000 ms — the incoming singing over the fused
+     * passage, which is the user's 「改完后…在过渡时就播放了人声」. The coupling's landing is a real
+     * 4 000 ms of intro skipped <em>because the departure asks for it</em>, and the voice lands
+     * 125 ms later than the departure (the grid's own quantisation of the coupling's 4 125).
+     *
+     * <p>And a voice that is there from the start is not skipped at all: the coupling's landing is
+     * before the content start at every line this track has, so the deck starts where the track does
+     * and the gate HOLDS the voice until the outgoing's rows have left — never the other way round.
      */
     @Test
-    public void aDeadIntroIsSkippedAndAVoiceFromTheStartIsNot() {
-        double[] bBars = bars(2000d, 0d, 120);
+    public void theLandingIsTheOneThatPutsTheVoiceWhereTheOutgoingLeft() {
         StemFusion.Plan skipped = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 40_000L,
-                0L, 500d, 0d, 500d, 0d, 1d, bars(2000d, 0d, 120), bBars,
+                0L, 500d, 0d, 500d, 0d, 1d, bars(2000d, 0d, 120), bars(2000d, 0d, 120),
                 StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT,
                 StemFusion.NO_BODY_MEASUREMENT, 12_125L));
         assertTrue(skipped.reason, skipped.valid);
-        assertEquals("the line a runway before the voice (12 000) is the deck's start", 10_000L,
+        assertEquals("the coupling's own landing (12 125 − 8 000), snapped to the grid", 4_000L,
                 skipped.entryMs);
-        assertEquals("so 10 000 ms of intro are never played", 10_000L, skipped.skippedIntroMs);
+        assertEquals("so 4 000 ms of intro are never played", 4_000L, skipped.skippedIntroMs);
         assertEquals(12_125L, skipped.firstVocalMs);
-        assertEquals("and no skip was declined", -1L, skipped.declinedIntroMs);
+        assertFalse("and the departure was the gesture's own end, not a measurement",
+                skipped.coupling.measured);
+        assertEquals("the departure is the passage's own end, in the outgoing's file",
+                skipped.junctionMs + skipped.windowMs, skipped.coupling.departureMs);
+        assertEquals("8 000 ms into this file from the entry", 8_000L,
+                skipped.coupling.departureInFileMs);
+        assertEquals("so the voice is heard 125 ms after the outgoing is gone", 125L,
+                skipped.coupling.residualGapMs);
+        assertEquals("and nothing of its own singing had to be held", 0L, skipped.coupling.heldMs);
+        assertEquals("the gate is the voice's own arrival", 12_125L,
+                skipped.coupling.voiceGateMs);
         assertTrue(plan(skipped), skipped.fusionEndMs <= 40_000L);
         assertTrue(skipped.describe(),
-                skipped.describe().contains("skipping 10000ms of its intro"));
+                skipped.describe().contains("skipping 4000ms of its intro"));
         assertTrue(skipped.describe(),
-                skipped.describe().contains("2125ms after the deck starts"));
+                skipped.describe().contains("8125ms after the deck starts"));
+        assertTrue("the coupling's own evidence is in the line: " + skipped.describe(),
+                skipped.describe().contains("which is the departure to the millisecond")
+                        || skipped.describe().contains("first HEARD 125ms"));
 
-        // The voice from the start: the entry is where it always was.
+        // The voice from the start: the coupling's landing is before the track's own start, so the
+        // deck starts where it always did — and the voice is HELD from its own first line until the
+        // outgoing's rows are gone (7 800 ms), never stacked on top of them.
         StemFusion.Plan immediate = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 40_000L,
-                0L, 500d, 0d, 500d, 0d, 1d, bars(2000d, 0d, 120), bBars,
+                0L, 500d, 0d, 500d, 0d, 1d, bars(2000d, 0d, 120), bars(2000d, 0d, 120),
                 StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT,
                 StemFusion.NO_BODY_MEASUREMENT, 200L));
         assertTrue(immediate.reason, immediate.valid);
         assertEquals(0L, immediate.entryMs);
         assertEquals(0L, immediate.skippedIntroMs);
+        assertEquals("the gate is the departure's own instant (8 000), not the voice's (200)", 8_000L,
+                immediate.coupling.voiceGateMs);
+        assertEquals("and the incoming's own singing is held for 7 800 ms of it", 7_800L,
+                immediate.coupling.heldMs);
+        assertEquals(0L, immediate.coupling.residualGapMs);
+        assertTrue(immediate.describe(), immediate.describe().contains("gate holds 7800ms of its own"
+                + " singing out"));
     }
 
     /**
-     * ⚠️ Round 6's third pass, the lower bound: the skip is about a FEW bars of instrumental, so
-     * what it asks is one bar of the incoming track's own grid — not round 5's flat 8 000 ms, which
-     * is four bars of a 120 BPM record and so left every track whose voice came in at two or three
-     * bars playing its whole intro. The bound is a bar count, so it means the same thing at any
-     * tempo: a voice 0.75 bars in is nothing to skip, a voice two bars in is one bar of intro the
-     * deck can start a bar later for.
-     */
-    @Test
-    public void aFewBarsOfIntroAreSkippedAndUnderOneBarIsNot() {
-        double[] aBars = bars(2000d, 0d, 120);
-        double[] bBars = bars(2000d, 0d, 120);
-        // The voice 1 500 ms in (0.75 of a 2 000 ms bar): under the one-bar bound, so no skip.
-        StemFusion.Plan under = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 20_000L,
-                0L, 500d, 0d, 500d, 0d, 1d, aBars, bBars,
-                StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT,
-                StemFusion.NO_BODY_MEASUREMENT, 1_500L));
-        assertTrue(under.reason, under.valid);
-        assertEquals(0L, under.entryMs);
-        assertEquals(0L, under.skippedIntroMs);
-
-        // A two-bar intro (the voice at 4 000 ms): the deck starts one bar later, at 2 000, so one
-        // bar of instrumental is never played and the voice is a bar into the track.
-        StemFusion.Plan fewBars = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 20_000L,
-                0L, 500d, 0d, 500d, 0d, 1d, aBars, bBars,
-                StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT,
-                StemFusion.NO_BODY_MEASUREMENT, 4_000L));
-        assertTrue(fewBars.reason, fewBars.valid);
-        assertEquals(2_000L, fewBars.entryMs);
-        assertEquals(2_000L, fewBars.skippedIntroMs);
-        assertTrue(fewBars.describe(), fewBars.describe().contains("2000ms after the deck starts"));
-    }
-
-    /**
-     * ⚠️ Round 6's third pass, the ceiling — and this is the clause the pass exists for: the landing
-     * is taken only when a deck started there still leaves the whole passage inside the window the
-     * incoming track's voice is held out for.
+     * ⚠️ <b>The direction the coupling closes, and the fixture the user's own defect report is
+     * about.</b> The incoming's voice is already singing two bars in, and the outgoing's own rows
+     * play right to the passage's end: at every line this track has, the voice's material is there
+     * BEFORE the departure. There is nothing to skip to — the deck cannot be started before its own
+     * start — so the answer is the gate: the incoming's own singing is HELD until the outgoing's
+     * rows have left (4 000 ms of it, from the voice's own 4 000 to the departure's 8 000) rather
+     * than stacked on them.
      *
-     * <p>The same material twice, and the only difference is that window. With a 40 s window the
-     * landing at 10 000 ms is paid for. With the window a 17 s blend actually gives it (17 000 ms of
-     * it, and a passage of 8 000 ms), the same landing would put the passage's end at 18 000 ms —
-     * <b>past the window</b> — and until this pass that made the plan <b>invalid</b>: the pair lost
-     * its fusion entirely, i.e. a track whose voice came in late was played by the round-17 edit
-     * rather than fused with its intro intact. Now the skip is simply not taken, the deck starts
-     * where it always did, and the fusion stands — with the landing it refused reported as
-     * {@code declinedIntroMs} rather than dropped.
+     * <p>⚠️ What the round-21 rule did here is the reject the user heard: the deck started at the
+     * line a runway before the voice (2 000), the voice arrived 2 000 ms into the ramp, and the
+     * outgoing's own material ran for another 6 000 ms underneath it — the incoming singing over the
+     * fused passage. And what the ABSOLUTE gate did (round 20's, at the window's own end) is the
+     * other reject: the voice held out for the rest of the window, i.e. its first lines gone for no
+     * reason the material gives. One measured instant is the whole difference.
      */
     @Test
-    public void aSkipTheVocalWindowCannotPayForIsNotTakenAndTheFusionStands() {
-        double[] bBars = bars(2000d, 0d, 120);
-        StemFusion.Plan paid = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 40_000L,
-                0L, 500d, 0d, 500d, 0d, 1d, bars(2000d, 0d, 120), bBars,
-                StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT,
-                StemFusion.NO_BODY_MEASUREMENT, 12_125L));
-        assertTrue(paid.reason, paid.valid);
-        assertEquals(10_000L, paid.entryMs);
-        assertEquals(-1L, paid.declinedIntroMs);
+    public void aVoiceAlreadySingingWhenTheDepartureComesIsHeldAndNotStacked() {
+        StemFusion.Plan held = coupled(20_000L, 4_000L, neverQuiet());
+        assertTrue(held.reason, held.valid);
+        assertEquals("there is nowhere to skip to: the voice is before every landing",
+                0L, held.entryMs);
+        assertEquals("so the departure is as late as the passage makes it", 8_000L,
+                held.coupling.departureInFileMs);
+        assertEquals("the voice's own arrival (4 000) is EARLY, so the gate holds it to 8 000",
+                8_000L, held.coupling.voiceGateMs);
+        assertEquals("4 000 ms of the incoming's own singing is held, not stacked", 4_000L,
+                held.coupling.heldMs);
+        assertEquals("and there is no gap to report in the other direction", 0L,
+                held.coupling.residualGapMs);
+        assertTrue("the gate is never before the departure: " + plan(held),
+                held.coupling.voiceGateMs >= held.entryMs + held.coupling.departureInFileMs);
+        // And what round 21 would have taken is still reported, as the "before" of the coupling.
+        assertEquals("the line a runway before the voice", 2_000L, held.coupling.uncoupledEntryMs);
+    }
 
-        StemFusion.Plan tooLate = StemFusion.plan(new StemFusion.Input(240_000L, 17_000L, 17_000L,
-                0L, 500d, 0d, 500d, 0d, 1d, bars(2000d, 0d, 120), bBars,
+    /**
+     * ⚠️ <b>The entry is always a bar line of the incoming's grid, even when the coupling's own
+     * landing is earlier than the track's first one.</b> The content start is mid-bar here (250 ms
+     * into a 2 000 ms bar) and the coupling asks for a landing before the track's own beginning
+     * (0 − 8 000): starting off the grid is not a fusion, so the design's own plain entry stands —
+     * the phase-matched line at or after the content start, 2 000 — and the gate holds the
+     * incoming's singing until the departure (2 000 + 8 000 = 10 000).
+     */
+    @Test
+    public void aLandingBeforeTheGridIsThePlainEntryAndNotAStartOffTheBar() {
+        StemFusion.Plan plan = StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, 20_000L,
+                250L, 500d, 0d, 500d, 0d, 1d, bars(2000d, 0d, 120), bars(2000d, 0d, 120),
                 StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT,
-                StemFusion.NO_BODY_MEASUREMENT, 12_125L));
-        assertTrue("the pair keeps its fusion: " + tooLate.reason, tooLate.valid);
-        assertEquals("the deck starts where it always did", 0L, tooLate.entryMs);
-        assertEquals(0L, tooLate.skippedIntroMs);
-        assertEquals("and the landing it refused is named", 10_000L, tooLate.declinedIntroMs);
-        assertTrue("which the window cannot pay for: " + plan(tooLate),
-                tooLate.declinedIntroMs + tooLate.windowMs > tooLate.removalMs);
-        assertTrue("while the fusion that IS planned fits it", tooLate.valid);
-        assertTrue(plan(tooLate), tooLate.fusionEndMs <= tooLate.removalMs);
-        assertEquals(12_125L, tooLate.firstVocalMs);
-        assertTrue(tooLate.describe(), tooLate.describe().contains("does NOT skip to it"));
-        assertTrue(tooLate.describe(),
-                tooLate.describe().contains(tooLate.removalMs + "ms the incoming's voice is held"
-                        + " out for"));
+                StemFusion.NO_BODY_MEASUREMENT, 0L, StemFusion.NO_INCOMING_MEASUREMENT, 0,
+                neverQuiet()));
+        assertTrue(plan.reason, plan.valid);
+        assertEquals("a line of the incoming's grid, not the mid-bar content start", 2_000L,
+                plan.entryMs);
+        assertEquals("and the gate still holds its singing to the departure", 10_000L,
+                plan.coupling.voiceGateMs);
+        assertEquals(10_000L, plan.coupling.heldMs);
+    }
+
+    /**
+     * ⚠️ <b>{@code 0} is a measurement, not "unknown".</b> A track whose voice is in its first
+     * sample ({@code vocalStartMs} answers 0 — the device's own {@code unhappy} does) is the case
+     * where the coupling has nothing to move: the deck cannot start before the track does. The gate
+     * then holds the whole passage's worth of its own singing (8 000 ms here) rather than stacking
+     * it on the outgoing's material, and the plan says so. Reading 0 as "no measurement" — which
+     * {@code firstVocalMs > 0} does — would report a hold of 0 for exactly the pair the hold is for,
+     * which is why the sentinel is {@code -1} and this fixture pins it.
+     */
+    @Test
+    public void aVoiceInTheFirstSampleIsHeldUntilTheDeparture() {
+        StemFusion.Plan held = coupled(20_000L, 0L, neverQuiet());
+        assertTrue(held.reason, held.valid);
+        assertEquals("the deck starts where the track does", 0L, held.entryMs);
+        assertEquals("and the gate waits for the outgoing's own rows", 8_000L,
+                held.coupling.voiceGateMs);
+        assertEquals("holding all 8 000 ms of the passage's worth of its own singing", 8_000L,
+                held.coupling.heldMs);
+        assertEquals(0L, held.coupling.residualGapMs);
+        assertEquals(0L, held.firstVocalMs);
+    }
+
+    /**
+     * ⚠️ <b>The miss the plan is allowed to keep, and it is named.</b> The outgoing's own rows leave
+     * the passage 2 000 ms in (a breakdown, a drop-out: the measured departure, and this is the case
+     * the user's 「前一首歌到达声音很小的部分」 is about), while the incoming's voice does not start
+     * until 15 000 ms of its file. The coupling's own landing (15 000 − 2 000 = 13 000) would run the
+     * passage past the window the incoming's voice is held out for (17 000 − 8 000 = 9 000 is the
+     * last landing it can pay for), so the landing is pulled back to that one — 8 000, the grid line
+     * below it — and the voice arrives 5 000 ms after the outgoing is gone: the residual gap,
+     * logged in ms and kept as a fusion rather than given up.
+     */
+    @Test
+    public void aVoiceTheWindowCannotBringForwardLeavesAGapThePlanReports() {
+        StemFusion.Plan gap = coupled(17_000L, 15_000L, exit(2_000L));
+        assertTrue("the fusion stands: " + gap.reason, gap.valid);
+        assertEquals("the measured departure is used, not the passage's end", 2_000L,
+                gap.coupling.departureInFileMs);
+        assertTrue("and it is reported as measured: " + gap.coupling.describe(gap.entryMs,
+                gap.firstVocalMs, gap.removalMs, gap.windowMs), gap.coupling.measured);
+        assertEquals("the landing is the last the window can afford", 8_000L, gap.entryMs);
+        assertTrue("so the passage still fits the window", gap.fusionEndMs <= gap.removalMs);
+        assertEquals(9_000L, gap.removalMs - gap.windowMs);
+        assertEquals("the voice arrives 5 000 ms after the outgoing is gone", 5_000L,
+                gap.coupling.residualGapMs);
+        assertEquals("and nothing is held: the voice is late, not early", 0L, gap.coupling.heldMs);
+        assertEquals("the gate is the voice's own arrival, not the window's end", 15_000L,
+                gap.coupling.voiceGateMs);
+        assertTrue(gap.describe(), gap.describe().contains("first HEARD 5000ms after the outgoing"
+                + " is gone"));
+    }
+
+    /**
+     * ⚠️ Round 25's other direction, on a measured departure: an outgoing whose own passage goes
+     * quiet <b>early</b> — a breakdown, a drop-out, the user's 「前一首歌到达声音很小的部分」, read off
+     * its own rows rather than guessed from a shape — with an incoming voice that comes in late. The
+     * departure is 6 000 ms into the passage, so the coupling's own landing is 12 000 − 6 000 = 6 000,
+     * a bar line of this grid, and the voice lands on the departure exactly: no residual gap at all.
+     *
+     * <p>Two things are reported beside it, and both are the point: the landing IS a skip (6 000 ms
+     * of intro are never played — 「跳过一些小节到人声部分」), and round 21's own landing (10 000, the
+     * line a runway before the voice) is 4 000 ms later than it — at that landing the voice arrives
+     * 2 000 ms into the ramp while the outgoing's material runs for another 4 000 ms, i.e. the
+     * incoming singing over the fused passage, which is the defect the coupling closes.
+     */
+    @Test
+    public void aMeasuredEarlyDepartureSkipsTheIntroAndTheVoiceLandsOnIt() {
+        StemFusion.Plan plan = coupled(20_000L, 12_000L, exit(6_000L));
+        assertTrue(plan.reason, plan.valid);
+        assertEquals("the landing the departure asks for (12 000 − 6 000), itself a bar line",
+                6_000L, plan.entryMs);
+        assertEquals("6 000 ms of intro are never played", 6_000L, plan.skippedIntroMs);
+        assertEquals(6_000L, plan.coupling.departureInFileMs);
+        assertTrue("the departure is the measured one: " + plan.coupling.describe(plan.entryMs,
+                plan.firstVocalMs, plan.removalMs, plan.windowMs), plan.coupling.measured);
+        assertEquals("the voice's own arrival IS the departure: no gap", 0L,
+                plan.coupling.residualGapMs);
+        assertEquals("and nothing had to be held", 0L, plan.coupling.heldMs);
+        assertEquals("the gate the render writes is that same instant", 12_000L,
+                plan.coupling.voiceGateMs);
+        assertEquals("round 21's own landing is reported beside it", 10_000L,
+                plan.coupling.uncoupledEntryMs);
+        assertTrue("which is 4 000 ms later than the coupling's: " + plan.describe(),
+                plan.coupling.uncoupledEntryMs > plan.entryMs);
+        assertTrue(plan.describe(), plan.describe().contains("which is the departure to the"
+                + " millisecond"));
+    }
+
+    /**
+     * ⚠️ <b>The measurement itself, which is the round's own subject.</b> The departure is read off
+     * the outgoing's <em>separated carried rows</em>: drums, low end and the melodic row summed, its
+     * own silence measured against its own body ({@link StemFusion#OUTGOING_EXIT_DB} under the loud
+     * tenth of the passage's own windows), sustained for {@link StemFusion#OUTGOING_EXIT_SUSTAIN_MS}.
+     * Three things the fixture pins:
+     *
+     * <ul>
+     *   <li>the rows going quiet 3 000 ms into the passage answer 3 000 ms (within a frame);</li>
+     *   <li>the outgoing's own <b>voice</b> may be as loud as it likes in the passage: it is not
+     *   carried, so it is not what the listener hears leave — a measurement over the master would
+     *   read the voice and never answer;</li>
+     *   <li>rows that never go quiet answer the passage's own end (the gesture's own recede is then
+     *   the departure), and a passage the measurement does not hold answers a negative instant,
+     *   which is what makes the plan fall back rather than invent a number.</li>
+     * </ul>
+     */
+    @Test
+    public void theDepartureIsMeasuredOffTheOutgoingRowsOwnEnvelope() {
+        int span = 8_000;
+        int frames = (int) Math.round(span / 1000d * RATE);
+        float[][][] quietAtThree = rows(frames, 3_000, 0.5, 0.005, 0.5);
+        StemFusion.OutgoingExit exit = StemFusion.exitOf(quietAtThree, RATE, 0L);
+        assertTrue("the passage's own rows are there to read", exit.measured());
+        long gone = exit.goneAtMs(0L, span);
+        assertTrue("the rows go quiet 3 000 ms in, read as " + gone + "ms",
+                Math.abs(gone - 3_000L) <= 100L);
+        // The voice is not part of it: the same passage with a voice at full scale over the whole of
+        // it (the third row above is the melodic one, which IS carried, so this is a fresh fixture).
+        float[][][] loudVoice = rows(frames, 3_000, 0.5, 0.005, 0.005);
+        for (int ch = 0; ch < 2; ch++) {
+            java.util.Arrays.fill(loudVoice[StemGesture.Stem.VOCALS.row()][ch], 0.5f);
+        }
+        assertEquals("the outgoing's own voice is not carried, so it cannot answer for the rows",
+                gone, StemFusion.exitOf(loudVoice, RATE, 0L).goneAtMs(0L, span));
+        // Rows that never go quiet: the gesture's own end is the departure.
+        assertEquals("a passage the rows play right through answers its own end", span,
+                StemFusion.exitOf(rows(frames, span, 0.5, 0.5, 0.5), RATE, 0L).goneAtMs(0L, span));
+        // A passage the material does not hold: no answer at all.
+        assertTrue("a span outside the material is not measured",
+                StemFusion.exitOf(quietAtThree, RATE, 0L).goneAtMs(span, span) < 0L);
+        // And the fallback names itself in the plan: no measurement at all is the shape's answer.
+        StemFusion.OutgoingExit none = StemFusion.NO_EXIT_MEASUREMENT;
+        assertFalse(none.measured());
+        assertEquals("the shape's own end, in the outgoing's own file", 5_000L,
+                none.goneAtMs(1_000L, 4_000L));
+    }
+
+    /** Four separated rows at {@code RATE}: the carried ones at {@code loud} until
+     *  {@code quietAtMs} and then at {@code quiet}, and the voice row at {@code voice}. */
+    private static float[][][] rows(int frames, int quietAtMs, double loud, double quiet,
+                                    double voice) {
+        float[][][] stems = new float[4][2][frames];
+        int at = (int) Math.round(quietAtMs / 1000d * RATE);
+        for (StemGesture.Stem stem : StemGesture.Stem.ALL) {
+            double level = stem == StemGesture.Stem.VOCALS ? voice : loud;
+            for (int ch = 0; ch < 2; ch++) {
+                for (int i = 0; i < frames; i++) {
+                    stems[stem.row()][ch][i] = (float) (i < at ? level : quiet);
+                }
+            }
+        }
+        return stems;
     }
 
     /** A plan's own evidence, for a message. */

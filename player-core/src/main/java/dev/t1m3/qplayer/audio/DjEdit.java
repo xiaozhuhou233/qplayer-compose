@@ -189,7 +189,9 @@ public final class DjEdit {
                     "vocals at exactly zero for the first %.2fs (the blend), then back over"
                             + " %.2fs ending at %.2fs (%s)",
                     returnStartSec, returnEndSec - returnStartSec, returnEndSec,
-                    onBarLine ? "a bar line of the incoming track" : "the window plus the margin");
+                    onBarLine ? "a bar line of the incoming track"
+                            : "the gate's own instant, not a bar line (the window plus its"
+                                    + " margin)");
         }
     }
 
@@ -219,6 +221,28 @@ public final class DjEdit {
             onBar = false;
         }
         return new Plan(end - RETURN_RAMP_SEC, end, onBar);
+    }
+
+    /**
+     * The plan for a window whose vocals come back at a <b>measured</b> instant — the fusion's own
+     * gate (round 25), where the instant is the outgoing track's own departure inside the passage
+     * ({@code StemFusion.Plan.coupling.voiceGateMs}) rather than a stretch read off a shape.
+     *
+     * <p>⚠️ <b>Why the margin is not applied here.</b> {@link #plan}'s floor exists because the plain
+     * path's reference is a <em>shape</em>: the stretch in which the outgoing track can still be
+     * heard is an estimate, and a lift that ends inside it would stack two voices. On the fusion path
+     * the instant is measured off the outgoing's own rows and marks where they have already fallen
+     * {@code StemFusion.OUTGOING_EXIT_DB} under their own body and stayed there, so the lift is meant
+     * to run over the outgoing's last, fading material — the user's own 「当过渡的混音效果逐渐减弱…
+     * 时，就接入歌词」. Pushing it a second later would put the incoming's first line back into the
+     * stretch the coupling was written to keep it out of, for no reason the material gives.
+     *
+     * @param returnEndSec  where the vocals are back at unity, seconds into the window
+     * @param onBarLine     whether that instant is a bar line of the incoming track (reported only)
+     */
+    public static Plan planAt(double returnEndSec, boolean onBarLine) {
+        double end = Math.max(0.05, returnEndSec);
+        return new Plan(Math.max(0d, end - RETURN_RAMP_SEC), end, onBarLine);
     }
 
     /**
