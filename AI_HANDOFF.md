@@ -2598,6 +2598,17 @@ PlayerControllerPlaybackTest` = **105 个用例 0 失败**。`StemBridge.stretch
   `QUICK_FADE` 1 000 ms 不动（只在有曲子短于 90 s 时出现，用户曲库 98–202 s）。
 - `RULE_VERSION` 4→5（窗口烤进文件，旧文件必须重渲）。
 
+**发布（24b，2026-09-24）**：`gh release create` 报「同名 release 已存在」——
+`ai-dj-transition-2026-09-24b` 这个 **release 对象是 09-19 就建好的**（当时的规划包名，`gh release list`
+按创建时间排序，所以它排在 24a 下面，前几轮都没注意到）。上一轮在 20:07 往里传过一份 APK，
+但**那一份的 `RULE_VERSION` 还是 4**（`dexdump -d` 读 `classes12.dex` 的 `StemFusion.RULE_VERSION` = 4），
+而把它改成 5 的那次提交是 20:17 —— 装上那一份，设备上已有的 `-r4` 编辑不会重渲，
+听到的还是旧的 16.6 秒窗口。已用 **HEAD 重新构建的那一份覆盖**（sha256 `e124dfae…`，`dexdump` 读出来是 5；
+两份**只差 `classes7.dex`/`classes12.dex` 两个条目**，98 MB 模型逐字节一致），
+发行说明与标题也已更新；URL 带 `?cb=` 核对过 **200 / Content-Length 192,179,303 / 正确的 APK MIME**。
+**教训**：发版前先 `gh release view <tag>`（同名对象可能早就存在），并用 `dexdump` 核对
+`RULE_VERSION`，别只看字节数和「构建成功」。
+
 **真机（K20 Pro `efaa83b2`，24b，过渡方式=0/17 s/曲线=2；两次跑三个边界）**：
 `CROSSFADE 重叠=long 16944ms … (… the blend is NOT shortened for it any more (the user's 17000ms stands …))`；
 `CROSSFADE 重叠=long 17129ms, curve=DJ_BLEND` + `the DJ edit for 1410815174 will hold its vocals out for
