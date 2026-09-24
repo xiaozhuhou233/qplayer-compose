@@ -2501,7 +2501,11 @@ PlayerControllerPlaybackTest` = **105 个用例 0 失败**。`StemBridge.stretch
    `androidComponents.onVariants { it.sources.assets?.addGeneratedSourceDirectory(stageStemModel) { t -> t.outputDir } }`
    接进每个 variant（debug/release 都有，打包会等它）。**校验发生在抄完之后、对将要打包的字节做**：
    文件不存在 / 字节数不对 / sha256 不对 ⇒ `GradleException`，信息里有路径、字节数、sha256、
-   覆盖用的属性名，以及「为什么拒绝产出没有模型的 APK」。**98MB 不进 git**：输出目录是 AGP 的
+   覆盖用的属性名，以及「为什么拒绝产出没有模型的 APK」。三条分支的原文都试过
+   （`-PqplayerStemModel=` 指向不存在的路径 / 指向 half 模型 / 指向同字节数的垃圾文件）。
+   ⚠️ **输入要声明成 `@InputFiles` 的 `ConfigurableFileCollection`，不能是 `@InputFile`**：
+   后者遇到不存在的文件会先被 Gradle 自己的「input file was expected to be present but it doesn't
+   exist」拦下（`@Optional` 也压不住），信息里没有 sha256 —— 而那正是这条规则存在的理由。**98MB 不进 git**：输出目录是 AGP 的
    `build/generated/assets/stageStemModel/`（`.gitignore` 已忽略 `**/build/`）。
    `androidResources { noCompress += "onnx" }`：模型是已压缩过的浮点权重，存着不压（APK 大小可预期、
    首跑复制是直读）。

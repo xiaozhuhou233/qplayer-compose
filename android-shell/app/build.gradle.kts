@@ -168,14 +168,20 @@ val stemModelFile: Provider<File> = providers.gradleProperty("qplayerStemModel")
  * (StemModel.recognise), and it cannot identify a model that was never put in the APK.
  */
 abstract class StageStemModel : DefaultTask() {
-    /** The model, read from outside the repository. Absent is a failure this task reports
-     *  itself (with @Optional so Gradle does not fail it first with its own message). */
-    @get:InputFile
-    @get:Optional
-    abstract val modelFile: RegularFileProperty
+    /** The model, read from outside the repository.
+     *  A file collection rather than an `@InputFile`: Gradle refuses to accept a plain input
+     *  file that is not there, and the absent case is this task's own to report — with the
+     *  path, the byte count and the sha256 — instead of stopping the build with "an input file
+     *  was expected to be present but it doesn't exist" and no numbers in it. */
+    @get:InputFiles
+    abstract val model: ConfigurableFileCollection
 
     /** The manifest's numbers, so a swapped or truncated model is caught in the build
-     *  rather than by every device that installs the APK. */
+     *  rather than by every device that installs the APK. The name is here for the one
+     *  message that has to be written when there is no file to take a name from. */
+    @get:Input
+    abstract val expectedName: Property<String>
+
     @get:Input
     abstract val expectedBytes: Property<Long>
 
@@ -189,12 +195,15 @@ abstract class StageStemModel : DefaultTask() {
 
     @TaskAction
     fun stage() {
-        val source = modelFile.asFile.get()
-        val wanted = "${source.name}, ${expectedBytes.get()} bytes, " +
-            "sha256 ${expectedSha256.get()}"
-        if (!source.isFile) {
+        val source = model.files.firstOrNull()
+        // The manifest's own name, never the configured file's: the point of the message is what
+        // the APP is looking for, and the path it actually tried is on the first line.
+        val wanted = "${expectedName.get()}, ${expectedBytes.get()} bytes," +
+            " sha256 ${expectedSha256.get()}"
+        if (source == null || !source.isFile) {
             throw GradleException(
-                "The stem model is not where this build looks for it: ${source.absolutePath}\n" +
+                "The stem model is not where this build looks for it: " +
+                    (source?.absolutePath ?: "(nothing configured)") + "\n" +
                     "  wanted: $wanted\n" +
                     "  Put the file there, or point the build at it with -PqplayerStemModel=<path>" +
                     " (or QPLAYER_STEM_MODEL=<path>).\n" +
@@ -259,7 +268,8 @@ val stageStemModel = tasks.register<StageStemModel>("stageStemModel") {
     group = "build"
     description = "Stages the stem model into the APK's assets/models/ (from outside the repo);" +
         " fails the build when it is absent or is not StemModel.QUARTER."
-    modelFile.set(layout.file(stemModelFile))
+    model.from(stemModelFile)
+    expectedName.set(stemModelName)
     expectedBytes.set(stemModelBytes)
     expectedSha256.set(stemModelSha256)
 }
