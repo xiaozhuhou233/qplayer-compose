@@ -8,15 +8,16 @@
 ## 零、接手须知（新会话先读这一段，约 45 行，够开工）
 
 **状态**：分支 `feat/ai-dj-transition`（**`main` 一直没动**，仍是 `5efc1ba`）。
-最近一次发布：tag `ai-dj-transition-2026-09-24c`（**192,179,303 bytes ≈ 192 MB**，
-sha256 `7e32232d…`，发行说明里是「入曲从哪一拍进场」的全部数字），
-`https://github.com/xiaozhuhou233/qplayer-compose/releases/download/ai-dj-transition-2026-09-24c/app-debug.apk`
+最近一次发布：tag `ai-dj-transition-2026-09-24d`（**192,179,303 bytes ≈ 192 MB**，
+sha256 `5b72514d…`，发行说明里是「落点和人声门是同一个量出来的时刻」的全部数字），
+`https://github.com/xiaozhuhou233/qplayer-compose/releases/download/ai-dj-transition-2026-09-24d/app-debug.apk`
 （能装的是 **debug** 包；release 是未签名的）。发布用 `gh`，`github.com:443` 在本机被拦，
 **必须走本地代理 `127.0.0.1:7890`**；资产 URL 要**从 `gh` 输出里原样复制**（前几轮手打错过账号名）。
-**发版前先 `gh release view <tag>`**：24b 那个 release 对象是 09-19 建的、24c 这次是空的（都核对过）。
-**24c 相对 24b 只有一处改动**（第 21 轮，2026-09-24，见第七节：入曲的落点由素材决定 —— 跳过前奏、
-落在人声前的小节线；`VOCAL_SKIP_MIN_MS 8000` → `VOCAL_SKIP_MIN_BARS 1` + 落点受「人声窗口」约束）；
-`RULE_VERSION` 5→6，所以旧编辑文件会重渲一次。
+**发版前先 `gh release view <tag>`**：24b 那个 release 对象是 09-19 建的、24c 那次是空的、24d 这次
+先查是 `release not found`（**都核对过**）。资产用 `?cb=` + range 请求核对过 **206 /
+`application/vnd.android.package-archive` / content-length 192,179,303**。
+**24d 相对 24c 只有一处改动**（第 25 轮，2026-09-25，见第七节：**落点与人声门由出曲自己 rows 的
+"离开时刻"这一个量决定**，`RULE_VERSION` 7→8，所以旧编辑文件会重渲一次）。
 
 **模型随 APK 交付（第 19 轮，2026-09-24）**：htdemucs-quarter 模型现在**打在 APK 的
 `assets/models/htdemucs-quarter.onnx` 里**，App 在**首次渲染**（preload 通道）把它复制到自己的
@@ -33,45 +34,57 @@ sha256 `7e32232d…`，发行说明里是「入曲从哪一拍进场」的全部
 然后 push 分支 + `gh release create` 把 debug APK 作为资产，并核对 HTTP 200。
 
 **这个功能是什么**：切歌时的 AI 过渡（DJ 式融合）。已实现并**在真机上验证过机制**的部分：
-双播放器交叉淡化；按配对选择过渡方式（CROSSFADE / SILENCE_TRIM / FADE_OUT_IN / QUICK_FADE / CUT 五种都出现过，
-按你曲库 1260 个有序配对统计为 CROSSFADE 76% / FADE_OUT_IN 24%）；出曲压成 −10dB 垫底、82% 处 −66dB；
+双播放器交叉淡化；按配对选择过渡方式（五种都出现过，按你曲库 1260 个有序配对统计为 CROSSFADE 76% /
+FADE_OUT_IN 24%）；出曲压成 −10dB 垫底、82% 处 −66dB；
 **入曲人声只压到「出曲还听得见」的那一段**（发货的 DJ 形状自己过 −60dB 地板在 ramp 的 75.2%，
-第 20 轮起窗口就在这里收尾，回来仍落在其后的第一条小节线上；对称曲线仍是整个 ramp，融合仍是整窗）；
+第 20 轮起窗口就在这里收尾；对称曲线仍是整个 ramp，融合仍是整窗）；
 调性过渡是**两侧相向的阶梯**（每步一个整调，读到平台确认；融合编辑是单次写回）；
-低频在 15% 处交接；节拍对齐；`过渡时长` 滑块 4–30 秒（默认 15）**长度归它，不再被 8 秒封顶或静音裁切顶掉**。
+低频在 15% 处交接；节拍对齐；`过渡时长` 滑块 4–30 秒（默认 15）**长度归它**；
+**第 25 轮起，融合路径的落点和人声门都由「出曲自己的 rows 在段落里离开的时刻」这一个量决定**
+（`entry = firstVocal − goneFile`，`voiceGateMs = max(entry + goneFile, firstVocal)`；
+`OUTGOING_EXIT_DB 20` / `OUTGOING_EXIT_SUSTAIN_MS 1000`；拆不开时退回手势自己的结尾）。
+
+**第 25 轮（2026-09-25）**：用户点名 3 Strikes → First Class，说「当过渡的混音效果逐渐减弱（前一首歌
+到达声音很小的部分）时，就接入歌词」。以前门是**文件绝对位置**（融合=窗口末尾，普通=ramp 的 75.2%），
+落点动不了就按住入曲前几句（跳词）、动得了就把人声压进过渡里 —— 两个毛病是同一个耦合失效。现在一个量
+（出曲自己 rows 掉到段落 body 下 20dB 并保持整秒）同时定**落点**和**门**，绝不早于 departure
+（不同时两个人声）。真机（K20 Pro）逐字：**3 Strikes → First Class** departure 167 543 ms（rows 自己：
+段落里从不到 20dB 以下 ⇒ 手势自己的结尾）、入曲第一句 3 750 ms、落点 **4 010**（第 21 轮会取 1 784）、
+门 **12 913** 而不是 17 320（按住它自己 9 163 ms 的唱）、残留 0、plan 有效；**A COLD PLAY → unhappy
+融合真的播了**（`curve=FUSION`，门 4 019 而不是 17 080）。⚠️ 用户那对在本机**两次都没渲染完**
+（渲染 ~150 s vs 边界 ~130 s 提前量 → 边界 `DEGRADED: no DJ edit for this pair`）——**渲染成本**是
+那一对的瓶颈（§零 缺陷清单），不是落点规则。
 
 **第 21 轮让「入曲从哪一拍进场」由素材决定**（用户：「不如直接跳过一些小节到人声部分」）：融合/slam
 的落点（编辑文件名的 `-e`，播放端一律照用）除了「相位对齐的公共网格小节线」之外，多了一条**内容**判据 ——
 入曲分离人声 row 上第一段**持续**人声（`vocalStartMs`，25ms 帧 / 1000ms 中位 > −50dBFS）出现得
 **≥ 1 小节**（`VOCAL_SKIP_MIN_BARS`，按入曲自己的拍格算；旧的是固定 8 000ms）时，deck 落在它前一条
 小节线再退一个 runway 小节，前奏整段不放；**上界是「入曲人声被压住的窗口」`removalMs`**（17s 设置下
-8 864–10 482ms，取决于入曲小节）——**落不进去就不跳**（deck 照旧从原处进场，日志写 `declinedIntroMs`）。
-`skippedIntroMs` 现在是 deck 真正跳过的量（比内容起点晚多少），不再是从落点到人声那条线的距离。
-**边界侧零改动**（deck 起点 = 编辑自己的 `-e`）。实测：`fusion/intro.py`（17 首，app 自己的规则）+
-`fusion/PlanDump3`（真 planner，17s 设置，14 个输入 → 旧判法有 5 个整个融合被拒）。
+8 864–10 482ms，取决于入曲小节）——**第 25 轮起上界仍然在，但落不进去是"拉回来 + 记残留"而不是"不跳"**。
+`skippedIntroMs` 是 deck 真正跳过的量。**边界侧零改动**（deck 起点 = 编辑自己的 `-e`）。
 
-**第 18 轮加了「融合过渡」**：过渡段不再靠 A 的原混音以 −10dB 垫底与 B 的伴奏交叉，而是**把两首歌
-的去人声伴奏在预渲染文件里拼成一小段**——交界点起 A 的鼓/贝斯接着打，B 的床在一小节内**淡入**
+**第 18 轮加了「融合过渡」**：过渡段不再靠 A 的原混音以 −10dB 垫底与 B 的伴奏交叉，而是**把两首歌的
+去人声伴奏在预渲染文件里拼成一小段**——交界点起 A 的鼓/贝斯接着打，B 的床在一小节内**淡入**
 （用户听过后点名要的），然后 A 的鼓、贝斯各自在自己的小节线上**用 80ms 拼接切走**（不是淡出），
 B 的鼓/贝斯在同一时刻切进来；出曲的**人声 row 从不参与携带**，入曲人声仍等融合结束后的小节线。
-两台播放器在交界处做 **300ms 线性等增益交接**（等功率会把两轨相加成 +3dB 鼓包：交界处两轨是
-同源相关信号）。文件头上还有**峰值限制器**和**有上限的补偿增益**（把人声让出的电平补回来）。
-前提：模型在位（`files/models/htdemucs-quarter.onnx`，sha256 `427b9588…`）、两首**节拍锁得住**
-（周期差 ≤2%，即同一速度族）、且 A 的交界处**还有律动**（`StemFusion` 在 ±2 小节内优先挑这样的位置）。
+两台播放器在交界处做 **300ms 线性等增益交接**。文件头上还有**峰值限制器**和**有上限的补偿增益**。
+前提：模型在位、两首**节拍锁得住**（周期差 ≤2%）或**速度无关就 SLAM**、且 A 的交界处**还有律动**。
 任一不满足就**原样退回第 17 轮的行为**，不报错。
 
-**⚠️ 第 21 轮之后，落点这件事还卡在两个「第 20 轮的数」上（要真跳 12–14 秒的前奏就得先决定它们）**：
+**⚠️ 第 21 轮之后仍卡着的两条（第 25 轮没动）**：
 - **渲染会提前返回**：第 17 轮那条省成本的规则（`DjEdit.presence`：前 `vocalOutMs` 里人声不到 5% ⇒
   「不用做编辑」⇒ 直接放原始流）在落点规则**之前**，所以入曲人声晚于 `vocalOutMs`（17s 设置下
-  **12 785ms**）的歌**根本走不到落点规则**。真机原文（24c，两次跑）：A COLD PLAY
-  `not needed — its first 13045ms is measured to have no vocals in it`、Ice Cream Man
-  `not needed — its first 12785ms … (99% at or below -50 dBFS)` → 边界照旧放它们的前奏。
-  用户库里 12–14 秒前奏的那几首（A COLD PLAY 13.2s / Out Of Love 13.2s / Paradise 14.2s）都在这一档。
-- **上界 = 人声窗口**：17s 设置下只有 **8 864–10 482ms**（= 17 040 − 四小节 passage），所以 12–14 秒的
-  前奏**即使渲染走到了也会被判 declined**（Round Town 12.1s 真机上一对是这样被否的）。
-  要让它们也跳，得让**融合的人声窗口跟着落点走**（门从文件绝对时间 `[0, removalMs)` 改成
-  `[entry, entry + blend)`，于是 deck 起点后移多少、文件里就多压多少）—— 这是改第 20 轮的规则，
-  本轮**按要求没碰**。改它的代价是分离/编码窗口按比例变长，收益是 `blend` 不再因为落点而被截断。
+  **12 785ms**）的歌**根本走不到落点规则**（真机原文：A COLD PLAY `not needed`、Ice Cream Man
+  `not needed`）。用户库里 12–14 秒前奏的那几首都在这一档。
+- **上界 = 人声窗口**：17s 下只有 **8 864–10 482ms**，更大的前奏跳不进去（第 25 轮起改为拉回来 +
+  记残留；要让它们全跳，得让**融合的人声窗口跟着落点走**，即门从文件绝对时间 `[0, removalMs)`
+  改成 `[entry, entry + blend)` —— 第 25 轮把**门**改成 `max(entry+departure, firstVocal)` 已经走了一半，
+  另一半是渲染窗口本身）。
+- **普通路径的门仍是绝对比例**（`DjEdit.vocalOutMs`，DJ 形状 75.2%）：用户那句"不是固定的比例"
+  只在融合路径兑现了；融合被拒的对子（含 3 Strikes → First Class 在本机上的实际播法）仍走它。
+- **边界 `backing before vocals` 报告**仍把"出曲还听得见"读成 `FadeCurve.FUSION` 的 2 000ms 交接，
+  于是耦合成功的融合会被打印成 `INSIDE THAT STRETCH — THE RULE IS NOT MET`（**只是报告**，promotion
+  正常、0 gap）。下一轮把 `Plan.coupling.departureMs` 喂进去。
 
 **已知缺陷 / 未验证（下一轮优先）**：
 1. **渲染文件的"去人声"在某些文件上从 ~13.4 秒起失效**（计划 16.7 秒）：第 18 轮找到候选根因——
@@ -84,20 +97,25 @@ B 的鼓/贝斯在同一时刻切进来；出曲的**人声 row 从不参与携�
    但根因只剩两个候选（parked 入曲通道未就绪 / 渲染抢 CPU），那对歌不在开发机曲库里。
 4. **桥（StemBridge）从未在真机上播放过**：一次判定素材不合格放弃，一次 82 秒渲染装不进提前量。
 5. **启动掉帧**：改动有代码依据（缓存遍历内联、主线程 totalSize、后台通道立刻开工、启动闸门），
-   但**一帧都没测**。现成脚本：`D:\qplayer-dev\harness15\measure.sh`。
+   但**一帧都没测**。现成脚本：`D:\qplayer-dev\harness\15\measure.sh`。
 6. **B站 视频预览圆角**：机制取自 AOSP（outline + clipToOutline），**没有截图确认**。
 7. **测试有 1 个长期失败**（不是我们的）：`SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`
    —— 另一个并行工作区留下的 `pageTransitionPreset` 半成品。
+8. **渲染成本**（第 25 轮实测）：一对的融合渲染约 **150 s**（12 s 尾巴分离 + head + 整曲编码），
+   而一首 175 s 的歌从"开始播"到"边界"只有约 130 s 的提前量（app 启动/点播本身占掉几十秒）——
+   **用户点名的 3 Strikes → First Class 在本机两次都是这个 race 输掉的**（边界 `DEGRADED: no DJ
+   edit for this pair`）。要么把渲染做快（第 18 轮的账：body 38% / 模型 28% / 四分之一在相位之外），
+   要么让它更早开始（preload 现在只等当前曲开始播）。
 
 **硬约束**：① **不能新增依赖**（本机 Google Maven 不通；Maven Central 可以）——唯一例外是已批准的
 `onnxruntime-android`；② **C 盘只剩 ~13G**，大文件（模型/渲染/scratch）一律放 `D:\qplayer-dev\`，
-不要复制仓库；③ 开发机只有 **Redmi K20 Pro（`efaa83b2`）**，8e 那台不能常连；④ 大文件是
-`ComposeQPlayerActivity.kt`（7700+ 行，**永远别整读**，用 `sed -n` + `grep -n`）；⑤ 编辑前重读目标区域。
+不要复制仓库；③ 开发机只有 **Redmi K20 Pro（`efaa83b2`）**，8e 那台不能常连；
+④ 大文件是 `ComposeQPlayerActivity.kt`（7700+ 行，**永远别整读**，用 `sed -n` + `grep -n`）；
+⑤ 编辑前重读目标区域。
 
 **工作方式**：把"找/验"类活**派子代理**（它们有自己的上下文，只回结论）；**一轮只推一个能编译的步骤**；
 每轮结束更新本文档（§7 是流水账日志，按需翻，别通读）。**第 18 轮的融合段已经用真模型在 PC 上渲染成
-WAV 并被用户听过**（用户听出的"交界卡顿"正是那一版的交界电平落差，已按实测修掉：−7.25dB → −0.09dB）；
-**但在手机 App 里的实际听感仍未被验证**，因为没有设备时只能看日志。PC 侧渲染/测量工具在
+WAV 并被用户听过**；**但在手机 App 里的实际听感仍未被验证**，因为没有设备时只能看日志。PC 侧渲染/测量工具在
 `D:\qplayer-dev\harness\fusion\`（venv + onnxruntime + htdemucs-quarter，`round18.py` 是带最终规则的渲染）。
 
 ## 一、这是什么
@@ -2732,9 +2750,75 @@ entry 逻辑、素材窗口都不动；**边界侧零改动**（deck 起点 = �
 渲染端给「速度无关」对子规划的 **SLAM 编辑，边界侧 `PairFit` 判 UNRELATED 就一律走 FADE_OUT_IN**
 （第一跑原文），所以 slam 那条路写出来的文件**没人播** —— 这是第 5 轮与 P7 之间的旧矛盾，本轮没动。
 
+### 第 25 轮（2026-09-25）：落点和人声门是同一个**量出来**的时刻（RULE_VERSION 7→8）
+
+**用户的原始要求**（听完 24c 之后，点名 3 Strikes → First Class）：「ai 推断每首歌的过渡落点 … 最佳
+状态是过渡为前一首歌的背景与后一首歌的背景音乐融合 … **当过渡的混音效果逐渐减弱（前一首歌到达
+声音很小的部分）时，就接入歌词**，此过程可以让 ai 判断」。两条禁令：① 长的**纯伴奏**段（词被跳过、
+人声太晚）是**旧**毛病；② 人声出现在**融合段里**是**新**毛病。
+
+**诊断（一句话）**：门（`-v`，人声回到 unity 的位置）以前是一个**文件绝对位置** —— 融合路径是窗口
+末尾 `removalMs`，普通路径是 `DjEdit.vocalOutMs(blend, curve)`（DJ 形状的 75.2%）—— 而落点由人声
+自己决定。落点动不了 → 门把入曲自己前几句整段按住（「跳过了很多词」）；落点动得了（第 21 轮的跳过）
+→ 门在 ramp 里提前到，人声压在出曲还没走完的时候（「在过渡时就播放了人声」）。**两个方向是同一个
+耦合失效**。
+
+**规则（一个数，读两遍）**：`StemFusion.exitOf` 出曲**自己的分离 rows**（鼓+低频+旋律，**从不含它的
+voice**）在段落里的**离开时刻** —— 掉到段落自己 body 以下 `OUTGOING_EXIT_DB = 20 dB` 并保持
+`OUTGOING_EXIT_SUSTAIN_MS = 1000 ms`（与 `vocalStartMs` 同形；答案取那一秒里**掉下去的那一帧**，
+不是确认它的窗口）。拆不开时退回**手势自己的结尾**（`NO_EXIT_MEASUREMENT`），日志区分三态：
+measured-but-never-quiet / measured-quiet-point / not-measured。
+
+- **落点** `entry = firstVocal − goneFile`（`goneFile = (departure − junction)*stretch`，即那个时刻在
+  入曲文件里的偏移）。取入曲自己网格上的小节线；**相位匹配只是"允许范围内的偏好"，并列时取最后一条**
+  （锁住的曲子里候选相位全同，残留最小的就是耦合那条线）；一个 runway 宽。
+  三个钳位（都不是拒签）：runway（人声前留一小节）、入曲自己的内容起点（再往下没有线就走 round-18
+  的 plain entry，**绝不落在小节线以外**）、以及"人声窗口付得起的上界" `removalMs − windowMs`
+  —— 付不起就**拉回来**（第 21 轮是"放弃跳过"），残留写进日志。
+- **门** `Coupling.voiceGateMs = max(entry + goneFile, firstVocal)`，封顶 `removalMs`；
+  `DjEdit.planAt` 造它（**不套普通路径那个 margin**：这里的时刻是量出来的，lift 本来就该铺在出曲最后
+  那段渐弱上）。**绝不早于 departure** = "绝不同时两个人声"；所以落点付不起时门是**按住**人声
+  （`heldMs`），不是叠上去。`Plan.coupling` 里还有 `residualGapMs`（人声比 departure 晚多少）、
+  `uncoupledEntryMs`（第 21 轮那条线，只作日志里的"before"）、`measured`。
+- **验收那条人声判据**改成按"门真正压住的那一段"量（`Material.voiceHeldMs`）：按整窗量会把**每个**
+  耦合成功的融合都拒掉（因为它恰好把设计刚放回来的人声读了进去）。
+
+**真机（K20 Pro `efaa83b2`，过渡方式=自动/17 s/DJ；`harness/r28/run28*.sh`；日志 `r28*/…logcat`）**，
+逐字（`DJ edit for X: the landing and the gate are one measured number — …`）：
+
+| 对子 | 出曲离开（它自己文件 ms） | 怎么量的 | 入曲第一句人声 | 落点（第 21 轮会取的那条） | 门 | 残留 |
+|---|---|---|---|---|---|---|
+| A COLD PLAY → unhappy（**融合真播了**：`slot 0 -> 1: CROSSFADE 重叠=long 17000ms, curve=FUSION`） | 163 996 | rows 自己，20 dB/整秒 | 0（第一帧就唱） | 1 895（同） | **4 019**（窗口本来按到 17 080） | 0（按住 2 124） |
+| unhappy → 3 Strikes | 82 909 | rows 自己，20 dB/整秒 | 0 | 518 | **2 840**（本来 17 000） | 0（按住 2 322） |
+| **3 Strikes → First Class**（用户点名的对子） | 167 543 | rows 自己 —— 段落里**从不**到 20 dB 以下 ⇒ 答案＝手势自己的结尾（同一瞬间） | 3 750 | **4 010**（第 21 轮：1 784） | **12 913**（本来 17 320） | 0（按住 9 163 它自己的唱） |
+
+（第三行 `fusion 1:1`、0.72% 出界、交界 158 560 ms、`-e4010 -j158560 -f12913`；`skippedIntroMs 3690`。
+**两次真机上那一对的渲染都没写进文件**：渲染约 150 s，边界只有约 130 s 提前量 → `stillWanted` 在
+promotion 时把它取消，边界走 `DEGRADED: no DJ edit for this pair` —— **渲染成本**（§零）才是那一对
+的瓶颈，不是落点规则；同一台机器上 `A COLD PLAY → unhappy`（slam，段落只 2 124 ms）写成了并被播了。）
+
+**这轮没做/新发现（下一轮优先）**：
+1. **普通路径的门还是绝对比例**（`DjEdit.vocalOutMs` = 形状的 75.2%）：用户那句"不是固定的比例"只兑现
+   了融合路径。融合被拒的对子（含本轮用户那对在本机上的实际播法）走的还是它。
+2. **边界那条 `backing before vocals` 报告和耦合不一致**：它把"出曲还听得见"读成 `FadeCurve.FUSION`
+   自己的 2 000 ms 交接，而文件里的融合段落一直带到 departure，于是耦合成功的融合会被打印成
+   `the voice is INSIDE THAT STRETCH — THE RULE IS NOT MET`（**只是报告**，同一跑 promotion 正常、
+   0 gap）。下一轮把 `Plan.coupling.departureMs` 喂进那处判据。
+3. 用户那对的渲染race（见上）：`DjEdit.presence` 的提前返回（§零 缺陷①）在这一对上仍然成立，
+   12–14 s 前奏的歌走不到落点规则。
+4. 第 21 轮那条记的旧矛盾还在：slam 编辑被边界 `PairFit` 判 UNRELATED → `FADE_OUT_IN`，文件没人播
+   （本轮 r28a 的 `slot 1 -> 2` 原文即此）。
+
+**测试**：`mvn -pl player-core test` **278 跑 1 失败**（仍是既有的 `SettingsCatalogTest`）。新增
+`theLandingIsTheOneThatPutsTheVoiceWhereTheOutgoingLeft`、`aMeasuredEarlyDepartureSkipsTheIntroAndTheVoiceLandsOnIt`、
+`aVoiceAlreadySingingWhenTheDepartureComesIsHeldAndNotStacked`、`aVoiceInTheFirstSampleIsHeldUntilTheDeparture`
+（`0` 是量到的值、`-1` 才是未知）、`aLandingBeforeTheGridIsThePlainEntryAndNotAStartOffTheBar`、
+`aVoiceTheWindowCannotBringForwardLeavesAGapThePlanReports`、`theDepartureIsMeasuredOffTheOutgoingRowsOwnEnvelope`。
+本轮 harness：`D:\qplayer-dev\harness\r28\`（`run28.sh` 4 首跑出三条边界；`run28b/28c.sh` 用户那对的两跑；
+`run28*.out`、`r28*-all.logcat`、`release-notes.md`、`r28-queue-backup.json`）。
 
 
-## 八、工作方式（为了省上下文，请遵守）
+
 
 1. **先读本文档，再动手**；不要先探索仓库。
 2. **"找/验"类工作派子代理**（Explore / general-purpose），让它读大文件、只回结论 ——
