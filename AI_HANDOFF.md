@@ -8,16 +8,18 @@
 ## 零、接手须知（新会话先读这一段，约 45 行，够开工）
 
 **状态**：分支 `feat/ai-dj-transition`（**`main` 一直没动**，仍是 `5efc1ba`）。
-最近一次发布：tag `ai-dj-transition-2026-09-24d`（**192,179,303 bytes ≈ 192 MB**，
-sha256 `5b72514d…`，发行说明里是「落点和人声门是同一个量出来的时刻」的全部数字），
-`https://github.com/xiaozhuhou233/qplayer-compose/releases/download/ai-dj-transition-2026-09-24d/app-debug.apk`
+最近一次发布：tag `ai-dj-transition-2026-09-25a`（**192,179,303 bytes ≈ 192 MB**，
+sha256 `65a2d79f…`，发行说明里是「歌词早一档」的全部数字：门由一个量出来的时刻往前带一格、且有上界），
+`https://github.com/xiaozhuhou233/qplayer-compose/releases/download/ai-dj-transition-2026-09-25a/app-debug.apk`
 （能装的是 **debug** 包；release 是未签名的）。发布用 `gh`，`github.com:443` 在本机被拦，
 **必须走本地代理 `127.0.0.1:7890`**；资产 URL 要**从 `gh` 输出里原样复制**（前几轮手打错过账号名）。
-**发版前先 `gh release view <tag>`**：24b 那个 release 对象是 09-19 建的、24c 那次是空的、24d 这次
-先查是 `release not found`（**都核对过**）。资产用 `?cb=` + range 请求核对过 **206 /
-`application/vnd.android.package-archive` / content-length 192,179,303**。
-**24d 相对 24c 只有一处改动**（第 25 轮，2026-09-25，见第七节：**落点与人声门由出曲自己 rows 的
-"离开时刻"这一个量决定**，`RULE_VERSION` 7→8，所以旧编辑文件会重渲一次）。
+**发版前先 `gh release view <tag>`**：24b 那个 release 对象是 09-19 建的、24c 那次是空的、24d/25a 两次
+先查都是 `release not found`（**都核对过**）。资产用 `?cb=` + range 请求核对过 **206 /
+`application/vnd.android.package-archive` / content-range `bytes 0-99/192179303`**。
+**25a 相对 24d 的改动**（第 30 轮，2026-09-25，见第七节）：入曲人声比量到的离开时刻**早一格出曲小节**
+（上界：材料自己 body 下 6 dB 的读数，读不到就用文件自己的手势），离开时刻本身读在 **12 dB** 而不是 20 dB；
+**任何带 `-e/-j` 锚点的编辑（fusion 或 slam）都决定一个重叠类型 + FUSION 曲线**（日志 `THE EDIT WON`）。
+`RULE_VERSION` 8→9，所以旧编辑文件会重渲一次。
 
 **模型随 APK 交付（第 19 轮，2026-09-24）**：htdemucs-quarter 模型现在**打在 APK 的
 `assets/models/htdemucs-quarter.onnx` 里**，App 在**首次渲染**（preload 通道）把它复制到自己的
@@ -54,6 +56,16 @@ FADE_OUT_IN 24%）；出曲压成 −10dB 垫底、82% 处 −66dB；
 融合真的播了**（`curve=FUSION`，门 4 019 而不是 17 080）。⚠️ 用户那对在本机**两次都没渲染完**
 （渲染 ~150 s vs 边界 ~130 s 提前量 → 边界 `DEGRADED: no DJ edit for this pair`）——**渲染成本**是
 那一对的瓶颈（§零 缺陷清单），不是落点规则。
+
+**第 30 轮（2026-09-25）**：用户听完 24d 说歌词**太晚**（「只不过歌词要稍微早一点或者让ai判断」）。
+门（`-v`）现在是那个量到的离开时刻**往前带一格出曲自己的小节**（`VOICE_GATE_LEAD_BARS 1`，
+`4*aBeatMs` 按 carry 比率映射），**上界**是材料在段落内 body 下 6 dB 的读数（`VOICE_GATE_FLOOR_DB 6`），
+材料读不到就用**文件自己的手势**（`voiceFloorMs`，且永不早于 `FadeCurve.JUNCTION_XFADE_MS` 的交接点）；
+离开时刻本身从 20 dB 改读 **12 dB**（`OUTGOING_EXIT_DB`）。落点仍与门是同一个数。
+真机（同一个 slam）：门 4 019 → **3 939**（slam 一节切口能给的就是那 80 ms）；夹具上的 4 步融合
+8 000 → **6 663**（**提前 1 337 ms**）。第二件事：**带 `-e/-j` 的 stem passage（fusion 或 slam）一律
+决定重叠类型**（`incomingEditIsStemPassage()`，日志 `THE EDIT WON`）—— 速度无关的对子（配对判定给
+FADE_OUT_IN 的那一族，也就是 slam 存在的原因）因此真的会播那个文件；无编辑路径不变。
 
 **第 21 轮让「入曲从哪一拍进场」由素材决定**（用户：「不如直接跳过一些小节到人声部分」）：融合/slam
 的落点（编辑文件名的 `-e`，播放端一律照用）除了「相位对齐的公共网格小节线」之外，多了一条**内容**判据 ——
@@ -101,11 +113,16 @@ B 的鼓/贝斯在同一时刻切进来；出曲的**人声 row 从不参与携�
 6. **B站 视频预览圆角**：机制取自 AOSP（outline + clipToOutline），**没有截图确认**。
 7. **测试有 1 个长期失败**（不是我们的）：`SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`
    —— 另一个并行工作区留下的 `pageTransitionPreset` 半成品。
-8. **渲染成本**（第 25 轮实测）：一对的融合渲染约 **150 s**（12 s 尾巴分离 + head + 整曲编码），
-   而一首 175 s 的歌从"开始播"到"边界"只有约 130 s 的提前量（app 启动/点播本身占掉几十秒）——
-   **用户点名的 3 Strikes → First Class 在本机两次都是这个 race 输掉的**（边界 `DEGRADED: no DJ
-   edit for this pair`）。要么把渲染做快（第 18 轮的账：body 38% / 模型 28% / 四分之一在相位之外），
-   要么让它更早开始（preload 现在只等当前曲开始播）。
+8. **渲染成本**（第 25 轮实测，第 30 轮再证）：一对的融合渲染约 **150 s**（12 s 尾巴分离 + head +
+   整曲编码），而一首 175 s 的歌从"开始播"到"边界"只有约 130 s 的提前量（app 启动/点播本身占掉几十秒）——
+   **用户点名的 3 Strikes → First Class 在本机第 25、30 两轮都是这个 race 输掉的**（边界
+   `DEGRADED: no DJ edit for this pair`；第 30 轮整个 session 只写出一个编辑文件）。
+   ⚠️ **这是这一轮最该先修的一条**：门已经早了一档，但对子要听到它必须先让渲染赶上边界。
+   要么把渲染做快（第 18 轮的账：body 38% / 模型 28% / 四分之一在相位之外），要么让它更早开始
+   （preload 现在只等当前曲开始播）。
+9. **slam 的提前量上限就是拼接宽度**（第 30 轮）：slam 的段落是一小节，上界落在它的切口线上，
+   所以它只提前了 80 ms（4 019 → 3 939）；要多提前，得让 slam 的窗口多一步（`SLAM_STEPS`）——
+   那就不是"同一个线上换手"的 slam 了，先别动。
 
 **硬约束**：① **不能新增依赖**（本机 Google Maven 不通；Maven Central 可以）——唯一例外是已批准的
 `onnxruntime-android`；② **C 盘只剩 ~13G**，大文件（模型/渲染/scratch）一律放 `D:\qplayer-dev\`，
@@ -2817,7 +2834,85 @@ promotion 时把它取消，边界走 `DEGRADED: no DJ edit for this pair` —�
 本轮 harness：`D:\qplayer-dev\harness\r28\`（`run28.sh` 4 首跑出三条边界；`run28b/28c.sh` 用户那对的两跑；
 `run28*.out`、`r28*-all.logcat`、`release-notes.md`、`r28-queue-backup.json`）。
 
+### 第 30 轮（2026-09-25）：歌词早一档 —— 门由一个**量出来的**时刻往前带一格，且有上界（RULE_VERSION 8→9）
 
+**用户的原始要求**（听完 24d 之后）：「我刚刚试听了k20上的apk，不符合我的要求，我要的是有伴奏接入过渡，
+然后过渡一段时间开始放歌词，**只不过歌词要稍微早一点或者让ai判断**」。结构是对的（有伴奏接入、之后才放词），
+缺的是**时间**：24d 把入曲人声放在出曲**量到的离开时刻**上，在用户那对上是 ramp 的 **76%**
+（`3 Strikes → First Class`：门 **12 913 ms / 17 000**）。
+
+**两个旋钮**（都在 `StemFusion`）：一个是有上界的**提前量**，一个是读得**更软**的门槛。
+
+| 常量 | 值 | 作用 |
+|---|---|---|
+| `OUTGOING_EXIT_DB` | **20 → 12 dB** | 离开时刻**读在哪一级**：从「一行已经停了」改成「远低于段落自己的 body」（用户那句「声音很小的部分」） |
+| `VOICE_GATE_LEAD_BARS` | **1** | 提前量 = **出曲自己网格的小节**（`4*aBeatMs`，按 carry 的比率映射回文件），从量到的离开时刻往前带一格 |
+| `VOICE_GATE_FLOOR_DB` | **6 dB** | 提前量**不得越过**的电平线 |
+
+**上界是一个问题，问在能回答它的那个信号上**（`StemFusion.entry`）：① **材料自己的包络**在段落内读到过
+body 下 6 dB 时用它（真会淡下去的段落保持第 25 轮的时刻，提前量只在那个下降段里挪一小格）；② 否则
+（材料在段落里从不到那一级 —— **用户那对就是这样**，slam 也是这样）用**文件自己的手势**
+（`voiceFloorMs(holdSteps, fadeSteps, barStep)`：等功率 recede 把出曲被携带的行压到 unity 下 6 dB 的那一刻），
+且永不早于两台播放器的交接点（`FadeCurve.JUNCTION_XFADE_MS`，出曲自己的**人声**在那里必然已消失）。
+落点与门仍是**同一个数**（第 25 轮的规则不动），其余一切照旧（小节线返回、出曲人声永不携带、人声回来前调性
+已恢复、融合/slam 手势、素材窗口）。日志逐对报告 `Coupling.ledFromMs` / `floorMs` /
+`departureInFileMs`（后者是**材料自己的**读数，也就是第 25 轮的时刻 —— 这一轮的 "before"）。
+
+**AI 为什么不选**：门是**渲染时**烤进 `-v` 的，而 AI 的决策在**边界**、渲染之后；候选是从一次它没听过的
+分离里量出来的电平。交给它需要：prompt 列候选、答案接进 Request、提前量进编辑缓存键（每个答案一次 150 s
+重渲）、每次改主意再升 `RULE_VERSION`。量出来的规则给出同一件事；模型**能**加的只有「上界内选哪种落法」
+（如「落在淡出开始处而不是中段」）—— 那是口味，材料自己的读数已经回答了。
+
+**Change 2（上一条欠着的指令：「先解决速度无关的对子问题，争取让更多歌曲用上融合逻辑」）**
+- **赢的谓词**：`HeuristicTransitionChooser` 规则 7（`ctx.pairFit().overlapsBadly()` → `FADE_OUT_IN`），
+  也就是**速度无关**的对子拿到的东西 —— 恰好是 SLAM 存在的那一族。
+- 第 19 轮规则 4 本来对**有锚点的编辑**（slam 与 fusion 写同样的 `-e/-j/-f`）就回答重叠类型，这一轮把它
+  **写清楚**：`TransitionContext.incomingEditIsStemPassage()`（fusion **或** slam；`incomingEditIsFusion()`
+  保留为第 19 轮的名字、同一个 bit），chooser 回答 `CROSSFADE` + `FadeCurve.FUSION` 并打印
+  **`THE EDIT WON`**、点名两种形状；能力规则仍在它之上（太短/太晚 CUT、不可流式 CUT），**无编辑路径一字
+  不改**（配对判定说 FADE_OUT_IN 就是 FADE_OUT_IN）。
+- `PlayerController.noteWithoutEdit` 现在也报告**非重叠**类型：决策那一刻磁盘上**有**该入曲的 DJ 编辑而
+  类型不是重叠的，日志直说 —— 这是「渲染还没落地」与「chooser 拒绝了文件」的区别，以前 `FADE_OUT_IN`
+  会在那行之前 return，问不出来。
+
+**真机（K20 Pro `efaa83b2`，这一轮的 APK；`harness/r30/run30.sh`；日志 `r30*/…logcat`）**：队列
+`A COLD PLAY → unhappy → 3 Strikes → First Class`，跑两遍 = 8 个边界，**0 gap(s)**。逐字：
+
+| 边界 | 对子 | 类型 / 曲线 / 长度 | 编辑被武装？ | promotion |
+|---|---|---|---|---|
+| 0 → 1 | A COLD PLAY → unhappy（100.6 vs 117.4，网格互不相关） | `CROSSFADE 重叠=long 17000ms, curve=FUSION (rule: THE EDIT WON — … STEM PASSAGE …)` | ✓ `incoming slot 1 (unhappy) is the rendered DJ edit — its vocals are out until 3939ms of its own file` | ✓（incoming at 18797/18804ms；overlap heard 18895 = start 1895 + ramp 17000） |
+| 1 → 2 | unhappy → 3 Strikes（117.4 vs 107.1，UNRELATED） | `FADE_OUT_IN (rule: … PairFit{… tempo UNRELATED …})` | ✗（3 Strikes 没有编辑文件） | 无第二播放器 |
+| 2 → 3 | **3 Strikes → First Class**（用户点名的那对） | `CROSSFADE 重叠=long 17089ms, curve=DJ_BLEND (… DEGRADED: no DJ edit for this pair …)` | ✗（渲染又一次没赶上边界） | ✓（start 671 + ramp 17005/17071） |
+| 3 → 0 | First Class → 3 Strikes | `CROSSFADE 16791ms, curve=DJ_BLEND`（出曲尾部静音那条规则） | ✗ | ✓ |
+
+唯一写出的编辑：`1452855759-v3939-e1895-j161872-f4019-r9.m4a`（**门 3939**，第 25 轮同一个 slam 是 4019）。
+它的耦合行逐字：`…the voice's lead this round (1 bar of the outgoing's own grid): the departure is
+2124ms into this file as the material reads it, one bar earlier is 0ms, and the bound on that lead is
+2044ms — … so the voice is placed 2044ms after the deck starts, 80ms earlier than the departure the
+material measured` —— 也就是说：**slam 的一小节切口能给的提前量就是那个 80 ms 的拼接宽度**（上界的
+诚实结果），真正能提前的是多步融合（夹具上 4 步融合 8 000 → **6 663**，提前 **1 337 ms**）。
+
+⚠️ **用户那对在本机仍然没听上**：它的渲染（First Class，`DEGRADED: no DJ edit for this pair`）又一次
+输给边界 —— 瓶颈是**渲染成本**（§零 缺陷 8），不是这一轮的规则。要在真机上听到那对的 6 663，
+得先让渲染赶上边界（或让 preload 更早开工）。
+
+**覆盖数（K20 自己的曲库）**：有序对 39×38 = **1 482**，其中「速度那一侧」放行 **682**
+（`!PairFit.overlapsBadly()`，与用户给的 682/1482 同一谓词）。本机档案快照（31 个可解析 `.bpm`，930 对，
+`harness/r30/Reach.java` 用 app 自己的谓词算）：关系族内（FUSION）**398**、无任何关系（SLAM）**532**、
+「配对判定拒绝但仍带 stem passage」**532**（520 slam + 12 边角）—— 这就是这一轮**新放行**的规模；
+按同一谓词外推到 1 482 ⇒ **≈800 对**（外推，未逐对量）。真正的闸门是**渲染自己的材料条款**：本轮真机上
+9 个轨道拿到过 fusion/slam 计划、3 个写出过带锚点的文件，其余被「入曲的行在段落里还没开始打」「没有节拍
+网格」「窗口付不起」拒掉 —— 所以 532/800 是**上限**。
+
+**测试**：`mvn -pl player-core test` **297 跑 1 失败**（仍是既有的 `SettingsCatalogTest`）。新增
+`theLedVoiceArrivesBeforeTheMeasuredExitAndNoEarlierThanTheBound`、
+`aLedVoiceOnAPassageThatNeverFallsIsBoundedByTheFilesOwnGesture`、
+`theEnvelopesTwoLevelsAreOneRuleAndTheSofterOneComesFirst`、
+`aSlamEditDecidesTheKindForAPairInNoRelationAtAll`。本轮 harness：`D:\qplayer-dev\harness\r30\`
+（`run30.sh`、`run30.out`、`r30-leg*.logcat`、`r30-all.logcat`、`Reach.java`、`release-notes.md`；
+spec 追加在 `D:\qplayer-dev\harness\FUSION-SPEC.md` 的 Round 30 一节）。
+发版：tag `ai-dj-transition-2026-09-25a`（192,179,303 bytes，sha256 `65a2d79f…`，
+资产核对 206 / `application/vnd.android.package-archive` / content-length 192179303）。
 
 
 1. **先读本文档，再动手**；不要先探索仓库。
