@@ -3793,8 +3793,28 @@ public final class PlayerController {
      * comes back where that file says.
      */
     private TransitionPlan noteWithoutEdit(TransitionPlan plan, Track next) {
-        if (plan == null || plan.overlapMs() <= 0L) return plan;
+        if (plan == null) return plan;
         if (stemEditRenderer == null) return plan;              // a host with no stem path at all
+        if (plan.overlapMs() <= 0L) {
+            // ⚠️ Round 30: the kinds that do not overlap never reached this method's own line, so a
+            // boundary whose pair judgement answered FADE_OUT_IN — which is what an unrelated-tempo
+            // pair gets, i.e. a slam's own population — said nothing at all about the file on disk.
+            // On a device run that is the difference between "the render had not landed yet" and
+            // "the chooser refused the passage", and it is the question the user's own report asked;
+            // so it is said here, from the same stat the kind was decided from.
+            if (djEditFor(next) != null) {
+                Logger.info("transition: a DJ edit for {} IS on disk at this instant, but this"
+                        + " boundary's kind is {} — not an overlapping one — and only an"
+                        + " overlapping kind is handed the file (resolveIncomingSource's own gate),"
+                        + " so this boundary plays the track's own master. An edit carrying the"
+                        + " passage's anchors (-e/-j) answers an overlapping kind itself"
+                        + " (HeuristicTransitionChooser's stem-passage rule), so a file that is here"
+                        + " and NOT taken is either a plain edit (no anchors in its name, today's"
+                        + " behaviour by design) or a render that landed after the decision was"
+                        + " taken", next != null ? next.title : "?", plan.kind());
+            }
+            return plan;
+        }
         if (djEditFor(next) != null) return plan;                // the voice is out of the blend
         return plan.withOverlap(plan.overlapMs(), String.format(java.util.Locale.US,
                 "DEGRADED: no DJ edit for this pair (no verified model, or the render is not"
@@ -4714,14 +4734,25 @@ public final class PlayerController {
             return bridgeStartMs >= 0L;
         }
 
-        /** Whether this edit carries the two backgrounds fused, i.e. the boundary must start the
-         *  incoming deck on {@link #entryMs} and hand over on the outgoing deck's
-         *  {@link #junctionMs} bar line.
+        /** Whether this edit carries a <b>stem passage</b> — the two backgrounds fused inside the
+         *  file — i.e. the boundary must start the incoming deck on {@link #entryMs} and hand over
+         *  on the outgoing deck's {@link #junctionMs} bar line.
+         *
+         *  <p>⚠️ <b>Both of the renderer's passages count (round 30), and they share this one name
+         *  because they share one treatment:</b> a <em>fusion</em> is the three-step gesture for a
+         *  pair whose grids relate, a <em>SLAM</em> is the one-bar cut for a pair in no relation at
+         *  all — and the renderer writes the same three markers for both ({@code -e}, {@code -j},
+         *  {@code -f}), so no anchor could tell them apart here and none is wanted: the deck starts
+         *  on the entry and the outgoing deck is cut on the junction either way. The chooser reads
+         *  this fact through {@link TransitionContext#incomingEditIsStemPassage()} and answers an
+         *  overlapping kind for it, which is what arms the file at all — and a slam's own population
+         *  (unrelated tempo, clashing keys) is exactly the population this boundary's pair
+         *  measurement would otherwise answer FADE_OUT_IN for.
          *
          *  <p>The same test as {@link StemEditRenderer.Result#isFusion()} — read from the file
          *  name here rather than from the render's own object, because the render happened in
          *  another process (or a previous session) and the name is all that is left of it. The two
-         *  have to agree: a fusion the renderer wrote and this parse did not recognise would be
+         *  have to agree: a passage the renderer wrote and this parse did not recognise would be
          *  played as an ordinary edit, i.e. with the deck started at its beat entry and the
          *  outgoing track faded out across the whole window — the shape the fusion exists to
          *  replace, and the one the user hears as 「上一首被强制停止了」 when it is used for a pair

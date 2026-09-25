@@ -231,11 +231,13 @@ public final class DjEdit {
      * <p>⚠️ <b>Why the margin is not applied here.</b> {@link #plan}'s floor exists because the plain
      * path's reference is a <em>shape</em>: the stretch in which the outgoing track can still be
      * heard is an estimate, and a lift that ends inside it would stack two voices. On the fusion path
-     * the instant is measured off the outgoing's own rows and marks where they have already fallen
-     * {@code StemFusion.OUTGOING_EXIT_DB} under their own body and stayed there, so the lift is meant
-     * to run over the outgoing's last, fading material — the user's own 「当过渡的混音效果逐渐减弱…
-     * 时，就接入歌词」. Pushing it a second later would put the incoming's first line back into the
-     * stretch the coupling was written to keep it out of, for no reason the material gives.
+     * the instant is measured off the outgoing's own rows — the user's own 「当过渡的混音效果逐渐减弱…
+     * 时，就接入歌词」 — and since round 30 it is that measured instant <em>led</em> by one bar of the
+     * outgoing's grid and floored where the file's own gesture has taken the outgoing's carried rows
+     * {@code StemFusion.VOICE_GATE_FLOOR_DB} under unity (or, when the material itself falls that far,
+     * where the material did): the listener's own answer to round 25's build was 「歌词要稍微早一点」,
+     * and the bound is what keeps the earlier voice from landing while the outgoing is still at the
+     * level they were on. See {@code StemFusion.VOICE_GATE_LEAD_BARS} and {@code StemFusion.entry}.
      *
      * @param returnEndSec  where the vocals are back at unity, seconds into the window
      * @param onBarLine     whether that instant is a bar line of the incoming track (reported only)

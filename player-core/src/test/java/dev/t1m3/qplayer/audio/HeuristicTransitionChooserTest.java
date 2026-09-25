@@ -301,7 +301,8 @@ public class HeuristicTransitionChooserTest {
                         + " and are constant either side of it",
                 FadeCurve.FUSION, plan.curveOr(FadeCurve.EQUAL_POWER));
         assertTrue("the reason says what decided it: " + plan.decidedBy(),
-                plan.decidedBy().contains("FUSION")
+                plan.decidedBy().contains("THE EDIT WON")
+                        && plan.decidedBy().contains("STEM PASSAGE")
                         && plan.decidedBy().contains("junction bar line"));
         System.out.println("fusion pair: " + plan.kind() + " " + plan.overlapMs() + "ms — "
                 + plan.decidedBy());
@@ -339,6 +340,69 @@ public class HeuristicTransitionChooserTest {
         assertEquals(TransitionKind.CROSSFADE,
                 chooser.choose(fusionCtx(shortA, b, 30_000L, TransitionContext.SILENCE_UNKNOWN,
                         TransitionContext.PairFit.UNMEASURED)));
+    }
+
+    /**
+     * ⚠️ <b>Round 30: a SLAM counts, and it is the case this rule was written for.</b> The fact the
+     * context carries is one bit — round 19 named it after the fusion it was built on — but the
+     * renderer writes the same anchors ({@code -e}/{@code -j}/{@code -f}) for a slam, whose own
+     * population is a pair in <em>no relation at all</em>: exactly the population rule 7's
+     * {@code PairFit} answers {@link TransitionKind#FADE_OUT_IN} for. The two halves of this test are
+     * the two halves of that device observation, on one hostile pair:
+     *
+     * <ul>
+     *   <li><b>no edit</b> — the sequential fade stands, decided by the pair's own measurement (the
+     *   {@code overlaps badly} line the device log carries), and nothing about round 30 changes
+     *   it;</li>
+     *   <li><b>the slam's edit on disk</b> — an <em>overlapping</em> kind with the passage's own
+     *   curve, which is the whole of what "the file is armed" means on this side of the boundary:
+     *   the controller's arming gate is {@code incomingMode == PARKED &&
+     *   transitionKind.overlapping()} and then the same {@code djEditFor} lookup that set this fact
+     *   ({@code PlayerController.resolveIncomingSource}), so a kind that is not overlapping is a
+     *   rendered slam nobody ever plays.</li>
+     * </ul>
+     */
+    @Test
+    public void aSlamEditDecidesTheKindForAPairInNoRelationAtAll() {
+        Track a = track("a", LONG_MS);
+        Track b = track("b", LONG_MS);
+        HeuristicTransitionChooser chooser = new HeuristicTransitionChooser();
+        TransitionContext.PairFit unrelated = clashingPair();
+        // No edit: the pair's own verdict, unchanged by round 30.
+        TransitionContext noEdit = ctx(a, b, 60_000L, true, true,
+                TransitionContext.SILENCE_UNKNOWN, TransitionContext.SILENCE_UNKNOWN, unrelated);
+        assertEquals(TransitionKind.FADE_OUT_IN, chooser.choose(noEdit));
+        assertTrue("and the reason is the pair's own measurement: " + chooser.plan(noEdit),
+                chooser.plan(noEdit).decidedBy().contains("overlaps badly"));
+        assertFalse("no edit means no stem passage", noEdit.incomingEditIsStemPassage());
+        // The same pair whose incoming track's edit is a slam — the same one bit, because the
+        // anchors the renderer writes are the same three.
+        TransitionContext slam = fusionCtx(a, b, 60_000L, TransitionContext.SILENCE_UNKNOWN,
+                unrelated);
+        assertTrue("the slam's edit is the stem-passage fact (both shapes carry -e/-j)",
+                slam.incomingEditIsStemPassage());
+        assertEquals(TransitionKind.CROSSFADE, chooser.choose(slam));
+        TransitionPlan plan = chooser.plan(slam);
+        assertEquals(TransitionKind.CROSSFADE, plan.kind());
+        assertTrue("an overlapping kind is what arms the file at all",
+                plan.kind().overlapping());
+        assertTrue("and it needs the second player the passage is prepared on",
+                plan.kind().needsSecondPlayer());
+        assertEquals("the passage's own shape, not the DJ blend", FadeCurve.FUSION,
+                plan.curveOr(FadeCurve.DJ_BLEND));
+        assertTrue("the line says the edit won, and names both shapes: " + plan.decidedBy(),
+                plan.decidedBy().contains("THE EDIT WON") && plan.decidedBy().contains("slam"));
+        // The capability rules stay above it: a boundary that cannot be armed at all is still CUT,
+        // edit or no edit.
+        assertEquals("too late in the track: no transition fits, rendered passage or not",
+                TransitionKind.CUT,
+                chooser.choose(fusionCtx(a, b, 1_000L, TransitionContext.SILENCE_UNKNOWN,
+                        unrelated)));
+        assertFalse("and a boundary nobody knows the length of is CUT too",
+                chooser.choose(fusionCtx(a, track("unknown", 0L), 60_000L,
+                        TransitionContext.SILENCE_UNKNOWN, unrelated)).overlapping());
+        System.out.println("slam pair: " + plan.kind() + " " + plan.overlapMs() + "ms — "
+                + plan.decidedBy());
     }
 
     /**

@@ -209,6 +209,14 @@ public final class StemFusion {
      *       and pairs whose voice comes in so late that a landing cannot pay for the passage now
      *       KEEP their fusion instead of losing it to a refused landing. Both are audible
      *       differences; a file written before this bump is played with the old entry.</li>
+     *   <li><b>8 → 9</b> — round 30 changed the <em>gate</em> again, and this time in the direction
+     *       the listener asked for: the incoming's voice arrives {@link #VOICE_GATE_LEAD_BARS} bar
+     *       of the outgoing's grid before the departure it had been sitting on, floored where the
+     *       file's own gesture has taken the outgoing's rows {@link #VOICE_GATE_FLOOR_DB} under
+     *       unity, and the departure itself is read at {@link #OUTGOING_EXIT_DB} = 12 dB rather
+     *       than 20. Every file written before it carries a {@code -v} that is the old, later gate
+     *       (and an {@code -e} chosen to match it), so a listener would hear the very complaint
+     *       「歌词要稍微早一点」 again on exactly the pairs they had already heard.</li>
      * </ul>
      *
      * <p>The price is one re-render per pair, once, in the pre-lane where there are minutes of
@@ -218,7 +226,7 @@ public final class StemFusion {
      * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
      * name.
      */
-    public static final int RULE_VERSION = 8;
+    public static final int RULE_VERSION = 9;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with
@@ -698,20 +706,33 @@ public final class StemFusion {
      *  to be for the passage to say it has left, dB — the user's 「当前一首歌到达声音很小的部分」,
      *  measured off the outgoing's own separated material instead of guessed from the shape.
      *
-     *  <p><b>Why 20 dB, and why relative.</b> The same number answers the same question on the
+     *  <p><b>Why relative, and why 12 dB.</b> The same number answers the same question on the
      *  incoming side already ({@link #INCOMING_ON_DB}: a row is <em>playing</em> while its beats are
-     *  within 20 dB of its own loud tenth), so "the rows have stopped" is that test read backwards,
-     *  on the other track, with the same instrument ({@link #bodyLevelDb}: the loud tenth of the
+     *  within 20 dB of its own loud tenth), so "the rows have left" is that test read backwards, on
+     *  the other track, with the same instrument ({@link #bodyLevelDb}: the loud tenth of the
      *  {@link #BODY_WINDOW_MS} windows). Relative to the passage's own body and not to an absolute
      *  floor because a master's level is the track's own: this library's separated outgoing rows sit
      *  ~20 dB under full scale in a loud passage and −70 in a quiet one, so an absolute floor calls
      *  a quiet track "gone" from its first sample.
      *
+     *  <p>⚠️ <b>The level itself is the round-30 tuning, and it is the user's own complaint that
+     *  moved it: 20 → 12 dB.</b> 20 dB is the level at which a row has <em>stopped</em> — the
+     *  incoming's own "is it playing" test read backwards — and read as an <em>arrival</em> it put
+     *  the incoming track's voice far too late: 「我要的是有伴奏接入过渡，然后过渡一段时间开始放歌词，
+     *  只不过歌词要稍微早一点」. What the user points at is 「前一首歌到达声音很小的部分」 — the
+     *  outgoing track already well under its own body, not yet silent — and 12 dB is that reading of
+     *  the same instrument. It is <em>softer, never unguarded</em>: the lead's own bound
+     *  ({@link #VOICE_GATE_FLOOR_DB}) is what promises the voice does not arrive while the outgoing
+     *  is still at or near the level the listener was on, and it is measured on the file's own
+     *  gesture, so it is a bound and not a hope.
+     *
      *  <p>The fallback when the envelope cannot be read is the gesture's own end ({@link
-     *  #NO_EXIT_MEASUREMENT}): a passage whose rows never get quiet is one the recede itself takes
-     *  out, and the recede reaches the floor at {@link Plan#fusionEndMs} by construction. Which of
-     *  the two answered is said in the log, and both numbers are reported per pair. */
-    public static final double OUTGOING_EXIT_DB = 20d;
+     *  #NO_EXIT_MEASUREMENT}): a passage whose rows never get quiet inside it (a steady last
+     *  section, which is what the user's own pair measures) is one the recede itself takes out, and
+     *  the recede reaches the floor at {@link Plan#fusionEndMs} by construction. That case is not
+     *  left alone any more — {@link #VOICE_GATE_LEAD_BARS} leads the answer — but it is still said
+     *  in the log, and both numbers are reported per pair. */
+    public static final double OUTGOING_EXIT_DB = 12d;
 
     /** How long the outgoing's rows have to STAY at {@link #OUTGOING_EXIT_DB} under their own body
      *  before that is a departure, ms — one second, the same rule {@link #vocalStartMs} uses on the
@@ -720,6 +741,82 @@ public final class StemFusion {
      *  read the first quiet frame would put the incoming's voice in over the next line of the
      *  outgoing track's own singing. */
     public static final long OUTGOING_EXIT_SUSTAIN_MS = 1_000L;
+
+    /** How far <b>earlier</b> than the measured departure the incoming's own voice may arrive, in
+     *  bars of the OUTGOING track's own grid — the second half of round 30's tuning, and the half
+     *  that answers the pairs {@link #OUTGOING_EXIT_DB} cannot: a passage whose rows never fall
+     *  even 12 dB under its own body has no measured departure inside it at all, so the earlier
+     *  arrival the user asked for (「歌词要稍微早一点」) has to come from the gesture's own shape
+     *  rather than from the material's envelope.
+     *
+     *  <p><b>Why one bar, and why in the outgoing track's grid.</b> A bar is the unit every other
+     *  musical decision in this file is made in (the intro skip is a bar, the runway is a bar, the
+     *  swaps are bar lines), it is what 「稍微早一点」 means musically rather than as a stopwatch, and
+     *  it is the outgoing track's own bar because the instant it leads is the outgoing track's own
+     *  departure. It is read as {@code 4 * aBeatMs} of the outgoing's measured grid, so a slow pair
+     *  leads by more milliseconds than a fast one and the lead is the same amount of music.
+     *
+     *  <p>⚠️ <b>The lead is bounded, and the bound is the invariant this file exists to keep</b>:
+     *  it may never reach back past the instant the FILE's own gesture has taken the outgoing's
+     *  carried rows {@link #VOICE_GATE_FLOOR_DB} under unity (see {@link #voiceFloorMs}). While the
+     *  rows are at or near unity the listener is still on the outgoing track's own material, so the
+     *  incoming's voice would arrive over a second voice's worth of music; past that instant the
+     *  outgoing is already on its way out and the arrival the user described — 「当过渡的混音效果逐渐
+     *  减弱…时，就接入歌词」 — is exactly what happens. */
+    public static final int VOICE_GATE_LEAD_BARS = 1;
+
+    /** The level the file's own recede must have taken the outgoing's carried rows below before the
+     *  voice may arrive, dB under unity — the bound on {@link #VOICE_GATE_LEAD_BARS}, and the
+     *  reason the lead cannot stack two voices.
+     *
+     *  <p>Unity is the right reference here and the passage's own body is not: inside the hold the
+     *  FILE plays the outgoing track's rows at unity, which is the level the listener was already
+     *  on when the junction arrived (that is the whole reason the gesture holds rather than cuts —
+     *  round 6, 「不要让它戛然而止」), and the recede's own gain is the one thing about "is the
+     *  outgoing still clearly audible" that is a fact of this file rather than a property of the
+     *  track's own material. 6 dB is the same "clearly audible" line the rest of this codebase draws
+     *  ({@code FadeCurve.bothAudibleMs} counts both tracks audible while they are within 6 dB of
+     *  each other), and it lands at two thirds of the recede's equal-power decline
+     *  ({@link #voiceGateFloorFraction}) — so a one-bar lead is usually allowed and a lead into the
+     *  hold never is. */
+    public static final double VOICE_GATE_FLOOR_DB = 6d;
+
+    /** The fraction of one equal-power decline (see {@link #fade}) at which a row is
+     *  {@link #VOICE_GATE_FLOOR_DB} under its own start: {@code cos(f*pi/2) = 10^(-dB/20)}. A
+     *  function rather than a constant so the dB is the only number a later reader tunes, and the
+     *  shape is the one the render really applies. */
+    static double voiceGateFloorFraction() {
+        return 2d / Math.PI * Math.acos(1d / Math.pow(10d, VOICE_GATE_FLOOR_DB / 20d));
+    }
+
+    /**
+     * Where the file's own gesture has taken the outgoing's carried rows {@link
+     * #VOICE_GATE_FLOOR_DB} under unity, as an offset from the entry in the file's own timeline, ms
+     * — the floor {@link #entry} clamps its lead against, and the second of the two bounds there.
+     *
+     * <p>The subject is the slowest row to leave, its low end (it recedes over {@code
+     * lowEndFadeSteps} steps where the drums take one), and the shape is the one the render applies
+     * ({@link #fade}'s cosine for a decline to the floor): a bound read off the longest-lived row is
+     * the <em>conservative</em> one — the sum of the rows is quieter than any one of them, so a
+     * bound that holds for the low end holds for what the listener hears.
+     *
+     * <p>And it is never earlier than the deck-level hand-over: the outgoing deck itself is taken
+     * from unity to exactly zero over {@link FadeCurve#JUNCTION_XFADE_MS} at the top of the ramp, so
+     * the outgoing track's own <b>voice</b> — which this file never carries — is gone at that
+     * instant whatever the rows are doing. The floor is the later of the two, which is what makes
+     * "the outgoing is not still clearly audible" true for both of the things the listener hears as
+     * the outgoing track: the live deck and the carried rows.
+     *
+     * @param holdSteps      steps the rows hold at unity ({@link #A_HOLD_STEPS}, or 1 on a slam)
+     * @param fadeSteps      steps the low end takes to reach the floor ({@code lowEndFadeSteps};
+     *                       a slam's splice is its own answer, so its caller passes 0)
+     * @param barStepMs      one step of the gesture, ms
+     */
+    public static long voiceFloorMs(int holdSteps, int fadeSteps, long barStepMs) {
+        double at = (Math.max(0, holdSteps) + voiceGateFloorFraction() * Math.max(0, fadeSteps))
+                * Math.max(0L, barStepMs);
+        return Math.max(FadeCurve.JUNCTION_XFADE_MS, Math.round(at));
+    }
 
     /** How much of the incoming's own intro there has to be before the deck starts later instead
      *  of at the content start, in <b>bars of the incoming's own grid</b> (round 6's third pass;
@@ -961,6 +1058,21 @@ public final class StemFusion {
          *  negative value when the passage is not inside the material this measurement holds. */
         long goneAtMs(long fromMs, long spanMs);
 
+        /**
+         * The same envelope read at another level under the passage's own body, dB — the second
+         * reading round 30 needs: {@link #OUTGOING_EXIT_DB} is where the incoming's voice is meant
+         * to <em>arrive</em> (the user's 「前一首歌到达声音很小的部分」), and
+         * {@link #VOICE_GATE_FLOOR_DB} is the level the lead that arrival takes may not reach back
+         * past ("the outgoing is still clearly audible there"). Both are the same rule — a
+         * sustained fall under the passage's own loud tenth ({@link #bodyLevelDb}) — so a caller
+         * cannot get one and not the other, which is the point of asking it here.
+         *
+         * <p>Same three answers as {@link #goneAtMs(long, long)}: an instant, the passage's own end
+         * when the level is never reached inside it, or negative when the passage is not inside the
+         * material.
+         */
+        long goneAtMs(long fromMs, long spanMs, double underBodyDb);
+
         /** Whether the passage's own envelope could be read at all. False makes {@link
          *  #goneAtMs} the gesture's own end, which is the fallback the log names. */
         default boolean measured() {
@@ -969,11 +1081,17 @@ public final class StemFusion {
     }
 
     /** The shape's own answer, for a caller with no separated material: the outgoing's rows are
-     *  taken to the floor by the gesture's own recede, which ends at the passage's end. */
+     *  taken to the floor by the gesture's own recede, which ends at the passage's end — at every
+     *  level, because a material nobody separated cannot have an earlier one. */
     public static final OutgoingExit NO_EXIT_MEASUREMENT = new OutgoingExit() {
         @Override
         public long goneAtMs(long fromMs, long spanMs) {
             return fromMs + Math.max(0L, spanMs);
+        }
+
+        @Override
+        public long goneAtMs(long fromMs, long spanMs, double underBodyDb) {
+            return goneAtMs(fromMs, spanMs);
         }
     };
 
@@ -1007,12 +1125,23 @@ public final class StemFusion {
 
             @Override
             public long goneAtMs(long fromMs, long spanMs) {
+                return gone(fromMs, spanMs, OUTGOING_EXIT_DB);
+            }
+
+            @Override
+            public long goneAtMs(long fromMs, long spanMs, double underBodyDb) {
+                return gone(fromMs, spanMs, underBodyDb);
+            }
+
+            /** One reading of the same envelope at any level under the passage's own body — the
+             *  round-25 rule verbatim, with the level as the parameter round 30 made it. */
+            private long gone(long fromMs, long spanMs, double underBodyDb) {
                 if (fromMs < startMs || !(spanMs > 0L)) return -1L;
                 long endMs = fromMs + spanMs;
                 if (!levels(fromMs, spanMs)) return -1L;
                 double body = bodyLevelDb(music, rate, startMs, fromMs, spanMs);
                 if (Double.isNaN(body)) return -1L;
-                double floor = body - OUTGOING_EXIT_DB;
+                double floor = body - underBodyDb;
                 int frameMs = frameMs();
                 int sustain = (int) Math.max(1L, Math.round(OUTGOING_EXIT_SUSTAIN_MS / frameMs));
                 int frames = levels.length;
@@ -1656,6 +1785,14 @@ public final class StemFusion {
      * afford puts the voice before the departure, so that much of the incoming's own singing is held
      * out rather than stacked on the outgoing's material) is non-zero, and both are zero exactly
      * when the coupling was met.
+     *
+     * <p>⚠️ <b>Round 30: the departure is still the anchor and is no longer the instant the voice
+     * arrives.</b> The listener, after the round-25 build: 「歌词要稍微早一点」. The gate is now the
+     * departure led by {@link #VOICE_GATE_LEAD_BARS} bars of the outgoing's grid and floored where
+     * the file's own gesture has taken the outgoing's rows {@link #VOICE_GATE_FLOOR_DB} under unity
+     * ({@link #ledFromMs} and {@link #floorMs} carry both, and {@link #departureInFileMs} is the
+     * "before" of this round on every pair). The landing moves with it — one number still decides
+     * both, which is the round-25 rule that the user's own pair proved.
      */
     public static final class Coupling {
         /** The outgoing's own file ms at which its carried rows left the passage. */
@@ -1667,7 +1804,17 @@ public final class StemFusion {
         public final boolean measured;
         /** The instant in the incoming's file at which its voice is back at <b>exactly unity</b> —
          *  the gate the render bakes in, and the number the boundary reads its own vocal return
-         *  from. Never before the departure: that is the no-two-voices invariant. */
+         *  from.
+         *
+         *  <p>⚠️ <b>Round 30 moved it earlier on purpose, and the invariant survived the move.</b>
+         *  Round 25 put it at the departure to the millisecond ("never before the departure: no two
+         *  voices"); the listener's own answer to that build is 「歌词要稍微早一点」, so it is now the
+         *  departure <em>led</em> by {@link #VOICE_GATE_LEAD_BARS} bars of the outgoing's grid and
+         *  <em>floored</em> at {@link #floorMs} — the instant the file's own gesture has already
+         *  taken the outgoing's carried rows {@link #VOICE_GATE_FLOOR_DB} under unity, and never
+         *  earlier than the deck-level hand-over that removes the outgoing track's own voice. So the
+         *  promise is unchanged in content ("the outgoing is not still clearly audible when the
+         *  incoming's voice begins") and earlier in time, which is exactly what was asked for. */
         public final long voiceGateMs;
         /** The incoming's voice is heard this much later than the departure, ms. */
         public final long residualGapMs;
@@ -1677,9 +1824,26 @@ public final class StemFusion {
         /** What round 21's rule would have taken for this pair, ms, or -1 when it would take none.
          *  Reported as the "before" of the coupling and read by nothing else. */
         public final long uncoupledEntryMs;
+        /** Round 30: where the lead alone would have put the departure in the incoming's file, ms
+         *  from {@link Plan#entryMs} — {@link #VOICE_GATE_LEAD_BARS} bars of the outgoing's grid
+         *  before the measured departure ({@link #departureInFileMs}, which is where the voice
+         *  arrived before this round). -1 when the plan has no landing. */
+        public final long ledFromMs;
+        /** Round 30: the file's own bound that lead was clamped against, ms from the entry
+         *  ({@link #voiceFloorMs}) — the instant the gesture has taken the outgoing's carried rows
+         *  {@link #VOICE_GATE_FLOOR_DB} under unity, or the deck-level hand-over, whichever is
+         *  later. The gate is never earlier than it. -1 when the plan has no landing. */
+        public final long floorMs;
 
         Coupling(long departureMs, long departureInFileMs, boolean measured, long voiceGateMs,
                  long residualGapMs, long heldMs, long uncoupledEntryMs) {
+            this(departureMs, departureInFileMs, measured, voiceGateMs, residualGapMs, heldMs,
+                    uncoupledEntryMs, -1L, -1L);
+        }
+
+        Coupling(long departureMs, long departureInFileMs, boolean measured, long voiceGateMs,
+                 long residualGapMs, long heldMs, long uncoupledEntryMs, long ledFromMs,
+                 long floorMs) {
             this.departureMs = departureMs;
             this.departureInFileMs = departureInFileMs;
             this.measured = measured;
@@ -1687,6 +1851,8 @@ public final class StemFusion {
             this.residualGapMs = residualGapMs;
             this.heldMs = heldMs;
             this.uncoupledEntryMs = uncoupledEntryMs;
+            this.ledFromMs = ledFromMs;
+            this.floorMs = floorMs;
         }
 
         /** No measurement and nothing derived: an invalid plan's own answer. */
@@ -1720,9 +1886,9 @@ public final class StemFusion {
                         firstVocalMs >= arrival ? "after" : "before"));
             }
             if (residualGapMs > 0L) {
-                sb.append(String.format(Locale.US, ", and it is first HEARD %dms after the outgoing"
-                        + " is gone (the coupling's own landing is not one this window can afford)",
-                        residualGapMs));
+                sb.append(String.format(Locale.US, ", and it is first HEARD %dms later than the"
+                        + " instant this round places the voice on (the coupling's own landing is not"
+                        + " one this window can afford)", residualGapMs));
             } else if (heldMs > 0L) {
                 sb.append(String.format(Locale.US, ", and the landing this window can afford puts it"
                         + " there that much EARLY, so the gate holds %dms of its own singing out"
@@ -1734,6 +1900,20 @@ public final class StemFusion {
                 sb.append(String.format(Locale.US, "; its voice is back at unity by %dms of this"
                                 + " file (the window alone would have held it out to %dms)",
                         voiceGateMs, removalMs));
+            }
+            if (ledFromMs >= 0L && floorMs >= 0L) {
+                sb.append(String.format(Locale.US, "; the voice's lead this round (%d bar%s of the"
+                                + " outgoing's own grid): the departure is %dms into this file as the"
+                                + " material reads it, one bar earlier is %dms, and the bound on that"
+                                + " lead is %dms — the material's own %.0f dB reading (%.0f dB under"
+                                + " the passage's body) when it has one inside the passage, and"
+                                + " otherwise the file's own gesture at %.0f dB under unity — so the"
+                                + " voice is placed %dms after the deck starts, %dms earlier than"
+                                + " the departure the material measured",
+                        VOICE_GATE_LEAD_BARS, VOICE_GATE_LEAD_BARS == 1 ? "" : "s",
+                        departureInFileMs, ledFromMs, floorMs, VOICE_GATE_FLOOR_DB, OUTGOING_EXIT_DB,
+                        VOICE_GATE_FLOOR_DB, Math.max(ledFromMs, floorMs),
+                        departureInFileMs - Math.max(ledFromMs, floorMs)));
             }
             if (uncoupledEntryMs > 0L) {
                 sb.append(String.format(Locale.US, "; the landing the round-21 rule would have taken"
@@ -2584,7 +2764,8 @@ public final class StemFusion {
         // `sourceSpan` are handed over because the landing's own ceiling and the departure's own
         // reading are both written in them (see `entry`).
         Landing landing = entry(in, junction, stepMs, slam ? 1 : relation.p, windowMs, sourceSpan,
-                stretch);
+                stretch, voiceFloorMs(slam ? 1 : holdSteps, slam ? 0 : lowEndFadeSteps,
+                        Math.round(stepMs)));
         long entry = landing.entryMs;
         if (entry < 0L) {
             // ⚠️ The refusal says WHAT it looked at, because the version that did not cost a device
@@ -2641,7 +2822,7 @@ public final class StemFusion {
                 holdForIncoming, incomingDrumsMs, incomingBassMs,
                 new Coupling(landing.departureMs, landing.departureInFileMs, landing.exitMeasured,
                         landing.voiceGateMs, landing.residualGapMs, landing.heldMs,
-                        landing.uncoupledEntryMs),
+                        landing.uncoupledEntryMs, landing.ledFromMs, landing.floorMs),
                 in.removalMs);
     }
 
@@ -2785,14 +2966,24 @@ public final class StemFusion {
      * One measured instant answers both, and it is measured off the material rather than taken from
      * a shape's own fraction.
      *
+     * @param floorMs  the file's own bound on the lead, ms from the entry ({@link #voiceFloorMs}):
+     *                 where the gesture has taken the outgoing's carried rows
+     *                 {@link #VOICE_GATE_FLOOR_DB} under unity. Used when the material itself offers
+     *                 no reading at that level inside the passage; when it does, that reading is the
+     *                 bound instead (see the body). Round 30; the number is the caller's because the
+     *                 gesture's own shape is (the hold and the low end's fade steps are the caller's
+     *                 own choice).
      * @return see {@link Landing}
      */
     private static Landing entry(Input in, long junctionMs, double stepMs, int p, long windowMs,
-                                 long sourceSpanMs, double stretch) {
+                                 long sourceSpanMs, double stretch, long floorMs) {
         // The departure FIRST, because the candidate lines have to reach the landing it asks for:
         // the outgoing's own rows leaving the passage, in its own file ms, and the same instant as an
         // offset in the incoming's file (`stretch` is the ratio the carry was read at, which is what
-        // places A's material from the junction on `entry`).
+        // places A's material from the junction on `entry`). The level it is read at is
+        // OUTGOING_EXIT_DB (round 30: 12 dB, "well under its own body" rather than "stopped"), and
+        // the two round-30 knobs both act on it below: a lead of VOICE_GATE_LEAD_BARS bars of the
+        // OUTGOING's grid, floored by the file's own gesture.
         long departureMs = in.exit.goneAtMs(junctionMs, sourceSpanMs);
         boolean exitMeasured = in.exit.measured() && departureMs >= junctionMs;
         if (!exitMeasured) {
@@ -2802,8 +2993,39 @@ public final class StemFusion {
             departureMs = junctionMs + Math.max(0L, Math.round(windowMs / Math.max(1e-9d, stretch)));
         }
         double ratio = stretch > 0d ? stretch : 1d;
-        long goneFile = Math.min(windowMs, Math.max(0L,
-                Math.round((departureMs - junctionMs) * ratio)));
+        // ⚠️ Round 30, and this is the whole of the earlier voice. The measured (or fallback)
+        // departure is led by VOICE_GATE_LEAD_BARS bars of the outgoing's own grid, read in the
+        // OUTGOING's milliseconds because that is whose departure it is, and then mapped into this
+        // file by the same ratio the carry was read at — the lead has to move the same number the
+        // departure moves in, or the two would not be one instant any more. The result is then
+        // clamped by the bound, which is one question asked of whichever signal can answer it:
+        //   • the material, when its own envelope has a reading at VOICE_GATE_FLOOR_DB (the instant
+        //     it is 6 dB under the passage's own body, i.e. no longer clearly audible): the lead may
+        //     not reach back past it. This is the case that keeps a real breakdown where round 25
+        //     put it — a passage whose music genuinely falls away early has its voice early, and the
+        //     lead is a nudge inside that fall, not a licence to move it;
+        //   • the FILE's own gesture, when the material never falls even that far inside the passage
+        //     (the user's own pair: a steady last section, so the material offers no instant at all
+        //     and the departure is the gesture's own end): there the only thing that can say "the
+        //     outgoing is still at the level the listener is on" is the file's own recede
+        //     ({@link #voiceFloorMs}), and it is what bounds the lead.
+        // Both are never earlier than the deck-level hand-over, which is where the outgoing track's
+        // own (never carried) voice is gone by construction.
+        long leadOutgoingMs = Math.round(VOICE_GATE_LEAD_BARS * BEATS_PER_BAR * in.aBeatMs);
+        long ledFromJunction = Math.max(0L, departureMs - leadOutgoingMs - junctionMs);
+        long ledFile = Math.min(windowMs, Math.max(0L, Math.round(ledFromJunction * ratio)));
+        long spanEnd = junctionMs + Math.max(0L, sourceSpanMs);
+        long guardMs = in.exit.goneAtMs(junctionMs, sourceSpanMs, VOICE_GATE_FLOOR_DB);
+        boolean guardRead = in.exit.measured() && guardMs >= junctionMs && guardMs < spanEnd;
+        long floorFile = Math.max(FadeCurve.JUNCTION_XFADE_MS, guardRead
+                ? Math.min(windowMs, Math.max(0L, Math.round((guardMs - junctionMs) * ratio)))
+                : floorMs);
+        long goneFile = Math.max(ledFile, floorFile);
+        // The departure as the MATERIAL reads it, offset from the deck's start — what the log
+        // reports ("its rows leave the passage at Xms of its own file, Yms into this one"), and the
+        // number round 25 put the voice on. `goneFile` above is where this round places the voice
+        // instead, which differs from it by exactly the lead and the bound.
+        long rawFile = Math.min(windowMs, Math.max(0L, Math.round((departureMs - junctionMs) * ratio)));
         long gridStep = Math.max(1L, Math.round(stepMs));
         if (in.firstVocalMs < 0L) {
             // ⚠️ The incoming's own voice is not known — no separation of its head, or nothing
@@ -2818,7 +3040,8 @@ public final class StemFusion {
                     in.contentStartMs + 2L * gridStep, 0L, lines, lines != in.bBarLinesMs);
             long gate = plain[0] < 0L ? -1L : Math.min(plain[0] + goneFile, in.removalMs);
             return new Landing(plain[0], plain[1] == 1L, plain[2] / 1000d, 0L, -1L, departureMs,
-                    goneFile, gate, 0L, 0L, exitMeasured, lines != in.bBarLinesMs);
+                    rawFile, gate, 0L, 0L, exitMeasured, lines != in.bBarLinesMs, ledFile,
+                    floorFile);
         }
         // The coupling's own landing, and the three things that can keep it from being taken. Each
         // clamp is a different report: the runway keeps the voice inside a track that is already
@@ -2845,7 +3068,8 @@ public final class StemFusion {
         if (lines == null || lines.length == 0) {
             // Nothing to land on at all: the plan refuses below with its own message about the
             // window, the array and the beat grid, and none of the coupling's numbers exist.
-            return new Landing(plain[0], false, 0d, 0L, -1L, -1L, -1L, -1L, 0L, 0L, false, false);
+            return new Landing(plain[0], false, 0d, 0L, -1L, -1L, -1L, -1L, 0L, 0L, false, false,
+                    ledFile, floorFile);
         }
         long line = -1L;
         for (double bar : lines) {
@@ -2923,8 +3147,9 @@ public final class StemFusion {
         long residualGap = Math.round((in.firstVocalMs - departureAt) / speed);
         long held = Math.round((departureAt - voiceAt) / speed);
         long skipped = Math.max(0L, landing - in.contentStartMs);
-        return new Landing(landing, matched, bestError, skipped, uncoupled, departureMs, goneFile,
-                gate, Math.max(0L, residualGap), Math.max(0L, held), exitMeasured, fromBeatGrid);
+        return new Landing(landing, matched, bestError, skipped, uncoupled, departureMs, rawFile,
+                gate, Math.max(0L, residualGap), Math.max(0L, held), exitMeasured, fromBeatGrid,
+                ledFile, floorFile);
     }
 
     /** The wall-clock phase error of a candidate landing against the outgoing's phase at the
@@ -2945,8 +3170,15 @@ public final class StemFusion {
      * as an offset from the entry (the file's own timeline), {@link #voiceGateMs} is where the
      * incoming's voice is back at unity, and the two misses are {@link #residualGapMs} (the voice
      * is that much later than the departure) and {@link #heldMs} (the landing the window could
-     * afford puts the voice earlier than the departure, so that much of its own singing is held).
+     * afford puts the voice earlier than the departure, so much of its own singing is held).
      * At most one of the two is non-zero, and both are zero exactly when the coupling was met.
+     *
+     * <p>Round 30's two knobs are reported beside them, because the gate's own ms is the number the
+     * listener hears and the difference between the departure and it is these: {@link #ledFromMs} is
+     * where the lead alone would have put it ({@link #VOICE_GATE_LEAD_BARS} bars of the outgoing's
+     * grid before the departure) and {@link #floorMs} is the file's own bound
+     * ({@link #voiceFloorMs}). {@link #departureInFileMs} is therefore the "before" of this round
+     * on every pair: it is where the voice used to arrive.
      */
     private static final class Landing {
         final long entryMs;
@@ -2961,10 +3193,16 @@ public final class StemFusion {
         final long heldMs;
         final boolean exitMeasured;
         final boolean entryFromBeatGrid;
+        /** Where the lead alone would have put the departure in this file, ms from the entry. */
+        final long ledFromMs;
+        /** The file's own bound on that lead, ms from the entry — the gesture's own
+         *  {@link #VOICE_GATE_FLOOR_DB} dB point, or the deck-level hand-over, whichever is later. */
+        final long floorMs;
 
         Landing(long entryMs, boolean phaseMatched, double phaseErrorMs, long skippedIntroMs,
                 long uncoupledEntryMs, long departureMs, long departureInFileMs, long voiceGateMs,
-                long residualGapMs, long heldMs, boolean exitMeasured, boolean entryFromBeatGrid) {
+                long residualGapMs, long heldMs, boolean exitMeasured, boolean entryFromBeatGrid,
+                long ledFromMs, long floorMs) {
             this.entryMs = entryMs;
             this.phaseMatched = phaseMatched;
             this.phaseErrorMs = phaseErrorMs;
@@ -2977,6 +3215,8 @@ public final class StemFusion {
             this.heldMs = heldMs;
             this.exitMeasured = exitMeasured;
             this.entryFromBeatGrid = entryFromBeatGrid;
+            this.ledFromMs = ledFromMs;
+            this.floorMs = floorMs;
         }
     }
 

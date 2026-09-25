@@ -49,6 +49,40 @@ public class StemFusionTest {
             }
 
             @Override
+            public long goneAtMs(long fromMs, long spanMs, double underBodyDb) {
+                // A cliff: every level is reached at the same instant, which is what a step envelope
+                // really is — and is why round 30's lead cannot move a pair whose outgoing material
+                // drops rather than fades (see the two-level test below).
+                return goneAtMs(fromMs, spanMs);
+            }
+
+            @Override
+            public boolean measured() {
+                return true;
+            }
+        };
+    }
+
+    /**
+     * A <b>ramped</b> envelope: a track fading away rather than dropping. The rows are 12 dB under
+     * the passage's own body (the arrival's own level, {@link StemFusion#OUTGOING_EXIT_DB}) at
+     * {@code departureMs} into the passage, and were already 6 dB under it
+     * ({@link StemFusion#VOICE_GATE_FLOOR_DB}, the lead's own bound) at {@code guardMs}.
+     */
+    private static StemFusion.OutgoingExit ramp(long departureMs, long guardMs) {
+        return new StemFusion.OutgoingExit() {
+            @Override
+            public long goneAtMs(long fromMs, long spanMs) {
+                return fromMs + Math.min(Math.max(0L, departureMs), spanMs);
+            }
+
+            @Override
+            public long goneAtMs(long fromMs, long spanMs, double underBodyDb) {
+                long at = underBodyDb <= StemFusion.VOICE_GATE_FLOOR_DB ? guardMs : departureMs;
+                return fromMs + Math.min(Math.max(0L, at), spanMs);
+            }
+
+            @Override
             public boolean measured() {
                 return true;
             }
@@ -630,8 +664,11 @@ public class StemFusionTest {
                 skipped.junctionMs + skipped.windowMs, skipped.coupling.departureMs);
         assertEquals("8 000 ms into this file from the entry", 8_000L,
                 skipped.coupling.departureInFileMs);
-        assertEquals("so the voice is heard 125 ms after the outgoing is gone", 125L,
-                skipped.coupling.residualGapMs);
+        assertEquals("this round's lead+floor moved the instant the voice is placed on to 6 663"
+                + " (one bar before the passage's end, floored by the file's own gesture)",
+                6_663L, skipped.coupling.floorMs);
+        assertEquals("so the voice is heard 1 462 ms later than that placement (12 125 − 6 663"
+                + " − 4 000)", 1_462L, skipped.coupling.residualGapMs);
         assertEquals("and nothing of its own singing had to be held", 0L, skipped.coupling.heldMs);
         assertEquals("the gate is the voice's own arrival", 12_125L,
                 skipped.coupling.voiceGateMs);
@@ -642,7 +679,7 @@ public class StemFusionTest {
                 skipped.describe().contains("8125ms after the deck starts"));
         assertTrue("the coupling's own evidence is in the line: " + skipped.describe(),
                 skipped.describe().contains("which is the departure to the millisecond")
-                        || skipped.describe().contains("first HEARD 125ms"));
+                        || skipped.describe().contains("first HEARD 1462ms"));
 
         // The voice from the start: the coupling's landing is before the track's own start, so the
         // deck starts where it always did — and the voice is HELD from its own first line until the
@@ -654,12 +691,12 @@ public class StemFusionTest {
         assertTrue(immediate.reason, immediate.valid);
         assertEquals(0L, immediate.entryMs);
         assertEquals(0L, immediate.skippedIntroMs);
-        assertEquals("the gate is the departure's own instant (8 000), not the voice's (200)", 8_000L,
-                immediate.coupling.voiceGateMs);
-        assertEquals("and the incoming's own singing is held for 7 800 ms of it", 7_800L,
+        assertEquals("the gate is the file's own gesture (6 663, round 30's floor), not the voice's"
+                + " (200)", 6_663L, immediate.coupling.voiceGateMs);
+        assertEquals("and the incoming's own singing is held for 6 463 ms of it", 6_463L,
                 immediate.coupling.heldMs);
         assertEquals(0L, immediate.coupling.residualGapMs);
-        assertTrue(immediate.describe(), immediate.describe().contains("gate holds 7800ms of its own"
+        assertTrue(immediate.describe(), immediate.describe().contains("gate holds 6463ms of its own"
                 + " singing out"));
     }
 
@@ -669,8 +706,9 @@ public class StemFusionTest {
      * play right to the passage's end: at every line this track has, the voice's material is there
      * BEFORE the departure. There is nothing to skip to — the deck cannot be started before its own
      * start — so the answer is the gate: the incoming's own singing is HELD until the outgoing's
-     * rows have left (4 000 ms of it, from the voice's own 4 000 to the departure's 8 000) rather
-     * than stacked on them.
+     * rows have left — 2 663 ms of it, from the voice's own 4 000 to round 30's bound at 6 663
+     * (the passage's end at 8 000 in round 25; the lead and the gesture's own 6 dB point are what
+     * moved it) — rather than stacked on them.
      *
      * <p>⚠️ What the round-21 rule did here is the reject the user heard: the deck started at the
      * line a runway before the voice (2 000), the voice arrived 2 000 ms into the ramp, and the
@@ -687,14 +725,22 @@ public class StemFusionTest {
                 0L, held.entryMs);
         assertEquals("so the departure is as late as the passage makes it", 8_000L,
                 held.coupling.departureInFileMs);
-        assertEquals("the voice's own arrival (4 000) is EARLY, so the gate holds it to 8 000",
-                8_000L, held.coupling.voiceGateMs);
-        assertEquals("4 000 ms of the incoming's own singing is held, not stacked", 4_000L,
+        assertEquals("the voice's own arrival (4 000) is EARLY, so the gate holds it to the file's"
+                + " own gesture (6 663 — round 30's floor, where the outgoing is 6 dB down)", 6_663L,
+                held.coupling.voiceGateMs);
+        assertEquals("2 663 ms of the incoming's own singing is held, not stacked", 2_663L,
                 held.coupling.heldMs);
         assertEquals("and there is no gap to report in the other direction", 0L,
                 held.coupling.residualGapMs);
-        assertTrue("the gate is never before the departure: " + plan(held),
-                held.coupling.voiceGateMs >= held.entryMs + held.coupling.departureInFileMs);
+        // ⚠️ Round 30 replaces round 25's own invariant here, and this line is the whole trade:
+        // the gate MAY sit before the departure (that is the earlier voice the listener asked for),
+        // and it may never sit before the bound — the instant the file's own gesture has taken the
+        // outgoing's carried rows 6 dB under unity. The departure is reported beside it as the
+        // material's own reading, which is where the voice used to be.
+        assertTrue("the gate is never before the bound: " + plan(held),
+                held.coupling.voiceGateMs >= held.entryMs + held.coupling.floorMs);
+        assertTrue("and it IS before round 25's instant, on purpose: " + plan(held),
+                held.coupling.voiceGateMs < held.entryMs + held.coupling.departureInFileMs);
         // And what round 21 would have taken is still reported, as the "before" of the coupling.
         assertEquals("the line a runway before the voice", 2_000L, held.coupling.uncoupledEntryMs);
     }
@@ -717,9 +763,10 @@ public class StemFusionTest {
         assertTrue(plan.reason, plan.valid);
         assertEquals("a line of the incoming's grid, not the mid-bar content start", 2_000L,
                 plan.entryMs);
-        assertEquals("and the gate still holds its singing to the departure", 10_000L,
+        assertEquals("and the gate still holds its singing until the outgoing is on its way out"
+                        + " (round 30: the file's own gesture, not the passage's end)", 8_663L,
                 plan.coupling.voiceGateMs);
-        assertEquals(10_000L, plan.coupling.heldMs);
+        assertEquals(8_663L, plan.coupling.heldMs);
     }
 
     /**
@@ -736,10 +783,13 @@ public class StemFusionTest {
         StemFusion.Plan held = coupled(20_000L, 0L, neverQuiet());
         assertTrue(held.reason, held.valid);
         assertEquals("the deck starts where the track does", 0L, held.entryMs);
-        assertEquals("and the gate waits for the outgoing's own rows", 8_000L,
+        assertEquals("and the gate waits for the outgoing's own rows", 6_663L,
                 held.coupling.voiceGateMs);
-        assertEquals("holding all 8 000 ms of the passage's worth of its own singing", 8_000L,
+        assertEquals("holding all 6 663 ms of the passage's worth of its own singing", 6_663L,
                 held.coupling.heldMs);
+        assertEquals("which is round 30's lead+floor case: the material never falls, so the FILE's"
+                + " own gesture is the bound (see theLedVoiceOnAPassageThatNeverFalls...)",
+                6_663L, held.coupling.floorMs);
         assertEquals(0L, held.coupling.residualGapMs);
         assertEquals(0L, held.firstVocalMs);
     }
@@ -770,8 +820,8 @@ public class StemFusionTest {
         assertEquals("and nothing is held: the voice is late, not early", 0L, gap.coupling.heldMs);
         assertEquals("the gate is the voice's own arrival, not the window's end", 15_000L,
                 gap.coupling.voiceGateMs);
-        assertTrue(gap.describe(), gap.describe().contains("first HEARD 5000ms after the outgoing"
-                + " is gone"));
+        assertTrue(gap.describe(), gap.describe().contains("first HEARD 5000ms later than the"
+                + " instant this round places the voice on"));
     }
 
     /**
@@ -808,6 +858,155 @@ public class StemFusionTest {
                 plan.coupling.uncoupledEntryMs > plan.entryMs);
         assertTrue(plan.describe(), plan.describe().contains("which is the departure to the"
                 + " millisecond"));
+    }
+
+    /**
+     * ⚠️ <b>Round 30's whole ask, on a pair whose material fades.</b> The listener, after the
+     * round-25 build (which put the incoming's first line at the outgoing's measured departure to the
+     * millisecond): 「歌词要稍微早一点」. The departure is still the anchor — and it is now read at
+     * {@link StemFusion#OUTGOING_EXIT_DB} = 12 dB rather than 20, so a passage that fades is read
+     * earlier too — but the voice arrives a bar of the <em>outgoing's</em> grid earlier, and the lead
+     * is clamped by the material's own {@link StemFusion#VOICE_GATE_FLOOR_DB} reading: the instant
+     * the outgoing's rows are 6 dB under the passage's body, i.e. no longer clearly audible.
+     *
+     * <p>Two things this fixture pins, and they are the invariant: the voice IS earlier than the
+     * measured exit ({@code voiceGateMs < departureInFileMs}), and it is never earlier than that
+     * bound ({@code voiceGateMs == entryMs + floorMs} here).
+     */
+    @Test
+    public void theLedVoiceArrivesBeforeTheMeasuredExitAndNoEarlierThanTheBound() {
+        // The rows are 12 dB under the passage's body 6 000 ms in and were already 6 dB under it at
+        // 4 000: a fading track, and the case the lead is for.
+        StemFusion.Plan plan = coupled(20_000L, 0L, ramp(6_000L, 4_000L));
+        assertTrue(plan.reason, plan.valid);
+        assertEquals("the deck starts where the track does", 0L, plan.entryMs);
+        assertEquals("the departure the material reads is 6 000 ms into this file", 6_000L,
+                plan.coupling.departureInFileMs);
+        assertEquals("one bar of the outgoing's grid (4 x 500 ms) before it", 4_000L,
+                plan.coupling.ledFromMs);
+        assertEquals("and the material's own 6 dB reading is the bound, at the same instant",
+                4_000L, plan.coupling.floorMs);
+        assertEquals("so the voice arrives there — 2 000 ms before the measured exit", 4_000L,
+                plan.coupling.voiceGateMs);
+        assertTrue("earlier than the departure: " + plan.coupling.voiceGateMs + " < "
+                + plan.coupling.departureInFileMs,
+                plan.coupling.voiceGateMs < plan.coupling.departureInFileMs);
+        assertEquals("and never earlier than the bound", 0L,
+                plan.coupling.voiceGateMs - plan.coupling.floorMs);
+        String described = plan.coupling.describe(plan.entryMs, plan.firstVocalMs, plan.removalMs,
+                plan.windowMs);
+        assertTrue(described, described.contains("one bar earlier is 4000ms"));
+        assertTrue(described, described.contains("the voice is placed 4000ms after the deck"
+                + " starts"));
+    }
+
+    /**
+     * ⚠️ <b>The case {@link StemFusion#OUTGOING_EXIT_DB} cannot reach: a passage whose own material
+     * never falls.</b> The rows play right through the passage (measured, and the answer is the
+     * gesture's own end), so there is no material instant for the voice to be led from — and the
+     * listener's own pair is exactly this (a steady last section; the round-25 device run:
+     * 「段落里从不到 20 dB 以下 ⇒ 答案＝手势自己的结尾」). The lead is then bounded by the
+     * <em>file's</em> own gesture: where the recede has taken the outgoing's carried rows
+     * {@link StemFusion#VOICE_GATE_FLOOR_DB} dB under unity, and never earlier than the deck-level
+     * hand-over that removes the outgoing track's own (never carried) voice.
+     *
+     * <p>On this fixture the passage's own end is 8 080 ms of material in an 8 000 ms window, the
+     * four-step gesture holds two steps and recedes over two, so 6 dB under unity is 2 + 2/3 steps =
+     * 6 663 ms — 1 337 ms earlier than where round 25 put the voice, which is the whole of the
+     * improvement on a pair like the user's.
+     */
+    @Test
+    public void aLedVoiceOnAPassageThatNeverFallsIsBoundedByTheFilesOwnGesture() {
+        StemFusion.Plan plan = coupled(20_000L, 0L, neverQuiet());
+        assertTrue(plan.reason, plan.valid);
+        assertEquals("the material never falls, so the answer is the gesture's own end (clamped to"
+                + " the window)", 8_000L, plan.coupling.departureInFileMs);
+        assertTrue("and it is reported as measured: " + plan.coupling.describe(plan.entryMs,
+                plan.firstVocalMs, plan.removalMs, plan.windowMs), plan.coupling.measured);
+        assertEquals("one bar of the outgoing's grid before the passage's end", 6_080L,
+                plan.coupling.ledFromMs);
+        assertEquals("the file's own gesture is the bound", 6_663L, plan.coupling.floorMs);
+        assertEquals("two steps of hold plus two thirds of the low end's two-step recede, at 6 dB"
+                + " under unity", 6_663L, StemFusion.voiceFloorMs(2, 2, 2_000L));
+        assertEquals("so the voice arrives 1 337 ms earlier than the departure", 6_663L,
+                plan.coupling.voiceGateMs);
+        assertTrue("earlier than the departure: " + plan.coupling.voiceGateMs + " < "
+                + plan.coupling.departureInFileMs,
+                plan.coupling.voiceGateMs < plan.coupling.departureInFileMs);
+        assertTrue("and the bound is never inside the deck-level hand-over",
+                plan.coupling.floorMs >= FadeCurve.JUNCTION_XFADE_MS);
+        assertEquals(FadeCurve.JUNCTION_XFADE_MS, StemFusion.voiceFloorMs(1, 0, 500L));
+        assertTrue(plan.describe(), plan.describe().contains("the voice is placed 6663ms after the"
+                + " deck starts"));
+    }
+
+    /**
+     * The measurement both of round 30's knobs are read off: <b>one rule, one instrument, two
+     * readings</b> ({@link StemFusion#OUTGOING_EXIT_DB} where the voice arrives,
+     * {@link StemFusion#VOICE_GATE_FLOOR_DB} what the lead may not reach back past). What it pins is
+     * that the bound is a <em>reading</em> and not an assumption:
+     *
+     * <ul>
+     *   <li>a fading passage is read earlier at 6 dB than at 12, which is what lets the lead act at
+     *   all;</li>
+     *   <li>a cliff reaches every level at the same instant, which is why the lead cannot move a
+     *   pair whose outgoing material drops rather than fades (the cliff fixtures above still answer
+     *   round 25's numbers, and this is the reason);</li>
+     *   <li>a passage that never falls answers its own end at both levels, which is the case the
+     *   file's own gesture bounds instead.</li>
+     * </ul>
+     */
+    @Test
+    public void theEnvelopesTwoLevelsAreOneRuleAndTheSofterOneComesFirst() {
+        int span = 8_000;
+        int frames = (int) Math.round(span / 1000d * RATE);
+        StemFusion.OutgoingExit fading = StemFusion.exitOf(
+                fadingRows(frames, 0, 6_000, 0.5, 0.004), RATE, 0L);
+        long at12 = fading.goneAtMs(0L, span, StemFusion.OUTGOING_EXIT_DB);
+        long at6 = fading.goneAtMs(0L, span, StemFusion.VOICE_GATE_FLOOR_DB);
+        assertTrue("a fading passage is read at both levels: 12 dB at " + at12 + "ms, 6 dB at "
+                + at6 + "ms", at6 > 0L && at12 > 0L);
+        assertTrue("and 6 dB is reached first, so the bound precedes the arrival: " + at6 + " < "
+                + at12, at6 < at12);
+        assertEquals("the departure is the arrival's own level, read by the same rule", at12,
+                fading.goneAtMs(0L, span));
+        // A cliff: every level at the same instant.
+        StemFusion.OutgoingExit cliff = StemFusion.exitOf(rows(frames, 3_000, 0.5, 0.005, 0.005),
+                RATE, 0L);
+        assertEquals("a cliff reaches the bound and the arrival at the same instant",
+                cliff.goneAtMs(0L, span),
+                cliff.goneAtMs(0L, span, StemFusion.VOICE_GATE_FLOOR_DB));
+        // Never quiet at either level: the passage's own end, which is what the gesture bounds.
+        StemFusion.OutgoingExit flat = StemFusion.exitOf(rows(frames, span, 0.5, 0.5, 0.5), RATE, 0L);
+        assertEquals(span, flat.goneAtMs(0L, span, StemFusion.VOICE_GATE_FLOOR_DB));
+        // And the shape's own answer when there is no separation at all: the passage's end, at every
+        // level, because a material nobody separated cannot have an earlier one.
+        assertEquals(4_000L, StemFusion.NO_EXIT_MEASUREMENT.goneAtMs(1_000L, 3_000L,
+                StemFusion.VOICE_GATE_FLOOR_DB));
+    }
+
+    /** Carried rows that fade linearly in amplitude from {@code loud} at {@code fromMs} to
+     *  {@code quiet} at {@code toMs} — a track fading away, which is the case round 30's lead is
+     *  for. The voice row follows the same shape (the measurement never reads it: see
+     *  {@link #theDepartureIsMeasuredOffTheOutgoingRowsOwnEnvelope}). */
+    private static float[][][] fadingRows(int frames, int fromMs, int toMs, double loud,
+                                          double quiet) {
+        float[][][] stems = new float[4][2][frames];
+        int from = (int) Math.round(fromMs / 1000d * RATE);
+        int to = (int) Math.round(toMs / 1000d * RATE);
+        for (StemGesture.Stem stem : StemGesture.Stem.ALL) {
+            for (int ch = 0; ch < 2; ch++) {
+                for (int i = 0; i < frames; i++) {
+                    double level = quiet;
+                    if (i < from) level = loud;
+                    else if (i < to) {
+                        level = loud + (quiet - loud) * (i - from) / (double) (to - from);
+                    }
+                    stems[stem.row()][ch][i] = (float) level;
+                }
+            }
+        }
+        return stems;
     }
 
     /**

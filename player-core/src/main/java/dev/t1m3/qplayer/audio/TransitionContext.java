@@ -20,7 +20,7 @@ import dev.t1m3.qplayer.model.Track;
  * justification is a number the app has already measured for another reason.
  *
  * <p>Round 19 adds one more fact, and it is not analysis either: whether the incoming
- * track's own rendered edit is a fusion ({@link #incomingEditIsFusion()}). That is a
+ * track's own rendered edit is a stem passage ({@link #incomingEditIsStemPassage()}). That is a
  * statement about the <em>file</em> the incoming deck will play — the renderer's own
  * answer, read back from its name — and it is the one thing that can settle the kind
  * before any of the pair's numbers are consulted, because a fusion's transition is
@@ -144,7 +144,7 @@ public final class TransitionContext {
     private final long outgoingTailSilenceMs;
     private final long incomingHeadSilenceMs;
     private final PairFit pairFit;
-    private final boolean incomingEditIsFusion;
+    private final boolean incomingEditIsStemPassage;
 
     /** The context a chooser sees: metadata plus "either side can be streamed on a
      *  second player", with both silence measurements unknown, no pair measurement and
@@ -199,7 +199,7 @@ public final class TransitionContext {
      * not be used for — and whether the incoming track's own rendered edit is a
      * <b>fusion</b>.
      *
-     * <p>⚠️ <b>{@code incomingEditIsFusion} is not a guess about the pair: it is the file the
+     * <p>⚠️ <b>{@code incomingEditIsStemPassage} is not a guess about the pair: it is the file the
      * incoming deck will actually play.</b> A DJ edit is the incoming track's own audio with its
      * vocals taken out of the front ({@code StemEditRenderer}); the renderer may instead write a
      * <em>fusion</em> — the two tracks' backgrounds spliced into one passage inside that file,
@@ -227,7 +227,7 @@ public final class TransitionContext {
                              long outgoingDurationMs, boolean outgoingStreamable,
                              boolean incomingStreamable,
                              long outgoingTailSilenceMs, long incomingHeadSilenceMs,
-                             PairFit pairFit, boolean incomingEditIsFusion) {
+                             PairFit pairFit, boolean incomingEditIsStemPassage) {
         this.outgoing = outgoing;
         this.incoming = incoming;
         this.remainingMs = Math.max(0L, remainingMs);
@@ -237,7 +237,7 @@ public final class TransitionContext {
         this.outgoingTailSilenceMs = outgoingTailSilenceMs;
         this.incomingHeadSilenceMs = incomingHeadSilenceMs;
         this.pairFit = pairFit == null ? PairFit.UNMEASURED : pairFit;
-        this.incomingEditIsFusion = incomingEditIsFusion;
+        this.incomingEditIsStemPassage = incomingEditIsStemPassage;
     }
 
     /** The track that is playing now. Never null in a boundary the controller
@@ -305,18 +305,44 @@ public final class TransitionContext {
     }
 
     /**
-     * Whether the incoming track's own rendered edit is a <b>fusion</b> — the two backgrounds
-     * spliced into one passage inside the file, with the outgoing track's junction bar line and
-     * the incoming file's own entry baked into its name ({@code StemFusion},
+     * Whether the incoming track's own rendered edit is a <b>stem passage</b> — the two backgrounds
+     * spliced into one passage inside the file, with the outgoing track's junction bar line and the
+     * incoming file's own entry baked into its name ({@code StemFusion},
      * {@code PlayerController.djEditFor} / {@code EditRef.isFusion()}).
      *
      * <p>True means the transition this boundary will hear is <em>inside the incoming deck's
      * file</em>, and the two live decks only hand over once: an overlapping kind is then the only
      * honest answer, and it is the only kind that plays that file at all. False means there is
      * nothing special about this pair — see the constructor for the whole list of ordinary cases.
+     *
+     * <p>⚠️ <b>Both of the passage's shapes count, and they are one fact for one reason (round
+     * 30).</b> A <b>fusion</b> ({@link #incomingEditIsFusion()} is the round-19 name this carries) is the
+     * three-step gesture for a pair whose grids relate; a <b>SLAM</b> is the one-bar cut for a pair
+     * whose grids are in no relation at all — and it is exactly those pairs that
+     * {@link HeuristicTransitionChooser}'s own pair measurement answers {@link
+     * TransitionKind#FADE_OUT_IN} for (unrelated tempo, clashing keys). The file, however, is the
+     * same kind of thing in both cases: the incoming track's own audio carrying the outgoing
+     * track's material, with {@code -e} and {@code -j} in its name, and the boundary must start the
+     * deck on the entry and cut the outgoing one on the junction. A rule that read the fusion case
+     * and not the slam is a rule that throws the very gesture the user asked for away on the pairs
+     * it was written for (「速度无关的也要接，不要淡入淡出」).
+     *
+     * <p>The fact lives here rather than in the chooser because the chooser is a decision over
+     * facts: it may not touch the filesystem, and the only thing that may is the controller, which
+     * already stats this pair's edit at exactly this instant for its own reasons
+     * ({@code PlayerController.noteWithoutEdit}). The chooser only has to say what it wants the
+     * kind to be.
      */
     public boolean incomingEditIsFusion() {
-        return incomingEditIsFusion;
+        return incomingEditIsStemPassage;
+    }
+
+    /** The same fact under the name round 30 gave it (see {@link #incomingEditIsFusion()}): a
+     *  rendered passage exists for the incoming track, whether it is a fusion or a slam. Read this
+     *  one in new code — the two never disagree, and the older name is kept because every call site
+     *  and the whole of round 19's documentation reads it. */
+    public boolean incomingEditIsStemPassage() {
+        return incomingEditIsStemPassage;
     }
 
     @Override
@@ -324,7 +350,7 @@ public final class TransitionContext {
         return "TransitionContext{" + outgoing + " -> " + incoming
                 + ", remaining=" + remainingMs + "ms"
                 + ", streamable=" + outgoingStreamable + "/" + incomingStreamable
-                + (incomingEditIsFusion ? ", incoming edit is a FUSION" : "")
+                + (incomingEditIsStemPassage ? ", incoming edit is a STEM PASSAGE" : "")
                 + ", " + pairFit + "}";
     }
 }

@@ -32,13 +32,18 @@ import dev.t1m3.qplayer.model.Track;
  * is already in hand. Without that measurement the answer is the plain overlap.
  *
  * <p>⚠️ <b>Round 19: one rule is not about the pair at all — the incoming track's own
- * rendered edit.</b> When that edit is a <em>fusion</em>
- * ({@link TransitionContext#incomingEditIsFusion()}), the transition is already inside
- * the file the incoming deck will play, so the answer is {@link TransitionKind#CROSSFADE}
- * whatever the pair's numbers say — that is the rule at the top of {@link #choose}, and it
- * is the one case where a measured clash does <em>not</em> buy a sequential fade: there is
- * no second tempo or key to clash with, because the file carries both tracks' material
- * itself.
+ * rendered edit.</b> When that edit is a <em>stem passage</em>
+ * ({@link TransitionContext#incomingEditIsStemPassage()} — a fusion for a related pair, a slam for
+ * one in no relation at all), the transition is already inside the file the incoming deck will
+ * play, so the answer is {@link TransitionKind#CROSSFADE} whatever the pair's numbers say — that
+ * is the rule at the top of {@link #choose}, and it is the one case where a measured clash does
+ * <em>not</em> buy a sequential fade: there is no second tempo or key to clash with, because the
+ * file carries both tracks' material itself. ⚠️ <b>Round 30 makes that rule cover the slam
+ * explicitly</b>, because the pairs a slam exists for (unrelated tempo, clashing keys) are exactly
+ * the pairs rule 7 answers {@link TransitionKind#FADE_OUT_IN} for — so before it, a rendered slam
+ * was planned, written and then never played: the kind was not overlapping, so the controller never
+ * armed the file and the plain fade ran instead (「速度无关的也要接，不要淡入淡出」 was answered by the
+ * renderer and thrown away by this chooser).
  *
  * <p>To be replaced by an AI implementation later through
  * {@code PlayerController.setTransitionChooser(...)}; this class stays as the
@@ -93,15 +98,17 @@ public final class HeuristicTransitionChooser implements TransitionChooser {
         //    callback is most likely to arrive while a ramp is still running. The
         //    historical hard cut is the only honest answer.
         if (!ctx.hasBothLengths()) return TransitionKind.CUT;
-        // 4. ⚠️ Round 19: an existing FUSION edit decides the kind. The incoming track's
-        //    own rendered file does not carry just that track — it carries a passage the
-        //    renderer built out of BOTH backgrounds, spliced at the outgoing track's own
-        //    junction bar line and the incoming file's own entry (`StemFusion`), so the
-        //    transition is already inside the file and the two live decks only hand over
-        //    once (a JUNCTION_XFADE_MS equal-gain fade, at that bar line — the file carries the
-        //    outgoing track's own material across the whole of it, so that deck plays out
-        //    instead of being stopped). Nothing this chooser could add
-        //    from the pair's numbers is worth anything there:
+        // 4. ⚠️ Round 19, sharpened by round 30: an existing stem passage decides the kind — a
+        //    FUSION (`-e/-j/-f` from a related pair) or a SLAM (the same three markers from a pair
+        //    whose grids are in NO relation: one bar, every element changing hands on one line).
+        //    The incoming track's own rendered file does not carry just that track — it carries a
+        //    passage the renderer built out of BOTH backgrounds, spliced at the outgoing track's own
+        //    junction bar line and the incoming file's own entry (`StemFusion`), so the transition is
+        //    already inside the file and the two live decks only hand over once (a
+        //    JUNCTION_XFADE_MS equal-gain fade, at that bar line — the file carries the outgoing
+        //    track's own material across the whole of it, so that deck plays out instead of being
+        //    stopped). Nothing this chooser could add from the pair's numbers is worth anything
+        //    there:
         //
         //      • an overlap is what plays that file at all — the controller only gives it
         //        to the incoming deck when the kind is overlapping (`resolveIncomingSource`),
@@ -109,9 +116,12 @@ public final class HeuristicTransitionChooser implements TransitionChooser {
         //        and plays the track's own master instead (FADE_OUT_IN, SILENCE_TRIM);
         //      • the pair's tempo judgement does not apply: the file is ONE source carrying
         //        both tempos' material, so there is no second grid left to clash with — and a
-        //        fusion only exists for a pair whose grids already locked (the renderer
-        //        refuses any other pair, and then the two decks are uncorrelated, which is why
-        //        its hand-over is the short changeover and not a musical blend).
+        //        slam exists *because* the pair has no relation at all (rule 7 below would
+        //        refuse exactly that pair), so a rule that read only the fusion case would
+        //        throw away the gesture on every unrelated-tempo pair, which is the population
+        //        the slam was built for (「速度无关的也要接，不要淡入淡出」). This is the whole of
+        //        round 30's Change 2: **any existing stem edit for the incoming decides an
+        //        overlapping kind**, whatever the pair's own measurement says.
         //
         //    This is the boundary's own rule, and the evidence is the file: the controller
         //    stats it at exactly this instant for its own reasons (`noteWithoutEdit`), with the
@@ -122,7 +132,7 @@ public final class HeuristicTransitionChooser implements TransitionChooser {
         //    a boundary that cannot be armed at all (an unstreamable side, no room left, a
         //    length nobody knows) is still CUT, and the user's own 过渡方式 never reaches this
         //    method (the controller answers a forced kind itself).
-        if (ctx.incomingEditIsFusion()) {
+        if (ctx.incomingEditIsStemPassage()) {
             return TransitionKind.CROSSFADE;
         }
         // 5. The outgoing track is measured to end in silence: there is nothing to
@@ -188,27 +198,37 @@ public final class HeuristicTransitionChooser implements TransitionChooser {
     @Override
     public TransitionPlan plan(TransitionContext ctx) {
         TransitionKind kind = choose(ctx);
-        if (kind == TransitionKind.CROSSFADE && ctx != null && ctx.incomingEditIsFusion()) {
-            // A fusion's own shape, not the DJ blend: the file already carries the
+        if (kind == TransitionKind.CROSSFADE && ctx != null && ctx.incomingEditIsStemPassage()) {
+            // A stem passage's own shape, not the DJ blend: the file already carries the
             // transition, so the two live decks only have to hand over once — a linear
             // (equal-gain) FadeCurve.JUNCTION_XFADE_MS fade at the junction, then both constant
-            // (see
-            // FadeCurve.FUSION). The length is the kind's default, which the controller
-            // then raises to the 过渡时长 the render's own window was cut for; naming the
-            // curve here means the boundary's decision line prints 融合 instead of the DJ
-            // shape it will not use (the ramp swaps in FUSION for a fusion edit either way,
-            // and that is the one place the two numbers could disagree).
+            // (see FadeCurve.FUSION). The file is a FUSION for a related pair and a SLAM for one in
+            // no relation at all; both play the same way (the deck starts on the edit's own `-e`,
+            // the outgoing deck is cut on its `-j`), which is why one rule answers both. The length
+            // is the kind's default, which the controller then raises to the 过渡时长 the render's
+            // own window was cut for; naming the curve here means the boundary's decision line
+            // prints 融合 instead of the DJ shape it will not use (the ramp swaps in FUSION for a
+            // stem passage either way, and that is the one place the two numbers could disagree).
+            //
+            // ⚠️ The sentence says THE EDIT WON: round 30's whole point is that this fact outranks
+            // the pair's own tempo and key measurement (rule 7), which for an unrelated-tempo pair
+            // — every slam's population — is FADE_OUT_IN. A reader of a device log must be able to
+            // see which of the two decided, in one line, without the file.
             return TransitionPlan.of(kind, TransitionPlan.defaultOverlapMs(kind),
-                    FadeCurve.FUSION, "rule: the incoming track's rendered edit is a FUSION — one"
-                            + " passage the renderer cut out of BOTH tracks, anchored on the outgoing"
+                    FadeCurve.FUSION, "rule: THE EDIT WON — the incoming track's rendered edit is a"
+                            + " STEM PASSAGE (a fusion for a related pair, a slam for a pair in no"
+                            + " relation at all: the renderer writes both with `-e`/`-j` in the file"
+                            + " name), one passage cut out of BOTH tracks and anchored on the outgoing"
                             + " track's own junction bar line and the incoming file's own entry — so"
                             + " the transition is inside the incoming deck's file: the outgoing deck"
                             + " is cut on that bar line and the two decks change over once in "
                             + FadeCurve.JUNCTION_XFADE_MS + "ms (linear, equal gain — the two are the"
-                            + " same material there), and no tempo or key judgement applies because"
-                            + " the file is one source carrying both backgrounds. This kind is also"
-                            + " what makes the deck play that file at all: a non-overlapping one"
-                            + " would play the track's own master instead");
+                            + " same material there). No tempo or key judgement applies: the file is"
+                            + " one source carrying both backgrounds, and a slam exists precisely for"
+                            + " the unrelated-tempo pairs this chooser's own PairFit would otherwise"
+                            + " answer FADE_OUT_IN for. This kind is also what makes the deck play"
+                            + " that file at all: a non-overlapping one would play the track's own"
+                            + " master instead and throw the gesture away");
         }
         if (kind == TransitionKind.CROSSFADE) {
             return TransitionPlan.of(kind, TransitionPlan.defaultOverlapMs(kind),

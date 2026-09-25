@@ -628,10 +628,17 @@ public class PlayerControllerPlaybackTest {
         String oldCacheBase = AppDirs.cacheBase();
         try {
             String withEdit = decisionLineForBoundary(true);
+            // The decision's own kind token, not the whole line: round 30's reason text quotes the
+            // sequential fade by name (it is the answer the rule overrides), so a substring test over
+            // the line would read its own explanation as a decision.
             assertTrue("with a fusion edit the pair must not be faded out and in: " + withEdit,
-                    withEdit.contains("CROSSFADE") && !withEdit.contains("FADE_OUT_IN"));
-            assertTrue("the decision line must name the fusion it was decided from: " + withEdit,
-                    withEdit.contains("FUSION"));
+                    withEdit.contains("slot 0 -> 1: CROSSFADE"));
+            assertTrue("the decision line must name the passage it was decided from, and say that"
+                            + " it won over the pair's own tempo rule (round 30's wording, which"
+                            + " covers the slam for the same bit — see"
+                            + " HeuristicTransitionChooser.aSlamEditDecidesTheKindForAPairInNoRelationAtAll): "
+                            + withEdit,
+                    withEdit.contains("STEM PASSAGE") && withEdit.contains("THE EDIT WON"));
             assertTrue("the curve is printed only for an OVERLAPPING kind, which is the arming"
                             + " gate's own condition (resolveIncomingSource): " + withEdit,
                     withEdit.contains("curve=" + FadeCurve.FUSION));

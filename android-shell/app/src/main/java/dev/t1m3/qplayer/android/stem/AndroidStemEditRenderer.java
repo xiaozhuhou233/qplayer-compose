@@ -988,7 +988,13 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                     request.title(), coupled.reason);
             return null;
         }
-        Logger.info("transition: DJ edit for {}: the landing and the gate are one measured number —"
+        // ⚠️ Round 30: the gate is the coupling's instant still — one measured number, and the
+        // landing is written around it — led by one bar of the outgoing's grid and floored by the
+        // file's own gesture (see StemFusion.VOICE_GATE_LEAD_BARS / voiceFloorMs). The coupling's
+        // own line carries both numbers and which of them decided, so this line says where the
+        // voice lands and this round's own knob by name.
+        Logger.info("transition: DJ edit for {}: the landing and the gate are one measured number,"
+                        + " led by the outgoing's grid and floored by the file's own gesture —"
                         + " {}. The incoming's voice is back at unity by {}ms of its file, and the"
                         + " deck starts at {}ms of it{}",
                 request.title(), coupled.coupling.describe(coupled.entryMs, firstVocalMs,
@@ -1121,10 +1127,13 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         if (plan.coupling.voiceGateMs > 0L && plan.coupling.voiceGateMs < request.removalMs) {
             Logger.info("transition: DJ edit for {}: the fusion's own vocal gate is the coupling's"
                             + " instant, not the window's end — the incoming's voice is back at"
-                            + " unity by {}ms of its file, where the outgoing's own rows have left,"
-                            + " instead of the {}ms the window alone would have held it out to"
-                            + " (the landing and the gate are one measured number)",
-                    request.title(), plan.coupling.voiceGateMs, request.removalMs);
+                            + " unity by {}ms of its file, where the outgoing's own rows are already"
+                            + " on their way out (round 30: {} bar of the outgoing's grid before the"
+                            + " departure, floored by the file's own gesture), instead of the {}ms the"
+                            + " window alone would have held it out to (the landing and the gate are"
+                            + " one measured number)",
+                    request.title(), plan.coupling.voiceGateMs, StemFusion.VOICE_GATE_LEAD_BARS,
+                    request.removalMs);
         }
         Fusion first = renderFusion(request, headStems, plan, gate, windowSec, clipped, tail,
                 melody, separateMs, outgoingMaster, 0d, bodyDb);
