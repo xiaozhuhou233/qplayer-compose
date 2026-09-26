@@ -9,6 +9,7 @@ import dev.t1m3.qplayer.audio.AudioBackend;
 import dev.t1m3.qplayer.ai.AiClient;
 import dev.t1m3.qplayer.bili.BiliClient;
 import dev.t1m3.qplayer.ai.AiPlaylistResult;
+import dev.t1m3.qplayer.ai.PlaylistMixer;
 import dev.t1m3.qplayer.ai.WebSearchClient;
 import dev.t1m3.qplayer.audio.BeatProfile;
 import dev.t1m3.qplayer.audio.BeatProfiler;
@@ -1271,6 +1272,54 @@ public final class PlayerController {
     public final Property<String> aiProgress = new Property<>("");
     public final Property<String> aiSummary = new Property<>("");
     public final Property<String> aiDetails = new Property<>("");
+
+    // --- the AI DJ's own continuation (round 34) -------------------------------------------------
+
+    /**
+     * The tag the AI DJ's continuation reads: <b>where the queue in the player came from</b>.
+     * {@link QueueOrigin#AI} is set by the one path that puts an AI list in the player and kept by
+     * every batch appended behind it; every ordinary way of filling the queue resets it to
+     * {@link QueueOrigin#USER} ({@link #playQueue}), so a user's own playlist is never extended on
+     * the AI DJ's behalf.
+     */
+    public enum QueueOrigin { USER, AI }
+
+    /** Published for the UI; the algorithm reads {@link #queueOriginKind}. */
+    public final Property<QueueOrigin> queueOrigin = new Property<>(QueueOrigin.USER);
+    /** The authoritative copy for {@link #maybeContinueAiPlaylist}, which runs on the main thread and
+     *  must not depend on render-thread timing. */
+    private volatile QueueOrigin queueOriginKind = QueueOrigin.USER;
+
+    /**
+     * What the AI DJ's next list is asked for, remembered at the moment the user starts one, so the
+     * continuation can run with the same request, count and provider while the current list is still
+     * playing. Cleared whenever a user-started queue takes over (see {@link #setQueueOrigin}).
+     */
+    private volatile AiContinuation aiContinuation;
+    /** True from the instant a continuation is asked for until its batch is behind the queue or the
+     *  attempt has failed, so one list can only ever ask for one more. */
+    private volatile boolean aiContinuationInFlight;
+
+    /** The AI DJ's remembered request — see {@link #aiContinuation}. The API key lives here for as
+     *  long as the list plays and is never logged or written anywhere. */
+    private static final class AiContinuation {
+        final String baseUrl;
+        final String apiKey;
+        final String model;
+        final String request;
+        final int count;
+        final boolean excludeLiked;
+
+        AiContinuation(String baseUrl, String apiKey, String model, String request, int count,
+                       boolean excludeLiked) {
+            this.baseUrl = baseUrl;
+            this.apiKey = apiKey;
+            this.model = model;
+            this.request = request;
+            this.count = count;
+            this.excludeLiked = excludeLiked;
+        }
+    }
     public final Property<List<NeteaseSong>> recentSongs = new Property<>(Collections.<NeteaseSong>emptyList());
     /** Currently opened playlist. */
     public final Property<List<NeteaseSong>> playlistTracks = new Property<>(Collections.<NeteaseSong>emptyList());
@@ -6792,6 +6841,10 @@ public final class PlayerController {
         privateFmGeneration.incrementAndGet();
         privateFmRequestInFlight = false;
         currentQueuePlaylistId = sourcePlaylistId;
+        // Round 34: every ordinary way of filling the queue clears the AI DJ's tag — the AI path
+        // re-applies it immediately after this returns (see the play branch of generateAiPlaylist),
+        // and a user's own queue therefore never gets extended on the AI DJ's behalf.
+        setQueueOrigin(QueueOrigin.USER);
         queue.clear();
         queue.addAll(q);
         queueTracks.set(new ArrayList<>(queue));
@@ -6980,6 +7033,9 @@ public final class PlayerController {
             coverPath.set("");
         });
         worker.submit(this::saveQueue);
+        // Round 34: the AI DJ's own continuation is decided here, where a track has just started —
+        // see maybeContinueAiPlaylist().
+        maybeContinueAiPlaylist();
         final int idx = i;
         final Track t = queue.get(i);
         // Start lyric loading at selection time, in parallel with audio URL
@@ -8087,7 +8143,7 @@ public final class PlayerController {
     /** Timeout for the third-party AMLL mirror alone; NetEase runs in parallel. */
     private static final int LYRIC_MIRROR_TIMEOUT_MS = 4_000;
     /** Grace window for the AMLL mirror once NetEase has already answered. */
-    private static final long LYRIC_MIRROR_GRACE_MS = 700L;
+    private static final long LYRIC_MIRROR_GRACE_MS = 1_800L;
     /** Songs the mirror had nothing for (or was too slow for) this session, so a
      *  replay does not pay for the mirror again. */
     private final java.util.Set<Long> lyricMirrorMisses =
@@ -8112,9 +8168,13 @@ public final class PlayerController {
             if (mirror != null && mirrorLines == null && mirror.isDone()) {
                 mirrorLines = quietly(mirror);
                 if (mirrorLines != null && !mirrorLines.isEmpty()) {
-                    // Word-level timing from the mirror: the better answer.
-                    netease.cancel(true);
-                    return mirrorLines;
+                    // A valid mirror response can still be only a short prefix.
+                    // Keep the authoritative request alive and compare both
+                    // complete timelines before publishing one.
+                    if (netease.isDone()) neteaseLines = quietly(netease);
+                    if (neteaseLines != null && !neteaseLines.isEmpty()) {
+                        return betterLyrics(neteaseLines, mirrorLines);
+                    }
                 }
             }
             if (neteaseLines == null && netease.isDone()) {
@@ -8129,7 +8189,9 @@ public final class PlayerController {
                         sleepQuietly(40L);
                     }
                     if (mirrorLines == null && mirror.isDone()) mirrorLines = quietly(mirror);
-                    if (mirrorLines != null && !mirrorLines.isEmpty()) return mirrorLines;
+                    if (mirrorLines != null && !mirrorLines.isEmpty()) {
+                        return betterLyrics(neteaseLines, mirrorLines);
+                    }
                     if (mirrorLines == null) {
                         // Still hanging: do not make this song's next play wait
                         // for the mirror again.
@@ -8148,8 +8210,30 @@ public final class PlayerController {
         }
         if (netease.isDone()) neteaseLines = quietly(netease);
         else netease.cancel(true);
-        if (mirrorLines != null && !mirrorLines.isEmpty()) return mirrorLines;
+        if (mirrorLines != null && !mirrorLines.isEmpty()) {
+            if (neteaseLines != null && !neteaseLines.isEmpty()) {
+                return betterLyrics(neteaseLines, mirrorLines);
+            }
+            return mirrorLines;
+        }
         return neteaseLines == null ? Collections.<LyricLine>emptyList() : neteaseLines;
+    }
+
+    /** Prefer the source with the larger usable timeline. A near-tie keeps the
+     * mirror because it normally carries word-level timestamps. */
+    private static List<LyricLine> betterLyrics(List<LyricLine> netease,
+                                                 List<LyricLine> mirror) {
+        return lyricCompletenessScore(mirror) >= lyricCompletenessScore(netease)
+                ? mirror : netease;
+    }
+
+    private static int lyricCompletenessScore(List<LyricLine> lines) {
+        if (lines == null || lines.isEmpty()) return 0;
+        int score = lines.size() * 100;
+        for (LyricLine line : lines) {
+            if (line != null && line.syllables != null && !line.syllables.isEmpty()) score++;
+        }
+        return score;
     }
 
     private static List<LyricLine> quietly(
@@ -10600,7 +10684,31 @@ public final class PlayerController {
             String request, int count, boolean replaceQueue, boolean excludeLiked,
             boolean webSearchEnabled, String webSearchUrl, String webSearchKey,
             boolean forceKnowledge, boolean useLikedPreferences) {
-        if (count <= 0 || baseUrl == null || baseUrl.trim().isEmpty()) return;
+        generateAiPlaylist(baseUrl, apiKey, model, request, count, replaceQueue, excludeLiked,
+                webSearchEnabled, webSearchUrl, webSearchKey, forceKnowledge, useLikedPreferences,
+                null, false);
+    }
+
+    /**
+     * The same generation, plus <b>round 34's two extra cases</b> — both of them the AI DJ's own
+     * continuation and neither of them driven by the UI:
+     *
+     * <ul>
+     *   <li>{@code oldSongs} — the list that is playing right now, handed to the model as the 「老歌」
+     *   anchor so the next list keeps the same style and mixes old songs with new ones;</li>
+     *   <li>{@code append} — put the resolved batch BEHIND the running queue instead of replacing it
+     *   ({@link #appendAiBatch}), which is what lets the music continue without a seam.</li>
+     * </ul>
+     */
+    private void generateAiPlaylist(String baseUrl, String apiKey, String model,
+            String request, int count, boolean replaceQueue, boolean excludeLiked,
+            boolean webSearchEnabled, String webSearchUrl, String webSearchKey,
+            boolean forceKnowledge, boolean useLikedPreferences,
+            List<Track> oldSongs, boolean append) {
+        if (count <= 0 || baseUrl == null || baseUrl.trim().isEmpty()) {
+            if (append) aiContinuationInFlight = false;
+            return;
+        }
         aiLoading.set(true); aiError.set(""); aiProgress.set("正在准备 AI 推荐…"); aiSummary.set(""); aiDetails.set("");
         worker.execute(() -> {
             try {
@@ -10665,7 +10773,8 @@ public final class PlayerController {
                                 .generatePlaylist(text, request, count,
                                         forceKnowledge
                                                 ? "[KNOWLEDGE_BASE_ONLY] 强制使用模型内置知识库，禁止联网搜索，输出真实可搜索歌曲。"
-                                                : "");
+                                                : "",
+                                        oldSongs == null ? "" : aiAnchor(oldSongs));
                     } catch (IOException retryable) {
                         lastAiError = retryable;
                         final int retryNo = attempt;
@@ -10697,24 +10806,144 @@ public final class PlayerController {
                             && !containsId(resolved, match.id)) resolved.add(match);
                 }
                 if (resolved.isEmpty()) throw new IllegalStateException("网易云未找到推荐歌曲");
+                // Round 34: the ordering is decided HERE rather than left to the prompt —
+                // 「几首中文歌几首英文歌这样混着」. A batch that is one language only comes back
+                // untouched (see PlaylistMixer), so a request that asks for Chinese only still gets
+                // Chinese only, and the prompt's own clause about that cannot be violated by us.
+                final List<NeteaseSong> ordered = PlaylistMixer.interleave(resolved,
+                        s -> PlaylistMixer.isChinese(s.name, s.artist));
                 String name = rec.playlistName == null || rec.playlistName.trim().isEmpty() ? "AI 推荐歌单" : rec.playlistName;
-                if (!replaceQueue) {
+                if (append) {
+                    // The continuation: behind the list that is playing, never in front of it.
+                    final String appendedName = name;
+                    post(() -> appendAiBatch(ordered, appendedName));
+                } else if (!replaceQueue) {
                     long playlistId = netease.createPlaylist(name, false);
                     int added = 0;
-                    for (NeteaseSong s : resolved) {
+                    for (NeteaseSong s : ordered) {
                         if (netease.manipulatePlaylistTracks(playlistId, s.id, true)) added++;
                     }
                     final int totalAdded = added;
-                    post(() -> { aiSongs.set(resolved); aiPlaylistName.set(name);
-                        if (totalAdded != resolved.size()) aiError.set("歌单已创建，但仅添加 " + totalAdded + "/" + resolved.size() + " 首");
+                    post(() -> { aiSongs.set(ordered); aiPlaylistName.set(name);
+                        if (totalAdded != ordered.size()) aiError.set("歌单已创建，但仅添加 " + totalAdded + "/" + ordered.size() + " 首");
                         loadMyPlaylists();
                     });
                 } else {
-                    post(() -> { aiSongs.set(resolved); aiPlaylistName.set(name); playSongList(resolved, 0); });
+                    post(() -> {
+                        aiSongs.set(ordered);
+                        aiPlaylistName.set(name);
+                        // playQueue() inside this resets the origin to USER (it is what every other
+                        // way of filling the queue does); the tag is re-applied here, and the
+                        // continuation's own request is remembered right beside it.
+                        playSongList(ordered, 0);
+                        setQueueOrigin(QueueOrigin.AI);
+                        aiContinuation = new AiContinuation(baseUrl, apiKey, model, request, count,
+                                excludeLiked);
+                        aiProgress.set("AI 歌单已开始播放：播到倒数第二首会自动续下一张（老歌 + 新歌、中英混排）");
+                    });
                 }
-            } catch (Throwable e) { post(() -> aiError.set(e.getMessage() == null ? "AI 推荐失败" : e.getMessage())); }
+            } catch (Throwable e) {
+                post(() -> aiError.set(e.getMessage() == null ? "AI 推荐失败" : e.getMessage()));
+                aiContinuationInFlight = false;
+            }
                 finally { post(() -> { aiLoading.set(false); aiProgress.set("处理完成"); }); }
         });
+    }
+
+    // --- the AI DJ's own continuation (round 34) -------------------------------------------------
+
+    /** Set the queue's origin tag, publish it, and drop the remembered AI request whenever the tag
+     *  stops being {@link QueueOrigin#AI} — a user-started queue must never be continued by the AI. */
+    private void setQueueOrigin(QueueOrigin origin) {
+        queueOriginKind = origin;
+        if (origin != QueueOrigin.AI) aiContinuation = null;
+        if (queueOrigin.peek() != origin) post(() -> queueOrigin.set(origin));
+    }
+
+    /**
+     * <b>The AI DJ keeps playing by itself.</b> The user's rule: 「当前列表播完到倒数第二首继续生成新列表
+     * 播放，然后播放列表生成需要同时包括老歌和新歌，以及相对相同的风格，记住要混着排序，几首中文歌几首英文歌
+     * 这样混着」.
+     *
+     * <p>Fired from {@link #playAt} on the main thread, when the track that just started is the
+     * <b>second-to-last</b> of a queue the AI DJ filled. That lead time is the point of the trigger:
+     * one generation plus a NetEase search per row takes tens of seconds, and a boundary is minutes
+     * away, so the next list is being built while the listener is still on the previous one — the
+     * batch lands behind the queue with {@link #appendAiBatch} and playback never stops, never
+     * re-cuts what is already playing, and never waits.
+     *
+     * <p>Fires once per list ({@link #aiContinuationInFlight}). The batch it appends becomes part of
+     * the same queue, so the same rule applies to it in turn and the list renews itself for as long
+     * as the listener lets it play; the tag that stops it is cleared by {@link #playQueue}, i.e. by
+     * the listener choosing their own music.
+     */
+    private void maybeContinueAiPlaylist() {
+        final AiContinuation c = aiContinuation;
+        if (c == null || aiContinuationInFlight) return;
+        if (queueOriginKind != QueueOrigin.AI) return;
+        final int size = queue.size();
+        if (size < 2 || playIndex < size - 2) return;
+        if (c.count <= 0 || c.baseUrl == null || c.baseUrl.trim().isEmpty()) return;
+        aiContinuationInFlight = true;
+        final List<Track> playing = new ArrayList<>(queue);
+        post(() -> aiProgress.set("当前歌单播到倒数第二首，正在生成下一张（老歌 + 新歌、中英混排）…"));
+        generateAiPlaylist(c.baseUrl, c.apiKey, c.model, c.request, c.count, true, c.excludeLiked,
+                false, "", "", false, false, playing, true);
+    }
+
+    /**
+     * Put the continuation's batch <b>behind</b> the queue that is playing, keeping the tag and
+     * re-arming the next continuation.
+     *
+     * <p>Rows still <b>unplayed</b> ahead in the queue are dropped: the model is asked for 「老歌和新歌」
+     * and is expected to name songs from the list it was shown, but naming one that is still queued
+     * behind the listener would double it right at the seam. A row the listener has already heard is
+     * allowed back — that is what 「老歌」 means.
+     */
+    private void appendAiBatch(List<NeteaseSong> batch, String name) {
+        List<Track> added = new ArrayList<>();
+        for (NeteaseSong s : batch) {
+            if (s == null) continue;
+            Track t = toTrack(s);
+            if (t == null) continue;
+            boolean ahead = false;
+            for (int i = Math.max(0, playIndex); i < queue.size(); i++) {
+                Track q = queue.get(i);
+                if (q != null && q.neteaseId != 0L && q.neteaseId == s.id) { ahead = true; break; }
+            }
+            if (!ahead) added.add(t);
+        }
+        aiContinuationInFlight = false;
+        if (added.isEmpty()) {
+            aiError.set("AI 续播：这一批都在队列里了，本次跳过");
+            return;
+        }
+        queue.addAll(added);
+        queueTracks.set(new ArrayList<>(queue));
+        aiSongs.set(batch);
+        if (name != null && !name.trim().isEmpty()) aiPlaylistName.set(name);
+        queueOriginKind = QueueOrigin.AI;
+        queueOrigin.set(QueueOrigin.AI);
+        aiProgress.set("已续上 " + added.size() + " 首（老歌 + 新歌、中英混排）");
+    }
+
+    /**
+     * The running list as the prompt's 「老歌」 anchor — {@code title - artist} lines, capped so a long
+     * list cannot crowd out the request itself. See {@link AiClient#generatePlaylist} for what the
+     * model is asked to do with it.
+     */
+    private static String aiAnchor(List<Track> songs) {
+        StringBuilder sb = new StringBuilder();
+        int n = 0;
+        for (Track t : songs) {
+            if (t == null || n >= 20) break;
+            String title = t.title == null ? "" : t.title.trim();
+            if (title.isEmpty()) continue;
+            String artist = t.artist == null ? "" : t.artist.trim();
+            sb.append(title).append(" - ").append(artist).append('\n');
+            n++;
+        }
+        return sb.toString();
     }
 
     private static boolean hasWebSearchIntent(String request) { /*

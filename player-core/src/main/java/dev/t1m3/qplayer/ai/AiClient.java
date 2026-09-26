@@ -106,11 +106,30 @@ public final class AiClient {
     }
 
     public AiPlaylistResult generatePlaylist(String sampleSongs, String request, int count, String webContext) throws IOException {
+        return generatePlaylist(sampleSongs, request, count, webContext, "");
+    }
+
+    /**
+     * The same, with the list that is <b>already playing</b> handed in as the style anchor (round 34:
+     * the AI DJ's own continuation, see {@code PlayerController.maybeContinueAiPlaylist}).
+     *
+     * <p>The user's own rule for a continuation: 「播放列表生成需要同时包括老歌和新歌，以及相对相同的风格，
+     * 记住要混着排序，几首中文歌几首英文歌这样混着」. The anchor is what makes the first half of that
+     * possible — the model cannot keep a style it was never shown — and
+     * {@link PlaylistMixer} is what makes the second half true regardless of what the model returns.
+     *
+     * @param previousList the running list as {@code title - artist} lines, or empty for a first
+     *                     generation from a typed request
+     */
+    public AiPlaylistResult generatePlaylist(String sampleSongs, String request, int count,
+                                             String webContext, String previousList) throws IOException {
         String normalizedRequest = request == null ? "" : request
                 .replaceAll("(?i)r\\s*(?:and|&)\\s*b", "R&B")
                 .replaceAll("(?i)rhythm\\s*and\\s*blues", "R&B");
         String system = "你是专业 DJ，负责根据用户要求推荐歌曲。把任何请求（包括中文、欧美、R&B、r and b、混合语言或模糊风格）直接转换为歌曲列表。" +
                 "中文 R&B 必须推荐华语歌手的真实 R&B 歌曲；欧美 R&B 必须推荐欧美歌手的真实 R&B 歌曲；如果同时要求中文和欧美，两类都要推荐。" +
+                "默认要中英混排：华语（中文）与欧美（英文）交替着来，几首中文几首英文这样混着，不要整张都是同一语种，也不要连着三首同一语种；但用户明确只要某一语种时以用户的要求为准。" +
+                "如果给了「上一张歌单」，新歌单里既要有其中的一部分（老歌，用来延续同一风格），也要有新的歌（新歌），并且风格与上一张相对一致。" +
                 "只返回一个合法 JSON 对象，不要 Markdown、解释、思考过程或代码围栏。歌手名请求也要返回歌曲，不要介绍人物。" +
                 "JSON 格式必须是：{\"playlistName\":\"歌单名\",\"summary\":\"简短说明\",\"songs\":[{\"title\":\"歌名\",\"artist\":\"歌手\",\"reason\":\"理由\"}]}。" +
                 "即使请求很短，也必须返回歌曲。songs 数组必须尽量返回目标数量，尤其是 15 首以上；不要因为输出较长而缩减为三四首。为节省输出，reason 可以为空字符串。";
@@ -119,6 +138,10 @@ public final class AiClient {
         }
         String user = "仅输出 JSON。先理解用户意图，再立即给出歌曲；不要因为描述简短、组合条件或语言混合而拒绝。songs 数组目标数量为 " + count + " 首，必须返回尽可能接近该数量的不同歌曲，不要只返回三四首；reason 统一填空字符串。用户要求：" + normalizedRequest + "\n推荐数量：" + count +
                 "\n收藏歌曲样本（仅用于判断风格）：\n" + sampleSongs;
+        if (previousList != null && !previousList.trim().isEmpty()) {
+            user += "\n\n上一张歌单（正在播放的老歌，用来延续同一风格。新歌单里既要有其中的一部分老歌，"
+                    + "也要有新的歌，并且中英混排、几首中文几首英文交替着来）：\n" + previousList.trim();
+        }
         if (webContext != null && !webContext.trim().isEmpty()) {
             if (webContext.contains("KNOWLEDGE_BASE_FALLBACK") || webContext.contains("KNOWLEDGE_BASE_ONLY")) {
                 user += "\n\n联网搜索不可用。请直接使用你的音乐知识库完成任务，必须输出可搜索的真实歌名和歌手，不要返回人物介绍、道歉或拒绝。\n";

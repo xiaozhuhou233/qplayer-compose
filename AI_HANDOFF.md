@@ -3796,6 +3796,46 @@ the incoming's vocals are out for`（`removal = blend_ms + content_start_ms`，�
 ⚠️ **仍未在设备上验证**（无设备）。⚠️ PC 镜像 `round6.py` 没有第 3 条（它是 RULE_VERSION 5），
 所以镜像渲的落点与这一版 App 不是同一套规则。
 
+### 第 34 轮（2026-09-26）：**AI DJ 自己续播（倒数第二首起生成下一张；老歌+新歌；中英混排）** —— 只动算法
+
+用户：「在 ai 生成的播放列表打个标签，当前列表播完到倒数第二首继续生成新列表播放，然后播放列表生成需要
+同时包括老歌和新歌，以及相对相同的风格，记住要混着排序，几首中文歌几首英文歌这样混着，只碰算法」。
+
+改动前的现状（都实测过）：AI 歌单只有 UI 对话框一个入口，结果是一次性 `playSongList` **替换**队列；
+队列没有任何来源标记（`currentQueuePlaylistId` 对 AI 队列是 0）；没有任何"队列快结束就续"的钩子
+（`privateFmMode` 那条只走网易云私人 FM）；排序**完全交给提示词**，本地只有去重与模糊匹配；
+`Track`/`NeteaseSong` **没有任何语种或风格字段**。
+
+实现（**player-core only，Kotlin 一行未动**）：
+
+1. **标签**：新增 `PlayerController.QueueOrigin{USER, AI}` + 已发布的 `queueOrigin` 属性 + 主线程用的
+   `queueOriginKind`。AI 路径把列表放进队列后置 AI；`playQueue()` **一律先清回 USER**（于是用户自己的
+   队列永远不会被 AI 续），并且非 AI 时同时丢掉"记住的请求"。
+2. **倒数第二首触发**：`playAt()` 里新增 `maybeContinueAiPlaylist()`。条件是"标签 = AI 且
+   `playIndex >= size − 2`"；命中就把正在播的整张歌单快照成提示词的「老歌」锚，把参数
+   （baseUrl/key/model/request/count/excludeLiked）记进 `aiContinuation`，后台生成后由
+   `appendAiBatch()` **追加到运行中的队列后面**（不替换、不动正在播的），并复位
+   `aiContinuationInFlight` —— 新加的那一段还会再触发一次，于是**无限续播**，直到用户自己选歌。
+   提前量就是"倒数第二首"的意义：一次生成 + 每首一次网易云搜索要几十秒，而到边界还有几分钟。
+   ⚠️ API key 只活在内存里的 `aiContinuation`，不打印、不落盘（沿用既有约定）。
+3. **老歌 + 新歌 + 同风格**：`AiClient.generatePlaylist(..., previousList)`（**新增重载**，旧的 4 参重载
+   原样转发）+ 两处提示词条款：给了「上一张歌单」时，新歌单既要有其中一部分老歌（延续风格）也要有新歌。
+   追加时**丢弃仍在队列里未播的那几首**（否则会在接缝处重复），**已播过的允许回来**（那正是"老歌"）。
+4. **中英混排落在算法里，而不是只写在提示词里**：新类 `ai/PlaylistMixer`（纯函数）——
+   `isChinese(title, artist)` 按 CJK 表意文字判定（`Track` 里没有语种字段，而中文歌的歌手常是拼音/英文名，
+   所以"任一处有汉字"即算中文）；`interleave(...)` 按**比例**铺开（不是死交替：8 中 2 英也能铺得开），
+   **同语种内绝不重排**（AI 的排序就是用户的排序），**单语种批次原样返回**（用户只要中文就还是只有中文）。
+   提示词侧同时加了"默认中英混排、几首中文几首英文交替、用户明确只要一个语种时以用户为准"。
+
+测试：新增 `ai/PlaylistMixerTest` **7 个**（分类、等量交替、8:2 铺开、语种内保序、单语种不动、run 上限）。
+player-core **315 跑 1 失败**，唯一失败仍是既有的
+`SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`。
+
+改动文件：`ai/PlaylistMixer.java`（新）、`ai/AiClient.java`（新重载 + 两条提示词条款）、
+`bridge/PlayerController.java`（标签 / 触发 / 追加 / 锚 / 混排）、`ai/PlaylistMixerTest.java`（新）。
+**UI 不需要改**：旧重载全部保留并转发，`replaceQueue = true` 那条路（对话框的"生成播放列表"模式）
+自动获得续播。**本轮没有构建、没有发布**（用户正在写别的东西，且要求只碰算法）。
+
 ## 九、音频焦点：自动暂停 / 自动恢复（2026-09-21 修复，装机验证）
 
 **用户诉求**：别的 App（B站、别的视频软件、别的音乐）开始放 → qplayer 自动暂停；那个 App 停了/暂停了
