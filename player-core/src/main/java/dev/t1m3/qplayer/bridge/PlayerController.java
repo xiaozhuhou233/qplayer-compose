@@ -9,7 +9,7 @@ import dev.t1m3.qplayer.audio.AudioBackend;
 import dev.t1m3.qplayer.ai.AiClient;
 import dev.t1m3.qplayer.bili.BiliClient;
 import dev.t1m3.qplayer.ai.AiPlaylistResult;
-import dev.t1m3.qplayer.ai.PlaylistMixer;
+import dev.t1m3.qplayer.ai.AiReference;
 import dev.t1m3.qplayer.ai.WebSearchClient;
 import dev.t1m3.qplayer.audio.BeatProfile;
 import dev.t1m3.qplayer.audio.BeatProfiler;
@@ -171,6 +171,15 @@ public final class PlayerController {
     private final ExecutorService lyricWorker = Executors.newFixedThreadPool(2, r -> {
         Thread t = new Thread(r, "qplayer-lyric");
         t.setDaemon(true);
+        return t;
+    });
+    // Whole-queue lyric warming is deliberately separate and single-threaded.
+    // The currently playing song keeps lyricWorker priority; this lane gradually
+    // fills memory/disk caches without delaying the lyric visible on screen.
+    private final ExecutorService lyricPreloadWorker = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "qplayer-lyric-preload");
+        t.setDaemon(true);
+        t.setPriority(Thread.MIN_PRIORITY);
         return t;
     });
     // Lyrics are resolved by racing two sources (see fetchLyricsRacing). The race
@@ -445,6 +454,8 @@ public final class PlayerController {
                     return size() > LYRIC_MEM_MAX;
                 }
             });
+    private final java.util.Set<Long> lyricPreloadQueued =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
     /** Per-track lyric timing corrections. The live LyricConfig value still feeds
      *  both renderers, but it is replaced whenever the current track changes. */
     private final Map<String, Integer> lyricOffsets =
@@ -502,9 +513,9 @@ public final class PlayerController {
     private final AtomicLong lyricLoadGeneration = new AtomicLong();
     /** Number of attempts made for one track's lyrics before an empty result is
      *  treated as "this song has none". */
-    private static final int LYRIC_FETCH_ATTEMPTS = 3;
+    private static final int LYRIC_FETCH_ATTEMPTS = 2;
     /** Base backoff between those attempts (multiplied by the attempt number). */
-    private static final long LYRIC_RETRY_MS = 1_500L;
+    private static final long LYRIC_RETRY_MS = 650L;
     /** Set by the lyric sources when they failed for a reason that may pass (a
      *  timeout, a 5xx, risk control) as opposed to answering "no lyrics". Only
      *  then is an empty result worth retrying — see loadNeteaseLyrics. */
@@ -7148,6 +7159,7 @@ public final class PlayerController {
         }
         // Current track's fetches are now queued; warm next/prev behind them.
         preloadAdjacent();
+        preloadQueueLyrics();
     }
 
     /** Feed coverBytes for the fluid backdrop: local tracks carry embedded
@@ -7531,6 +7543,29 @@ public final class PlayerController {
                 // measure now rather than inside a boundary's lead window.
                 requestBeatProfile(t, cached);
             }
+        }
+    }
+
+    /** Warm every NetEase lyric in the current queue after the playing track's
+     * request has started. Requests are deduplicated and serialized on a low
+     * priority lane; they only populate the normal memory/disk caches. */
+    private void preloadQueueLyrics() {
+        final int current = playIndex;
+        for (int offset = 1; offset < queue.size(); offset++) {
+            int index = (current + offset) % queue.size();
+            Track track = queue.get(index);
+            if (track == null || track.source != Track.Source.NETEASE || track.neteaseId == 0L) continue;
+            final long id = track.neteaseId;
+            if (lyricMem.containsKey(id) || !lyricPreloadQueued.add(id)) continue;
+            lyricPreloadWorker.submit(() -> {
+                try {
+                    fetchNeteaseLyrics(id);
+                } catch (Throwable e) {
+                    Logger.warn("queue lyric preload failed for {}: {}", id, e.getMessage());
+                } finally {
+                    lyricPreloadQueued.remove(id);
+                }
+            });
         }
     }
 
@@ -8139,11 +8174,11 @@ public final class PlayerController {
     }
 
     /** How long either lyric source may take before the other one's answer is used. */
-    private static final long LYRIC_RACE_TIMEOUT_MS = 6_000L;
+    private static final long LYRIC_RACE_TIMEOUT_MS = 3_500L;
     /** Timeout for the third-party AMLL mirror alone; NetEase runs in parallel. */
     private static final int LYRIC_MIRROR_TIMEOUT_MS = 4_000;
     /** Grace window for the AMLL mirror once NetEase has already answered. */
-    private static final long LYRIC_MIRROR_GRACE_MS = 1_800L;
+    private static final long LYRIC_MIRROR_GRACE_MS = 700L;
     /** Songs the mirror had nothing for (or was too slow for) this session, so a
      *  replay does not pay for the mirror again. */
     private final java.util.Set<Long> lyricMirrorMisses =
@@ -9204,6 +9239,11 @@ public final class PlayerController {
                     currentLikeable.set(cur.neteaseId != 0);
                     playMode.set(Math.max(0, Math.min(2, savedMode)));
                 });
+                // A restored network track starts with an empty lyric list. Mark
+                // the request as active before launching it so the lyric page
+                // shows its loading state instead of looking permanently empty.
+                lyricsLoading.set(cur.source == Track.Source.NETEASE
+                        || cur.source == Track.Source.CUSTOM_API);
                 // Load the full cover art + lyrics now (both cache-first internally)
                 // instead of waiting for the user to press play — playAt() normally
                 // does this, but playAt() itself isn't called until then.
@@ -10742,6 +10782,30 @@ public final class PlayerController {
                     }
                 }
                 post(() -> aiProgress.set("正在让 AI 分析音乐风格并生成推荐…"));
+                // Round 35: the listening history is a reference for EVERY generation — the user:
+                // 「推荐歌曲除了当红歌还需要我的历史记录参考」 — and it is a random DRAW of it rather than
+                // its newest page, because the same request must not come back with the same list
+                // twice (「ai 算法生成的歌曲要有随机性」). The list that is playing joins it for a
+                // continuation, and a random 切入角度 goes with both: the angles are what ask for the
+                // artists' new releases and for the slightly less-mainstream picks.
+                final Random rnd = new Random();
+                List<String> historyLines = new ArrayList<>();
+                try {
+                    List<NeteaseSong> history = recentSongs.peek();
+                    if (history == null || history.isEmpty()) history = netease.recentPlayed(100);
+                    List<String> all = new ArrayList<>();
+                    for (NeteaseSong s : history) {
+                        if (s == null || s.name == null || s.name.trim().isEmpty()) continue;
+                        String artist = s.artist == null ? "" : s.artist.trim();
+                        all.add(artist.isEmpty() ? s.name.trim() : s.name.trim() + " - " + artist);
+                    }
+                    historyLines = AiReference.sample(all, AiReference.HISTORY_SAMPLE, rnd);
+                } catch (Throwable ignored) {
+                    // The history is best effort: a generation without it is still a generation.
+                }
+                final String references = AiReference.block(historyLines,
+                        oldSongs == null ? null : aiLines(oldSongs, AiReference.PREVIOUS_LIST_CAP),
+                        AiReference.angles(rnd));
                 String webContext = "";
                 // Always use the provider knowledge base; ordinary prompts
                 // must not be blocked by optional web-search configuration.
@@ -10774,7 +10838,7 @@ public final class PlayerController {
                                         forceKnowledge
                                                 ? "[KNOWLEDGE_BASE_ONLY] 强制使用模型内置知识库，禁止联网搜索，输出真实可搜索歌曲。"
                                                 : "",
-                                        oldSongs == null ? "" : aiAnchor(oldSongs));
+                                        references);
                     } catch (IOException retryable) {
                         lastAiError = retryable;
                         final int retryNo = attempt;
@@ -10806,12 +10870,11 @@ public final class PlayerController {
                             && !containsId(resolved, match.id)) resolved.add(match);
                 }
                 if (resolved.isEmpty()) throw new IllegalStateException("网易云未找到推荐歌曲");
-                // Round 34: the ordering is decided HERE rather than left to the prompt —
-                // 「几首中文歌几首英文歌这样混着」. A batch that is one language only comes back
-                // untouched (see PlaylistMixer), so a request that asks for Chinese only still gets
-                // Chinese only, and the prompt's own clause about that cannot be violated by us.
-                final List<NeteaseSong> ordered = PlaylistMixer.interleave(resolved,
-                        s -> PlaylistMixer.isChinese(s.name, s.artist));
+                // ⚠️ Round 35 REMOVED the interleave step that round 34 put here — the user:
+                // 「也不用非要是中英文穿插」. The prompt still asks for a natural mix, but the order the
+                // model returned is the order the listener gets, and {@code PlaylistMixer} is kept (with
+                // its tests) for whenever a forced mix is wanted again.
+                final List<NeteaseSong> ordered = resolved;
                 String name = rec.playlistName == null || rec.playlistName.trim().isEmpty() ? "AI 推荐歌单" : rec.playlistName;
                 if (append) {
                     // The continuation: behind the list that is playing, never in front of it.
@@ -10928,22 +10991,21 @@ public final class PlayerController {
     }
 
     /**
-     * The running list as the prompt's 「老歌」 anchor — {@code title - artist} lines, capped so a long
-     * list cannot crowd out the request itself. See {@link AiClient#generatePlaylist} for what the
-     * model is asked to do with it.
+     * The running list as reference lines — {@code title - artist}, capped so a long list cannot
+     * crowd out the request itself. Round 35: these go into {@link AiReference#block} together with
+     * the sampled listening history and this run's angles, rather than into a prompt section of
+     * their own.
      */
-    private static String aiAnchor(List<Track> songs) {
-        StringBuilder sb = new StringBuilder();
-        int n = 0;
+    private static List<String> aiLines(List<Track> songs, int cap) {
+        List<String> out = new ArrayList<>();
         for (Track t : songs) {
-            if (t == null || n >= 20) break;
+            if (t == null || out.size() >= cap) break;
             String title = t.title == null ? "" : t.title.trim();
             if (title.isEmpty()) continue;
             String artist = t.artist == null ? "" : t.artist.trim();
-            sb.append(title).append(" - ").append(artist).append('\n');
-            n++;
+            out.add(artist.isEmpty() ? title : title + " - " + artist);
         }
-        return sb.toString();
+        return out;
     }
 
     private static boolean hasWebSearchIntent(String request) { /*
@@ -12307,6 +12369,7 @@ public final class PlayerController {
         cacheWorker.shutdownNow();
         precacheWorker.shutdownNow();
         lyricWorker.shutdownNow();
+        lyricPreloadWorker.shutdownNow();
         retryWorker.shutdownNow();
         monetFetchWorker.shutdownNow();
         monetWorker.shutdownNow();

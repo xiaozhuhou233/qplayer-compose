@@ -20,6 +20,12 @@ import java.util.function.Predicate;
  *
  * <p>Rows are never re-ordered inside their own language: the AI's own ranking within a language is
  * the ranking the user asked for, and this class only decides which language comes next.
+ *
+ * <p>⚠️ <b>Round 35 stopped applying this to the generated list.</b> The same user, after living with
+ * it: 「也不用非要是中英文穿插」 — the prompt still asks for a natural mix, but the order the model
+ * returned is the order the listener gets ({@code PlayerController} no longer calls
+ * {@link #interleave}). This class and its tests are kept deliberately: the rule is one line away from
+ * being turned back on, and it is the answer if a language-mixed request is ever ignored again.
  */
 public final class PlaylistMixer {
 

@@ -29,15 +29,26 @@ public final class AiClient {
     }
 
     public String chat(String system, String user) throws IOException {
+        return chat(system, user, 0.2d);
+    }
+
+    /**
+     * One turn at a caller-chosen {@code temperature}. The playlist path uses this to run
+     * <b>warm</b> ({@link AiReference#temperature}) — the user asked for the generated songs to have
+     * randomness (「ai 算法生成的歌曲要有随机性」), and a greedy 0.2 answers the same request with the
+     * same list every time. Every other caller keeps {@link #chat(String, String)}, which is the old
+     * 0.2: the transition chooser must answer the same way twice for the same pair.
+     */
+    public String chat(String system, String user, double temperature) throws IOException {
         try {
-            return chatOnce(system, user, true);
+            return chatOnce(system, user, true, temperature);
         } catch (IOException e) {
             // Some OpenAI-compatible gateways reject response_format while
             // accepting the rest of /chat/completions. Retry once without it.
             String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase();
             if (message.contains("response_format") || message.contains("json_object")
                     || message.contains("unsupported") || message.contains("不支持")) {
-                return chatOnce(system, user, false);
+                return chatOnce(system, user, false, temperature);
             }
             throw e;
         }
@@ -54,13 +65,18 @@ public final class AiClient {
      * endpoint and key.
      */
     public String chatPlain(String system, String user) throws IOException {
-        return chatOnce(system, user, false);
+        return chatOnce(system, user, false, 0.2d);
     }
 
     private String chatOnce(String system, String user, boolean requestJson) throws IOException {
+        return chatOnce(system, user, requestJson, 0.2d);
+    }
+
+    private String chatOnce(String system, String user, boolean requestJson, double temperature)
+            throws IOException {
         JsonObject root = new JsonObject();
         root.addProperty("model", model);
-        root.addProperty("temperature", 0.2);
+        root.addProperty("temperature", Math.max(0d, Math.min(2d, temperature)));
         // Recommendations only need compact structured output. Keeping the
         // response budget small materially reduces latency and avoids verbose
         // hidden-style explanations from compatible gateways.
@@ -110,25 +126,30 @@ public final class AiClient {
     }
 
     /**
-     * The same, with the list that is <b>already playing</b> handed in as the style anchor (round 34:
-     * the AI DJ's own continuation, see {@code PlayerController.maybeContinueAiPlaylist}).
+     * The same, with <b>the reference block</b> the controller composed handed in: my listening
+     * history, the list that is playing (a continuation only) and this run's 切入角度 — see
+     * {@link AiReference#block}.
      *
-     * <p>The user's own rule for a continuation: 「播放列表生成需要同时包括老歌和新歌，以及相对相同的风格，
-     * 记住要混着排序，几首中文歌几首英文歌这样混着」. The anchor is what makes the first half of that
-     * possible — the model cannot keep a style it was never shown — and
-     * {@link PlaylistMixer} is what makes the second half true regardless of what the model returns.
+     * <p>Round 34 introduced this parameter as the 「老歌」 anchor of a continuation; round 35 widened
+     * it to every generation, because the user asked for the history to be consulted as well
+     * (「推荐歌曲除了当红歌还需要我的历史记录参考」) and for picks beyond the current hits
+     * (「参考也要推荐某些歌手的新歌或者稍微小众点的歌曲」). The request itself is also sent warm here
+     * ({@link AiReference#temperature}) — 「ai 算法生成的歌曲要有随机性」 — which is why this path does
+     * not use the plain {@link #chat(String, String)} with its greedy 0.2.
      *
-     * @param previousList the running list as {@code title - artist} lines, or empty for a first
-     *                     generation from a typed request
+     * @param references the block {@link AiReference#block} built, or empty for a bare request
      */
     public AiPlaylistResult generatePlaylist(String sampleSongs, String request, int count,
-                                             String webContext, String previousList) throws IOException {
+                                             String webContext, String references) throws IOException {
         String normalizedRequest = request == null ? "" : request
                 .replaceAll("(?i)r\\s*(?:and|&)\\s*b", "R&B")
                 .replaceAll("(?i)rhythm\\s*and\\s*blues", "R&B");
         String system = "你是专业 DJ，负责根据用户要求推荐歌曲。把任何请求（包括中文、欧美、R&B、r and b、混合语言或模糊风格）直接转换为歌曲列表。" +
                 "中文 R&B 必须推荐华语歌手的真实 R&B 歌曲；欧美 R&B 必须推荐欧美歌手的真实 R&B 歌曲；如果同时要求中文和欧美，两类都要推荐。" +
-                "默认要中英混排：华语（中文）与欧美（英文）交替着来，几首中文几首英文这样混着，不要整张都是同一语种，也不要连着三首同一语种；但用户明确只要某一语种时以用户的要求为准。" +
+                "语种没有硬性要求：中文、英文都可以，哪首合适放哪首，不要为了凑语种比例牺牲选曲；用户明确只要某一语种时才以用户的要求为准。" +
+                "选曲必须同时包含：① 当红/热门的歌；② 参考我给的历史记录，挑我口味里的歌（同风格、同歌手）；" +
+                "③ 其中某些歌手的新歌或新发行；④ 几首稍微小众/冷门的，不要整张都是榜单热歌。" +
+                "每次生成都要有随机性：即使要求一模一样，也不要每次都给出同一批歌，换一些角度、换一些歌手、换一些年代。" +
                 "如果给了「上一张歌单」，新歌单里既要有其中的一部分（老歌，用来延续同一风格），也要有新的歌（新歌），并且风格与上一张相对一致。" +
                 "只返回一个合法 JSON 对象，不要 Markdown、解释、思考过程或代码围栏。歌手名请求也要返回歌曲，不要介绍人物。" +
                 "JSON 格式必须是：{\"playlistName\":\"歌单名\",\"summary\":\"简短说明\",\"songs\":[{\"title\":\"歌名\",\"artist\":\"歌手\",\"reason\":\"理由\"}]}。" +
@@ -138,9 +159,8 @@ public final class AiClient {
         }
         String user = "仅输出 JSON。先理解用户意图，再立即给出歌曲；不要因为描述简短、组合条件或语言混合而拒绝。songs 数组目标数量为 " + count + " 首，必须返回尽可能接近该数量的不同歌曲，不要只返回三四首；reason 统一填空字符串。用户要求：" + normalizedRequest + "\n推荐数量：" + count +
                 "\n收藏歌曲样本（仅用于判断风格）：\n" + sampleSongs;
-        if (previousList != null && !previousList.trim().isEmpty()) {
-            user += "\n\n上一张歌单（正在播放的老歌，用来延续同一风格。新歌单里既要有其中的一部分老歌，"
-                    + "也要有新的歌，并且中英混排、几首中文几首英文交替着来）：\n" + previousList.trim();
+        if (references != null && !references.trim().isEmpty()) {
+            user += "\n\n" + references.trim();
         }
         if (webContext != null && !webContext.trim().isEmpty()) {
             if (webContext.contains("KNOWLEDGE_BASE_FALLBACK") || webContext.contains("KNOWLEDGE_BASE_ONLY")) {
@@ -149,7 +169,10 @@ public final class AiClient {
                 user += "\n\n以下是联网搜索得到的参考资料。优先从其中提取真实歌名和歌手，不要把网页标题或说明当成歌曲；资料不完整时只返回能确认的歌曲：\n" + webContext;
             }
         }
-        String raw = chat(system, user).trim();
+        // Warm, and a fresh draw for every attempt: 「ai 算法生成的歌曲要有随机性」. A retry after an
+        // unusable answer therefore comes back with different songs rather than the same ones again.
+        String raw = chat(system, user,
+                AiReference.temperature(java.util.concurrent.ThreadLocalRandom.current())).trim();
         String originalResponse = raw;
         // Gateways often wrap valid JSON in Markdown or a short preamble.
         // Extract the JSON object before parsing instead of rejecting the
