@@ -31,10 +31,26 @@ public final class SettingsCatalog {
     public static final String LOCAL = "本地";
     public static final String ABOUT = "关于";
     public static final String AI = "AI";
+    /** ACE-Step: the cloud model that GENERATES a transition passage from the two neighbours.
+     *  Its own group, not a corner of {@link #AI}: that group is the AI music ASSISTANT (an
+     *  OpenAI-compatible chat endpoint used for style analysis and recommendations), while this
+     *  one is a music-generation endpoint with its own protocol, its own key and its own model
+     *  name. Sharing a key between them would be wrong. */
+    public static final String ACE_STEP = "ACE-Step";
     public static final String PALETTE = "调色板";
 
+    /** The ACE-Step group's rows, by key: the switch, the address, the key (the user's own, never
+     *  this app's), the model, and how far under the passage the generated bed sits. Named here
+     *  because {@code SettingsCore} pushes all five as one configuration, and a key that is only a
+     *  string literal at its own spec is a key the push can miss. */
+    public static final String ACE_STEP_ENABLED_KEY = "aceStepEnabled";
+    public static final String ACE_STEP_BASE_URL_KEY = "aceStepBaseUrl";
+    public static final String ACE_STEP_API_KEY_KEY = "aceStepApiKey";
+    public static final String ACE_STEP_MODEL_KEY = "aceStepModel";
+    public static final String ACE_STEP_BED_DB_KEY = "aceStepBedDb";
+
     public static final List<String> CATEGORIES = Collections.unmodifiableList(
-            Arrays.asList(APPEARANCE, PLAYBACK, LYRIC, LOCAL, AI, PALETTE, ABOUT));
+            Arrays.asList(APPEARANCE, PLAYBACK, LYRIC, LOCAL, AI, ACE_STEP, PALETTE, ABOUT));
 
     /** Fluid-background mode, 0 dynamic / 1 static. Stored under a new key
      *  because the same setting used to be a boolean ("lyricBgStatic") and a
@@ -236,6 +252,31 @@ public final class SettingsCatalog {
                 .build());
         out.add(SettingSpec.text("aiWebSearchKey", AI, "搜索 API Key", "")
                 .desc("自行申请填写，仅保存在本机")
+                .build());
+
+        // ---- ACE-Step：由前后两首歌「生成」一段过渡素材 -----------------------
+        // 与上面 AI 音乐助手分开：那是 OpenAI 兼容的文本接口，这是音乐生成接口，
+        // 协议、key、模型名都不同，共用一个 key 是错的。
+        out.add(SettingSpec.toggle(SettingsCatalog.ACE_STEP_ENABLED_KEY, ACE_STEP, "启用 ACE-Step", false)
+                .desc("开启后：渲染过渡时把云端生成的素材垫在本地过渡的段落下面"
+                        + "（衔接仍由本地融合负责）。失败/超时/素材不合格都不会影响过渡本身，"
+                        + "只是这一层不出现。")
+                .build());
+        out.add(SettingSpec.text(SettingsCatalog.ACE_STEP_BASE_URL_KEY, ACE_STEP, "API 地址 *",
+                        "https://api.acemusic.ai")
+                .desc("官方云端；自托管时填自己的地址")
+                .build());
+        out.add(SettingSpec.text(SettingsCatalog.ACE_STEP_API_KEY_KEY, ACE_STEP, "API Key *", "")
+                .desc("只保存在本机：不写进 APK、不随 APK 分发、不上传")
+                .build());
+        out.add(SettingSpec.text(SettingsCatalog.ACE_STEP_MODEL_KEY, ACE_STEP, "模型名称 *",
+                        "acestep-v1.5-turbo")
+                .desc("云端 GET /v1/models 列出的唯一 id（不带斜杠时会自动补上 acemusic/ 前缀）")
+                .build());
+        out.add(SettingSpec.slider(SettingsCatalog.ACE_STEP_BED_DB_KEY, ACE_STEP,
+                        "垫层电平（比段落低）", 18, 6, 18, 1)
+                .desc("越大越轻。18 是听感判定的默认值，12 更明显。这一层是段落上的额外织体，"
+                        + "不改变原有过渡。")
                 .build());
         out.add(SettingSpec.toggle("aiForceKnowledge", AI, "强制使用知识库", false)
                 .desc("联网搜索失败时改用模型知识库继续生成")

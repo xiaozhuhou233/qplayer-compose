@@ -13,7 +13,10 @@ import ai.onnxruntime.OrtEnvironment;
 import ai.onnxruntime.OrtSession;
 import ai.onnxruntime.TensorInfo;
 
+import dev.t1m3.qplayer.ai.AceStepClient;
+import dev.t1m3.qplayer.audio.AceStepBed;
 import dev.t1m3.qplayer.audio.DjEdit;
+import dev.t1m3.qplayer.audio.StemBed;
 import dev.t1m3.qplayer.audio.StemBridge;
 import dev.t1m3.qplayer.audio.StemEditRenderer;
 import dev.t1m3.qplayer.audio.StemFusion;
@@ -29,7 +32,9 @@ import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.BooleanSupplier;
 
@@ -374,6 +379,18 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         long removalMs = request.removalMs;
         long spanMs = returnSpanMs(request.beatPeriodMs);
         long headMs = removalMs + spanMs;
+        // ⚠️ Round 33: what gets DECODED and SEPARATED is the head extended to the arrival probe,
+        // and what the file is built from is the head's own `headMs` of it (see step 2 below). The
+        // two are one separation, so the arrival's own measurement costs the difference between them
+        // and nothing else — {@code StemFusion.ARRIVAL_PROBE_MS} carries the measurement and the
+        // reason its value is where it is (the rule's own percentile needs the arrival inside the
+        // last tenth of the material it is handed). A render whose head already reaches the probe
+        // separates exactly what it always did (the helper returns the head unchanged), and so does
+        // one that cannot fuse at all, because it never measures an arrival: nothing is refused and
+        // nothing is shortened.
+        long probeMs = request.canFuse()
+                ? StemFusion.arrivalProbeMs(headMs, probeDurationMs(request.sourcePath))
+                : headMs;
         // ⚠️ Round 20: the window (what gets decoded and separated) stays the blend's own length,
         // but the GATE ends where the outgoing track leaves the passage — `request.vocalOutMs`,
         // the shape's own answer (DjEdit.vocalOutMs), which is 75.2% of a DJ-shape blend. The
@@ -390,13 +407,24 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 request.title(), vocalOutMs,
                 vocalOutMs < removalMs ? "a part" : "all", request.blendMs, spanMs,
                 DjEdit.VOCAL_RETURN_MARGIN_MS, format.rate, headMs);
+        if (probeMs > headMs) {
+            // ⚠️ Round 33, and this line is the round's whole cost: one sentence per render, and the
+            // two numbers are the ones a device ledger needs to place it (the head the file is built
+            // from, and the span the arrival's own row reaches over).
+            Logger.info("transition: DJ edit for {}: the arrival probe — {}ms of the incoming's file"
+                            + " is separated where the head is {}ms, so the row the arrival is read"
+                            + " on reaches the voice's own entry into it; the file itself is built"
+                            + " from the first {}ms of it exactly as before",
+                    request.title(), probeMs, headMs, headMs);
+        }
 
         // 1. The head, decoded from the file's start. Starting at zero is what keeps every
         //    offset the transition machinery already computes — the content start, the
         //    beat entry, the ramp's handoff, the published position — meaning the same
         //    thing on this file as on the stream it replaces.
         long headFrames = headMs * format.rate / 1000L;
-        final float[][] head = new float[2][(int) headFrames];
+        long probeFrames = probeMs * format.rate / 1000L;
+        final float[][] head = new float[2][(int) probeFrames];
         long[] decoded = new long[1];
         boolean[] cancelled = new boolean[1];
         // ⚠️ The render's phases, timed where they happen so the total can be CHECKED against
@@ -407,7 +435,10 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         // [5] the part of the body's phase that was the AAC encoder rather than the decoder. Without an additive ledger a render's seconds cannot be placed — the device's
         // 154 s outlier had ~73 s that no existing line accounted for, and that number decides
         // whether overlapping the encode with the model is worth building at all.
-        long[] phases = new long[6];
+        // ⚠️ And [6], the cloud bed's own wait — the one phase that is NOT this device's work. It
+        // is timed apart for exactly that reason: what it costs this render is the wait, and what
+        // it costs the listener is nothing (the boundary is minutes away).
+        long[] phases = new long[7];
         long headDecodeStart = System.currentTimeMillis();
         boolean completed = decode(request.sourcePath, 2, 0L, head[0].length, request.stillWanted,
                 cancelled, (pcm, frames) -> {
@@ -426,19 +457,34 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                     + " to render", request.title(), decoded[0]);
             return null;
         }
-        final float[][] headWindow = trim(head, (int) decoded[0]);
+        // ⚠️ The head is the first `headMs` of what was decoded — the same window this render has
+        // always built the file from, and the only material anything below renders or measures a
+        // file decision on — and the arrival probe is all of what was decoded (round 33). The two
+        // are the same array whenever the probe did not extend, which is what keeps an unextended
+        // render bit-for-bit what it was.
+        final float[][] headWindow = trim(head, (int) Math.min(decoded[0], headFrames));
+        final float[][] arrivalWindow = trim(head, (int) decoded[0]);
         phases[3] = System.currentTimeMillis() - headDecodeStart;
 
-        // 2. The separation, at the rate and on the grid the model was trained for.
+        // 2. The separation, at the rate and on the grid the model was trained for. ONE separation,
+        //    over the probe span; what the file is built from is its first `headForModel[0].length`
+        //    samples — the head's own material, unchanged.
         float[][] headForModel = resample(headWindow, format.rate, StemModel.MODEL_RATE);
+        float[][] probeForModel = probeFrames > headFrames
+                ? resample(arrivalWindow, format.rate, StemModel.MODEL_RATE)
+                : headForModel;
         long separateStart = System.currentTimeMillis();
-        float[][][] stems = separate(weights, headForModel, request.stillWanted);
-        if (stems == null) {
+        float[][][] separatedHead = separate(weights, probeForModel, request.stillWanted);
+        if (separatedHead == null) {
             Logger.info("transition: DJ edit for {} cancelled during the separation",
                     request.title());
             return null;
         }
         long separateMs = System.currentTimeMillis() - separateStart;
+        // What builds the file, and what the arrival is read on: the head's own rows (the same array
+        // as `separatedHead`'s when nothing was extended) and the whole of the separated vocal row.
+        float[][][] stems = trimStems(separatedHead, headForModel[0].length);
+        float[][] arrivalVocals = separatedHead[StemGesture.Stem.VOCALS.row()];
 
         // 3. The user's clause: if that head has no vocals in it there is nothing to strip,
         //    so the whole stem path is skipped and the incoming plays its own stream. The
@@ -494,10 +540,16 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         // supply later, which is what makes a plain edit re-renderable (see PlayerController).
         int[] refusedWhy = new int[1];
         Fusion fusion = null;
+        // The cloud bed, if the user has ACE-Step configured: the model's own material, asked for
+        // as soon as this render knows where the passage will be (see {@link BedRunner}) and summed
+        // UNDER the passage the fusion renders — never in place of it. A host with the feature off,
+        // or a pair the cloud cannot be asked about, leaves every line below exactly as it was.
+        BedRunner cloudBed = request.cloudBed != null && request.cloudBed.configured()
+                ? new BedRunner(request.cloudBed, request) : null;
         if (request.canFuse()) {
             long fusionStart = System.currentTimeMillis();
-            fusion = attemptFusion(weights, request, format, stems, inBars, windowPlan, windowSec,
-                    clipped, refusedWhy, phases, cancelled);
+            fusion = attemptFusion(weights, request, format, stems, arrivalVocals, inBars,
+                    windowPlan, windowSec, clipped, refusedWhy, phases, cancelled, cloudBed);
             phases[2] = System.currentTimeMillis() - fusionStart;
             if (cancelled[0]) return null;
         }
@@ -691,16 +743,17 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         // worth building at all.)
         long totalMs = System.currentTimeMillis() - startedAt;
         long phasesSum = phases[0] + phases[1] + phases[2] + phases[3] + phases[4] + separateMs
-                + headEncodeMs + bodyEncodeMs;
+                + headEncodeMs + bodyEncodeMs + phases[6];
         Logger.info("transition: DJ edit for {}: the render's own accounting — head decode {}ms,"
                         + " model+head separation {}ms, probe decode {}ms, tail separation {}ms,"
                         + " the fusion attempt in all {}ms (junction search + the wait's retries),"
                         + " the bridge's tail separation {}ms, head encode {}ms, body decode+encode"
-                        + " {}ms (of which the AAC encoder {}ms and the decoder {}ms); the phases sum"
-                        + " to {}ms of the render's {}ms in all, leaving {}ms outside every phase",
+                        + " {}ms (of which the AAC encoder {}ms and the decoder {}ms), the cloud"
+                        + " bed's own wait {}ms; the phases sum to {}ms of the render's {}ms in all,"
+                        + " leaving {}ms outside every phase",
                 request.title(), phases[3], separateMs, phases[0], phases[1], phases[2], phases[4],
-                headEncodeMs, bodyEncodeMs, phases[5], bodyEncodeMs - phases[5], phasesSum, totalMs,
-                totalMs - phasesSum);
+                headEncodeMs, bodyEncodeMs, phases[5], bodyEncodeMs - phases[5], phases[6],
+                phasesSum, totalMs, totalMs - phasesSum);
         long bytes = named.length();
         if (bytes < MIN_EDIT_BYTES) {
             Logger.warn("transition: DJ edit for {} came out at {} bytes, which is not a"
@@ -727,6 +780,439 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 : new StemEditRenderer.Result(named.getAbsolutePath(), bridgeStartMs,
                         Math.round(plan.returnEndSec * 1000d),
                         bridgeReport != null ? bridgeReport.describe() : "");
+    }
+
+    // --- the cloud bed -------------------------------------------------------
+
+    /** How far before the stretch it needs a cloud context is decoded, ms: the extractor seeks to
+     *  the container's own sync sample, which is at or before the requested offset, so the decode
+     *  has to begin early enough for the stretch itself to be inside it. */
+    private static final long CONTEXT_LEAD_MS = 2_000L;
+
+    /**
+     * The cloud bed for one passage (AI_HANDOFF §7, rounds 31–32): the model's own material, asked
+     * for as soon as this render knows where the passage will be, and summed <b>under</b> the
+     * passage the local fusion renders — never in place of it.
+     *
+     * <p><b>What it is for.</b> The local fusion's passage is made of the outgoing track's own
+     * material, which is why it cannot sound like a transition: measured on a real pair, four
+     * fifths of a three-bar slam's passage correlates +0.79…+0.96 with the outgoing track itself,
+     * so what a listener hears is "this song plays six seconds longer, then the next one". The
+     * cloud model provides the one thing local processing cannot — material that is in neither
+     * track — and it is placed at a level this render chooses ({@link AceStepBed.Config#underDb}
+     * below the passage) rather than at one the server chose.
+     *
+     * <p><b>Why it cannot hurt the seams.</b> {@link StemBed} puts the bed's own gain at
+     * <b>exactly zero</b> at both of its ends, so summing it at {@code entryMs} cannot move a level
+     * step across either seam; the fusion's own clauses and its acceptance measurement are
+     * untouched, because the bed is summed after the measurement and outside it.
+     *
+     * <p><b>Every failure is the same failure</b>, and it is the one this renderer's contract
+     * states: the material is refused, the request fails, the cloud is unreachable, the key is not
+     * set, the setting is off — each of those leaves the edit exactly what it would be without this
+     * class, with one line saying which. A user without the feature gets a byte-identical render:
+     * nothing below is reached at all when {@code request.cloudBed} is not configured.
+     *
+     * <p><b>When it runs.</b> The request goes out the moment the fusion's plan exists (the earliest
+     * instant the passage's own numbers are known) and runs on its own thread while this render
+     * finishes, so the cloud's 21–34 s overlaps the render's remainder instead of following it. It
+     * is never on a playback path, and the one place this render waits for it is the instant before
+     * the head is encoded, where the material has to exist or not.
+     *
+     * <p>⚠️ <b>An edit already on disk is reused whichever way this switch was when it was
+     * rendered.</b> The file's name — and so the boundary's lookup — is the same with the bed and
+     * without it, and {@link StemFusion#RULE_VERSION} is deliberately NOT bumped for this feature:
+     * a bump would put a fresh separation of every cached edit on a user who never turned ACE-Step
+     * on (a render is 130–150 s), which the switch's own "off means nothing changes" promise
+     * forbids. What a user sees instead is that edits rendered while the switch was off are played
+     * as they are until the cache drops them, and every render after the switch carries the bed.
+     *
+     * <p><b>The cost.</b> Two decodes of the two neighbours (12 s each) plus the buffer's own WAV
+     * (a few megabytes) and the answer's JSON — tens of megabytes held for the length of one
+     * request, against a render that already peaks at several hundred.
+     */
+    private final class BedRunner {
+
+        private final AceStepBed.Config config;
+        /** The render's own request: the incoming track's file (what the bed is written into), the
+         *  outgoing one (the buffer's left half), and the two log-line facts this needs. */
+        private final Request request;
+        /** Every request this render has made, normally one: the geometry it was made for is what a
+         *  later caller is matched against (see {@link #addTo}). */
+        private final List<BedJob> jobs = new ArrayList<BedJob>(2);
+
+        BedRunner(AceStepBed.Config config, Request request) {
+            this.config = config;
+            this.request = request;
+        }
+
+        /** Asks for the bed one plan's passage would need, and returns at once. Idempotent for a
+         *  geometry already in flight, so a later ask from {@link #addTo} does not repeat it. */
+        void ask(StemFusion.Plan plan, Format incoming) {
+            AceStepBed.Geometry geometry = geometryOf(plan, incoming);
+            if (geometry == null) return;
+            if (!geometry.valid) {
+                Logger.info("transition: DJ edit for {}: no cloud bed under this passage — {}",
+                        request.title(), geometry.why);
+                return;
+            }
+            synchronized (jobs) {
+                if (find(geometry) != null) return;
+                Logger.info("transition: DJ edit for {}: {}", request.title(), geometry.describe());
+                submit(geometry, incoming);
+            }
+        }
+
+        /**
+         * The bed, summed under the passage {@code plan} describes — or nothing at all, with the
+         * reason logged. Called once, on the render's own lane, immediately before the head is
+         * encoded, so this is the one place a render can wait for the cloud.
+         */
+        void addTo(float[][] edited, StemFusion.Plan plan, Format incoming) {
+            AceStepBed.Geometry wanted = geometryOf(plan, incoming);
+            if (wanted == null) return;
+            if (!wanted.valid) {
+                Logger.info("transition: DJ edit for {}: no cloud bed under this passage — {}",
+                        request.title(), wanted.why);
+                return;
+            }
+            BedJob job;
+            synchronized (jobs) {
+                job = find(wanted);
+                if (job == null) {
+                    // Either the geometry moved after the request went out (the wait extended the
+                    // hold and the entry was pulled back with it), or this render's passage only
+                    // became known after the ask. Both are a second request, and the first is
+                    // discarded by its own thread: what matters is that the material in the file was
+                    // made for the passage the file carries.
+                    if (!jobs.isEmpty()) {
+                        Logger.warn("transition: DJ edit for {}: the landing moved after the cloud"
+                                + " was asked — the request in flight is for {}, and the passage this"
+                                + " render wrote is {} — so a second request is made for the geometry"
+                                + " that will be written and the first is discarded",
+                                request.title(), shapeOf(jobs.get(0).geometry), shapeOf(wanted));
+                    } else {
+                        Logger.info("transition: DJ edit for {}: the cloud bed was never asked for"
+                                + " (this render's passage was not valid when the ask went out), so it"
+                                + " is asked for now and waited for", request.title());
+                        Logger.info("transition: DJ edit for {}: {}", request.title(),
+                                wanted.describe());
+                    }
+                    job = submit(wanted, incoming);
+                    if (job == null) return;
+                }
+            }
+            float[][] material = job.await();
+            if (material == null) return;
+
+            long frames = Math.round(plan.windowMs * StemModel.MODEL_RATE / 1000d);
+            int at = (int) Math.round(plan.entryMs * (double) StemModel.MODEL_RATE / 1000d);
+            if (plan.entryMs < 0L || at + (int) frames > edited[0].length) {
+                Logger.warn("transition: DJ edit for {}: the cloud bed is NOT in this edit — the"
+                        + " passage is [{}ms, {}ms) of the incoming's file, which is not inside the"
+                        + " {}ms head this render wrote", request.title(), plan.entryMs,
+                        plan.fusionEndMs, edited[0].length * 1000L / StemModel.MODEL_RATE);
+                return;
+            }
+            // The level the bed sits under is the passage's own, measured on the head the fusion
+            // just rendered — the same material the listener hears, at the same instant in the file.
+            double passageDb = levelDbOf(edited, at, (int) frames);
+            StemBed.Bed bed = StemBed.prepare(material, StemModel.MODEL_RATE, plan.windowMs,
+                    Math.round(plan.bBarMs), AceStepBed.bedLevelDb(passageDb, config.underDb));
+            Logger.info("transition: DJ edit for {}: {}", request.title(), bed.note);
+            if (!bed.usable) {
+                Logger.warn("transition: DJ edit for {}: the cloud bed is NOT in this edit — the"
+                        + " material did not pass its own clause (above), so the passage stays exactly"
+                        + " the local fusion's own, which is what this edit is without the bed",
+                        request.title());
+                return;
+            }
+            // The clause round 32 states, and the last thing between the bed and the file: the sum
+            // has to stay under the ceiling the fusion's own limiter holds to. A passage already at
+            // full scale where the bed's peaks land has no room under it, and the answer there is to
+            // leave the bed out — a clamped sample in the file is not worth a layer.
+            double peak = AceStepBed.peakWithBed(edited, bed.pcm, at);
+            if (peak > DjEdit.Limiter.CEILING) {
+                Logger.warn("transition: DJ edit for {}: the cloud bed is NOT in this edit — the sum"
+                        + " would peak at {} against the ceiling of {} (a passage at full scale has"
+                        + " no room under it, and the level knob is what moves the bed down)",
+                        request.title(), fmtPeak(peak), fmtPeak(DjEdit.Limiter.CEILING));
+                return;
+            }
+            AceStepBed.addBed(edited, bed.pcm, at);
+            Logger.info("transition: DJ edit for {}: the cloud bed is IN this edit — the passage"
+                            + " measures {} dBFS over its {}ms, the bed sits {} dB under it inside"
+                            + " [{}ms, {}ms) of the incoming's file, and the sum peaks at {} (the"
+                            + " ceiling is {}); both of the bed's ends are exactly zero, so neither"
+                            + " seam of the passage moved",
+                    request.title(), fmtDb(passageDb), plan.windowMs, config.underDb, plan.entryMs,
+                    plan.fusionEndMs, fmtPeak(peak), fmtPeak(DjEdit.Limiter.CEILING));
+        }
+
+        /** One request, added to the list and started on its own thread. */
+        private BedJob submit(AceStepBed.Geometry geometry, Format incoming) {
+            BedJob job = new BedJob(geometry, incoming);
+            jobs.add(job);
+            Thread thread = new Thread(job::run, "qplayer-acestep-bed");
+            thread.setDaemon(true);
+            thread.start();
+            return job;
+        }
+
+        private BedJob find(AceStepBed.Geometry geometry) {
+            String key = keyOf(geometry);
+            for (BedJob job : jobs) {
+                if (job.key.equals(key)) return job;
+            }
+            return null;
+        }
+
+        /** The geometry the cloud would be asked about for this passage — the plan's own numbers
+         *  and the two files' lengths, which is everything the buffer's shape depends on. */
+        private AceStepBed.Geometry geometryOf(StemFusion.Plan plan, Format incoming) {
+            if (plan == null || !plan.valid || incoming == null) return null;
+            long outgoingDurationMs = Math.round(probeDurationMs(request.outgoingSourcePath));
+            long incomingDurationMs = Math.round(probeDurationMs(request.sourcePath));
+            return AceStepBed.geometry(plan.junctionMs, plan.fusionEndMs, plan.windowMs,
+                    outgoingDurationMs, incomingDurationMs, incoming.rate);
+        }
+
+        /** One request: its geometry, its thread, and what came back. */
+        private final class BedJob {
+            final String key;
+            final AceStepBed.Geometry geometry;
+            private final Format incoming;
+            private final Object done = new Object();
+            private boolean finished;
+            private float[][] material;
+            private String note = "";
+
+            BedJob(AceStepBed.Geometry geometry, Format incoming) {
+                this.geometry = geometry;
+                this.incoming = incoming;
+                this.key = keyOf(geometry);
+            }
+
+            void run() {
+                try {
+                    material = fetch();
+                } catch (Throwable e) {
+                    note = "the request failed (" + e + ")";
+                } finally {
+                    synchronized (done) {
+                        finished = true;
+                        done.notifyAll();
+                    }
+                }
+            }
+
+            /**
+             * The material, or null — waiting for this request if it is still in flight, but only
+             * as long as the render is still wanted: a queue that has moved on abandons the bed
+             * rather than holding the lane for a request nobody will hear.
+             */
+            float[][] await() {
+                synchronized (done) {
+                    while (!finished) {
+                        if (!request.stillWanted.getAsBoolean()) {
+                            Logger.info("transition: DJ edit for {}: the cloud bed's request is"
+                                    + " abandoned (the queue moved on)", request.title());
+                            return null;
+                        }
+                        try {
+                            done.wait(250L);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            return null;
+                        }
+                    }
+                }
+                if (material == null) {
+                    Logger.info("transition: DJ edit for {}: the cloud bed brought nothing back —"
+                                    + " {}. The passage is the local fusion's own, exactly as it is"
+                                    + " without this feature",
+                            request.title(), note);
+                }
+                return material;
+            }
+
+            /** Everything up to the material, on this job's own thread. */
+            private float[][] fetch() throws Exception {
+                Format outgoing = probe(request.outgoingSourcePath);
+                if (outgoing == null) {
+                    note = "the outgoing track's file cannot be read, so the buffer's left half"
+                            + " cannot be built";
+                    return null;
+                }
+                boolean[] cancelled = new boolean[1];
+                long contextsAt = System.currentTimeMillis();
+                float[][] tail = context(request.outgoingSourcePath, outgoing, geometry.aFromMs,
+                        geometry.tailMs, cancelled);
+                if (tail == null) {
+                    note = cancelled[0] ? "the render was cancelled while decoding the outgoing's tail"
+                            : "the outgoing's tail from " + geometry.aFromMs + "ms could not be"
+                                    + " decoded";
+                    return null;
+                }
+                float[][] head = context(request.sourcePath, incoming, geometry.bFromMs,
+                        geometry.headMs, cancelled);
+                if (head == null) {
+                    note = cancelled[0] ? "the render was cancelled while decoding the incoming's head"
+                            : "the incoming's head from " + geometry.bFromMs + "ms could not be"
+                                    + " decoded";
+                    return null;
+                }
+                if (outgoing.rate != incoming.rate) {
+                    // The two files' rates can differ (a 48 kHz library track against a 44.1 kHz one).
+                    // The buffer is assembled at the incoming's rate because that is the file the bed
+                    // is written into; the server resamples it to its own 48 kHz anyway.
+                    tail = resample(tail, outgoing.rate, incoming.rate);
+                    Logger.info("transition: DJ edit for {}: the cloud buffer's left context was"
+                            + " resampled {}Hz -> {}Hz (the two files' rates differ)",
+                            request.title(), outgoing.rate, incoming.rate);
+                }
+                float[][] buffer = AceStepBed.assemble(tail, head, geometry.windowFrames());
+                long builtAt = System.currentTimeMillis();
+                String body = AceStepBed.body(config, geometry, AceStepBed.wav(buffer, incoming.rate));
+                long sentAt = System.currentTimeMillis();
+                String answer = new AceStepClient(config.url(), config.apiKey).post(body);
+                long answeredAt = System.currentTimeMillis();
+                AceStepBed.Reply reply = AceStepBed.reply(answer);
+                if (!reply.ok) {
+                    note = reply.why + (reply.text.isEmpty() ? ""
+                            : " (the model said: " + flatten(reply.text) + ")");
+                    return null;
+                }
+                AceStepBed.Wav returned = AceStepBed.wav(reply.bytes);
+                if (!returned.ok) {
+                    note = returned.why;
+                    return null;
+                }
+                String wrongLength = AceStepBed.lengthCheck(returned, geometry);
+                if (wrongLength != null) {
+                    note = wrongLength;
+                    return null;
+                }
+                AceStepBed.Gain gain = AceStepBed.gain(returned, buffer, incoming.rate, geometry);
+                if (!gain.measured) {
+                    note = gain.why;
+                    return null;
+                }
+                AceStepBed.invert(returned.pcm, gain);
+                float[][] span = AceStepBed.span(returned, geometry);
+                if (span == null) {
+                    note = "the returned buffer does not reach the end of the passage's window";
+                    return null;
+                }
+                // Retimed to the rate this render works at — the bed goes under a passage rendered
+                // at the model's own rate, and only then is the whole head resampled to the file's.
+                float[][] material = resample(span, returned.rate, StemModel.MODEL_RATE);
+                int needed = (int) Math.round(geometry.gapMs * StemModel.MODEL_RATE / 1000d);
+                if (material[0].length < needed) {
+                    note = String.format(java.util.Locale.US, "the material retimed to %dHz is %d"
+                                    + " frames against the passage window's %d",
+                            StemModel.MODEL_RATE, material[0].length, needed);
+                    return null;
+                }
+                Logger.info("transition: DJ edit for {}: the cloud answered in {}ms — {}, {}, the"
+                                + " repainted span is {} frames at {}Hz retimed to {} frames at"
+                                + " {}Hz (the passage window is {} frames at that rate); the whole"
+                                + " request was in flight for {}ms (the buffer's own decodes took"
+                                + " {}ms, the request itself took {}ms), and it ran from the moment"
+                                + " this render's plan existed",
+                        request.title(), answeredAt - sentAt, returned.describe(), gain.describe(),
+                        span[0].length, returned.rate, material[0].length, StemModel.MODEL_RATE,
+                        needed, answeredAt - contextsAt, builtAt - contextsAt, answeredAt - sentAt);
+                return material;
+            }
+
+            /**
+             * One context of the cloud's buffer: {@code ms} of one file from {@code fromMs}, decoded
+             * once and cut to exactly that stretch.
+             *
+             * <p>The cut is measured from where the decode really began ({@link #windowStartMs}),
+             * because the extractor seeks to the container's own sync sample and may start before
+             * the offset it was asked for. These two contexts are the only material in the request
+             * whose position this app fixes, and the right one in particular is the round-32
+             * correction: it starts where the passage hands back to the incoming, not at that
+             * track's own start.
+             */
+            private float[][] context(String path, Format format, long fromMs, long ms,
+                                      boolean[] cancelled) throws Exception {
+                long want = Math.round(ms * format.rate / 1000d);
+                long lead = Math.max(1L, Math.round(CONTEXT_LEAD_MS * format.rate / 1000d));
+                final float[][] raw = new float[2][(int) (want + lead)];
+                long[] decoded = new long[1];
+                long[] firstPtsUs = new long[1];
+                boolean[] inner = new boolean[1];
+                boolean completed = decode(path, 2, fromMs, raw[0].length, request.stillWanted, inner,
+                        firstPtsUs, (pcm, block) -> {
+                            for (int ch = 0; ch < raw.length && ch < pcm.length; ch++) {
+                                System.arraycopy(pcm[ch], 0, raw[ch], (int) decoded[0], block);
+                            }
+                            decoded[0] += block;
+                        });
+                if (inner[0]) {
+                    cancelled[0] = true;
+                    return null;
+                }
+                long realStart = windowStartMs(firstPtsUs[0], fromMs);
+                int offset = (int) Math.round((fromMs - realStart) * format.rate / 1000d);
+                if (offset < 0 || offset + want > decoded[0]) {
+                    Logger.info("transition: DJ edit for {}: the cloud buffer's context from {}ms of"
+                                    + " {} decoded to {} frames from {}ms{}, which does not hold the"
+                                    + " {} frames it needs",
+                            request.title(), fromMs, path, decoded[0], realStart,
+                            completed ? "" : " (the decode stopped early)", want);
+                    return null;
+                }
+                return slice(raw, offset, (int) want);
+            }
+        }
+    }
+
+    /** A short shape for a log line: the two contexts and where the silence sits between them. */
+    private static String shapeOf(AceStepBed.Geometry geometry) {
+        if (geometry == null) return "nothing";
+        return String.format(java.util.Locale.US, "a %dms silence at %dms of the buffer, after a %dms"
+                        + " tail taken from %dms of the outgoing's file and before a %dms head from"
+                        + " %dms of the incoming's",
+                geometry.gapMs, geometry.tailMs, geometry.tailMs, geometry.aFromMs, geometry.headMs,
+                geometry.bFromMs);
+    }
+
+    /** What makes two cloud geometries the same request: every number the buffer's shape is. */
+    private static String keyOf(AceStepBed.Geometry geometry) {
+        return geometry.rate + "/" + geometry.tailMs + "/" + geometry.gapMs + "/" + geometry.headMs
+                + "/" + geometry.aFromMs + "/" + geometry.bFromMs;
+    }
+
+    /** The RMS of one stretch of a rendered head, dBFS — the level the bed is placed under. */
+    private static double levelDbOf(float[][] pcm, int from, int frames) {
+        double energy = 0d;
+        int count = 0;
+        for (float[] row : pcm) {
+            for (int i = from; i < from + frames && i < row.length; i++) {
+                if (i < 0) continue;
+                energy += row[i] * (double) row[i];
+                count++;
+            }
+        }
+        if (count == 0 || !(energy > 0d)) return -240d;
+        return 20d * Math.log10(Math.sqrt(energy / count));
+    }
+
+    /** A peak, as the log prints levels in this class. */
+    private static String fmtPeak(double peak) {
+        return String.format(java.util.Locale.US, "%.4f", peak);
+    }
+
+    /** One line's worth of a model's own words, for a log line. */
+    private static String flatten(String text) {
+        if (text == null) return "";
+        String flat = text.replace('\n', ' ').replace('\r', ' ').trim();
+        while (flat.contains("  ")) flat = flat.replace("  ", " ");
+        return flat.length() > 160 ? flat.substring(0, 160) + "…" : flat;
     }
 
     // --- the fusion ----------------------------------------------------------
@@ -779,11 +1265,22 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
      * renders today's edit from the same material it always did: the bridge when the bridge passes
      * its own measurement, the plain edit-with-vocal-gate otherwise. Nothing about those paths is
      * touched by the attempt, and the log says which of them it was and why.
+     *
+     * <p><b>The two materials (round 33).</b> {@code headStems} is the file's own head — every plan
+     * this method makes, and every sample the file is built from, comes off it and the head has not
+     * changed. {@code arrivalVocals} is the incoming's separated vocal row over the whole span the
+     * caller separated, which is <em>this</em> head extended to {@code StemFusion.ARRIVAL_PROBE_MS}:
+     * it is handed to {@link StemFusion#vocalStartMs} and to nothing else, because how far the
+     * material reaches is what decides whether a voice that arrives late is measured as an arrival
+     * at all — the whole of this round. Every other measurement here (the rows the wait reads, the
+     * hit shares, the bar lines) stays on the head the file is built from, so nothing but the
+     * landing moves.
      */
     private Fusion attemptFusion(StemModel.Candidate weights, Request request, Format format,
-                                 float[][][] headStems, double[] headBars, DjEdit.Plan edit,
-                                 double windowSec, int[] clipped, int[] refusedWhy,
-                                 long[] phases, boolean[] cancelled)
+                                 float[][][] headStems, float[][] arrivalVocals, double[] headBars,
+                                 DjEdit.Plan edit, double windowSec, int[] clipped,
+                                 int[] refusedWhy, long[] phases, boolean[] cancelled,
+                                 BedRunner cloudBed)
             throws Exception {
         double aBeatMs = request.outgoingBeatPeriodMs;
         double bBeatMs = request.beatPeriodMs;
@@ -831,9 +1328,17 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 Math.round(aDurMs - StemFusion.CUT_BACK_MS - request.blendMs),
                 probeStart[0] + decoded[0].length * 1000L / format.rate);
         final double bodyDb = body.bodyDb();
+        // ⚠️ Round 33: read off the PROBE's vocal row and not the head's. The head is what the file
+        // is built from and it ends where the blend's own window ends; the arrival is a fact about
+        // the incoming track's file that can sit later than that (the pair this round is about: a
+        // 16 044 ms head, its voice genuinely arriving at 16-18 s, and eleven seconds of it read as
+        // the separation's own bleed). How long that material is decides the whole measurement —
+        // `vocalStartMs` reads the arrival against the row's OWN body, so a row that stops before
+        // the voice measures the bleed as the body and answers "the voice is already singing" — and
+        // that is the only thing this round changes about it (see
+        // {@link StemFusion#ARRIVAL_PROBE_MS}).
         long firstVocalMs = StemFusion.vocalStartMs(
-                headStems[StemGesture.Stem.VOCALS.row()], StemModel.MODEL_RATE, 0L,
-                DjEdit.SILENT_FRAME_DBFS);
+                arrivalVocals, StemModel.MODEL_RATE, 0L, DjEdit.SILENT_FRAME_DBFS);
         // ⚠️ Every bar line the fusion is given is in ms, and the renderer's are in seconds (see
         // {@link #inMs}): the conversion happens once, here, for both of the plans below.
         double[] headBarsMs = inMs(headBars);
@@ -848,7 +1353,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 request.removalMs, request.incomingContentStartMs, aBeatMs,
                 request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
                 headBarsMs, StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT, body,
-                firstVocalMs, incomingOn));
+                firstVocalMs, incomingOn, 0, null, incomingGrooveOf(headStems)));
         if (!plan.valid) {
             refusedWhy[0] = WHY_PLAN;
             Logger.info("transition: DJ edit for {}: no fusion — {}. The render is today's edit",
@@ -858,6 +1363,17 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         Logger.info("transition: DJ edit for {}: the two backgrounds can be fused — {}. Its own"
                         + " bar grid came from {} of the outgoing track's low end decoded in {}ms",
                 request.title(), plan.describe(), gridText(aBeatMs), probeMs);
+        // ⚠️ The cloud bed's request goes out HERE, and this is the earliest instant it can: the
+        // passage's own numbers (where it begins, how long it is, where it hands back to the
+        // incoming) are known and nothing above this line depends on the cloud, so the request runs
+        // while this render finishes the fusion — the junction search below, the wait's retry
+        // renders, and the encode. The cloud takes 21–34 s where a render takes 130–150, so what a
+        // boundary minutes away pays for the bed is the tail of one request and not one request.
+        // (If the landing moves after this — the wait extends the hold and the entry is pulled back
+        // with it — the request that is already in flight no longer fits the passage this render
+        // writes, and {@link BedRunner} asks again for the geometry that will be written rather than
+        // summing a bed made for another one.)
+        if (cloudBed != null) cloudBed.ask(plan, format);
         if (plan.incomingDrumsMs >= 0L || plan.incomingBassMs >= 0L) {
             // ⚠️ And how much the reading can be trusted: on a stem whose beats span tens of dB (the
             // device's Lose My Mind is 52 dB from its loudest beat to its quietest and OPENS on two
@@ -927,7 +1443,8 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         StemFusion.Plan chosen = StemFusion.plan(new StemFusion.Input(aDurMs, request.blendMs,
                 request.removalMs, request.incomingContentStartMs, aBeatMs,
                 request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
-                headBarsMs, quiet, groove, body, firstVocalMs, incomingOn));
+                headBarsMs, quiet, groove, body, firstVocalMs, incomingOn, 0, null,
+                incomingGrooveOf(headStems)));
         if (!chosen.valid) {
             refusedWhy[0] = WHY_PLAN;
             Logger.info("transition: DJ edit for {}: no fusion — the junction could not be placed"
@@ -980,7 +1497,8 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         StemFusion.Plan coupled = StemFusion.plan(new StemFusion.Input(aDurMs, request.blendMs,
                 request.removalMs, request.incomingContentStartMs, aBeatMs,
                 request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
-                headBarsMs, quiet, groove, body, firstVocalMs, incomingOn, 0, exit));
+                headBarsMs, quiet, groove, body, firstVocalMs, incomingOn, 0, exit,
+                incomingGrooveOf(headStems)));
         if (!coupled.valid) {
             refusedWhy[0] = WHY_PLAN;
             Logger.info("transition: DJ edit for {}: no fusion — the coupling could not place the"
@@ -1067,6 +1585,17 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                             request.title(), extra, extra == 1 ? "" : "s",
                             made.report.pulseLine(), best == null ? "it was refused"
                                     : best.report.pulseLine());
+                }
+                // The bed, summed under the passage this render just made and before anything is
+                // encoded — the last thing that happens to the head, and the only thing in this
+                // render that came off the network. Everything about it is measured and logged; the
+                // fusion's own acceptance above is untouched by it, because the clause is about the
+                // passage and the bed is a layer under it (its ends are exactly zero, which is what
+                // keeps both seams where the fusion put them).
+                if (cloudBed != null) {
+                    long bedStartedAt = System.currentTimeMillis();
+                    cloudBed.addTo(made.edited, made.plan, format);
+                    phases[6] = System.currentTimeMillis() - bedStartedAt;
                 }
                 return made;
             }
@@ -1185,8 +1714,27 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         StemFusion.Plan attempt = StemFusion.plan(new StemFusion.Input(aDurMs, request.blendMs,
                 request.removalMs, request.incomingContentStartMs, aBeatMs,
                 request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
-                headBarsMs, quiet, groove, body, firstVocalMs, incomingOn, extra, exit));
+                headBarsMs, quiet, groove, body, firstVocalMs, incomingOn, extra, exit,
+                incomingGrooveOf(headStems)));
         return attempt != null && attempt.valid ? attempt : null;
+    }
+
+    /**
+     * <b>Round 33: the incoming track's own groove</b> — whether its separated drums and low end are
+     * playing at a position in its own file — measured off the head this render has already
+     * separated, with the junction's own instrument and floor ({@link
+     * StemFusion#GROOVE_FLOOR_DBFS}, {@link StemFusion#grooveOf}).
+     *
+     * <p>Why it exists: {@link StemFusion.Input#incomingGroove} is the clause that keeps the landing
+     * out of the incoming's own quiet intro. The listener, on the two landings rendered for them:
+     * 「上一轮的 34800 很完美」, and the measurement behind their ear is that the same track's drums and
+     * low end are −70…−87 dBFS for its first 19 s — so the shallow landing handed the passage a
+     * second deck that was not playing, and the fusion's second half was one deck fading out.
+     */
+    private static StemFusion.Groove incomingGrooveOf(float[][][] headStems) {
+        return StemFusion.grooveOf(headStems[StemGesture.Stem.DRUMS.row()],
+                headStems[StemGesture.Stem.BASS.row()], StemModel.MODEL_RATE, 0L,
+                StemFusion.GROOVE_FLOOR_DBFS);
     }
 
     /** The step one plan's table uses, ms. */
@@ -1902,6 +2450,21 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         for (int ch = 0; ch < pcm.length; ch++) {
             out[ch] = java.util.Arrays.copyOf(pcm[ch], Math.min(frames, pcm[ch].length));
         }
+        return out;
+    }
+
+    /**
+     * The first {@code frames} of a separated window, per row and channel: what a render that
+     * separated a longer span than the head it writes builds that head from (round 33 — the
+     * probe's span is separated, the head's own samples are what goes into the file).
+     *
+     * <p>The same array when there is nothing to cut, so a render that did not extend its
+     * separation is not merely equal to what it was — it is the identical material.
+     */
+    private static float[][][] trimStems(float[][][] stems, int frames) {
+        if (stems.length == 0 || stems[0].length == 0 || frames >= stems[0][0].length) return stems;
+        float[][][] out = new float[stems.length][][];
+        for (int row = 0; row < stems.length; row++) out[row] = trim(stems[row], frames);
         return out;
     }
 

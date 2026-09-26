@@ -481,6 +481,18 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
                 case "aiTimeoutMs":
                     pushTransition();
                     break;
+                // The ACE-Step rows — their own group, because it is a different service from the
+                // AI music assistant above (a music GENERATION endpoint, with its own protocol, its
+                // own key and its own model name). All five are one configuration, so changing any
+                // of them re-pushes all of it; the renderer reads it once per render, which happens
+                // minutes before the boundary it is for.
+                case SettingsCatalog.ACE_STEP_ENABLED_KEY:
+                case SettingsCatalog.ACE_STEP_BASE_URL_KEY:
+                case SettingsCatalog.ACE_STEP_API_KEY_KEY:
+                case SettingsCatalog.ACE_STEP_MODEL_KEY:
+                case SettingsCatalog.ACE_STEP_BED_DB_KEY:
+                    pushAceStep();
+                    break;
                 case "highQuality": controller.setHighQualityEnabled(bool("highQuality")); break;
                 case "maxCacheSizeMB": controller.setCacheMaxSizeMB(intOf("maxCacheSizeMB")); break;
                 default: break;
@@ -505,6 +517,11 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         controller.setCacheMaxSizeMB(intOf("maxCacheSizeMB"));
         pushCustomApi();
         pushTransition();
+        // The ACE-Step group is pushed with everything else on load, so a session that starts with
+        // the switch already on has its settings at the controller before the first render is asked
+        // for — a value that only arrived after the first boundary would be a feature that appears
+        // to need a restart.
+        pushAceStep();
     }
 
     /** The whole 「智能过渡」 block, in one place: the switch, the forced kind, the
@@ -549,6 +566,31 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
                 intOf(SettingsCatalog.TRANSITION_BLEND_KEY) * 1000L);
         controller.setAiTransitionConfig(str("aiBaseUrl"), str("aiApiKey"), str("aiModel"),
                 intOf("aiTimeoutMs"));    }
+
+    /**
+     * The whole ACE-Step group in one place, pushed to the controller on load and on every change of
+     * one of its rows: the switch, the address, the user's own key, the model, and how far under
+     * the passage the generated bed sits.
+     *
+     * <p>Its own group and its own push, deliberately not folded into {@link #pushTransition()}: the
+     * 「AI」 rows above configure the AI music assistant (an OpenAI-compatible <em>text</em> endpoint),
+     * while this is a music-generation endpoint with a different protocol, a different key and a
+     * different model name — sharing a key between them would be wrong, and so would sharing a push.
+     *
+     * <p>The renderer asks for the cloud only when the four required values are all there; with the
+     * switch off, or a row empty, the edit a render writes is byte for byte the one this build made
+     * before ACE-Step existed. The key never leaves this method's arguments except into the config
+     * the controller holds, and the controller's log line says whether one is set — never the key.
+     */
+    private void pushAceStep() {
+        if (controller == null) return;
+        controller.setAceStepBedConfig(
+                bool(SettingsCatalog.ACE_STEP_ENABLED_KEY),
+                str(SettingsCatalog.ACE_STEP_BASE_URL_KEY),
+                str(SettingsCatalog.ACE_STEP_API_KEY_KEY),
+                str(SettingsCatalog.ACE_STEP_MODEL_KEY),
+                intOf(SettingsCatalog.ACE_STEP_BED_DB_KEY));
+    }
 
     private void pushCustomApi() {
         if (controller == null) return;

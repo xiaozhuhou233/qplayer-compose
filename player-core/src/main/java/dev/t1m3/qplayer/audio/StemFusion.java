@@ -96,12 +96,56 @@ public final class StemFusion {
      *  outgoing's hold ends, so both backings are near unity across that whole step. */
     public static final int B_ARRIVAL_FADE_STEPS = 1;
 
-    /** How many steps a <b>SLAM</b> lasts: one (round 5). A pair whose grids are in no relation has
-     *  no common bar to lay three states of a table on, so the slam gets the one gesture that needs
-     *  no beat matching at all — the outgoing's rows play for one bar of the incoming's own grid and
+    /** How many steps a <b>SLAM</b> lasts: <b>three</b> (one until the listening that made this
+     *  {@link #RULE_VERSION} 10). A pair whose grids are in no relation has no common bar to lay
+     *  three states of a table on, so the slam gets the one gesture that needs no beat matching at
+     *  all — the outgoing's rows play for {@code SLAM_STEPS} bars of the incoming's own grid and
      *  everything changes hands on that bar line, which is where the incoming's grid is solid. The
      *  one cost of no relation is that this cut lands wherever it lands in the outgoing's own bar;
      *  that is what a DJ's slam mix does, and it is why the gesture is still a cut and not a fade.
+     *
+     *  <p><b>Why three — the listening that decided it.</b> One bar was never a length anybody chose:
+     *  it was the shortest passage the arithmetic allowed, and what the user asked for at the end of
+     *  round 30 is that the slam be <em>listened to as a length</em>. Four renders of the same pair at
+     *  <b>1 / 2 / 3 / 4 bars</b> of the incoming's grid — the incoming's bar is <b>2 043.94 ms</b>, so
+     *  <b>2.1 / 4.2 / 6.2 / 8.3 s</b> — and the user chose the <b>3-bar</b> render, 6.2 s. The plan
+     *  that render comes from is the one number applied everywhere: the window is
+     *  {@code 3 * 2 043.94 + 80 = 6 212 ms}, which is what the harness's own mirror
+     *  ({@code fusion/round6.py}, whose {@code SLAM_STEPS} is this constant) prints for the chosen
+     *  variant, and it passes that mirror's own clauses.
+     *
+     *  <p>⚠️ <b>And it is not the upper end of what would work — 5 and 6 bars are REFUSED</b>, by the
+     *  arithmetic pass, before anything is rendered: "no line of the outgoing's grid inside the ...ms
+     *  the passage can be taken from", because the passage and the junction search's own band are
+     *  paid for out of the same cost bound ({@link #FUSION_TAIL_MAX_MS}). So 3 sits below a real
+     *  ceiling rather than being an arbitrary middle. On the pair that was listened to (a
+     *  2 043.94 ms bar) that bound is exactly what refuses 5 bars
+     *  ({@code 5*2 043.94 + 80 + 2*1 000 = 12 300 > 12 000}) while 4 passes ({@code 10 256}) —
+     *  which is the ceiling the renders found, reproduced by the arithmetic here.
+     *
+     *  <p><b>What this costs, said plainly:</b> the passage is now three bars of the incoming's grid
+     *  out of a {@link #FUSION_TAIL_MAX_MS} budget shared with the separation's own leads, so a slam
+     *  on a much slower incoming than the listened one is refused by {@link #refusal}'s cost clause
+     *  where a one-bar slam used to fit — the bound bites at a bar wider than
+     *  {@code (12 000 - 80 - 2 000) / 3 ≈ 3.3 s} (about 73 BPM at 4 beats a bar). Such a pair keeps
+     *  today's plain edit and is refused before anything is decoded; that is the same arithmetic pass
+     *  that refuses 5 and 6 bars, not a second rule.
+     *
+     *  <p><b>Everything on the slam path follows from this one number</b> — that is the property the
+     *  length change had to preserve, and each of these is the same {@code SLAM_STEPS}:
+     *  <ul>
+     *    <li>the hold, i.e. the line everything changes hands on:
+     *        {@code entry + SLAM_STEPS * barStep} (<b>swap</b> / <b>bass</b>);</li>
+     *    <li>the file's window: {@code SLAM_STEPS * stepMs + CUT_MS}, so the {@link #CUT_MS} splice
+     *        that ends on the line is <em>inside</em> the window {@code gainAt} guards
+     *        ({@code fusionEndMs} = {@code swap + CUT_MS});</li>
+     *    <li>the material A's own rows occupy, taken from A's file: {@code sourceSpanMs} =
+     *        {@code ceil((SLAM_STEPS * stepMs + CUT_MS) / stretch)} — A's rows really do span three
+     *        bars plus the splice;</li>
+     *    <li>the pre-decode clause in {@link #refusal} that decides whether the pair may be attempted
+     *        at all, and the voice floor the coupling reads the file's own gesture with
+     *        ({@link #voiceFloorMs}, whose hold argument is this constant on a slam).</li>
+     *  </ul>
      *
       * ⚠️ <b>A SLAM cuts, and it is the only gesture that does — on the user's own instruction.</b>
       * Round 5's listening produced two sentences and they are about different paths: for the
@@ -116,12 +160,14 @@ public final class StemFusion {
       * (0.3x, no dip), where an instantaneous cut reads 0.3227 (1.2x). So: keep the cut, run the
       * splice.
       *
-      * <p>And the window is that one step PLUS the splice — `fusionEndMs` is where A is exactly gone,
-      * i.e. `swap + CUT_MS` — because the file has to contain the hand-over it is named for. Without
-      * the extra 80 ms `gainAt`'s own guard sent the splice's samples to the floor and the outgoing's
-      * rows fell unity → exactly 0 in one sample.
+      * <p>And the window is those {@code SLAM_STEPS} steps PLUS the splice — `fusionEndMs` is where A
+      * is exactly gone, i.e. `swap + CUT_MS` — because the file has to contain the hand-over it is
+      * named for. Without the extra 80 ms `gainAt`'s own guard sent the splice's samples to the floor
+      * and the outgoing's rows fell unity → exactly 0 in one sample. The window is read as the max of
+      * the two ways of writing the same span so that the rounding of a bar line can never leave the
+      * splice's last sample outside it (see `plan`).
      */
-    public static final int SLAM_STEPS = 1;
+    public static final int SLAM_STEPS = 3;
 
     /** How long each unity/0 change takes. 80 ms: long enough not to click, short enough that the
      *  change is heard as an edit on the line rather than as a fade — the whole point of the
@@ -217,6 +263,68 @@ public final class StemFusion {
      *       than 20. Every file written before it carries a {@code -v} that is the old, later gate
      *       (and an {@code -e} chosen to match it), so a listener would hear the very complaint
      *       「歌词要稍微早一点」 again on exactly the pairs they had already heard.</li>
+     *   <li><b>9 → 10</b> — the SLAM path's own length, and this one is a <em>listening</em> rather
+     *       than a defect: {@link #SLAM_STEPS} 1 → 3, so the outgoing's rows play for three bars of
+     *       the incoming's own grid instead of one before everything changes hands. Every
+     *       unrelated-tempo pair's edit is a different file (a 3-bar passage, 6 212 ms on the pair
+     *       that was listened to), so a file written before this bump would be played as today's
+     *       slam and the listener would hear the length they rejected — the one-bar hand-over.</li>
+     *   <li><b>10 → 11</b> — {@link #vocalStartMs} reads the incoming's voice against the vocal
+     *       row's OWN <b>body</b> ({@link #VOICE_ARRIVAL_DB}) instead of against the absolute floor
+     *       the renderer hands in, so a separated row that carries a faint bleed from its first
+     *       sample no longer reports its voice as already singing in the first window. On the pair
+     *       that was listened to ({@code unhappy}, a 12 s blend: the row's body −13.6, its bleed
+     *       −25.4, its voice from 17 s) the measurement moves from 0 ms to 17 000 ms, and with it
+     *       the landing the plan derives — the last bar line the window can afford instead of the
+     *       track's own beginning, which is the eleven seconds of voice-less intro the listener
+     *       heard as 「不像过渡」. Every file written before this bump carries the incoming deck at
+     *       the old measurement and is played at it — the version is in every edit's key, not only a
+     *       fusion's, so this is what makes those files re-render rather than keep playing the entry
+     *       this round moved.</li>
+     *   <li><b>11 → 12</b> — the material {@link #vocalStartMs} is fed now reaches a late arrival.
+     *       Round 32's rule change above was necessary but not sufficient: the renderer separated a
+     *       head of {@code removalMs + returnSpanMs} — 16 044 ms on the listened pair — and that
+     *       track's voice arrives at <b>16–18 s</b> of its own file, so the row the rule measured
+     *       held the bleed and the eleven-second hole and nothing else. Its body
+     *       ({@code bodyLevelDb}, the 90th-percentile window) was therefore the bleed, and the
+     *       answer stayed <b>0</b>: the landing the listener picked was still unreachable.
+     *       {@link #arrivalProbeMs} lengthens the separated-and-measured span to
+     *       {@link #ARRIVAL_PROBE_MS} (19 000 ms — measured, see that constant: 18 000 does not
+     *       clear it, because the arrival has to fall inside the probe's <em>last tenth</em> for the
+     *       body to be the voice rather than the bleed). The file's own length and encode are
+     *       unchanged. Every edit written before this bump was planned from the truncated row, so
+     *       each one has to be planned again — including the ones written minutes ago under 11.</li>
+     *   <li><b>12 → 13</b> — the landing's own <b>window</b> is bounded and must not sit in the
+     *       incoming's own quiet intro, and this is the rule the user asked for after listening to
+     *       round 32's two landings: 「落点寻找不要太靠后或者太靠前，尽量在前奏找完，一开始就是词的那就过
+     *       几个小节找，总之不要把小半个歌跳过」, and then, of the deeper one:「上一轮的 34800 很完美」.
+     *       Rounds 25–32 put the landing on the coupling — {@code firstVocal - goneFile} — and bounded
+     *       it only by what the window could pay for; but the {@code firstVocalMs} that number is
+     *       measured from is the <b>sustained</b> arrival (16–18 s on the pair the user listens to, see
+     *       the 11 → 12 entry above), so a long track's ceiling left the deck starting deep in the song
+     *       with the incoming's own lines held out over the whole stretch — the 「跳过了很多词」 the user
+     *       heard, in the other direction. Three clauses now, in this order:
+     *
+     *       <ul>
+     *         <li>the landing is clamped into <b>two bars</b> of the incoming's own grid when the track
+     *         is already singing at its own content start ({@link #ENTRY_WORDS_BARS}, tested over
+     *         {@link #ENTRY_AT_ONCE_BARS} bars) — 「一开始就是词的那就过几个小节找」;</li>
+     *         <li>and it may never start more than {@link #ENTRY_MAX_MS} past that content start — the
+     *         "don't skip half the song" guard, which the user's own 过渡时长 still bounds from
+     *         below (the ceiling is unchanged, so no pair can plan what its blend cannot pay for);</li>
+     *         <li>and it may not sit where the incoming's own groove is silent ({@link
+     *         Input#incomingGroove}): that is the clause the 34 800 ms landing the user called perfect
+     *         is made of. Measured on that pair, the incoming's drums and low end are −70…−87 dBFS for
+     *         its first 19 s, so the shallow landing gave the passage a second deck that was not
+     *         playing — the fusion's second half was one deck fading out.</li>
+     *       </ul>
+     *
+     *       <b>The fusion itself is untouched</b> — the gesture's shape, the gate, the departure and
+     *       the stretch are the same numbers; only which bar line the deck starts on moved. The
+     *       floor gives way to the cap so that no pair which fused before refuses now. Every edit
+     *       written before this bump is planned again (the version is in the edit's own key), and the
+     *       renderer's separated head already reaches as far as the landing can
+     *       ({@code headMs = removalMs + span}), so a deeper landing costs no extra separation.</li>
      * </ul>
      *
      * <p>The price is one re-render per pair, once, in the pre-lane where there are minutes of
@@ -226,7 +334,7 @@ public final class StemFusion {
      * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
      * name.
      */
-    public static final int RULE_VERSION = 9;
+    public static final int RULE_VERSION = 13;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with
@@ -807,7 +915,8 @@ public final class StemFusion {
      * "the outgoing is not still clearly audible" true for both of the things the listener hears as
      * the outgoing track: the live deck and the carried rows.
      *
-     * @param holdSteps      steps the rows hold at unity ({@link #A_HOLD_STEPS}, or 1 on a slam)
+     * @param holdSteps      steps the rows hold at unity ({@link #A_HOLD_STEPS}, or
+     *                       {@link #SLAM_STEPS} on a slam)
      * @param fadeSteps      steps the low end takes to reach the floor ({@code lowEndFadeSteps};
      *                       a slam's splice is its own answer, so its caller passes 0)
      * @param barStepMs      one step of the gesture, ms
@@ -848,6 +957,41 @@ public final class StemFusion {
      *  its intro is skipped: the deck starts a bar or two early so the voice lands on a beat of a
      *  track that is already playing, never after the voice itself. */
     public static final int VOCAL_SKIP_RUNWAY_BARS = 1;
+
+    /** How far into the incoming track the deck may start at the <b>latest</b>, ms — the absolute cap
+     *  on the landing's own window (round 33).
+     *
+     *  <p>The user's rule, after listening to the rounds that put the landing on the coupling:
+     *  「落点寻找不要太靠后或者太靠前，尽量在前奏找完…总之不要把小半个歌跳过」, and then, after hearing
+     *  the landing this round makes reachable: 「上一轮的 34800 很完美」 — 34 800 ms of a 187 s track, so
+     *  the cap has to sit well past four bars and short of the song. 40 000 ms.
+     *
+     *  <p><b>It is not a second budget.</b> The user's own 过渡时长 is still what pays for the
+     *  landing ({@code ceiling}, the window the incoming's vocals are out for — the same clause the
+     *  plan asks as {@code fusionEnd <= removalMs}), so this cap only ever binds when their own
+     *  setting already reaches that far. What it stops is a landing that skips most of a record on a
+     *  pair whose blend is long: "half the song" is the thing they named as the failure. */
+    public static final long ENTRY_MAX_MS = 40_000L;
+
+    /** How many bars of the incoming's own grid a track that is <b>already singing at its content
+     *  start</b> skips before the deck starts — the floor on the landing's window (round 33).
+     *
+     *  <p>「一开始就是词的那就过几个小节找」. Two bars, and what those bars cost is not their vocals
+     *  (the gate holds the incoming's own singing out over the passage on <em>any</em> landing) but
+     *  where the deck's own material comes from: two bars in rather than the track's first sample.
+     *  On the pair the user listens to this is the landing they picked by ear before this round
+     *  existed — {@code unhappy}'s 4 450 ms is its own second bar line plus the grid's phase. */
+    public static final int ENTRY_WORDS_BARS = 2;
+
+    /** How close to the content start the incoming's own voice has to be measured for its track to
+     *  count as "singing at the start" — {@link #ENTRY_WORDS_BARS}'s own test, in bars of the
+     *  incoming's grid.
+     *
+     *  <p>Two bars and not one: of the tracks that sing at once, two are measured just over a bar in
+     *  ({@code audio_violet} 2 150 ms = 1.07 bars) and they are intros in name only — the count of
+     *  tracks whose voice arrives between 2.2 s and 9.2 s is <b>zero</b> (see
+     *  {@link #VOCAL_SKIP_MIN_BARS}). */
+    public static final int ENTRY_AT_ONCE_BARS = 2;
 
     /** How far either side of the junction target the search may look, in bars of the outgoing's
      *  own grid (round 3: it was ±1 bar, i.e. "the nearest line, with a ±1 s preference").
@@ -1253,15 +1397,28 @@ public final class StemFusion {
      * and skipping an intro on the strength of one is worse than not skipping. The answer is the
      * first {@link #VOCAL_SUSTAIN_MS} of the vocal row whose <em>median</em> frame is above it — a
      * sustained voice, which is what a voice arriving is.
+     *
+     * <p>⚠️ <b>And the floor it has to clear is the row's own, since round 32</b> — the later of
+     * the {@code floorDbfs} the caller hands in and the row's body less {@link #VOICE_ARRIVAL_DB}.
+     * The absolute floor the renderer passes ({@code DjEdit.SILENT_FRAME_DBFS}, −50) is a
+     * <em>lower bound</em> here and not the test: a separated vocal row's bleed is tens of dB above
+     * it (the pair that was listened to carries −25 dBFS from about 75 ms on), so on its own it
+     * cannot tell a bleed from a voice. That constant's own note has the measurement.
      */
     public static long vocalStartMs(float[][] vocals, int rate, long startMs, double floorDbfs) {
         if (vocals == null || vocals.length == 0 || vocals[0] == null || !(rate > 0)) return -1L;
         double[] levels = StemBridge.frameLevelsDb(vocals, rate, vocals[0].length / (double) rate);
         int frameMs = Math.max(1, (int) Math.round(StemBridge.FRAME_SEC * 1000d));
         int frames = (int) Math.max(1L, Math.round(VOCAL_SUSTAIN_MS / frameMs));
+        // The caller's floor stays the floor when the row has no body to be read against (a row
+        // shorter than one BODY_WINDOW_MS): `bodyLevelDb` answers NaN and the rule is the one this
+        // method always applied (see VOICE_ARRIVAL_DB's own note for the other cases).
+        double bodyDb = rowBodyDb(vocals, rate, startMs);
+        double floor = Double.isNaN(bodyDb) ? floorDbfs
+                : Math.max(floorDbfs, bodyDb - VOICE_ARRIVAL_DB);
         for (int i = 0; i + frames <= levels.length; i++) {
             double median = StemBridge.median(java.util.Arrays.copyOfRange(levels, i, i + frames));
-            if (median > floorDbfs) return startMs + (long) i * frameMs;
+            if (median > floor) return startMs + (long) i * frameMs;
         }
         return -1L;
     }
@@ -1269,6 +1426,149 @@ public final class StemFusion {
     /** How long a stretch of the incoming's vocal row has to be above the floor before it counts as
      *  the voice arriving, ms (see {@link #vocalStartMs}). */
     public static final long VOCAL_SUSTAIN_MS = 1_000L;
+
+    /**
+     * The level of the vocal row's own <b>body</b>, dBFS — {@link #bodyLevelDb} over the whole of
+     * the material handed to {@link #vocalStartMs}, which is the same instrument and the same
+     * {@link #BODY_WINDOW_MS} windows the outgoing's body is measured with ({@link #bodyLevelOf}:
+     * the loud tenth of its one-second windows). NaN when the row holds no full window, which
+     * leaves the caller's own floor as the answer.
+     *
+     * <p>The span is the shortest channel, the same bound the frame scan above uses — a channel
+     * shorter than the first one would otherwise be read past its end by the energy sum.
+     */
+    private static double rowBodyDb(float[][] vocals, int rate, long startMs) {
+        int samples = vocals[0].length;
+        for (float[] channel : vocals) {
+            if (channel != null) samples = Math.min(samples, channel.length);
+        }
+        return bodyLevelDb(vocals, rate, startMs, startMs, samples * 1000L / rate);
+    }
+
+    /**
+     * How far under the row's OWN body the {@link #VOCAL_SUSTAIN_MS} median of a vocal row may sit
+     * and still count as the voice arriving, dB — the second half of {@link #vocalStartMs}, and the
+     * half that makes its answer a measurement of the voice rather than of a bleed (round 32).
+     *
+     * <p><b>Why the floor has to be relative, and it is measured.</b> The incoming track of the
+     * pair that was listened to ({@code unhappy}, a 12 s blend) separates with a <b>−25 dBFS
+     * presence in its vocal row from about 75 ms on</b> — separation bleed from the backing rather
+     * than singing — while its voice really arrives at 16-17 s. The median of each 1 s window of its
+     * 25 ms frames: <b>0-1 s −25.39, 1-2 s −27.28, 2-3 s −29.80, 3-4 s −37.95, 4-15 s −71 … −75</b>
+     * (the voice genuinely absent for eleven seconds), <b>16-17 s −24.66, 17-18 s −13.57, 18-19 s
+     * −14.30</b>. The absolute floor the renderer hands in ({@code DjEdit.SILENT_FRAME_DBFS} = −50)
+     * sits 25 dB under that bleed, so the FIRST window already cleared it, {@link #vocalStartMs}
+     * answered <b>0 ms</b>, the deck started at the track's own beginning and the rendered
+     * transition ran into eleven seconds of voice-less intro — which is the 「不像过渡」 the listener
+     * reported. No absolute floor can answer a row whose own bleed is louder than it, so the
+     * reference has to be the row's own body: the instrument the rest of this file already reads
+     * levels with ({@link #bodyLevelDb}, the loud tenth of the {@link #BODY_WINDOW_MS} windows, as
+     * {@link #QUIET_PASSAGE_DB}, {@link #OUTGOING_EXIT_DB} and {@link #INCOMING_ON_DB} all are).
+     *
+     * <p><b>Why 6.</b> The bleed sits at −25.4 and the body at −13.6 … −14.5 (the sustained level
+     * from 17 s on) — <b>11 dB apart</b> — so 6 dB separates them with margin, while a passage that
+     * is merely a quieter verse stays an arrival (the same 6 dB "clearly audible" line
+     * {@link #VOICE_GATE_FLOOR_DB} draws). On this track the first window whose 1 s median clears
+     * {@code body − 6 = −19.6} is <b>17-18 s</b> (the 16-17 s window at −24.66, still the bleed,
+     * does not), so the answer becomes <b>17 000 ms</b> instead of 0.
+     *
+     * <p>⚠️ <b>Never lower this to make anything pass.</b> This number IS the separation between a
+     * bleed and a voice: below it the bleed's own windows qualify again, which is the defect the
+     * constant exists for, and the deck goes back to the track's own beginning on exactly the pairs
+     * the round is about.
+     *
+     * <p>⚠️ <b>Two things it cannot do, and both are the honest limits of the rule.</b> (1) A row
+     * with <em>no</em> voice at all measures its own bleed as its body, so the floor sits 6 dB under
+     * the bleed and the first window still clears it: the answer stays {@code startMs}, exactly
+     * where the absolute floor put it — that case acquires no arrival it does not have, and must
+     * not get worse (the row a separation really returns for the track above is one of these if the
+     * material stops before the voice: the renderer's separated head is
+     * {@code removalMs + returnSpanMs} = 16 044 ms for it, and its arrival begins at 16 s, so the
+     * head holds the bleed and not one second of the body). (2) The body is measured over the
+     * material <em>handed in</em>: a row that ends before the voice comes in has no body to be
+     * relative to and is answered as the absolute floor answered it.
+     */
+    public static final double VOICE_ARRIVAL_DB = 6d;
+
+    /**
+     * How long the material a renderer hands to {@link #vocalStartMs} has to reach, ms — the span
+     * the arrival has to be <em>inside</em> for the rule above to be able to see it at all
+     * (round 33).
+     *
+     * <p><b>Why a constant, and the measurement.</b> {@link #VOICE_ARRIVAL_DB}'s own note names the
+     * pair this is about and the renderer's separated head for it: {@code removalMs +
+     * returnSpanMs} = <b>16 044 ms</b> for a 12 s blend on a 510.986 ms grid — and that track's
+     * voice genuinely arrives at <b>16-18 s</b> of its own file (per 1 s medians of its vocal row:
+     * 4-15 s is −71 … −75 dBFS, 16-17 s is −24.66, 17-18 s is −13.57, 18 s on is −13.6 … −14.5). So
+     * the head the rule was reading <em>ended before the arrival</em>: all sixteen of its one-second
+     * windows were the faint separation bleed or the eleven-second hole, its body was measured as
+     * the <em>bleed</em> (−27.3 dBFS), the floor went 6 dB under that (−33.3), and the very first
+     * window (−25.4) cleared it — {@link #vocalStartMs} answered <b>0</b> and the deck started at
+     * the track's own beginning with eleven seconds of voice-less intro in front of it. The rule was
+     * right and the material was short of the fact it is about (「AI 推断每首歌的过渡落点」).
+     *
+     * <p>⚠️ <b>Why 19 000 and not the "one second past the arrival" that 18 000 looks like.</b>
+     * Because the floor is read against the row's own body, the material has to be long enough for
+     * that body to be <em>found</em>: {@link #bodyLevelDb} answers the window at the 90th percentile
+     * of its {@link #BODY_WINDOW_MS} windows, so the arrival has to sit inside the material's last
+     * tenth. Measured on this pair's own table (1 s windows: −25.39, −27.28, −29.80, −37.95, twelve
+     * at −71 … −75, −24.66, −13.57, −14.30), as the material handed in grows:
+     * <pre>
+     *   15 000 - 18 500 ms   body = −25.40 or −24.66 (a bleed window)   floor −31.4 / −30.7   → 0
+     *   19 000 - 26 000 ms   body = −13.60 (the voice's own second)     floor −19.6          → 16 475
+     * </pre>
+     * At 18 000 ms the 90th-percentile index is still the 16-17 s window — the twelve-second hole
+     * leaves one window too few above it — and the answer is <b>still 0</b>: that span pays for the
+     * material and buys nothing. 19 000 ms is the shortest span on which this pair's own arithmetic
+     * answers its arrival, and the answer does not move again from there to 26 000 (measured in
+     * 500 ms steps). What the rule needs is the arrival inside the last tenth of what it is given,
+     * which is what makes a fixed constant right for the pair this round is about — and a per-track
+     * answer (separate until the body is the body) a later round's question.
+     *
+     * <p><b>What the value buys, and what it must not be lowered to.</b> The answer only has to
+     * clear the plan's own ceiling to place the landing: on this pair that ceiling is
+     * {@code removalMs - windowMs} = 12 000 − 6 212 = <b>5 788 ms</b>, and every arrival past it
+     * lands on the same line — <b>4 450</b>, which skips 4 088 ms of the incoming's intro, the
+     * figure the listener chose. ⚠️ 18 000 does not clear it on this pair (it answers 0, the very
+     * defect this round exists to fix), and where the threshold sits is the percentile rule's own
+     * arithmetic rather than a margin that may be trimmed back for cost.
+     *
+     * <p>⚠️ <b>What this is not.</b> It is not a measurement rule and it changes no threshold — the
+     * answer {@link #vocalStartMs} gives on the same row is the same answer, it is simply given a row
+     * that contains what it is looking for. Everything that builds the <em>file</em> keeps using the
+     * head it always used; only the arrival's own row is this long (see
+     * {@code AndroidStemEditRenderer}).
+     */
+    public static final long ARRIVAL_PROBE_MS = 19_000L;
+
+    /**
+     * The span a renderer has to separate for the arrival of the incoming track's voice to be inside
+     * the material {@link #vocalStartMs} measures, ms: {@code headMs} — the render's own head, which
+     * the file it writes is built from — extended to {@link #ARRIVAL_PROBE_MS}, and never past the
+     * track's own end.
+     *
+     * <p>Three properties, and all three are the point of the function:
+     * <ul>
+     *   <li><b>It never SHORTENS anything.</b> A head already at or past {@code ARRIVAL_PROBE_MS} is
+     *   returned unchanged, so a request whose material already reached the arrival separates exactly
+     *   the material it separated before (bit for bit: same window, same model input, same file);</li>
+     *   <li><b>a short track is not asked for material it does not have.</b> {@code fileDurationMs}
+     *   bounds the probe (a 9 s track is separated to its own 9 s, and its head is untouched
+     *   whatever that is) — and a duration the container does not give ({@code <= 0}) leaves the
+     *   probe whole, because a decode simply stops at the end of the file either way;</li>
+     *   <li><b>the head is a FLOOR and the probe is the extension.</b> The answer is
+     *   {@code max(headMs, min(ARRIVAL_PROBE_MS, fileDurationMs))}, so no request is ever refused or
+     *   shortened by this round, and the extra material separated is bounded by
+     *   {@code ARRIVAL_PROBE_MS - headMs} (the measured pair: 16 044 → 19 000 ms, <b>+18.4%</b> —
+     *   the price of the arrival being measurable at all, see {@link #ARRIVAL_PROBE_MS}).
+     * </ul>
+     */
+    public static long arrivalProbeMs(long headMs, double fileDurationMs) {
+        long probe = fileDurationMs > 0d
+                ? Math.min(ARRIVAL_PROBE_MS, Math.round(fileDurationMs))
+                : ARRIVAL_PROBE_MS;
+        return Math.max(headMs, probe);
+    }
 
     /**
      * Where the incoming track's own <b>rhythm</b> row starts playing, ms of its own file, or -1
@@ -1707,6 +2007,21 @@ public final class StemFusion {
          */
         public final OutgoingExit exit;
 
+        /**
+         * Whether the <b>incoming</b> track's own groove — its separated drums and low end — is
+         * playing around a position in its file (round 33). The same instrument {@link #groove}
+         * applies to the outgoing, asked of the other deck, and the clause it answers is the one the
+         * listener's ear reported as 「34800 很完美」: a landing inside the incoming's own quiet
+         * intro hands the passage a near-empty second track — measured on the pair under test,
+         * {@code audio_huai}'s drums and low end sit at <b>−70 … −87 dBFS for its first 19 s</b>
+         * (its section before them carries only the melodic row, −24…−32 dBFS) — so the fusion's
+         * second half is one deck fading out instead of two songs crossing over. {@link
+         * #NO_GROOVE_MEASUREMENT} (the default, and every fixture that only asks about the
+         * arithmetic) keeps the landing where the coupling alone puts it, which is the behaviour
+         * before this round.
+         */
+        public final Groove incomingGroove;
+
         public Input(long aDurMs, long blendMs, long removalMs, long contentStartMs,
                      double aBeatMs, double aPhaseMs, double bBeatMs, double bPhaseMs, double speed,
                      double[] aBarLinesMs, double[] bBarLinesMs, VocalQuiet quiet) {
@@ -1752,7 +2067,21 @@ public final class StemFusion {
                      double[] aBarLinesMs, double[] bBarLinesMs, VocalQuiet quiet, Groove groove,
                      BodyLevel body, long firstVocalMs, IncomingOn incoming, int extraHoldSteps,
                      OutgoingExit exit) {
+            this(aDurMs, blendMs, removalMs, contentStartMs, aBeatMs, aPhaseMs, bBeatMs, bPhaseMs,
+                    speed, aBarLinesMs, bBarLinesMs, quiet, groove, body, firstVocalMs, incoming,
+                    extraHoldSteps, exit, NO_GROOVE_MEASUREMENT);
+        }
+
+        /** Round 33: the same input with the <b>incoming's</b> own groove measured — see {@link
+         *  #incomingGroove}. The renderer's own call sites use this one; every fixture that only asks
+         *  about the arithmetic keeps the overload above and the pre-round-33 landing. */
+        public Input(long aDurMs, long blendMs, long removalMs, long contentStartMs,
+                     double aBeatMs, double aPhaseMs, double bBeatMs, double bPhaseMs, double speed,
+                     double[] aBarLinesMs, double[] bBarLinesMs, VocalQuiet quiet, Groove groove,
+                     BodyLevel body, long firstVocalMs, IncomingOn incoming, int extraHoldSteps,
+                     OutgoingExit exit, Groove incomingGroove) {
             this.exit = exit == null ? NO_EXIT_MEASUREMENT : exit;
+            this.incomingGroove = incomingGroove == null ? NO_GROOVE_MEASUREMENT : incomingGroove;
             this.aDurMs = aDurMs;
             this.blendMs = blendMs;
             this.removalMs = removalMs;
@@ -1957,19 +2286,24 @@ public final class StemFusion {
         /** The incoming's bar line its deck starts playing on — where the fusion begins, its own
          *  file ms. */
         public final long entryMs;
-        /** {@code entryMs + barStep}: the outgoing's drums out and the incoming's in. */
+        /** The line everything changes hands on: {@code entryMs + holdSteps*barStep} for a fusion,
+         *  and {@code entryMs + }{@link #SLAM_STEPS}{@code *barStep} for a slam (whose hold IS the
+         *  slam's length). The outgoing's drums out and the incoming's in. */
         public final long swapMs;
-        /** {@code entryMs + 2*barStep}: the low end changes hands. The same instant as
+        /** {@code entryMs + 2*barStep} on a fusion: the low end changes hands. The same instant as
          *  {@link #swapMs} on a slam. */
         public final long bassMs;
-        /** {@code entryMs + windowMs}: the last of the outgoing's material is gone. */
+        /** {@code entryMs + windowMs}: the last of the outgoing's material is gone — on a slam, where
+         *  the {@link #CUT_MS} splice that ends on {@link #swapMs} ends. */
         public final long fusionEndMs;
-        /** Where the incoming's own bed has arrived at unity: {@code entryMs + barStep}, which is
-         *  {@link #swapMs} — the line the outgoing's drums leave on. */
+        /** Where the incoming's own bed has arrived at unity: {@code entryMs + BED_FADE_BARS} bars of
+         *  the incoming's own grid — a different instant from the outgoing's hold for every gesture
+         *  except a one-bar slam (see the constructor), and so NOT {@link #swapMs} on this round's
+         *  three-bar slam. */
         public final long bedFadeMs;
 
-        /** The fusion window's length in the file, ms ({@code 3} steps of the table, or one on a
-         *  slam). */
+        /** The fusion window's length in the file, ms ({@code 3} steps of the table, or
+         *  {@link #SLAM_STEPS} on a slam — plus the splice for a slam). */
         public final long windowMs;
         /** The outgoing's own timeline the carried passage covers, ms
          *  ({@code steps*barStep/stretch + CUT/stretch}), rounded up: the material A's rows occupy
@@ -2177,8 +2511,8 @@ public final class StemFusion {
                             : "");
             String head = slam
                     ? String.format(Locale.US, "SLAM (the grids are in no relation, so nothing is"
-                            + " beat-matched: one bar of the incoming's grid, every element changing"
-                            + " hands on the same line at %dms)", swapMs)
+                            + " beat-matched: %d bars of the incoming's grid, every element changing"
+                            + " hands on the same line at %dms)", SLAM_STEPS, swapMs)
                     : String.format(Locale.US, "fusion %s: drums swap at %dms, low end at %dms, all"
                             + " A gone at %dms (%dms = %d steps of %.0fms)",
                     relation == null ? "(no relation)" : relation.describe(), swapMs, bassMs,
@@ -2286,7 +2620,8 @@ public final class StemFusion {
         if (!(aDurMs > 0d)) return "the outgoing track's length could not be read";
         if (!(blendMs > 0L)) return "the boundary's blend length is not known";
         if (contentStartMs < 0L) return "the incoming deck's own start is not known";
-        // ⚠️ Round 5: a pair in no relation is no longer refused — it gets a SLAM (one bar of the
+        // ⚠️ Round 5: a pair in no relation is no longer refused — it gets a SLAM ({@link
+        // #SLAM_STEPS} bars of the
         // incoming's grid, no beat matching), so this clause only refuses the pair whose grids
         // cannot be read at all.
         Relation relation = relationOf(aBeatMs, bBeatMs, speed);
@@ -2517,7 +2852,7 @@ public final class StemFusion {
         boolean slam = relation == null;
         // One step of the table: `p` bars of the incoming's grid for a relation, one bar for a
         // slam (the only line of the incoming's own grid the gesture needs), and the gesture lasts
-        // FUSION_BARS of them (one for a slam).
+        // FUSION_BARS of them (SLAM_STEPS for a slam).
         double stepMs = slam ? bBar : relation.barStepMs(in.bBeatMs);
         double stretch = slam ? in.speed : relation.stretch(in.aBeatMs, in.bBeatMs);
         // ⚠️ THE CARRY'S RATIO AND THE DECK'S RATIO ARE ONE DECISION, NOT TWO. `stretch` is what A's
@@ -2674,18 +3009,29 @@ public final class StemFusion {
         // one cut is the window's own end) and for a fusion too (its rows reach the floor ON the
         // window's last step, so the material has to last that far).
         int cutSteps = slam ? SLAM_STEPS : steps;
-        // ⚠️ A SLAM's window is one step PLUS the splice: every element changes hands on the line
-        // at `swapMs`, and the 80 ms splice that de-clicks that hand-over runs from the line to
-        // {@code swap + CUT_MS}. When the window ended ON the line (it did until round 6's tenth
+        // ⚠️ A SLAM's window is its SLAM_STEPS bars PLUS the splice: every element changes hands on
+        // the line at `swapMs`, and the 80 ms splice that de-clicks that hand-over runs from the line
+        // to {@code swap + CUT_MS}. When the window ended ON the line (it did until round 6's tenth
         // pass) the splice had nowhere to happen: `gainAt`'s own guard sent [swap, swap + CUT) to the
         // floor, so the outgoing's rows fell from unity to exactly 0 in one sample — the
         // instantaneous cut the user ruled out (「不要让它戛然而止」), measured on the device's own render as
         // a 0.3227 sample-to-sample jump against the signal's own 99.9th percentile of 0.2648 (1.2x).
         // With the splice inside the window the same line reads 0.0913 (0.3x) and no dip. The take
         // grows by the same CUT_MS (see sourceSpan, which has always counted it).
-        long windowMs = slam ? Math.round(SLAM_STEPS * stepMs + CUT_MS) : Math.round(steps * stepMs);
-        // The material the take needs: the rows are cut at `swapMs` (which for a slam is the
-        // window's own end) plus the splice, in the outgoing's own file.
+        //
+        // The max is the two ways of writing that one span, and it is the SLAM's because the line is a
+        // bar LINE of the incoming's own grid — `entry + SLAM_STEPS * round(stepMs)`, an integer
+        // multiple of the grid it lands on — while the window is measured in the step's own
+        // (possibly fractional) milliseconds. At SLAM_STEPS = 1 the two roundings agreed by
+        // construction; at three they can differ by a millisecond, and a window a millisecond short
+        // of `swap + CUT_MS` is the sampled defect above, not a rounding detail.
+        long windowMs = slam
+                ? Math.max(Math.round(SLAM_STEPS * stepMs + CUT_MS),
+                        (long) SLAM_STEPS * Math.round(stepMs) + CUT_MS)
+                : Math.round(steps * stepMs);
+        // The material the take needs: the rows are cut at `swapMs` (which for a slam is the line
+        // that hands over, one splice before the window's own end) plus the splice, in the outgoing's
+        // own file.
         long sourceSpan = (long) Math.ceil((cutSteps * stepMs + CUT_MS)
                 / (stretch > 0d ? stretch : 1d));
         // ⚠️ The window the render will separate, paid for out of the cost bound:
@@ -2764,7 +3110,7 @@ public final class StemFusion {
         // `sourceSpan` are handed over because the landing's own ceiling and the departure's own
         // reading are both written in them (see `entry`).
         Landing landing = entry(in, junction, stepMs, slam ? 1 : relation.p, windowMs, sourceSpan,
-                stretch, voiceFloorMs(slam ? 1 : holdSteps, slam ? 0 : lowEndFadeSteps,
+                stretch, voiceFloorMs(slam ? SLAM_STEPS : holdSteps, slam ? 0 : lowEndFadeSteps,
                         Math.round(stepMs)));
         long entry = landing.entryMs;
         if (entry < 0L) {
@@ -2792,22 +3138,31 @@ public final class StemFusion {
         // the bound the user asked to
         // keep (rule 3 of round 6: the fade must not dominate). With a one-step hold the rise starts
         // at the entry itself.
-        long arriveStart = slam ? entry + barStep : entry + (long) Math.max(0, holdSteps - 1) * barStep;
-        long arriveEnd = slam ? entry + barStep + CUT_MS
+        //
+        // ⚠️ A SLAM's hold is {@link #SLAM_STEPS} bars of the incoming's own grid — round 5's one bar
+        // until the listening that set it to three — and it is that count everywhere on this path and
+        // nowhere written out as a literal: `slamHold` below is the one spot the line is computed, and
+        // the arrival, the swap, the bass and the window's own end are all read off it. The window
+        // contains `slamHold + CUT_MS` by construction (see `windowMs`), which is the property the
+        // sampled defect at the end of round 6 bought: the splice's last sample is inside the file.
+        long slamHold = entry + (long) SLAM_STEPS * barStep;
+        long arriveStart = slam ? slamHold
+                : entry + (long) Math.max(0, holdSteps - 1) * barStep;
+        long arriveEnd = slam ? slamHold + CUT_MS
                 : arriveStart + (long) B_ARRIVAL_FADE_STEPS * barStep;
         // ⚠️ A SLAM's instants come from the SLAM's shape, not the fusion's. `shapeFor` hands every
         // pair a two-step hold, and on a slam that put `holdEnd`/`arriveEnd` at entry + 2 steps while
-        // the window is one step plus the splice — so the "after their swap" slice began past the
-        // window's end, held 0 samples, and {@link StemBridge#levelDb} answered −240 for it: every
-        // slam on the device was refused with "the incoming's own drums never arrive (-240.0 dBFS
-        // after their swap)" while the same slice read at the slam's own instants holds the
+        // the window is the slam's own hold plus the splice — so the "after their swap" slice began
+        // past the window's end, held 0 samples, and {@link StemBridge#levelDb} answered −240 for it:
+        // every slam on the device was refused with "the incoming's own drums never arrive (-240.0
+        // dBFS after their swap)" while the same slice read at the slam's own instants holds the
         // incoming's real kit at −10.3 dBFS. A slam's rows are at unity to its line, the incoming's
         // arrive at it over the splice, and all of A is gone where the splice ends.
         long drumsEnd = entry + (long) (holdSteps + A_DRUMS_FADE_STEPS) * barStep;
         long lowEndEnd = entry + (long) (holdSteps + lowEndFadeSteps) * barStep;
-        long swap = slam ? entry + barStep : holdEnd;
+        long swap = slam ? slamHold : holdEnd;
         long bass = slam ? swap : holdEnd;
-        long drawEnd = slam ? entry + barStep + CUT_MS : lowEndEnd;
+        long drawEnd = slam ? slamHold + CUT_MS : lowEndEnd;
         if (slam) {
             holdEnd = swap;
             drumsEnd = drawEnd;
@@ -3055,12 +3410,32 @@ public final class StemFusion {
         target = Math.min(target, in.firstVocalMs - runway);
         target = Math.max(target, in.contentStartMs);
         target = Math.min(target, ceiling);
+        // Round 33 — the landing's own WINDOW, which is a different question from the coupling's
+        // landing above. See ENTRY_MAX_MS / ENTRY_WORDS_BARS / ENTRY_AT_ONCE_BARS for the user's rule
+        // (「不要太靠后或者太靠前…尽力在前奏找完…不要把小半个歌跳过」) and the numbers behind the cap and
+        // the two bars. Two details of the shape, both deliberate: `cap` is never below the content
+        // start (so a track whose own start is already deep is not made worse), and it is still
+        // bounded by `ceiling` — the user's own 过渡时长 is what pays for a landing, so nothing here
+        // can plan a deeper one than their setting can afford. The floor GIVES WAY to the cap rather
+        // than the other way round: a pair whose ceiling cannot pay for even the floor lands where it
+        // always did instead of refusing the fusion outright.
+        long cap = Math.max(in.contentStartMs,
+                Math.min(ceiling, in.contentStartMs + ENTRY_MAX_MS));
+        long floor = Math.max(in.contentStartMs,
+                Math.min(in.firstVocalMs - in.contentStartMs <= (long) ENTRY_AT_ONCE_BARS * gridStep
+                                ? in.contentStartMs + (long) ENTRY_WORDS_BARS * gridStep
+                                : in.contentStartMs,
+                        cap));
+        target = Math.min(Math.max(target, floor), cap);
         // The lines the deck may start on: the COMMON grid's — every `p` bars of the incoming's own
         // grid (every bar for a unison pair and a slam, which is bit-for-bit round 18's and round 4's
         // candidate set), spaced `stepMs` apart — reaching the coupling's own target, because that is
         // where the landing is (round 21 reached the incoming's voice instead, and the two are not
         // the same place once the departure is measured).
         long to = Math.max(in.contentStartMs + 2L * gridStep, target + gridStep);
+        // Round 33's groove clause walks FORWARD from the target, so the candidates have to reach as
+        // far as that walk may go.
+        to = Math.max(to, cap + gridStep);
         double[] lines = entryLines(in, gridStep, p, to);
         boolean fromBeatGrid = lines != in.bBarLinesMs;
         long[] plain = search(in, junctionMs, gridStep, in.contentStartMs,
@@ -3078,6 +3453,33 @@ public final class StemFusion {
             // where this file does not.
             if (at < in.contentStartMs || at > target) continue;
             if (line < 0L || at > line) line = at;
+        }
+        // ⚠️ Round 33's other half, and the clause the listener's ear asked for by name
+        // (「上一轮的 34800 很完美」): the landing may not sit in the incoming's own quiet intro.
+        // What that file was, measured: the pair's incoming track has its own drums and low end at
+        // −70…−87 dBFS for its first 19 s (the section before them carries the melodic row alone,
+        // −24…−32 dBFS), so a landing inside it hands the passage a second deck that is not playing —
+        // the fusion's second half is one deck fading out, which is the 「不像过渡」 the same listener
+        // reported two rounds earlier. The instrument is the junction's own
+        // ({@link #GROOVE_FLOOR_DBFS}, {@link #grooveOf}), asked of the other deck, and it is skipped
+        // entirely when the caller measured no incoming groove (every fixture that only asks about
+        // the arithmetic, which is what keeps those landings where they were).
+        //
+        // The walk is forward only and bounded by `cap`: a landing EARLIER than the target is never
+        // taken here, because the outgoing's departure is what the target is measured from, and this
+        // clause is about the incoming's own silence rather than about the coupling.
+        if (line >= 0L && in.incomingGroove != NO_GROOVE_MEASUREMENT
+                && !in.incomingGroove.presentAround(line, in.bBeatMs)) {
+            long moved = -1L;
+            for (double bar : lines) {
+                long at = Math.round(bar);
+                if (at <= line || at > cap) continue;
+                if (in.incomingGroove.presentAround(at, in.bBeatMs)) {
+                    moved = at;
+                    break;
+                }
+            }
+            if (moved > 0L) line = moved;
         }
         // ⚠️ No line of the grid at or below the target means the coupling's own landing is EARLIER
         // than this track's first line, and starting off the grid is not a fusion — the entry is a
@@ -3380,8 +3782,11 @@ public final class StemFusion {
      *
      * <p>This is the table's one fade, and it is the user's own request (「新歌的进入请用淡入效果」):
      * the bed is what the incoming contributes while the outgoing's voice leaves, and a bed that
-     * arrived by cut would put a step where the ear is listening for continuity. The bar it takes
-     * is the bar the outgoing's drums leave on, so the two events are heard as one.
+     * arrived by cut would put a step where the ear is listening for continuity. On a one-bar hold
+     * the bar it takes IS the bar the outgoing's drums leave on, so the two events are heard as one;
+     * on this round's {@link #SLAM_STEPS}-bar slam the bed is up a bar before the hand-over, and that
+     * is what carries the ear through it (the bed is the incoming's own content, and its drums and low
+     * end are what arrive on the line — see `gainAt`'s slam branch).
      */
     static double bedGain(Plan plan, double fileMs) {
         if (plan == null || !plan.valid) return linear(B_BED_DB);
@@ -4050,7 +4455,7 @@ public final class StemFusion {
         if (period > 0d) {
             double[] levels = StemBridge.frameLevelsDb(rhythm, rate, windowSec);
             double median = StemBridge.median(levels);
-            // ⚠️ A SLAM's window is ONE bar and its gesture is a cut, so there is no passage pulse to
+            // ⚠️ A SLAM's gesture is a cut, not a recede, so there is no passage pulse to
         // judge: the clause is skipped for it (round 5) and the carried-row and voice clauses stand.
         int perBeat = Math.max(1, (int) Math.round(period / StemBridge.FRAME_SEC));
             r.beats = Math.max(1, levels.length / perBeat);

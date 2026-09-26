@@ -3492,10 +3492,14 @@ private fun SettingsScreen(settings: SettingsCore, controller: PlayerController)
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             settings.categories().forEach { item ->
-                if (item == SettingsCatalog.LOCAL || item == SettingsCatalog.ABOUT || item == SettingsCatalog.LYRIC || item == SettingsCatalog.PLAYBACK || item == SettingsCatalog.APPEARANCE || item == SettingsCatalog.PALETTE || item == SettingsCatalog.AI) {
-                    if (item == category) Button(onClick = { category = item }) { Text(item) }
-                    else OutlinedButton(onClick = { category = item }) { Text(item) }
-                }
+                // ⚠️ This used to be a hand-written list of the category names -- a stale copy of
+                // SettingsCatalog.CATEGORIES that happened to name every category until one was
+                // added. ACE-Step's rows were in the catalog and in the APK, but its tab was
+                // filtered out here, so the settings screen simply had no entry for it and the
+                // feature was unreachable. Render whatever the catalog lists; a category with no
+                // rows is a mistake in the catalog, not something to hide silently here.
+                if (item == category) Button(onClick = { category = item }) { Text(item) }
+                else OutlinedButton(onClick = { category = item }) { Text(item) }
             }
         }
         LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {

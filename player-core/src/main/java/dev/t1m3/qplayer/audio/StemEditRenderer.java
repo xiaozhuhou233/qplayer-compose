@@ -202,6 +202,21 @@ public interface StemEditRenderer {
         /** Polled during the render; false means the queue moved on and the work is
          *  to be thrown away. Never null. */
         public final BooleanSupplier stillWanted;
+        /**
+         * The ACE-Step settings, or {@link AceStepBed#OFF} — the cloud ambience bed that may be
+         * summed UNDER the passage a fusion renders (see {@code AceStepBed}).
+         *
+         * <p>Carried on the request rather than read from a settings store inside the renderer, for
+         * the same reason every other number here is: a render is a snapshot of the boundary's own
+         * decisions, and the host that decides them is the only thing that knows where its settings
+         * live. {@link AceStepBed.Config#configured()} is the whole switch — off, or no address, no
+         * key or no model, and the render is byte for byte what it is without this field at all.
+         *
+         * <p>⚠️ The key is in here and it must never come out again: not into a log line, not into
+         * the edit's file name, not into anything written to disk. The renderer uses it for one
+         * {@code Authorization} header and nothing else.
+         */
+        public final AceStepBed.Config cloudBed;
 
         public Request(String sourcePath, String outBasePath, Track track, long removalMs,
                        double beatPeriodMs, double beatPhaseMs, BooleanSupplier stillWanted) {
@@ -232,6 +247,16 @@ public interface StemEditRenderer {
                        double outgoingBeatPeriodMs, double outgoingBeatPhaseMs, double speed,
                        long blendMs, long incomingContentStartMs, long vocalOutMs,
                        BooleanSupplier stillWanted) {
+            this(sourcePath, outBasePath, track, removalMs, beatPeriodMs, beatPhaseMs,
+                    outgoingSourcePath, outgoingBeatPeriodMs, outgoingBeatPhaseMs, speed,
+                    blendMs, incomingContentStartMs, vocalOutMs, stillWanted, AceStepBed.OFF);
+        }
+
+        public Request(String sourcePath, String outBasePath, Track track, long removalMs,
+                       double beatPeriodMs, double beatPhaseMs, String outgoingSourcePath,
+                       double outgoingBeatPeriodMs, double outgoingBeatPhaseMs, double speed,
+                       long blendMs, long incomingContentStartMs, long vocalOutMs,
+                       BooleanSupplier stillWanted, AceStepBed.Config cloudBed) {
             this.sourcePath = sourcePath;
             this.outBasePath = outBasePath;
             this.track = track;
@@ -246,6 +271,7 @@ public interface StemEditRenderer {
             this.blendMs = blendMs;
             this.incomingContentStartMs = incomingContentStartMs;
             this.stillWanted = stillWanted != null ? stillWanted : () -> true;
+            this.cloudBed = cloudBed != null ? cloudBed : AceStepBed.OFF;
         }
 
         /** Whether this request can carry a bridge at all (the outgoing side is available). */

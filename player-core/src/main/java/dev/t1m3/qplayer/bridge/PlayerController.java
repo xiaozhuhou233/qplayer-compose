@@ -3,6 +3,7 @@ package dev.t1m3.qplayer.bridge;
 import java.io.File;
 import java.io.IOException;
 
+import dev.t1m3.qplayer.audio.AceStepBed;
 import dev.t1m3.qplayer.audio.AiTransitionChooser;
 import dev.t1m3.qplayer.audio.AudioBackend;
 import dev.t1m3.qplayer.ai.AiClient;
@@ -709,6 +710,17 @@ public final class PlayerController {
     /** The host's stem renderer (see {@link #setStemEditRenderer}), or null where there
      *  is none. Without one nothing on this class's stem path is ever entered. */
     private volatile StemEditRenderer stemEditRenderer;
+    /**
+     * The ACE-Step settings (see {@link #setAceStepBedConfig}): the cloud model whose material may
+     * be summed under a fusion's passage. {@link AceStepBed#OFF} until Settings pushes them, which
+     * is also what every host with no such settings gets — and an off value is a render that is
+     * byte for byte the one this app made before the feature existed.
+     *
+     * <p>⚠️ It carries the user's key. Read once per render request and put into one Authorization
+     * header; never logged, never written to disk and never part of a file name (see
+     * {@link AceStepBed.Config#describe}, which prints whether a key is set and nothing more).
+     */
+    private volatile AceStepBed.Config aceStepBed = AceStepBed.OFF;
     /** End the ramp this early, so the promotion lands just BEFORE the outgoing
      *  track's own end instead of racing its completion callback. */
     private static final long CROSSFADE_TAIL_MS = 250L;
@@ -2121,6 +2133,32 @@ public final class PlayerController {
      */
     public void setStemEditRenderer(StemEditRenderer renderer) {
         this.stemEditRenderer = renderer;
+    }
+
+    /**
+     * The ACE-Step settings, pushed in from Settings on load and on every change of one of its
+     * four rows (see the Settings core). The controller keeps no copy of its own — this is the
+     * value every render request below carries — so toggling the switch takes effect at the next
+     * render, which is minutes before the boundary that render is for.
+     *
+     * <p>With the switch off, or without an address, a key or a model, this is
+     * {@link AceStepBed#OFF}: the renderer never enters the cloud path and the edit it writes is
+     * exactly what it writes on a build with no ACE-Step code in it at all.
+     *
+     * <p>One line per change, and it never contains the key — only whether one is set. The key
+     * itself goes nowhere but the renderer's one Authorization header.
+     */
+    public void setAceStepBedConfig(boolean enabled, String baseUrl, String apiKey, String model,
+                                    double underDb) {
+        AceStepBed.Config next = AceStepBed.config(enabled, baseUrl, apiKey, model, underDb);
+        if (next.configured() == aceStepBed.configured()
+                && next.baseUrl.equals(aceStepBed.baseUrl) && next.modelId().equals(aceStepBed.modelId())
+                && next.apiKey.equals(aceStepBed.apiKey) && next.underDb == aceStepBed.underDb) {
+            return;
+        }
+        aceStepBed = next;
+        Logger.info("transition: ACE-Step 云端氛围层 — {}{}", next.describe(),
+                next.configured() ? "" : "（未配置完整：这一项关闭时，渲染与没有这个功能时完全一致）");
     }
 
     /** True while the backend is ramping the two tracks against each other, or
@@ -5175,7 +5213,8 @@ public final class PlayerController {
                     outgoingGrid != null ? outgoingGrid.firstBeatMs() : 0d,
                     speed,
                     blendMs, contentStart, vocalOutMs,
-                    () -> generation == precacheGeneration.get());
+                    () -> generation == precacheGeneration.get(),
+                    aceStepBed);
             StemEditRenderer.Result result = renderer.render(request);
             if (result == null) {
                 // Not an error: an inert feature (no model) says so itself, once.
