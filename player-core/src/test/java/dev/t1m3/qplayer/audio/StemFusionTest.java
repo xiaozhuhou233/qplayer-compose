@@ -790,6 +790,45 @@ public class StemFusionTest {
     }
 
     /**
+     * ⚠️ <b>Round 15: the phrase's own opening, not the level.</b> The listener: 「混音完接入人声从一句话
+     * 半截开始接入的…应该前一首歌的尾音播完就接入或者过渡的听感听不到前一首歌了就接入」. On their own pair the
+     * vocal row is one continuous sung section from 16 s on, so a gate placed by level lands mid-line —
+     * and the separation's own bleed at the head (−25 dBFS presence from 75 ms, the reason round 32
+     * exists) is what a naive "rise out of anything quiet" rule would read as the opening instead.
+     *
+     * <p>This fixture is those two traps in one row: four seconds of bleed, a real gap, then a phrase.
+     * The level-based arrival answers the bleed; the phrase rule answers the phrase.
+     */
+    @Test
+    public void thePhraseStartIsTheRiseOutOfARealGapAndNotTheBleedAtTheHead() {
+        int rate = 8_000;
+        double[] db = new double[] {-18d, -18d, -18d, -18d,     // the bleed, above the arrival floor
+                -75d, -75d, -75d, -75d, -75d, -75d, -75d,       // a real gap (11 s)
+                -75d, -75d, -75d, -75d,
+                -13.6d, -13.6d, -13.6d, -13.6d};                // the phrase (4 s, from 15 s)
+        float[][] row = sections(rate, db);
+        assertEquals("the phrase rule answers where the voice opens, not where the bleed is",
+                15_000L, StemFusion.vocalPhraseStartMs(row, rate, 0L, -50d), 250L);
+        assertTrue("and the level-based reading is the one that answered the bleed: "
+                        + StemFusion.vocalStartMs(row, rate, 0L, -50d),
+                StemFusion.vocalStartMs(row, rate, 0L, -50d) < 2_000L);
+    }
+
+    /** A vocal row of one-second sections, one per dBFS entry (a 220 Hz tone at that RMS). */
+    private static float[][] sections(int rate, double... db) {
+        float[][] out = new float[2][db.length * rate];
+        for (int s = 0; s < db.length; s++) {
+            float amp = (float) (Math.pow(10d, db[s] / 20d) * Math.sqrt(2d));
+            for (int i = 0; i < rate; i++) {
+                float v = amp * (float) Math.sin(2d * Math.PI * 220d * i / rate);
+                out[0][s * rate + i] = v;
+                out[1][s * rate + i] = v;
+            }
+        }
+        return out;
+    }
+
+    /**
      * ⚠️ <b>The direction the coupling closes, and the fixture the user's own defect report is
      * about.</b> The incoming's voice is already singing two bars in, and the outgoing's own rows
      * play right to the passage's end: at every line this track has, the voice's material is there

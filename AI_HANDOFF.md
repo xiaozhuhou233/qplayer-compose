@@ -3866,6 +3866,44 @@ player-core **315 跑 1 失败**，唯一失败仍是既有的
 首次生成没有"上一张歌单"段）；player-core **323 跑 1 失败**，唯一失败仍是既有的
 `SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`。
 
+### 第 15 轮（2026-09-27）：**人声放行要落在"句首"，而不是一段连续演唱的中途**
+
+用户：「现在切割人声可能有问题，混音完接入人声从一句话半截开始接入的，并且可能人声接入的慢了，应该前一首歌的尾音
+播完就接入或者过渡的听感听不到前一首歌了就接入」。
+
+**测量（用用户那对歌的分离素材，`stemcache/audio_unhappy-0-37527.npz` 的人声行，1 秒中位数）**：
+
+| 时间 | 人声 |
+|---|---|
+| 0–15 s | −75 dBFS 左右（**没在唱**） |
+| **16 s** | −24.7 ← **句首** |
+| 17 s 起 | −13.6 / −14.3 / −14.5 … **一路连续，中间没有停顿** |
+
+⇒ 这首歌从 16 秒起是**一整段连续演唱、只有一个开口**。而 RULE 14 之后落点 14670ms、放行时刻 ≈ 14670 + goneFile
+≈ **21333ms** —— 正落在 16 秒那段连续演唱的**中途**。**所以不是人声分离坏了**（人声行干净、电平正常），
+是**放行时刻对齐错了**：`firstVocalMs` 回答的是"人声持续到哪一秒算到了"（整段电平），不是"哪一秒开口"；
+第 13 轮"走出空白引子"的条款还会把落点再往后推，进一步破坏对齐；第 14 轮把上限放开、落点更深之后偏差被放大
+（原来被窗口卡在 4450，听不出来）。
+
+**已做（RULE 15 的第一半，本轮）**：新增 `StemFusion.vocalPhraseStartMs(vocals, rate, startMs, floorDbfs)`——
+**句首 = 从真实空隙里升起来的那一下**：1 秒中位数越过到达门槛（`VOICE_ARRIVAL_DB` = body − 6 dB），
+且**前面 `PHRASE_GAP_MS` = 2 秒的帧全部低于 body − `PHRASE_GAP_DB` = 20 dB**；
+**文件开头不算空隙**（这条拦住分离在头部的 bleed：−25 dBFS 从 75 ms 起，正是第 32 轮存在的理由）。
+渲染器改为**优先用句首**、找不到时回落到原来的 `vocalStartMs`（一开始就在唱的歌没有"开口"可找，
+落点由 2 小节下限与 groove 条款决定）。新测试 `thePhraseStartIsTheRiseOutOfARealGapAndNotTheBleedAtTheHead`
+用一行同时包含两个陷阱的素材把这件事钉住（bleed 段 −18、真空隙 −75、句子 −13.6）：电平读数是 bleed，
+句首读数才是句子。
+
+**还没做（下一轮）**：① **放行时刻改成"出曲真正听不到的那一刻"**（现在的 gate 是 departure 之前
+一小节 + 6 dB 那条，用户嫌"接入慢了"）；② **落点对齐句首**（`target = 句首 − goneFile`），并且第 13 轮
+"走出空白引子"的条款要**按整句走**、走完重新对齐，不能破坏对齐。
+
+⚠️ **欠账**：RULE 14 留下的三条旧期望仍红（`theArrivalMeasuredOnTheProbeIsTheLandingTheListenerChose`
+期望被窗口卡住的 4450、实际已是材料说的 14670；`aVoiceTheWindowCannotBringForward...` 期望 8000、实际 12000；
+`everyValidityClauseRefusesTheFusionOnItsOwn` 的 fusion-end 用例），加上既有的
+`SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`。它们记录的是**被改掉的那条规则**，
+要按新规则重写（不是简单改数字：每条断言的语义都变了）。
+
 ## 九、音频焦点：自动暂停 / 自动恢复（2026-09-21 修复，装机验证）
 
 **用户诉求**：别的 App（B站、别的视频软件、别的音乐）开始放 → qplayer 自动暂停；那个 App 停了/暂停了

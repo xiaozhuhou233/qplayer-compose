@@ -1447,6 +1447,60 @@ public final class StemFusion {
      *  the voice arriving, ms (see {@link #vocalStartMs}). */
     public static final long VOCAL_SUSTAIN_MS = 1_000L;
 
+    /** How long the silence before a phrase start has to last, ms — see
+     *  {@link #vocalPhraseStartMs}. Two seconds, because one is what a singer's own breath between
+     *  two lines looks like and this is meant to find the line, not the breath. */
+    public static final long PHRASE_GAP_MS = 2_000L;
+
+    /** How far under the vocal row's own body that silence has to sit, dB — the other half of
+     *  {@link #vocalPhraseStartMs}. 20 dB, which is the gap the listener's own pair measures
+     *  (4–15 s at −71…−75 dBFS against a −13.6 dBFS body). */
+    public static final double PHRASE_GAP_DB = 20d;
+
+    /**
+     * <b>Where the incoming's voice next opens its mouth</b> — the first phrase start at or after
+     * {@code startMs}, or {@code -1} when the row never opens one (round 15).
+     *
+     * <p>Why this and not {@link #vocalStartMs}: that method answers "how far in does the voice stay
+     * loud enough for a second to be its own body", which is the right question for "is this track
+     * singing yet" and the wrong one for "where do I let the voice back in". On the pair the listener
+     * reported, the row is −75 dBFS until 15 s, −24.7 at 16 s, and −13.6…−15.4 from 17 s <b>with no
+     * gap anywhere after</b> — one continuous sung section — so a gate placed by level alone lands in
+     * the middle of a line: their 「混音完接入人声从一句话半截开始接入的」.
+     *
+     * <p>A phrase start is therefore a rise <b>out of a real gap</b>: a window whose 1 s median clears
+     * the arrival floor ({@link #VOICE_ARRIVAL_DB} under the row's own body) whose preceding
+     * {@link #PHRASE_GAP_MS} of frames all sit {@link #PHRASE_GAP_DB} below that body. The file's own
+     * beginning does not count as a gap — which is what keeps a separation bleed at the head (a
+     * −25 dBFS presence from 75 ms on, the reason round 32 exists) from being read as an opening.
+     */
+    public static long vocalPhraseStartMs(float[][] vocals, int rate, long startMs, double floorDbfs) {
+        if (vocals == null || vocals.length == 0 || vocals[0] == null || !(rate > 0)) return -1L;
+        double[] levels = StemBridge.frameLevelsDb(vocals, rate, vocals[0].length / (double) rate);
+        int frameMs = Math.max(1, (int) Math.round(StemBridge.FRAME_SEC * 1000d));
+        int frames = (int) Math.max(1L, Math.round(VOCAL_SUSTAIN_MS / frameMs));
+        int gapFrames = (int) Math.max(1L, Math.round(PHRASE_GAP_MS / frameMs));
+        double bodyDb = rowBodyDb(vocals, rate, startMs);
+        if (Double.isNaN(bodyDb)) return -1L;
+        double floor = Math.max(floorDbfs, bodyDb - VOICE_ARRIVAL_DB);
+        double gapFloor = bodyDb - PHRASE_GAP_DB;
+        for (int i = gapFrames; i + frames <= levels.length; i++) {
+            if (levels[i] <= floor) continue;
+            boolean gapped = true;
+            for (int j = i - gapFrames; j < i; j++) {
+                if (levels[j] > gapFloor) {
+                    gapped = false;
+                    break;
+                }
+            }
+            if (!gapped) continue;
+            double median = StemBridge.median(
+                    java.util.Arrays.copyOfRange(levels, i, i + frames));
+            if (median > floor) return startMs + (long) i * frameMs;
+        }
+        return -1L;
+    }
+
     /**
      * The level of the vocal row's own <b>body</b>, dBFS — {@link #bodyLevelDb} over the whole of
      * the material handed to {@link #vocalStartMs}, which is the same instrument and the same

@@ -1344,7 +1344,16 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         // the voice measures the bleed as the body and answers "the voice is already singing" — and
         // that is the only thing this round changes about it (see
         // {@link StemFusion#ARRIVAL_PROBE_MS}).
-        long firstVocalMs = StemFusion.vocalStartMs(
+        // ⚠️ Round 15: what the landing and the gate are aligned to is the voice's own OPENING, not
+        // "the voice has been loud for a second" — the listener's report was 「混音完接入人声从一句话
+        // 半截开始接入的」, and the row of their own pair proves why: a single continuous sung section,
+        // so a level-based arrival lands mid-line. The phrase reading is preferred and the arrival
+        // reading stays as the fallback for a track that never gives its vocal row a gap (a track that
+        // sings from its first bar has no opening to find, and its landing is decided by the two-bar
+        // floor and the groove clause instead — see StemFusion.ENTRY_WORDS_BARS).
+        long firstPhraseMs = StemFusion.vocalPhraseStartMs(
+                arrivalVocals, StemModel.MODEL_RATE, 0L, DjEdit.SILENT_FRAME_DBFS);
+        long firstVocalMs = firstPhraseMs >= 0L ? firstPhraseMs : StemFusion.vocalStartMs(
                 arrivalVocals, StemModel.MODEL_RATE, 0L, DjEdit.SILENT_FRAME_DBFS);
         // ⚠️ Every bar line the fusion is given is in ms, and the renderer's are in seconds (see
         // {@link #inMs}): the conversion happens once, here, for both of the plans below.
