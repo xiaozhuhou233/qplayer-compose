@@ -387,6 +387,21 @@ public final class StemFusion {
      *       4 000, which is round 13's 「不要把小半个歌跳过」 in the opposite direction. This build is
      *       shipped to be LISTENED to, with its fixture expectations not yet retuned (15 of 48 in
      *       {@code StemFusionTest} pin the old, fixed length).</li>
+     *   <li><b>16 → 17</b> — <b>the generated bed is asked for a TRANSITION instead of a flat pad, and
+     *       it is 12 dB under the passage instead of 18.</b> Both are the user's own report
+     *       (「融合段很明显是生成的那段出了问题……与后面的歌曲压根没有关联，能不能让生成段更符合过渡逻辑」) and both
+     *       are in the request rather than in the mixing: {@code AceStepBed.CAPTION} used to ask for "a
+     *       sustained, even harmonic pad … no lead line, no vocals, no beat of its own", i.e. for exactly
+     *       the texture that belongs to neither track, and {@code StemBed.BED_LEVEL_DB} was 18 — the
+     *       value 12 had been asked for by ear in the round that was later rolled back. The caption now
+     *       has a direction (it begins in the first track's key and mood and its later part already
+     *       belongs to the second, so the join reads as the second track beginning) while KEEPING the
+     *       continuity clauses that fixed the sparse-junk failure the pad caption replaced, and it still
+     *       forbids a drum beat of its own (the passage already carries the outgoing's kit). ⚠️ The two
+     *       ride in one build with {@code 13 → 16} above, so a listener cannot attribute the difference
+     *       between them; they are both "make the generated segment work", and the bed's level is the
+     *       one with a measured cost (the sum now reaches the limiter on a dense passage — the
+     *       {@code aBedThatWouldPushTheSumOverFullScale} fixture had to be given 6 dB more room).</li>
      * </ul>
      *
      * <p>The price is one re-render per pair, once, in the pre-lane where there are minutes of
@@ -396,7 +411,7 @@ public final class StemFusion {
      * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
      * name.
      */
-    public static final int RULE_VERSION = 16;
+    public static final int RULE_VERSION = 17;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with

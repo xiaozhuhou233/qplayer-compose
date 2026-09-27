@@ -45,9 +45,15 @@ import java.util.Locale;
  */
 public final class StemBed {
 
-    /** The bed sits this far under the passage it goes under, dB. First value, to be tuned by
-     *  ear. */
-    public static final double BED_LEVEL_DB = 18.0d;
+    /** The bed sits this far under the passage it goes under, dB.
+     *
+     *  <p>18 was the first value, "to be tuned by ear". It was, and the ear said 12: the user asked
+     *  for exactly that in the round that made the bed more obvious (「智能过渡请继续让 acestep 生成的过渡段
+     *  更明显」), and that change was lost when the rounds around it were rolled back — so it is here
+     *  again. 12 is the measured pair: {@code AceStepBed.DEFAULT_UNDER_DB} and its ceiling both read
+     *  this, and 12 dB under a passage is a layer you can hear doing its job instead of one you have to
+     *  be told about. */
+    public static final double BED_LEVEL_DB = 12.0d;
 
     /** A bed whose envelope is flatter than this is a drone, not texture, and is refused, dB of
      *  peak-to-trough range over {@link #ENVELOPE_MS} ms frames. It was 12 until a listener heard

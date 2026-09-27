@@ -295,7 +295,13 @@ public class AceStepBedTest {
                 .getAsJsonArray("content");
         String text = content.get(0).getAsJsonObject().get("text").getAsString();
         assertTrue(text, text.contains("<prompt>"));
-        assertTrue(text, text.contains("never stops, never drops in level"));
+        // ⚠️ Round 18: the ask is a TRANSITION with a direction, not the flat pad it used to be. Both
+        // halves are pinned here because the direction is the half the user's own report was about
+        // (「与后面的歌曲压根没有关联」) while the continuity clauses are what fixed the sparse-junk
+        // failure this caption replaced — dropping either one is a different request.
+        assertTrue(text, text.contains("its later part already belongs to the SECOND track"));
+        assertTrue(text, text.contains("no thinning out at the join"));
+        assertTrue(text, text.contains("no drum beat of its own"));
         assertTrue(text, text.contains("[Instrumental]"));
         assertEquals("input_audio", content.get(1).getAsJsonObject().get("type").getAsString());
         assertEquals("wav", content.get(1).getAsJsonObject().getAsJsonObject("input_audio")
@@ -574,7 +580,10 @@ public class AceStepBedTest {
 
         // the passage's own level, as the renderer measures it off the rendered head
         double passageDb = -12.58d;
-        for (double underDb : new double[] {18d, 12d}) {
+        // the two ends of the range, read off the constants: the bed's own level moved in round 18
+        // (18 -> 12 dB under the passage), and a fixture that spells the old pair out refuses its own
+        // subject the moment the knob moves again.
+        for (double underDb : new double[] {StemBed.BED_LEVEL_DB, AceStepBed.MIN_UNDER_DB}) {
             // ⚠️ the real window against the real bar: 6212 ms of a 2043.94 ms bar, so the fades are
             // capped at a third of the window instead of being a whole bar each (see StemBed)
             StemBed.Bed bed = StemBed.prepare(material, SENT_RATE, WINDOW_MS, BAR_MS,
@@ -614,8 +623,10 @@ public class AceStepBedTest {
                 "this material is supposed to leave no room under it: " + peak);
 
         // a passage with room under it: the bed is summed by its own samples, and the seams do not
-        // move because the bed's ends are exactly zero
-        float[][] quiet = scaled(passage, 0.2d);
+        // move because the bed's ends are exactly zero. ⚠️ 0.1 and not 0.2 (round 18): the bed is 6 dB
+        // louder than this fixture was written for, so the room has to come out of the passage — which
+        // is the trade the level change made, stated as a fixture rather than as a comment.
+        float[][] quiet = scaled(passage, 0.1d);
         double quietPeak = AceStepBed.peakWithBed(quiet, bed.pcm, at);
         println("with the passage 14 dB down the sum peaks at %.4f (the ceiling is %.0f)",
                 quietPeak, DjEdit.Limiter.CEILING);
