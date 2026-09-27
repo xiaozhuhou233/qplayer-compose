@@ -378,7 +378,14 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         }
         long removalMs = request.removalMs;
         long spanMs = returnSpanMs(request.beatPeriodMs);
-        long headMs = removalMs + spanMs;
+        // ⚠️ Round 14: the head has to reach as far as the landing can, and the landing is now decided
+        // by the material (StemFusion.ENTRY_MAX_MS) rather than by the listener's 过渡时长 — so the
+        // separated material covers the deepest landing this build can plan plus its passage and the
+        // return margin. The price is paid here and only here: a longer separation per render (what
+        // the pre-lane's minutes of margin are for), in exchange for a landing the old ceiling refused
+        // outright (the 34 800 ms one).
+        long headMs = Math.max(removalMs + spanMs,
+                StemFusion.ENTRY_MAX_MS + spanMs + Math.max(0L, request.blendMs));
         // ⚠️ Round 33: what gets DECODED and SEPARATED is the head extended to the arrival probe,
         // and what the file is built from is the head's own `headMs` of it (see step 2 below). The
         // two are one separation, so the arrival's own measurement costs the difference between them

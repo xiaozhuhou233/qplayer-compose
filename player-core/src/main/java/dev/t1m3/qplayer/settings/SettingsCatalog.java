@@ -129,6 +129,12 @@ public final class SettingsCatalog {
      *  used as a constant. */
     public static final String TRANSITION_BLEND_KEY = "transitionBlendSeconds";
 
+    /** The crossfade length the app uses now that the 过渡时长 row is gone (round 14) — the length the
+     *  listener HEARS, decided here instead of by them. It has no effect on where the incoming deck
+     *  starts: that is the material's own reading ({@code StemFusion.ENTRY_MAX_MS} and the coupling).
+     *  15 s is the row's own default, kept so the audible crossfade does not change with its removal. */
+    public static final long BLEND_MS = 15_000L;
+
     private SettingsCatalog() {}
 
     public static List<SettingSpec> specs() {
@@ -206,17 +212,12 @@ public final class SettingsCatalog {
                         + "设备不支持时不参与，过渡照常。")
                 .dependsOn(SMART_TRANSITION_KEY)
                 .build());
-        // The blend's length. One number for every ordinary pair, applied on the next
-        // boundary that is decided (the controller reads it, never a copy), and the
-        // floor under the chooser's own answer: a chooser that names 8s is raised to it.
-        out.add(SettingSpec.slider(TRANSITION_BLEND_KEY, PLAYBACK, "过渡时长", 15, 4, 30, 1)
-                .unit(" 秒").dots()
-                .desc("两首交叉淡化多久，4–30 秒。太短像淡入淡出，太长则两首不搭的歌"
-                        + "会同时很响。当前这首收尾很平淡时最多提前 "
-                        + dev.t1m3.qplayer.audio.TransitionPlan.PLAIN_EXTENSION_MS / 1000L
-                        + " 秒开始融合。")
-                .dependsOn(SMART_TRANSITION_KEY)
-                .build());
+        // ⚠️ The 过渡时长 row used to live here, and round 14 removed it at the listener's own
+        // request: 「你可以直接在设置里把过渡时长刨了，完全 ai 自己定，只要不是过于离谱」. What it still
+        // decides is the length of the crossfade they HEAR ({@link #BLEND_MS}); what it no longer
+        // decides is anything about the landing — that is the material's own reading now, bounded by
+        // {@code StemFusion.ENTRY_MAX_MS} (see RULE_VERSION 14's entry). The key itself is kept so a
+        // device carrying a stored value cannot crash, and {@code SettingsCore} no longer reads it.
         out.add(SettingSpec.toggle("highQuality", PLAYBACK, "高音质播放", true)
                 .desc("关闭后使用低音质播放以节省流量")
                 .build());

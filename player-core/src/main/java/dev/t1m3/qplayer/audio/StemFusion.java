@@ -323,8 +323,29 @@ public final class StemFusion {
      *       the stretch are the same numbers; only which bar line the deck starts on moved. The
      *       floor gives way to the cap so that no pair which fused before refuses now. Every edit
      *       written before this bump is planned again (the version is in the edit's own key), and the
-     *       renderer's separated head already reaches as far as the landing can
-     *       ({@code headMs = removalMs + span}), so a deeper landing costs no extra separation.</li>
+     *       renderer's separated head is sized to reach it ({@code headMs} in the renderer), so a
+     *       deeper landing costs a longer separation rather than a broken one.</li>
+     *   <li><b>13 → 14</b> — <b>the landing is no longer budgeted by the listener's 过渡时长.</b> The
+     *       user, after the round-13 build: 「你继续修改落点，你可以直接在设置里把过渡时长刨了，完全 ai 自己定，
+     *       只要不是过于离谱」. Until now every ceiling in this file was written in that setting — the
+     *       landing could not start deeper than {@code removalMs - windowMs}, and the passage could not
+     *       be longer than what it paid for — which is exactly why the landing the listener called
+     *       perfect (34 800 ms into a 187 s incoming) was refused by both this file and the renderer.
+     *       Three things changed, and {@link #ENTRY_MAX_MS} is the whole of the new budget:
+     *       <ul>
+     *         <li>{@link #maxStepsFor} is bounded by {@link #ENTRY_MAX_MS} instead of {@code removalMs},
+     *         so a passage is as long as the <em>material</em> asks for;</li>
+     *         <li>the landing's ceiling is {@code contentStart + ENTRY_MAX_MS - window} instead of
+     *         {@code removalMs - window}, so it is the material's own reading (the coupling's target,
+     *         walked forward out of a silent intro) that decides where the deck starts;</li>
+     *         <li>the renderer separates the incoming's head far enough to reach any landing this file
+     *         can plan.</li>
+     *       </ul>
+     *       What still bounds it is everything that was measured rather than chosen: the coupling
+     *       ({@code firstVocal - goneFile}), the two-bar floor of an already-singing track, the 40 s
+     *       ceiling, and the groove clause — which is what 「只要不是过于离谱」 means here. The
+     *       crossfade the listener <em>hears</em> is unchanged: the deck-level blend and the ramp are
+     *       the same numbers, and the passage's own shape is the same gesture.</li>
      * </ul>
      *
      * <p>The price is one re-render per pair, once, in the pre-lane where there are minutes of
@@ -334,21 +355,20 @@ public final class StemFusion {
      * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
      * name.
      */
-    public static final int RULE_VERSION = 13;
+    public static final int RULE_VERSION = 14;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with
      * {@code ceil((steps*stepMs + CUT)/stretch) + 2*slack <= cap} and
-     * {@code contentStart + steps*stepMs <= removalMs} (the fusion has to stay inside the window the
-     * incoming's vocals are out for — {@link #plan}'s own clause, asked here in the same terms so
-     * that the wait for the incoming's rows cannot push the passage past it).
+     * {@code steps*stepMs <= ENTRY_MAX_MS} (round 14: the passage's own bound is the material's, not
+     * the listener's 过渡时长 — {@code removalMs} used to be the second term here, which is what capped
+     * every passage at what that setting paid for).
      */
     private static int maxStepsFor(double stepMs, double stretch, long cap, long removalMs,
                                    long contentStartMs) {
         double ratio = stretch > 0d ? stretch : 1d;
         long byCap = (long) Math.floor(((cap - 2L * A_TAIL_SLACK_MS) * ratio - CUT_MS) / stepMs);
-        long byVocals = Math.floorDiv(removalMs - contentStartMs,
-                Math.max(1L, Math.round(stepMs)));
+        long byVocals = Math.floorDiv(ENTRY_MAX_MS, Math.max(1L, Math.round(stepMs)));
         return (int) Math.max(1L, Math.min(byCap, byVocals));
     }
 
@@ -3121,10 +3141,20 @@ public final class StemFusion {
                     + entryWhy(in, stepMs), aBar, bBar, lock);
         }
         long fusionEnd = entry + windowMs;
-        if (fusionEnd > in.removalMs) {
+        // ⚠️ Round 14 relaxed this clause, and it is the one that refused the landing the listener
+        // called perfect (34 800 ms into a 187 s incoming). It used to be `fusionEnd <= removalMs`,
+        // i.e. "the whole crossfade must fit inside the blend the 过渡时长 setting paid for". What the
+        // clause really protects is that the passage fits inside the incoming's own material with its
+        // vocals gated for exactly the passage's length — and that gate is entry-relative
+        // (`goneFile`/the coupling), so a deeper landing does not break it; only the material has to
+        // exist that far in, which is what the renderer's head is now sized for. The bound is the
+        // material's own: the same ENTRY_MAX_MS the landing is clamped to, plus the passage it needs.
+        long materialHead = in.contentStartMs + ENTRY_MAX_MS + windowMs;
+        if (fusionEnd > materialHead) {
             return invalid(String.format(Locale.US,
-                    "the fusion would run %dms past the %dms the incoming's vocals are out for",
-                    fusionEnd - in.removalMs, in.removalMs), aBar, bBar, lock);
+                    "the fusion would run %dms past the %dms of the incoming track this build plans"
+                            + " over (%dms of landing plus the %dms passage)",
+                    fusionEnd - materialHead, materialHead, ENTRY_MAX_MS, windowMs), aBar, bBar, lock);
         }
         long barStep = Math.round(stepMs);
         // The gesture's own instants (round 6): the incoming's drums and low end rise over one step
@@ -3404,7 +3434,13 @@ public final class StemFusion {
         // what the window the incoming's voice is held out for can pay for (the same clause the plan
         // asks as `fusionEnd <= removalMs`, asked here so that a landing the window cannot afford is
         // pulled back to the last one it can rather than making the whole plan invalid).
-        long ceiling = in.removalMs - windowMs;
+        // Round 14: the ceiling is the MATERIAL's bound, not the listener's 过渡时长. It used to be
+        // `removalMs - windowMs`, i.e. "the landing may not start deeper than the blend the user asked
+        // for could pay for" — which is what refused the landing they called perfect (34 800 ms in).
+        // ENTRY_MAX_MS is the whole of the new budget; `removalMs` still exists because the renderer
+        // separates and gates on it, but it no longer decides where the deck starts.
+        long ceiling = Math.max(in.contentStartMs,
+                in.contentStartMs + ENTRY_MAX_MS - Math.max(0L, windowMs));
         long runway = (long) VOCAL_SKIP_RUNWAY_BARS * gridStep;
         long target = in.firstVocalMs - goneFile;
         target = Math.min(target, in.firstVocalMs - runway);
