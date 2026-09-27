@@ -3195,21 +3195,13 @@ public final class StemFusion {
                     + entryWhy(in, stepMs), aBar, bBar, lock);
         }
         long fusionEnd = entry + windowMs;
-        // ⚠️ Round 14 relaxed this clause, and it is the one that refused the landing the listener
-        // called perfect (34 800 ms into a 187 s incoming). It used to be `fusionEnd <= removalMs`,
-        // i.e. "the whole crossfade must fit inside the blend the 过渡时长 setting paid for". What the
-        // clause really protects is that the passage fits inside the incoming's own material with its
-        // vocals gated for exactly the passage's length — and that gate is entry-relative
-        // (`goneFile`/the coupling), so a deeper landing does not break it; only the material has to
-        // exist that far in, which is what the renderer's head is now sized for. The bound is the
-        // material's own: the same ENTRY_MAX_MS the landing is clamped to, plus the passage it needs.
-        long materialHead = in.contentStartMs + ENTRY_MAX_MS + windowMs;
-        if (fusionEnd > materialHead) {
-            return invalid(String.format(Locale.US,
-                    "the fusion would run %dms past the %dms of the incoming track this build plans"
-                            + " over (%dms of landing plus the %dms passage)",
-                    fusionEnd - materialHead, materialHead, ENTRY_MAX_MS, windowMs), aBar, bBar, lock);
-        }
+        // ⚠️ Round 14 DELETED the clause that used to stand here ("the fusion would run Xms past the
+        // Yms the incoming's vocals are out for"). It is not weakened, it is <b>unreachable</b>: the
+        // landing is clamped to {@code contentStart + ENTRY_MAX_MS - windowMs} ({@link #entry}), so
+        // {@code fusionEnd <= contentStart + ENTRY_MAX_MS} holds by construction — and that clamp is
+        // the material's own bound, which is what took the clause's place. What the clause was really
+        // protecting (the incoming's vocals are gated for exactly the passage's length, never stacked)
+        // is entry-relative and lives in the coupling's gate, not here.
         long barStep = Math.round(stepMs);
         // The gesture's own instants (round 6): the incoming's drums and low end rise over one step
         // starting where the outgoing's hold ends, and the outgoing's rows recede from that same

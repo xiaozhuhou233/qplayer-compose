@@ -3904,6 +3904,22 @@ player-core **315 跑 1 失败**，唯一失败仍是既有的
 `SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`。它们记录的是**被改掉的那条规则**，
 要按新规则重写（不是简单改数字：每条断言的语义都变了）。
 
+⚠️ **欠账已清（同日）**：RULE 14 留下的三条旧期望已按新规则重写，另外**"融合越过人声窗口"那条判据直接删掉了**——
+它不是被放松，而是**不可达**：落点已被夹在 `contentStart + ENTRY_MAX_MS − window`，所以
+`fusionEnd ≤ contentStart + ENTRY_MAX_MS` 恒成立，而那条夹子就是替代它的材料上限。player-core 现在
+**324 跑 1 失败**，唯一失败是既有的 `SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`。
+（这三条不是简单改数字：每条断言的**语义**都变了，比如"窗口付得起的最晚落点 4450"现在断言的是
+"落点就是耦合自己的、不再被打回"，见 `theArrivalMeasuredOnTheProbeIsTheLandingTheListenerChose`。）
+
+⚠️ **用户随后又报了两条，都还没做**：
+1. **放行时刻还要更贴"出曲听不到的那一刻"**（现在是 departure 之前一小节 + 6 dB 那条），以及**落点要在
+   groove 条款把它往后推之后仍对齐句首**。这需要把"句首"作为**测量**传给计划（`Input` 再加一个可选字段 +
+   渲染器 4 个调用点），因为 gate 是相对落点的、落点一动对齐就散。
+2. **「前一首歌音量在过渡时骤减得太快了」**。两个嫌疑，先量再改：① **牌面层的 junction 交叉淡化
+   `FadeCurve.JUNCTION_XFADE_MS = 2000ms`**（出曲自己那份没分离的材料在 2 秒内交出）；② **carried 行的退场**
+   是 gesture 的 1–2 步（120 BPM 下一步≈2 秒）。渲染日志里本来就有"the six exchanges and the levels across
+   each"，可以直接读它量出这条斜坡。
+
 ## 九、音频焦点：自动暂停 / 自动恢复（2026-09-21 修复，装机验证）
 
 **用户诉求**：别的 App（B站、别的视频软件、别的音乐）开始放 → qplayer 自动暂停；那个 App 停了/暂停了
