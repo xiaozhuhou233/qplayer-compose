@@ -205,7 +205,7 @@ public class StemBedTest {
         assertNotNull(bed.pcm);
 
         int frames = (int) Math.round(RATE * windowMs / 1000d);
-        int fadeFrames = (int) Math.round(RATE * (double) barMs / 1000d);
+        int fadeFrames = (int) Math.round(RATE * StemBed.BED_FADE_BARS * (double) barMs / 1000d);
         assertEquals(frames, bed.frames);
         assertEquals(fadeFrames, bed.fadeFrames);
         assertEquals(1, bed.pcm.length);
@@ -440,10 +440,14 @@ public class StemBedTest {
     // --- the envelope, which is why the seams are safe -------------------------
 
     @Test
-    public void theEnvelopeIsOneBarAtEachEndAndZeroAtTheSeams() {
+    public void theEnvelopeIsTwoBarsAtEachEndAndZeroAtTheSeams() {
         int frames = 176_400;      // 4 s at 44.1 kHz
-        int fadeFrames = 22_050;   // one 500 ms bar of the incoming's grid
-        assertEquals(500d, 1000d * fadeFrames / RATE, 0.05d);
+        // Ⓐ Round 30: the listener asked for the bed's ending to be a fade-out (and its start a
+        // fade-in), so the wanted envelope is BED_FADE_BARS bars and not one. Derived from the
+        // constant rather than written out, because what this fixture is about is the SHAPE
+        // (zero at both seams, monotone, symmetric) and the length is the constant's business.
+        int fadeFrames = (int) Math.round(RATE * StemBed.BED_FADE_BARS * 500d / 1000d);
+        assertEquals(2 * 500d, 1000d * fadeFrames / RATE, 0.05d);
 
         // exactly zero at the first and the last sample, and rising immediately after each
         assertEquals(0d, StemBed.envelope(0, frames, fadeFrames), 0d);

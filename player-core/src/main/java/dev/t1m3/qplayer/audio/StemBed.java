@@ -124,8 +124,19 @@ public final class StemBed {
     public static final double BODY_WINDOW_DB = 30.0d;
 
     /** The fade-in and fade-out at each end <b>wanted</b>, in bars of the incoming track's own
-     *  grid. Wanted, not guaranteed: see {@link #MIN_FADE_MS}. */
-    public static final int BED_FADE_BARS = 1;
+     *  grid. Wanted, not guaranteed: see {@link #MIN_FADE_MS}.
+     *
+     *  <p>Ⓐ Round 30: <b>two</b> bars, and it is the listener's own report that moved it. The
+     *  envelope has been at both ends since this class existed (see the class's own note: the bed
+     *  is zero at its first and last sample by construction), but at one bar of the incoming
+     *  track's grid — 1.6 s on the pair that was listened to, at 149 BPM — a percussive bed's
+     *  ending still arrives as an ending rather than as a leave-taking: 「我说的是 ai 垫层的收尾要
+     *  淡出，最好再有个淡入」. Two bars is 3.2 s on the same grid, which is a musical phrase rather
+     *  than a fade-out effect, and it is the same envelope at the start, so the bed now also
+     *  arrives over two bars instead of one. The {@code frames / 3} cap below is unchanged, so a
+     *  passage too short for two bars at each end still keeps a hold to normalise over and still
+     *  falls back to the shorter fade rather than being refused. */
+    public static final int BED_FADE_BARS = 2;
 
     /** The shortest fade that is still a fade and not a click, ms. The wanted
      *  {@link #BED_FADE_BARS} is capped so the window keeps a hold for the RMS to be measured

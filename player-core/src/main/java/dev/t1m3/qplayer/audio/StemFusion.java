@@ -495,7 +495,7 @@ public final class StemFusion {
      * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
      * name.
      */
-    public static final int RULE_VERSION = 23;
+    public static final int RULE_VERSION = 24;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with
