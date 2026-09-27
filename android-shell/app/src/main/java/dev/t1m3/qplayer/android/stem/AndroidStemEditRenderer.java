@@ -1760,8 +1760,19 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                     request.title(), plan.coupling.voiceGateMs, StemFusion.VOICE_GATE_LEAD_BARS,
                     request.removalMs);
         }
+        // Ⓜ Round 31: the carried rows are assembled ONCE, for both renders below. They are the
+        // make-up's own input — `applyMakeup` only ever reads them and returns a fresh array — so
+        // hoisting them out of `renderFusion` cannot change one sample of what is written, and it
+        // spares the second call the whole carry-and-gate stage: the resample of the outgoing's
+        // stems the pre-lengthening needs, the gesture's gate over the window, and the four rows'
+        // worth of copying. Which of the two is the bigger share is what the timing line inside
+        // `renderFusion` is for; this one is free either way.
+        final float[][][] carriedRows = StemFusion.gate(
+                StemFusion.carry(tail.stems, StemModel.MODEL_RATE, tail.startMs, plan,
+                        request.speed, melody),
+                plan, melody, StemModel.MODEL_RATE);
         Fusion first = renderFusion(request, headStems, plan, gate, windowSec, clipped, tail,
-                melody, separateMs, outgoingMaster, 0d, bodyDb);
+                melody, separateMs, outgoingMaster, 0d, bodyDb, carriedRows);
         double makeup = StemFusion.makeupDb(
                 first.report.stepMeasured ? first.report.junctionStepDb : Double.NaN);
         if (!(makeup > 0d)) {
@@ -1780,7 +1791,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
             return first;
         }
         Fusion lifted = renderFusion(request, headStems, plan, gate, windowSec, clipped, tail,
-                melody, separateMs, outgoingMaster, makeup, bodyDb);
+                melody, separateMs, outgoingMaster, makeup, bodyDb, carriedRows);
         Logger.info("transition: DJ edit for {}: the fusion's junction measured {} dB against the"
                         + " outgoing track's own last {}ms — the voice the fusion removes was that"
                         + " much of the energy — so the outgoing's carried rows are lifted {} dB"
@@ -1880,18 +1891,27 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
     private Fusion renderFusion(Request request, float[][][] headStems, StemFusion.Plan plan,
                                 DjEdit.Plan edit, double windowSec, int[] clipped, Tail tail,
                                 boolean melody, long separateMs, float[][] outgoingMaster,
-                                double makeupDb, double bodyDb) {
+                                double makeupDb, double bodyDb, float[][][] carriedRows) {
+        // Ⓜ Round 31: where this call's own time goes, because the only way to cut the fusion's
+        // cost is to know WHICH half of it to cut. `attemptFusion` renders the passage twice — once
+        // at make-up 0 to learn the junction's step, once with the solved make-up, whose report is
+        // the one the acceptance judges — and the two are identical except for one scalar on the
+        // carried rows. Whether the second call can be made cheap depends on one fact nobody has
+        // measured: is the money in the part that does NOT depend on the make-up (the carry, the
+        // gate, the window slices) or in the part that does (the head's own render and the report
+        // over the window)? Logged per call, so one device render answers it.
+        long tStart = System.nanoTime();
         int rate = StemModel.MODEL_RATE;
         int startFrame = (int) Math.round(plan.entryMs * (double) rate / 1000d);
         int frames = (int) Math.round(plan.windowMs * (double) rate / 1000d);
-        float[][][] carried = StemFusion.applyMakeup(StemFusion.gate(
-                StemFusion.carry(tail.stems, rate, tail.startMs, plan, request.speed, melody),
-                plan, melody, rate), makeupDb);
+        float[][][] carried = StemFusion.applyMakeup(carriedRows, makeupDb);
+        long tCarry = System.nanoTime();
         DjEdit.ClipGuard guard = new DjEdit.ClipGuard(startFrame, startFrame + frames);
         DjEdit.Limiter limiter = new DjEdit.Limiter(rate);
         float[][] edited = DjEdit.renderHead(headStems, rate, windowSec, edit, clipped,
                 StemFusion.incomingGains(plan, edit), carried, startFrame, null, null, 0, guard,
                 limiter);
+        long tHead = System.nanoTime();
         Logger.info("transition: DJ edit for {}: {}", request.title(), limiter.describe());
         float[][][] incoming = new float[4][][];
         float[][][] source = new float[4][][];
@@ -1936,6 +1956,12 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                                 - plan.entryMs)),
                 melody, request.outgoingBeatPeriodMs / 1000d, request.beatPeriodMs / 1000d, guard);
         Logger.info("transition: DJ edit for {} — {}", request.title(), report.describe());
+        Logger.info("transition: DJ edit for {}: one fusion render, make-up {} dB — the carried"
+                        + " rows' assembly {}ms, the head's own render {}ms, the report {}ms"
+                        + " ({}ms in all)",
+                request.title(), fmtDb(makeupDb),
+                (tCarry - tStart) / 1000000L, (tHead - tCarry) / 1000000L,
+                (System.nanoTime() - tHead) / 1000000L, (System.nanoTime() - tStart) / 1000000L);
         return new Fusion(plan, edited, report, separateMs, edit);
     }
 
