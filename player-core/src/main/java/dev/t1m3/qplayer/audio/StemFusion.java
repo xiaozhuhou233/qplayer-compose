@@ -413,6 +413,14 @@ public final class StemFusion {
      *       attempts. Only the request text changed — the level, the geometry, the gates and everything
      *       upstream are untouched — but the take the model returns is different audio, so the cached
      *       edits are re-rendered once.</li>
+     *   <li><b>18 → 19</b> — <b>the bed's caption asks for the two tracks' TUNES fused, not for a pad
+     *       with no melody.</b> The user's requirement, in their own words: 「不要只是淡入淡出式的结合，
+     *       生成物要是两首歌的曲调融合在一起丝滑过渡而不是中间接一个由小声到大声淡入」. Every earlier
+     *       version of the caption carried "it is a pad and not a melody … no melody of its own", which
+     *       asked the model for exactly the level-ramped material that is being objected to; the melody
+     *       clause is gone and the ask is a melodic hand-over (the first track's tune, then the second's
+     *       over it, then only the second's). Kept: no fade-in from quiet and no swell, continuous and
+     *       even, instrumental (「过渡里尽量没人声」), and no drum beat of its own.</li>
      * </ul>
      *
      * <p>The price is one re-render per pair, once, in the pre-lane where there are minutes of
@@ -422,7 +430,7 @@ public final class StemFusion {
      * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
      * name.
      */
-    public static final int RULE_VERSION = 18;
+    public static final int RULE_VERSION = 19;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with

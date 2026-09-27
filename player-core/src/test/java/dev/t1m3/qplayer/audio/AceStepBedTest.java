@@ -300,11 +300,17 @@ public class AceStepBedTest {
         // 而是做收尾然后变到第二首」 — so "ending, not a continuation" and "the second track's beginning"
         // are asserted as clauses of their own, and the continuity clauses from the first fix stay:
         // dropping any one of the four is a different request, not a rewording.
-        assertTrue(text, text.contains("the first track's own ENDING"));
-        assertTrue(text, text.contains("NOT more of the same music and not a continuation of it"));
-        assertTrue(text, text.contains("its later part is the SECOND track's beginning"));
-        assertTrue(text, text.contains("no thinning out at the join"));
-        assertTrue(text, text.contains("no drum beat of its own"));
+        // ⚠️ Round 22 changed the job: the model is no longer asked for a piece of music at all, but to
+        // CONTINUE the audio across the seam (the local fusion stays as it is and the model repairs its
+        // most abrupt stretch). The clauses pinned here are the request's own two halves — carry the music
+        // on, and do not do it by fading or swelling — plus the fact that nothing from the abandoned
+        // "write a transition" wording survived.
+        assertTrue(text, text.contains("Continue this audio seamlessly across the gap"));
+        assertTrue(text, text.contains("do not start anything new"));
+        assertTrue(text, text.contains("nothing fades in, nothing swells"));
+        assertFalse("the passage-wide bed's ask is not this one any more",
+                text.contains("FUSES the two tracks' tunes"));
+        assertFalse(text.contains("no melody of its own"));
         assertTrue(text, text.contains("[Instrumental]"));
         assertEquals("input_audio", content.get(1).getAsJsonObject().get("type").getAsString());
         assertEquals("wav", content.get(1).getAsJsonObject().getAsJsonObject("input_audio")

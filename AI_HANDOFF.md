@@ -4147,6 +4147,29 @@ ACESTEP_API_KEY=... java -cp "$CP" BedFetch audio_huai audio_owa 185200 8000 800
   跑法：`BED_OUT=.../<out>/ ACESTEP_API_KEY=... java -cp "$CP" BedFetch audio_fortnight audio_passionfruit 204141 6506 10778 12 captions.txt`
   → release **`bed-ab-fortnight-passionfruit-2026-09-27`**（`bed-fp.zip`，4×context + 4×span + README）。
 
+### 第 22 轮（2026-09-27）：**架构改了 —— 本地融合照旧，AI 只补"最突兀的那一段"**
+
+用户（听完第 21 轮那些生成段之后）：「算了算了别让他生成歌曲了，太狗屎了，**还是用当时的本地融合，然后 ai 只负责
+生成帮助衔接最突兀的那一段的融合**」。于是**第 18–21 轮那条路线（让模型写一段垫层/过渡/曲调融合）到此为止**：
+不再要它写音乐，模型的工作变成**把本地融合里最突兀的那一小段缝住**。
+
+**新分工**：本地融合（我们自己的 stem 融合）完全照旧；ACE-Step 只做**短补丁**。
+模型最擅长、也最符合这个要求的模式是 **repaint + "接着继续"**（inpainting），而不是"写一段过渡"——
+所以 `AceStepBed.CAPTION` 也换成了 continuation 的说法（"Continue this audio seamlessly across the gap …
+do not start anything new. It should sound as if the recording had never stopped."）。
+
+**已经做的**（都是工具侧，没有动 app 的播放/渲染路径）：
+- `AceStepBed.geometry(..., contextMs)` 新增**短上下文重载**（补缝前后各几秒就够，不需要各 12 秒；
+  夹在 `[MIN_CONTEXT_MS, CONTEXT_MS]`）。
+- `BedFetch` 支持传 contextMs；在**用户那一对**上跑出三版 7 秒 buffer 的补缝
+  （A 的 2s + **3s 补丁** + B 的 2s），release **`seam-patch-fortnight-passionfruit-2026-09-27`**（`seam-fp.zip`）。
+
+**接进 app 需要三件事**（还没做，等用户听完定方向）：
+1. **测出"最突兀的时刻"**：SLAM 就是出曲各层被切掉的那条交接线（`Plan.swapMs`）；对拍融合有两个候选
+   （入曲鼓组到达 `arriveStart`、牌面交接 `junction`）。可以在渲染出的段落上量"20ms 窗电平阶跃"最大的位置。
+2. **把段落自己的音频当前后文**（app 里那段就在 `edited` 内存里，不用另外解码），补丁长度是参数（先 3 秒）。
+3. **按 unity 替换那一小段**，两头 150–300ms 等功率交叉——**是补缝，不是垫在下面的层**（不是 12/18 dB 之下）。
+
 ## 九、音频焦点：自动暂停 / 自动恢复（2026-09-21 修复，装机验证）
 
 **用户诉求**：别的 App（B站、别的视频软件、别的音乐）开始放 → qplayer 自动暂停；那个 App 停了/暂停了

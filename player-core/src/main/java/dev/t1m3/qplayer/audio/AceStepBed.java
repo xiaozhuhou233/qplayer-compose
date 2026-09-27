@@ -105,43 +105,33 @@ public final class AceStepBed {
      *  server rejects — and the self-hosted server's own id is namespaced the same way. */
     public static final String MODEL_NAMESPACE = "acemusic/";
 
-    /** The caption — <b>the bed's whole job description.</b> Two listening rounds have now been spent
-     *  on this one string, and each is a lesson about what the model does with a word.
+    /** The caption — <b>the job description, and the job has changed twice.</b>
      *
-     *  <p><b>Round 18</b> replaced "a sustained, even harmonic pad … no lead line, no vocals, no beat of
-     *  its own" — a texture that by construction belongs to neither track — with a directional ask
-     *  (「融合段很明显是生成的那段出了问题……与后面的歌曲压根没有关联，能不能让生成段更符合过渡逻辑」). That was
-     *  better and still wrong, and the user named the mistake precisely: <b>「你不要让她延续前一首歌的
-     *  歌曲做续写，而是做收尾然后变到第二首」</b> — do not have it continue the first track, have it
-     *  <em>end</em> the first track and then change into the second. The round-18 wording said "its first
-     *  part belongs to the first track: the same key, the same mood", which is an instruction to keep
-     *  writing that track, and that is what they heard.
+     *  <p><b>Rounds 18–21 were all spent on the wrong job.</b> They asked the model for a layer that runs
+     *  under the whole passage — a pad first, then a directional transition, then a fusion of the two
+     *  tracks' tunes — and the listener's verdict on that whole line of work is 「算了算了别让他生成歌曲了，
+     *  太狗屎了，还是用当时的本地融合，然后 ai 只负责生成帮助衔接最突兀的那一段的融合」: stop having it
+     *  write songs; the local stem fusion stays exactly as it is, and the model's only job is the stretch
+     *  where that fusion is at its most abrupt.
      *
-     *  <p>So the ask is a <b>function</b>, not a mood: the first part is the first track's own
-     *  <em>ending</em> — the phrase that comes to rest, explicitly not more of the same music — the middle
-     *  turns, and the later part is the <em>second</em> track's beginning, in its key and harmony, so the
-     *  join reads as the second track arriving. What is KEPT from both earlier attempts: it stays
-     *  continuous and even (the layer must never leave a hole — a wind-down is a musical gesture, not a
-     *  level drop), it stays instrumental, and it still has <b>no drum beat of its own</b> (the passage
-     *  already carries the outgoing track's kit). The model hears 12 s of each track either side of the
-     *  stretch it fills (see {@code Geometry}), so both ends are things it can actually do.
+     *  <p>So the ask is no longer a piece of music at all — it is a <b>continuation</b>, which is what a
+     *  repaint model is best at and what the audio in the buffer already describes. The buffer is short
+     *  (the caller's own context length either side of the seam, not {@link #CONTEXT_MS}), the model hears
+     *  the music immediately before and immediately after the seam, and this sentence asks it to carry
+     *  that music across: same instruments, same energy, one unbroken line, nothing new started. Every
+     *  clause about "no fade-in, no swell" is the negative half of the same request — a patch that rises
+     *  or falls in level is the thing being replaced, not a repair.
      *
-     *  <p>⚠️ What this does NOT fix: nothing in the request carries the two tracks' measured tempo or key
-     *  as data — the model has the audio and this sentence. And the gates in {@link StemBed} (occupancy,
-     *  spread) were tuned on the material the FIRST caption produced, so a take with this shape may be
-     *  refused by numbers that were never meant to judge it; if the log starts saying the bed is not in
-     *  the edit, those are the numbers to re-derive, not this text. */
+     *  <p>⚠️ Two things this wording CANNOT do, so the next reader does not expect them: it cannot make the
+     *  patch musically right if the model improvises anyway (the take is stochastic; the listener judges,
+     *  and {@code BedFetch} is how several wordings are compared in one sitting), and it says nothing about
+     *  WHERE the seam is — the caller picks that (for a SLAM it is the outgoing's rows' own cut at
+     *  {@code Plan.swapMs}; for a beat-matched fusion there are two candidates, the incoming's arrival and
+     *  the deck-level hand-over). */
     public static final String CAPTION =
-            "A transition that ends the first track and begins the second. Its first part is the first"
-            + " track's own ENDING: a resolving, winding-down harmonic phrase in the first track's key"
-            + " that brings that music to rest — the closing bars of the piece, NOT more of the same"
-            + " music and not a continuation of it. Through its middle it turns, and its later part is"
-            + " the SECOND track's beginning: that track's key, its harmony and its mood, arriving as"
-            + " that track starts, so the join sounds like the second track beginning rather than like"
-            + " a fade. It is one continuous layer and it never leaves a hole: whatever the music does,"
-            + " the layer itself keeps sounding from start to finish with no silence and no thinning out"
-            + " at the join. It is a harmonic layer and not a lead line: no vocals, no melody of its"
-            + " own, and no drum beat of its own.";
+            "Continue this audio seamlessly across the gap: the same music, the same instruments, the"
+            + " same energy, one unbroken line — nothing fades in, nothing swells, no silence, and do"
+            + " not start anything new. It should sound as if the recording had never stopped.";
 
     /** ACE-Step's own sentinel for an instrumental take, sent beside
      *  {@code audio_config.instrumental} because they are two different switches. */
@@ -324,6 +314,24 @@ public final class AceStepBed {
      */
     public static Geometry geometry(long junctionMs, long fusionEndMs, long windowMs,
                                     long outgoingDurationMs, long incomingDurationMs, int rate) {
+        return geometry(junctionMs, fusionEndMs, windowMs, outgoingDurationMs, incomingDurationMs,
+                rate, CONTEXT_MS);
+    }
+
+    /**
+     * The same geometry with the context length <b>given</b> instead of {@link #CONTEXT_MS} — for the
+     * PC bench ({@code BedFetch}) that asks ACE-Step for a take over a <em>short</em> window, which is a
+     * different job from the passage-wide bed: a patch that repairs one seam needs only a couple of
+     * seconds of audio either side of it, and giving the model twelve would make it describe twelve
+     * seconds of music instead of continuing two. {@code contextMs} is clamped to
+     * {@code [MIN_CONTEXT_MS, CONTEXT_MS]} so no caller can ask for a context the model cannot use.
+     *
+     * <p>The app itself never calls this: it asks for the passage-wide bed, which is what
+     * {@code CONTEXT_MS} is for.
+     */
+    public static Geometry geometry(long junctionMs, long fusionEndMs, long windowMs,
+                                    long outgoingDurationMs, long incomingDurationMs, int rate,
+                                    long contextMs) {
         if (rate <= 0) return invalid("a buffer at " + rate + "Hz");
         if (windowMs <= 0L) return invalid("a " + windowMs + "ms passage window");
         if (junctionMs <= 0L) return invalid("the outgoing deck is cut at " + junctionMs + "ms of"
@@ -338,14 +346,15 @@ public final class AceStepBed {
             return invalid("the incoming file's length is not known, so no head window can be"
                     + " placed after " + fusionEndMs + "ms of it");
         }
-        long tailMs = Math.min(CONTEXT_MS, junctionMs);
+        long wanted = Math.max(MIN_CONTEXT_MS, Math.min(CONTEXT_MS, contextMs));
+        long tailMs = Math.min(wanted, junctionMs);
         if (tailMs < MIN_CONTEXT_MS) {
             return invalid(String.format(Locale.US, "the junction is at %dms of the outgoing's file,"
                     + " so only %dms of its tail is available — under the %dms a context needs",
                     junctionMs, tailMs, MIN_CONTEXT_MS));
         }
         long available = incomingDurationMs - fusionEndMs;
-        long headMs = Math.min(CONTEXT_MS, available);
+        long headMs = Math.min(wanted, available);
         if (headMs < MIN_CONTEXT_MS) {
             return invalid(String.format(Locale.US, "the passage hands back to the incoming at %dms"
                             + " of a %dms file, leaving %dms — under the %dms a context needs",
