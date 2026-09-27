@@ -4467,6 +4467,53 @@ return lifted;
 ⚠️ **发布说明里的反引号会被 shell 吃掉**（两次事故）：`gh release create --notes "..."` 里凡是 `` `X` `` 都会被当命令
 执行、留下空档。**一律用 `--notes-file` / `git commit -F`**（第 26/31 轮就是这么绕过去的）。
 
+### 第 32 轮（2026-09-28）：**量尺给了答案：报告占每遍渲染的 90%；Shape of You 没提示的真因是 SLAM 被反复拒**
+
+用户：「我播放了原本会生成最强混音的歌 shape of you，但是他现在不给提示了貌似也没真生成」。
+
+**① 提速的量尺（`-27t` 装的）第一次就出结果**（`Something 2 Prove`，真机）：
+
+```
+one fusion render, make-up +0.00 dB — 搬运装配 0ms, 头部渲染 1915ms, 报告 17959ms (19875ms)
+one fusion render, make-up +1.89 dB — 搬运装配 11ms, 头部渲染 1368ms, 报告 22353ms (23733ms)
+```
+
+**钱在"报告测量"里：18–25 秒，占每一遍渲染的 90%+**；头部渲染只有 1.3–1.9 秒，装配 ~0ms（所以 `-27t` 那把
+实切虽然对，但不是大头）。而 `attemptFusion` 每**一次**尝试要**渲染两遍**、每次渲染都**跑一遍完整报告**——
+一对子还要重试好几轮（这次日志里同一对子从 21:58 渲到 22:04）。
+
+**下一刀（设计已定，实施即可）**：给报告构建加一个 `stepOnly` 开关，让**第一遍（用来量交界落差的那一遍）只建材料 +
+头部 + 量落差**，跳过其余测量（相关类测量就是那 18–25 秒）。于是：
+
+- 需要 make-up 的对子：探针 ~2s + 一遍完整渲染 ~24s = 26s，**对比现在的两遍 48s，省约 22 秒/次尝试**；
+- 不需要 make-up 的对子：探针 2s + 完整渲染 24s ≈ 现状（+1~2s）。
+
+安全性来自"探针走的是**同一段代码**"（同一个 `renderFusion` + 同一个 `StemFusion.referenceDb(outgoingMaster, rate, bodyDb)`
+的夹取，renderer 1934 行），所以它量到的落差和完整报告会量到的**是同一个值**——这也是不动验收的唯一办法。
+相关位置：`AndroidStemEditRenderer.renderFusion`（1880 起，`new StemFusion.Material(...)` 在 1948）、
+报告构建在 `StemFusion` 4560–4720 之间（落差那一支在 4630–4649）。
+
+**② Shape of You 为什么没提示：不是"没生成"，是这一对被判成了 SLAM 且验收反复拒它。** 日志原文：
+
+```
+the two backgrounds can be fused — SLAM (the grids are in no relation ...: 3 bars of the incoming's grid ...)
+... NOT ACCEPTABLE: the incoming's own drums never arrive (-58.2 dBFS after their swap);
+... NOT ACCEPTABLE: the incoming's own low end never arrive (-54.9 dBFS after their swap);   (重试后的窗口)
+```
+
+- **提示**（`mixReady`）只在 `result.isFusion()` 时亮，而这一对走的是 **SLAM** 分支（191.7 vs 149.0 BPM，网格无关系）
+  ——**SLAM 不是 "fusion"**，所以即使它被写出来也不点亮提示；而这里它**根本没被写出来**：两次尝试都栽在
+  "the incoming's own drums/low end never arrive" 这条（地板是 −50 dBFS，读数 −58.2 / −54.9）。
+- 同一份报告里还有 **NaN**：`its own fade fading material (NaN vs NaN dBFS over the fade)`、
+  `pulse: 0 of 0 beats carry an attack`——与第 30 轮记的那个洞同一个（那两条判据在空跑）。
+- 另外：用户是**跳进** Shape of You 的（21:57:55.139 播它），所以"上一对（oh yeah? → Shape of You）"的编辑请求
+  被换歌作废（日志里 `DJ edit for So Far Away cancelled during the separation` 同理）——这也解释了"看起来没生成"。
+
+**下一步（按价值排序）**：Ⓐ 报告 `stepOnly` 那一刀（省 ~22s/次尝试，最确定）；Ⓑ SLAM 的
+"the incoming's own rows never arrive" 这条在 −58/−54 dBFS 附近误杀（地板 −50，且它在 SLAM 自己的 `swap` 之后取切片，
+第 6 轮修过一次同类问题），要按 SLAM 自己的时刻重新审一遍；Ⓒ 报告里的 NaN；Ⓓ `mixReady` 是否该对 SLAM 也亮
+（现在只对 RELATION 家族的 fusion 亮——若用户把 SLAM 也算"最强混音"，那要改，但先问清）。
+
 ## 九、音频焦点：自动暂停 / 自动恢复（2026-09-21 修复，装机验证）
 
 **用户诉求**：别的 App（B站、别的视频软件、别的音乐）开始放 → qplayer 自动暂停；那个 App 停了/暂停了
