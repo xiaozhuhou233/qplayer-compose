@@ -37,6 +37,7 @@ import dev.t1m3.qplayer.customapi.CustomSong;
 import dev.t1m3.qplayer.library.LibraryScanner;
 import dev.t1m3.qplayer.lyric.LyricLine;
 import dev.t1m3.qplayer.lyric.LyricParser;
+import dev.t1m3.qplayer.lyric.LyricTiming;
 import dev.t1m3.qplayer.lyric.TtmlParser;
 import dev.t1m3.qplayer.lyric.WordTimeLrcParser;
 import dev.t1m3.qplayer.lyric.skia.LyricConfig;
@@ -455,6 +456,9 @@ public final class PlayerController {
                 }
             });
     private final java.util.Set<Long> lyricPreloadQueued =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+    // One stale-LRC upgrade attempt per song/session; never retry on each frame.
+    private final java.util.Set<Long> lyricTimingRefreshAttempted =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
     /** Per-track lyric timing corrections. The live LyricConfig value still feeds
      *  both renderers, but it is replaced whenever the current track changes. */
@@ -3195,6 +3199,27 @@ public final class PlayerController {
                 // the deadline instead of a ladder, exactly as round 13's pairs without a section
                 // do: {@link KeyGlide#none} is that shape, and `pitchIdentityAtFileMs` above is the
                 // instant it lands on.
+                // ⚠️ Round 27, and it is the listener's own instruction: 「非必要不要用升调，或者你最好能让
+                // 它不变得突然」. A shift that RAISES the incoming track is dropped here with the tempo
+                // kept — and with the shift gone there is nothing left to write back at
+                // `pitchIdentityAtFileMs` either, which is the other half of the same report:
+                // 「非常诡异的降调升调……非常突然就变回原样了」. Both halves come from ONE mechanism
+                // (the promotion's own write of speed x1 / pitch x1), so removing the shift removes
+                // the return with it: the raised record in the overlap was the 诡异, and the
+                // one-write return at the deadline was the 突然.
+                //
+                // <p>A DOWNWARD shift is kept — it is what this library's pairs mostly want (B's
+                // material pulled into A's harmony rather than pushed out of it), and it is heard
+                // as a record played a touch slower rather than as a detune. The suddenness of ITS
+                // return is the remaining half of the report and needs the ear plus the promotion's
+                // own log line before the pitch-write path is touched (see AI_HANDOFF's round 27).
+                if (nat.semitones() > 0) {
+                    nat = nat.onlyTempo("the shift would RAISE the incoming track by "
+                            + nat.semitones() + " semitone(s); a raised record in the overlap with"
+                            + " a one-write return at the deadline is what was reported as"
+                            + " 诡异的升调 / 非常突然就变回原样了 — 非必要不要用升调");
+                    pitchIdentityAtFileMs = -1L;
+                }
                 keyGlide = fusion
                         ? KeyGlide.none("this edit is a fusion: one pre-mixed source carrying BOTH"
                                 + " backgrounds, so a ladder would step the outgoing track's own"
@@ -5670,6 +5695,8 @@ public final class PlayerController {
         List<LyricLine> published = ly != null ? ly : Collections.<LyricLine>emptyList();
         lyrics.set(published);
         lyricsRevision.set(lyricsRevision.peek() + 1L);
+        Logger.info("lyric timing: {} word-timed rows / {} total rows",
+                LyricTiming.wordTimedLines(published), published.size());
         lyricsCoverOnly.set(computeCoverOnly(published));
         // Sync the highlighted line to wherever the transport already sits. Normally
         // redundant — pump() re-derives lyricIndex from backend.position() every ~200ms
@@ -8152,6 +8179,7 @@ public final class PlayerController {
                     applyLyrics(mem);
                 }
             });
+            refreshPlainLyricCache(songId, mem);
             return;
         }
         // (Lyrics were already blanked at the track switch in playAt; the async fetch
@@ -8189,7 +8217,7 @@ public final class PlayerController {
             final List<LyricLine> fetched = ly;
             post(() -> {
                 if (isCurrentLyricRequest(songId, expectedIndex, requestGeneration)) {
-                    applyLyrics(fetched);
+                    applyLyrics(cacheBestLyrics(songId, fetched));
                 }
             });
         });
@@ -8251,8 +8279,67 @@ public final class PlayerController {
         List<LyricLine> mem = lyricMem.get(songId);
         if (mem != null) return mem;
         List<LyricLine> lines = fetchLyricsRacing(songId);
-        if (!lines.isEmpty()) lyricMem.put(songId, lines);
+        if (!lines.isEmpty()) {
+            lines = cacheBestLyrics(songId, lines);
+            refreshPlainLyricCache(songId, lines);
+        }
         return lines;
+    }
+
+    private List<LyricLine> cacheBestLyrics(long songId, List<LyricLine> incoming) {
+        synchronized (lyricMem) {
+            List<LyricLine> best = LyricTiming.prefer(lyricMem.get(songId), incoming);
+            if (!best.isEmpty()) lyricMem.put(songId, best);
+            return best;
+        }
+    }
+
+    /** Cache immediately, but publish only to the same playback generation.
+     * A late LRC answer must not overwrite a YRC/TTML upgrade.
+     */
+    private void publishLyricUpgrade(long songId, long generation, List<LyricLine> incoming) {
+        List<LyricLine> best = cacheBestLyrics(songId, incoming);
+        post(() -> {
+            Track track = currentTrack();
+            if (lyricLoadGeneration.get() != generation || track == null
+                    || track.source != Track.Source.NETEASE || track.neteaseId != songId) return;
+            if (LyricTiming.wordTimedLines(best) > LyricTiming.wordTimedLines(lyrics.peek())) {
+                applyLyrics(best);
+            }
+        });
+    }
+
+    /** Keep cached text visible while rechecking old line-only responses.
+     * Refreshes use the preload lane, not the UI/audio thread, and never delete
+     * offline lyrics on a timeout or a no-lyrics response.
+     */
+    private void refreshPlainLyricCache(long songId, List<LyricLine> cachedLines) {
+        if (LyricTiming.wordTimedLines(cachedLines) > 0
+                || !lyricTimingRefreshAttempted.add(songId)) return;
+        final long generation = lyricLoadGeneration.get();
+        lyricPreloadWorker.submit(() -> {
+            try {
+                String path = diskCache.getNeteaseLyric(songId);
+                byte[] cached = readBytesFromFile(path);
+                if (cached != null) {
+                    NeteaseLyric old = LYRIC_GSON.fromJson(
+                            new String(cached, java.nio.charset.StandardCharsets.UTF_8), NeteaseLyric.class);
+                    if (old != null && !LyricTiming.shouldRefreshPlainCache(
+                            old.fetchedAtMs, System.currentTimeMillis())) return;
+                }
+                NeteaseLyric fresh = netease.lyric(songId);
+                if (fresh == null || fresh.isEmpty()) return;
+                List<LyricLine> parsed = LyricParser.fromNeteaseStrings(
+                        fresh.yrc, fresh.lrc, fresh.tlyric, fresh.romalrc);
+                if (parsed.isEmpty()) return;
+                fresh.fetchedAtMs = System.currentTimeMillis();
+                diskCache.cacheNeteaseLyric(LYRIC_GSON.toJson(fresh)
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8), songId);
+                publishLyricUpgrade(songId, generation, parsed);
+            } catch (Exception e) {
+                Logger.warn("lyric timing refresh failed; keeping cached lyrics: {}", e.getClass().getSimpleName());
+            }
+        });
     }
 
     /** How long either lyric source may take before the other one's answer is used. */
@@ -8310,10 +8397,27 @@ public final class PlayerController {
                         return betterLyrics(neteaseLines, mirrorLines);
                     }
                     if (mirrorLines == null) {
-                        // Still hanging: do not make this song's next play wait
-                        // for the mirror again.
-                        mirror.cancel(true);
-                        rememberLyricMirrorMiss(songId);
+                        // Display LRC now, but a slow word-timed answer remains
+                        // useful. Do not permanently disqualify it after 700ms.
+                        if (LyricTiming.wordTimedLines(neteaseLines) == 0) {
+                            final java.util.concurrent.Future<List<LyricLine>> pending = mirror;
+                            final long generation = lyricLoadGeneration.get();
+                            lyricPreloadWorker.submit(() -> {
+                                try {
+                                    List<LyricLine> upgraded = pending.get(
+                                            LYRIC_MIRROR_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
+                                    if (upgraded != null && !upgraded.isEmpty()) {
+                                        publishLyricUpgrade(songId, generation, upgraded);
+                                    } else rememberLyricMirrorMiss(songId);
+                                } catch (Exception ignored) {
+                                    pending.cancel(true);
+                                    rememberLyricMirrorMiss(songId);
+                                }
+                            });
+                        } else {
+                            mirror.cancel(true);
+                            rememberLyricMirrorMiss(songId);
+                        }
                     }
                     return neteaseLines;
                 }
@@ -8336,21 +8440,10 @@ public final class PlayerController {
         return neteaseLines == null ? Collections.<LyricLine>emptyList() : neteaseLines;
     }
 
-    /** Prefer the source with the larger usable timeline. A near-tie keeps the
-     * mirror because it normally carries word-level timestamps. */
+    /** Prefer actual word timings, not a larger count of plain LRC rows. */
     private static List<LyricLine> betterLyrics(List<LyricLine> netease,
                                                  List<LyricLine> mirror) {
-        return lyricCompletenessScore(mirror) >= lyricCompletenessScore(netease)
-                ? mirror : netease;
-    }
-
-    private static int lyricCompletenessScore(List<LyricLine> lines) {
-        if (lines == null || lines.isEmpty()) return 0;
-        int score = lines.size() * 100;
-        for (LyricLine line : lines) {
-            if (line != null && line.syllables != null && !line.syllables.isEmpty()) score++;
-        }
-        return score;
+        return LyricTiming.prefer(netease, mirror);
     }
 
     private static List<LyricLine> quietly(
@@ -8398,6 +8491,7 @@ public final class PlayerController {
         try {
             NeteaseLyric nl = netease.lyric(songId);
             if (nl.isEmpty()) return Collections.emptyList();
+            nl.fetchedAtMs = System.currentTimeMillis();
             byte[] data = LYRIC_GSON.toJson(nl).getBytes(java.nio.charset.StandardCharsets.UTF_8);
             diskCache.cacheNeteaseLyric(data, songId);
             return LyricParser.fromNeteaseStrings(nl.yrc, nl.lrc, nl.tlyric, nl.romalrc);
