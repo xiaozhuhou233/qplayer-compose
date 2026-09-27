@@ -274,8 +274,9 @@ public final class SettingsCatalog {
                 .desc("云端 GET /v1/models 列出的唯一 id（不带斜杠时会自动补上 acemusic/ 前缀）")
                 .build());
         out.add(SettingSpec.slider(SettingsCatalog.ACE_STEP_BED_DB_KEY, ACE_STEP,
-                        "垫层电平（比段落低）", 18, 6, 18, 1)
-                .desc("越大越轻。18 是听感判定的默认值，12 更明显。这一层是段落上的额外织体，"
+                        "垫层电平（比段落低）", 12, 6, 12, 1)
+                .desc("越大越轻。12 是听感判定的默认值（原来 18 听不出来，已按「让 acestep 生成的过渡段"
+                        + "更明显」调到 12，设备上存着的 18 也会被夹到 12）。这一层是段落上的额外织体，"
                         + "不改变原有过渡。")
                 .build());
         out.add(SettingSpec.toggle("aiForceKnowledge", AI, "强制使用知识库", false)

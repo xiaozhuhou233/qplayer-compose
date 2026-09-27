@@ -46,8 +46,13 @@ import java.util.Locale;
 public final class StemBed {
 
     /** The bed sits this far under the passage it goes under, dB. First value, to be tuned by
-     *  ear. */
-    public static final double BED_LEVEL_DB = 18.0d;
+     *  ear — and it has been: <b>18 → 12 (round 36)</b>, because the listener who asked for the cloud
+     *  layer in the first place could not hear it (「让 acestep 生成的过渡段更明显」). Twelve is the
+     *  shallower of the two levels that were judged when this layer was designed, and it is now both
+     *  the default and the deepest the setting can ask for ({@link
+     *  AceStepBed#MAX_UNDER_DB} follows this constant), so a device carrying the old 18 in its settings
+     *  is clamped to 12 rather than left quiet. */
+    public static final double BED_LEVEL_DB = 12.0d;
 
     /** A bed whose envelope is flatter than this is a drone, not texture, and is refused, dB of
      *  peak-to-trough range over {@link #ENVELOPE_MS} ms frames. It was 12 until a listener heard
@@ -90,12 +95,16 @@ public final class StemBed {
      *        <td>1.4 dB</td></tr>
      *  </table>
      *
-     *  <p>0.80 sits between the nearest accepted material (84.4%, real music's own tail) and the
-     *  nearest refused (75.0%), and both of those are high-range material — which is the point: the
-     *  spread reading does not separate them, this one does. The last row is the other failure and
-     *  is not this clause's to catch: a flat window is 100% occupied, and {@link
-     *  #MIN_BED_SPREAD_DB} is what refuses it. */
-    public static final double MIN_BED_OCCUPANCY = 0.80d;
+     *  <p><b>0.65, and it was 0.80 until round 36</b> — the number moved because the listener could
+     *  not hear this layer at all: on their own pair the cloud's take measured <b>75.0%</b> (the row
+     *  above), so the old floor refused it, the render logged 「no cloud bed」 and nothing was added —
+     *  which is the 「让 acestep 生成的过渡段更明显」 this round is about. 0.65 sits between that take and
+     *  the sparseness the same listener had already rejected by ear (<b>52.3%</b>: 「只有几下鼓，有点
+     *  糊弄」), so what the clause accepts is material whose texture is continuous enough to sit under a
+     *  passage, and what it refuses is a scattering of hits. The last row is the other failure and is
+     *  not this clause's to catch: a flat window is 100% occupied, and {@link #MIN_BED_SPREAD_DB} is
+     *  what refuses it. */
+    public static final double MIN_BED_OCCUPANCY = 0.65d;
 
     /** How far under the material's own body level a frame may sit and still count as occupied,
      *  dB. Read <b>one-sided on purpose</b>: the material <i>above</i> the body is the events the
