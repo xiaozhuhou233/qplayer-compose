@@ -4263,6 +4263,46 @@ a 过渡到 b」+「**融合段可以长一点**，尽量用背景音融，**融
 **验证要点**：编辑文件名带 `-e/-j/-f` 三段锚点、边界日志出现 `curve=FUSION`、详情页出现「最强混音已完成」
 （`mixReady` 只在 `result.isFusion()` 时点亮）。
 
+### 第 26 轮（2026-09-27）：**渲染的唤醒锁 + 低频交接改渐变；「过渡完跳调」和「段落里出曲原唱」查清了但没动**
+
+用户四条（同一口气）：「刷视频或者关闭屏幕都不打断混音生成」「从播放这个歌的第一秒就开始生成混音」
+「解决前一首歌音量骤降」「过渡段存在大量人声」，之后又加「不要出现过渡完突然降调或者升调」。
+
+**改了两件：**
+
+1. **渲染期间持有 `PARTIAL_WAKE_LOCK`**（`AndroidStemEditRenderer.render` 的 try/finally，
+   `RENDER_WAKE_TIMEOUT_MS = 30min` 只是保险丝）。**查证过的结论**：没有任何代码在切走/关屏时取消渲染——
+   取消只有两处（换歌时 `precacheGeneration` 递增把 `stillWanted` 翻假；Activity 在停止播放时销毁 →
+   `precacheWorker.shutdownNow()`）。所以"被打断"的真实机制是**CPU 被挂起**：渲染跑在 `precacheWorker`
+   （daemon、`MIN_PRIORITY`），它和播放服务都没有自己的唤醒锁（只有 MediaPlayer 的播放有
+   `setWakeMode`），关屏或失去音频焦点暂停之后 CPU 可以随时睡，而**日志里一行都不留**。
+2. **低频交接从"一次写"改成 2 秒渐变**（`AndroidAudioBackend.bassSwapNow` → `bassSwapLevel(u)`，由 ramp
+   自己的 tick 调用，`BASS_SWAP_FADE_MS = 2000`）。原来在重叠 15% 处一次 equalizer 写就把出曲 200Hz 以下
+   砍到设备最低电平——两个 32ms tick 之间"整个地基没了"，这就是「前一首歌音量骤降」。时刻与最终电平不变。
+
+**没动、但机制已经查清的两条（下一轮）**：
+
+- **「过渡完突然降调/升调」**：现场在交接那一刻——promotion 时 `endPitchBackAtPromotion` 用**一次写**把
+  `speed×1 / pitch×1` 写回去（注释自己写 "one write"）。若过渡期间入曲被移调（`KeyGlide` 阶梯），这一次写
+  就是**一个整调的跳变**，位置正好在「过渡完」。**融合路径是 `KeyGlide.none`**（"one pre-mixed source
+  carrying BOTH"）——融合不规划调性过渡，音高关系完全由生成文件决定。
+  **没盲改的原因**：pitch 写入正是 P0「过渡后播放死掉/重放」的来源（`AndroidAudioBackend` 里写着的），
+  本机听不到。正确做法：先拿到一对**真会移调**的日志（`pitchIdentityAtFileMs`、阶梯每一步的时刻、
+  `the promoted track is back at its own tempo and pitch`），再把阶梯的**最后一步挪到交接之前**，让跳变发生在
+  两轨都还听得见的时候。
+- **「过渡段存在大量人声」**：`StemFusion.carriedOf` **跳过 VOCALS 行**——文件永远不带出曲人声；而**出曲现场
+  deck 在整个段落里都是 unity**（`FadeCurve.FUSION.outGain` 只在 `JUNCTION_XFADE_MS = 2000ms` 内 1→0，
+  之后才是 0），所以段落里**出曲原唱一直在唱**，还和文件里那份"同一段素材"的伴奏叠着（+相关叠加）。
+  系统里唯一的 vocal gate 是**文件里入曲那一轨**的（作用在 B 上），从来没有作用在 A 的现场 deck 上。
+  改法方向唯一：**段落里把出曲现场 deck 降下去**（伴奏文件里已有），时机/深度按耳朵定。
+
+⚠️ 另外值得记一笔：`bassSwapAtMs` 那条低频交接对**融合边界也存在**（不只是普通混合），所以第 2 条改动
+同时影响融合段落里的出曲低音。
+
+**发布**：tag `ai-dj-transition-2026-09-27o`，**192,485,819 bytes**，sha256 `e099c640…`
+（和 27n **同字节数、不同 sha256**——dex 对齐 + 98MB 模型主导，已用 `:app:dexBuilderDebug` 非 UP-TO-DATE
+确认新类确实进了包）。
+
 ## 九、音频焦点：自动暂停 / 自动恢复（2026-09-21 修复，装机验证）
 
 **用户诉求**：别的 App（B站、别的视频软件、别的音乐）开始放 → qplayer 自动暂停；那个 App 停了/暂停了
