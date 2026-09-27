@@ -1279,6 +1279,19 @@ public final class PlayerController {
     public final Property<Boolean> aiLoading = new Property<>(false);
     public final Property<String> aiError = new Property<>("");
     public final Property<List<NeteaseSong>> aiSongs = new Property<>(Collections.<NeteaseSong>emptyList());
+
+    /**
+     * <b>Whether the strongest mix this app can make for the boundary that is coming is already
+     * rendered</b> (round 16) — the tag the playback detail page's hint reads (「最强混音已完成」).
+     *
+     * <p>What it means, exactly: the renderer' own completion, i.e. the DJ edit file for the
+     * incoming track and the outgoing that is playing has been written (and would be found by
+     * {@code djEditPath} when the boundary comes). It is deliberately the <em>earlier</em> of the two
+     * possible meanings — the alternative, "the edit is now playing", cannot be a hint because by
+     * then the listener is already listening to it. It is cleared when a render for a new pair is
+     * asked for, so a "done" from the previous boundary can never be read as this one's.
+     */
+    public final Property<Boolean> mixReady = new Property<>(false);
     public final Property<String> aiPlaylistName = new Property<>("");
     public final Property<String> aiProgress = new Property<>("");
     public final Property<String> aiSummary = new Property<>("");
@@ -5161,6 +5174,9 @@ public final class PlayerController {
         // that was streamed from a URL has nothing to separate, and then there is no bridge and
         // the edit is the round-12 one (same lane, same moment, documented at requestStemEdit's
         // header).
+        // Round 16: a render for a new pair is starting, so a "done" from the previous boundary can
+        // never be read as this one's (see the mixReady property).
+        post(() -> mixReady.set(false));
         final Track outgoing = currentTrack();
         final String outgoingKey = outgoing != null ? TransitionPlan.trackKey(outgoing) : null;
         final String outgoingAudio = outgoing != null && outgoing.source == Track.Source.NETEASE
@@ -5285,6 +5301,10 @@ public final class PlayerController {
             // The renderer wrote the file; the cap on how many of them exist is this cache's
             // business, not the renderer's.
             diskCache.evictDjEdits();
+            // Round 16: this is the instant the detail page's 「最强混音已完成」 becomes true — the file
+            // for the boundary that is coming exists. See the property's own note for why the later
+            // meaning ("it is playing") would be useless as a hint.
+            post(() -> mixReady.set(true));
             Logger.info("transition: the DJ edit for {} is ready at {} — {}", t.title, result.path,
                     result.note.isEmpty() ? "no bridge in it" : result.note);
             if (result.isFusion()) {

@@ -3920,6 +3920,14 @@ player-core **315 跑 1 失败**，唯一失败仍是既有的
    是 gesture 的 1–2 步（120 BPM 下一步≈2 秒）。渲染日志里本来就有"the six exchanges and the levels across
    each"，可以直接读它量出这条斜坡。
 
+3. **播放详情页（进度条下面）加一条"最强混音已完成"的提示**。⚠️ **实测：这个状态在桥里根本不存在** ——
+   `PlayerController` 没有任何 `Property` 暴露"这一轮的 DJ 编辑渲染好了"（`grep` 过 `stem|edit|transition` 的
+   属性，一个都没有；Kotlin 侧也没读）。现在的做法是渲染器在预渲染通道里默默渲完、文件存在了就切过去
+   （`stemEditRenderer` / `AndroidStemEditRenderer`），UI 完全不知道。所以这条提示**不是**一行 UI：要先在
+   控制器上加一个已发布的状态（例如 `Property<Boolean> mixReady` 或 `mixStage`），由渲染器完成时喂它，
+   再由详情页读它显示"已完成"。顺手要定清"完成"的语义：是"这一轮的编辑文件写好了"，还是"已经开始播它了"
+   （前者早、后者准，建议前者 + 文案写成"最强混音已就绪"）。
+
 ## 九、音频焦点：自动暂停 / 自动恢复（2026-09-21 修复，装机验证）
 
 **用户诉求**：别的 App（B站、别的视频软件、别的音乐）开始放 → qplayer 自动暂停；那个 App 停了/暂停了
