@@ -96,6 +96,17 @@ public final class StemFusion {
      *  outgoing's hold ends, so both backings are near unity across that whole step. */
     public static final int B_ARRIVAL_FADE_STEPS = 1;
 
+    /** How many steps before the hold's end the incoming's backing starts to rise (round 28).
+     *
+     *  <p>The rise still <em>ends</em> on the hold's own end — that instant, and every level the
+     *  table writes around it, are unchanged; this constant only decides how much of the passage
+     *  the second track is audible for on the way up. It was one step until round 28, which on the
+     *  grown passages (round 18/24) left the second track at the floor for most of a 12 s passage
+     *  and brought it in only in its last bar — the listener's 「由小变大时不要小声太久，尽快做到背景音与
+     *  前一首融合」. {@link #B_ARRIVAL_FADE_STEPS} is consequently the span of a one-step hold, which
+     *  is the shape it documents. */
+    public static final int B_ARRIVAL_LEAD_STEPS = 2;
+
     /** How many steps a <b>SLAM</b> lasts: <b>three</b> (one until the listening that made this
      *  {@link #RULE_VERSION} 10). A pair whose grids are in no relation has no common bar to lay
      *  three states of a table on, so the slam gets the one gesture that needs no beat matching at
@@ -439,6 +450,18 @@ public final class StemFusion {
      *       4 000 before this clause. And the vocal gate is clamped to the passage's own end
      *       ({@code landing + windowMs}), so 「融完立马接人声」 is a property of the arithmetic rather than a
      *       hope about where the curve snaps.</li>
+     *   <li><b>21 → 22</b> — <b>the incoming's backing starts rising two steps before the hold ends
+     *       instead of one.</b> The listener: 「现在让第二首歌进入的声音逐渐变大，由小变大时不要小声太久，
+     *       尽快做到背景音与前一首融合，期间请你不要放人声」. The rise's own end is untouched (it is still the
+     *       hold's end, where the outgoing begins to recede, and every level the table writes around
+     *       it is unchanged), so this is purely "one bar less of nothing": {@link
+     *       #B_ARRIVAL_LEAD_STEPS} decides it, and on the grown 12 s passages the second track is
+     *       now audible from the third bar instead of only the last. The file's audio changes, so the
+     *       version is bumped and cached edits are re-rendered once. The other half of that same
+     *       sentence — 「期间请你不要放人声」 — is NOT in this file: the incoming's voice is gated by the
+     *       table (see {@link Plan#voiceGateMs}) and always was, while the OUTGOING track's own voice
+     *       is never carried here (see {@code carriedOf}) and comes from its live deck, which this
+     *       planner cannot touch. See AI_HANDOFF's round 28.</li>
      * </ul>
      *
      * <p>The price is one re-render per pair, once, in the pre-lane where there are minutes of
@@ -448,7 +471,7 @@ public final class StemFusion {
      * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
      * name.
      */
-    public static final int RULE_VERSION = 21;
+    public static final int RULE_VERSION = 22;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with
@@ -3329,10 +3352,19 @@ public final class StemFusion {
         // construction (see `windowMs`), which is the property the sampled defect at the end of round
         // 6 bought: the splice's last sample is inside the file.
         long slamHold = entry + (long) steps * barStep;
+        // ⚠️ Round 28: 「由小变大时不要小声太久，尽快做到背景音与前一首融合」 — the incoming's backing now
+        // starts rising {@link #B_ARRIVAL_LEAD_STEPS} steps before the hold ends instead of one, and
+        // therefore takes that many steps longer to get there. The arrival's END is untouched: it is
+        // still the hold's own end, which is the instant the outgoing starts to recede and the
+        // instant the table's final levels — and the acceptance and coexistence bound measured on
+        // them — are written around. What changes is that the second track's backing is *audible*
+        // for a bar more of the passage instead of sitting at the floor until the last moment, which
+        // is what "fuses on the backing early" means in this file's own numbers: same destination,
+        // same levels, one bar less of nothing.
         long arriveStart = slam ? slamHold
-                : entry + (long) Math.max(0, holdSteps - 1) * barStep;
+                : entry + (long) Math.max(0, holdSteps - B_ARRIVAL_LEAD_STEPS) * barStep;
         long arriveEnd = slam ? slamHold + CUT_MS
-                : arriveStart + (long) B_ARRIVAL_FADE_STEPS * barStep;
+                : entry + (long) holdSteps * barStep;
         // ⚠️ A SLAM's instants come from the SLAM's shape, not the fusion's. `shapeFor` hands every
         // pair a two-step hold, and on a slam that put `holdEnd`/`arriveEnd` at entry + 2 steps while
         // the window is the slam's own hold plus the splice — so the "after their swap" slice began
