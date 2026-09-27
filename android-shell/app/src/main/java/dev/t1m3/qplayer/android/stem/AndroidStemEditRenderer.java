@@ -744,6 +744,15 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 // the boundary has to be able to tell that from a refusal about the files
                 // themselves — otherwise the pair is never asked again (see the class's WHY_*).
                 + (fusion == null && refusedWhy[0] > 0 ? "-x" + refusedWhy[0] : "")
+                // Ⓜ Round 36: and, for a fusion, WHICH of the two products it is. `-s` marks the
+                // SLAM path's hand-over (both elements changing on the same line, one 80 ms splice,
+                // no recede table); a relation fusion carries only -e/-j/-f. It is in the name for
+                // the same reason every other fact here is: the name is the only thing a later
+                // reader has — the detail page asks the directory what this pair's edit IS, hours
+                // after the render finished and long after the render's own completion event has
+                // been forgotten (「我退出来再进界面发现没有一个显示了已完成混音的」). `-s` cannot
+                // collide with the other markers (-b -v -e -j -f -x -r) and it is not a time.
+                + (fusion != null && fusion.plan.slam ? "-s" : "")
                 // ⚠️ And the rule set this file was rendered under, so a file that predates the
                 // version cannot be mistaken for a finished edit of the current rules (the
                 // boundary treats a name with no `-r<current>` as stale — see PlayerController's

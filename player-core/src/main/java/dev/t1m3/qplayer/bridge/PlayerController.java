@@ -38,6 +38,7 @@ import dev.t1m3.qplayer.library.LibraryScanner;
 import dev.t1m3.qplayer.lyric.LyricLine;
 import dev.t1m3.qplayer.lyric.LyricParser;
 import dev.t1m3.qplayer.lyric.LyricTiming;
+import dev.t1m3.qplayer.lyric.LyricRefreshGate;
 import dev.t1m3.qplayer.lyric.TtmlParser;
 import dev.t1m3.qplayer.lyric.WordTimeLrcParser;
 import dev.t1m3.qplayer.lyric.skia.LyricConfig;
@@ -457,9 +458,7 @@ public final class PlayerController {
             });
     private final java.util.Set<Long> lyricPreloadQueued =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
-    // One stale-LRC upgrade attempt per song/session; never retry on each frame.
-    private final java.util.Set<Long> lyricTimingRefreshAttempted =
-            java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final LyricRefreshGate lyricTimingRefresh = new LyricRefreshGate();
     /** Per-track lyric timing corrections. The live LyricConfig value still feeds
      *  both renderers, but it is replaced whenever the current track changes. */
     private final Map<String, Integer> lyricOffsets =
@@ -3943,9 +3942,36 @@ public final class PlayerController {
      * change this label for this boundary; the deck still plays the edit it lands, whose voice
      * comes back where that file says.
      */
+    /** Ⓜ Round 36: publish what this pair's own edit IS, read off the directory rather than from a
+     *  render's completion event.
+     *
+     *  <p>The listener, walking back into the detail page: 「我退出来再进界面发现没有一个显示了已完成混音
+     *  的」. Nothing was wrong with the render — it is playback-driven and runs wherever the app is — but
+     *  the two hints were set at the instant a render finished and cleared when the NEXT pair's render
+     *  was requested, so they only existed while the page happened to be open across that instant.
+     *  A boundary's decision (this method's caller) is the one moment that knows which pair is
+     *  coming, so the flags are (re)published here from {@code djEditFor} — the same lookup the
+     *  decision itself is made on — and they then stay true for as long as the file is on disk.
+     *
+     *  <p>A real fusion is `-e`/`-j` present and `-s` absent; the SLAM path's product is the same two
+     *  anchors with `-s` (see the renderer's name construction), which is the ruling the listener
+     *  gave: 「只有真混音才算进去」. */
+    private void publishMixKind(EditRef edit) {
+        boolean fusion = edit != null && edit.entryMs >= 0L && edit.junctionMs >= 0L;
+        final boolean slam = fusion && edit.slam;
+        final boolean ready = fusion && !slam;
+        post(() -> {
+            mixReady.set(ready);
+            mixSlam.set(slam);
+        });
+    }
+
     private TransitionPlan noteWithoutEdit(TransitionPlan plan, Track next) {
         if (plan == null) return plan;
         if (stemEditRenderer == null) return plan;              // a host with no stem path at all
+        // Ⓜ Round 36: the two hints are facts about the disk, so they are refreshed at the one
+        // moment that knows which pair is coming — see publishMixKind.
+        publishMixKind(djEditFor(next));
         if (plan.overlapMs() <= 0L) {
             // ⚠️ Round 30: the kinds that do not overlap never reached this method's own line, so a
             // boundary whose pair judgement answered FADE_OUT_IN — which is what an unrelated-tempo
@@ -4864,6 +4890,10 @@ public final class PlayerController {
      *  {@link StemEditRenderer.Result}). */
     private static final class EditRef {
         final String path;
+        /** Ⓜ Round 36: the file name carries {@code -s} when this fusion came from the SLAM path
+         *  rather than from the relation family's own hand-over. Read here because the name is the
+         *  only thing that survives the render — see the mixReady/mixSlam properties. */
+        final boolean slam;
         /** Where the carried passage starts in the incoming track's own file, ms, or -1. */
         final long bridgeStartMs;
         /** Where the incoming track's vocals are back at unity, ms into its own file, or -1. */
@@ -4887,12 +4917,17 @@ public final class PlayerController {
 
         EditRef(String path, long bridgeStartMs, long vocalReturnEndMs,
                 long entryMs, long junctionMs, long fusionEndMs) {
+            this(path, bridgeStartMs, vocalReturnEndMs, entryMs, junctionMs, fusionEndMs, false);
+        }
+        EditRef(String path, long bridgeStartMs, long vocalReturnEndMs,
+                long entryMs, long junctionMs, long fusionEndMs, boolean slam) {
             this.path = path;
             this.bridgeStartMs = bridgeStartMs;
             this.vocalReturnEndMs = vocalReturnEndMs;
             this.entryMs = entryMs;
             this.junctionMs = junctionMs;
             this.fusionEndMs = fusionEndMs;
+            this.slam = slam;
         }
 
         boolean hasBridge() {
@@ -4981,7 +5016,7 @@ public final class PlayerController {
                             EditRef ref = new EditRef(file.getAbsolutePath(),
                                     suffixTime(name, "-b", base), suffixTime(name, "-v", base),
                                     suffixTime(name, "-e", base), suffixTime(name, "-j", base),
-                                    suffixTime(name, "-f", base));
+                                    suffixTime(name, "-f", base), name.contains("-s"));
                             // ⚠️ And the identity check a hash cannot answer: an edit is these two
                             // tracks' own audio, and the times in its name are positions in their
                             // files — the incoming's, except the junction, which is the outgoing's
@@ -7724,7 +7759,10 @@ public final class PlayerController {
                 byte[] data = readBytesFromFile(cached);
                 if (data != null && data.length > 0) {
                     String ttml = new String(data, java.nio.charset.StandardCharsets.UTF_8);
-                    if (!ttml.trim().isEmpty()) return TtmlParser.parse(ttml);
+                    if (!ttml.trim().isEmpty()) {
+                        List<LyricLine> parsed = TtmlParser.parse(ttml);
+                        if (!parsed.isEmpty()) return parsed;
+                    }
                 }
             } catch (Throwable ignored) { }
         }
@@ -7736,12 +7774,13 @@ public final class PlayerController {
                 "https://amlldb.bikonoo.com/ncm-lyrics/" + songId + ".ttml",
                 LYRIC_MIRROR_TIMEOUT_MS);
         if (data == null || data.length == 0) return Collections.emptyList();
-        // Cache for next time.
-        diskCache.cacheLyric(data, songId);
         String ttml = new String(data, java.nio.charset.StandardCharsets.UTF_8);
         if (ttml.trim().isEmpty()) return Collections.emptyList();
         try {
-            return TtmlParser.parse(ttml);
+            List<LyricLine> parsed = TtmlParser.parse(ttml);
+            // Do not persist HTML/error responses as a permanent empty TTML hit.
+            if (!parsed.isEmpty()) diskCache.cacheLyric(data, songId);
+            return parsed;
         } catch (Throwable e) {
             Logger.warn("ttml parse failed for {}: {}", songId, e.getMessage());
             return Collections.emptyList();
@@ -8195,10 +8234,10 @@ public final class PlayerController {
         if (mem != null) {   // preloaded / recently played -> apply instantly
             post(() -> {
                 if (isCurrentLyricRequest(songId, expectedIndex, requestGeneration)) {
-                    applyLyrics(mem);
+                    applyLyrics(cacheBestLyrics(songId, mem));
                 }
             });
-            refreshPlainLyricCache(songId, mem);
+            refreshIncompleteLyricCache(songId, mem);
             return;
         }
         // (Lyrics were already blanked at the track switch in playAt; the async fetch
@@ -8239,6 +8278,9 @@ public final class PlayerController {
                     applyLyrics(cacheBestLyrics(songId, fetched));
                 }
             });
+            if (isCurrentLyricRequest(songId, expectedIndex, requestGeneration)) {
+                refreshIncompleteLyricCache(songId, fetched);
+            }
         });
     }
 
@@ -8300,7 +8342,6 @@ public final class PlayerController {
         List<LyricLine> lines = fetchLyricsRacing(songId);
         if (!lines.isEmpty()) {
             lines = cacheBestLyrics(songId, lines);
-            refreshPlainLyricCache(songId, lines);
         }
         return lines;
     }
@@ -8313,52 +8354,85 @@ public final class PlayerController {
         }
     }
 
-    /** Cache immediately, but publish only to the same playback generation.
+    /** Cache immediately, but publish only to the same song.
      * A late LRC answer must not overwrite a YRC/TTML upgrade.
+     * Lyrics fetched while preloading are still valid when that song starts;
+     * the preload generation must not prevent its visible timing upgrade.
      */
-    private void publishLyricUpgrade(long songId, long generation, List<LyricLine> incoming) {
-        List<LyricLine> best = cacheBestLyrics(songId, incoming);
+    private void publishLyricUpgrade(long songId, List<LyricLine> incoming) {
+        cacheBestLyrics(songId, incoming);
         post(() -> {
             Track track = currentTrack();
-            if (lyricLoadGeneration.get() != generation || track == null
+            if (track == null
                     || track.source != Track.Source.NETEASE || track.neteaseId != songId) return;
+            List<LyricLine> best = cacheBestLyrics(songId, incoming);
             if (LyricTiming.wordTimedLines(best) > LyricTiming.wordTimedLines(lyrics.peek())) {
                 applyLyrics(best);
             }
         });
     }
 
-    /** Keep cached text visible while rechecking old line-only responses.
-     * Refreshes use the preload lane, not the UI/audio thread, and never delete
-     * offline lyrics on a timeout or a no-lyrics response.
+    /** Recheck incomplete timing, not just caches with zero timed lines. Only
+     * invoked for playback (not whole-queue preloading); never block UI/audio.
+     * Plain text stays visible while either source has a chance to upgrade it.
      */
-    private void refreshPlainLyricCache(long songId, List<LyricLine> cachedLines) {
-        if (LyricTiming.wordTimedLines(cachedLines) > 0
-                || !lyricTimingRefreshAttempted.add(songId)) return;
-        final long generation = lyricLoadGeneration.get();
-        lyricPreloadWorker.submit(() -> {
-            try {
-                String path = diskCache.getNeteaseLyric(songId);
-                byte[] cached = readBytesFromFile(path);
-                if (cached != null) {
-                    NeteaseLyric old = LYRIC_GSON.fromJson(
-                            new String(cached, java.nio.charset.StandardCharsets.UTF_8), NeteaseLyric.class);
-                    if (old != null && !LyricTiming.shouldRefreshPlainCache(
-                            old.fetchedAtMs, System.currentTimeMillis())) return;
+    private void refreshIncompleteLyricCache(long songId, List<LyricLine> cachedLines) {
+        if (!LyricTiming.needsTimingUpgrade(cachedLines)
+                || !lyricTimingRefresh.begin(songId, System.currentTimeMillis())) return;
+        try {
+            lyricWorker.submit(() -> {
+                try {
+                    NeteaseLyric old = null;
+                    byte[] cached = readBytesFromFile(diskCache.getNeteaseLyric(songId));
+                    if (cached != null) {
+                        try {
+                            old = LYRIC_GSON.fromJson(new String(cached,
+                                    java.nio.charset.StandardCharsets.UTF_8), NeteaseLyric.class);
+                        } catch (RuntimeException ignored) { }
+                    }
+                    if (old == null || LyricTiming.shouldRefreshPlainCache(
+                            old.fetchedAtMs, System.currentTimeMillis())) {
+                        try {
+                            NeteaseLyric fresh = netease.lyric(songId);
+                            if (fresh != null && !fresh.isEmpty()) {
+                                List<LyricLine> parsed = LyricParser.fromNeteaseStrings(
+                                        fresh.yrc, fresh.lrc, fresh.tlyric, fresh.romalrc);
+                                if (!parsed.isEmpty()) {
+                                    NeteaseLyric retained = fresh;
+                                    if (old != null) {
+                                        List<LyricLine> previous = LyricParser.fromNeteaseStrings(
+                                                old.yrc, old.lrc, old.tlyric, old.romalrc);
+                                        if (LyricTiming.wordTimedLines(previous) > LyricTiming.wordTimedLines(parsed)) {
+                                            retained = old; // A temporary LRC-only answer cannot erase cached YRC.
+                                        }
+                                    }
+                                    retained.fetchedAtMs = System.currentTimeMillis();
+                                    diskCache.cacheNeteaseLyric(LYRIC_GSON.toJson(retained)
+                                            .getBytes(java.nio.charset.StandardCharsets.UTF_8), songId);
+                                    publishLyricUpgrade(songId, parsed);
+                                }
+                            }
+                        } catch (Exception e) {
+                            Logger.warn("lyric timing refresh failed; keeping cache: {}", e.getClass().getSimpleName());
+                        }
+                    }
+                    // A fresh LRC response is not proof that the mirror has no
+                    // timed lyrics. Retry its previous timeout independently.
+                    List<LyricLine> best = lyricMem.get(songId);
+                    if (LyricTiming.needsTimingUpgrade(best != null ? best : cachedLines)
+                            && shouldTryLyricMirror(songId)) {
+                        List<LyricLine> mirror = fetchAmllLyrics(songId);
+                        if (!mirror.isEmpty()) publishLyricUpgrade(songId, mirror);
+                    }
+                } finally {
+                    List<LyricLine> best = lyricMem.get(songId);
+                    lyricTimingRefresh.finish(songId, System.currentTimeMillis(),
+                            !LyricTiming.needsTimingUpgrade(best != null ? best : cachedLines));
                 }
-                NeteaseLyric fresh = netease.lyric(songId);
-                if (fresh == null || fresh.isEmpty()) return;
-                List<LyricLine> parsed = LyricParser.fromNeteaseStrings(
-                        fresh.yrc, fresh.lrc, fresh.tlyric, fresh.romalrc);
-                if (parsed.isEmpty()) return;
-                fresh.fetchedAtMs = System.currentTimeMillis();
-                diskCache.cacheNeteaseLyric(LYRIC_GSON.toJson(fresh)
-                        .getBytes(java.nio.charset.StandardCharsets.UTF_8), songId);
-                publishLyricUpgrade(songId, generation, parsed);
-            } catch (Exception e) {
-                Logger.warn("lyric timing refresh failed; keeping cached lyrics: {}", e.getClass().getSimpleName());
-            }
-        });
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            lyricTimingRefresh.finish(songId, System.currentTimeMillis(), false);
+        }
     }
 
     /** How long either lyric source may take before the other one's answer is used. */
@@ -8367,10 +8441,27 @@ public final class PlayerController {
     private static final int LYRIC_MIRROR_TIMEOUT_MS = 4_000;
     /** Grace window for the AMLL mirror once NetEase has already answered. */
     private static final long LYRIC_MIRROR_GRACE_MS = 700L;
-    /** Songs the mirror had nothing for (or was too slow for) this session, so a
-     *  replay does not pay for the mirror again. */
-    private final java.util.Set<Long> lyricMirrorMisses =
+    /** Negative results expire: a timeout must not disable this source until restart. */
+    private final Map<Long, Long> lyricMirrorRetryAfter = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Set<Long> lyricMirrorInFlight =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    private boolean shouldTryLyricMirror(long songId) {
+        Long next = lyricMirrorRetryAfter.get(songId);
+        return next == null || System.currentTimeMillis() >= next;
+    }
+
+    private List<LyricLine> fetchAmllLyrics(long songId) {
+        if (!lyricMirrorInFlight.add(songId)) return Collections.emptyList();
+        try {
+            List<LyricLine> lines = tryAmllTtml(songId);
+            if (lines.isEmpty()) rememberLyricMirrorMiss(songId);
+            else lyricMirrorRetryAfter.remove(songId);
+            return lines;
+        } finally {
+            lyricMirrorInFlight.remove(songId);
+        }
+    }
 
     /** Ask both lyric sources at once and keep the first usable answer. The AMLL
      *  mirror is a third-party host that is regularly slow or unreachable, and
@@ -8381,9 +8472,8 @@ public final class PlayerController {
     private List<LyricLine> fetchLyricsRacing(long songId) {
         java.util.concurrent.Future<List<LyricLine>> netease =
                 lyricRaceWorker.submit(() -> neteaseLyricCacheFirst(songId));
-        java.util.concurrent.Future<List<LyricLine>> mirror = lyricMirrorMisses.contains(songId)
-                ? null
-                : lyricRaceWorker.submit(() -> tryAmllTtml(songId));
+        java.util.concurrent.Future<List<LyricLine>> mirror = shouldTryLyricMirror(songId)
+                ? lyricRaceWorker.submit(() -> fetchAmllLyrics(songId)) : null;
         long deadline = System.currentTimeMillis() + LYRIC_RACE_TIMEOUT_MS;
         List<LyricLine> neteaseLines = null;
         List<LyricLine> mirrorLines = null;
@@ -8418,15 +8508,14 @@ public final class PlayerController {
                     if (mirrorLines == null) {
                         // Display LRC now, but a slow word-timed answer remains
                         // useful. Do not permanently disqualify it after 700ms.
-                        if (LyricTiming.wordTimedLines(neteaseLines) == 0) {
+                        if (LyricTiming.needsTimingUpgrade(neteaseLines)) {
                             final java.util.concurrent.Future<List<LyricLine>> pending = mirror;
-                            final long generation = lyricLoadGeneration.get();
-                            lyricPreloadWorker.submit(() -> {
+                            lyricWorker.submit(() -> {
                                 try {
                                     List<LyricLine> upgraded = pending.get(
                                             LYRIC_MIRROR_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
                                     if (upgraded != null && !upgraded.isEmpty()) {
-                                        publishLyricUpgrade(songId, generation, upgraded);
+                                        publishLyricUpgrade(songId, upgraded);
                                     } else rememberLyricMirrorMiss(songId);
                                 } catch (Exception ignored) {
                                     pending.cancel(true);
@@ -8476,8 +8565,8 @@ public final class PlayerController {
     }
 
     private void rememberLyricMirrorMiss(long songId) {
-        if (lyricMirrorMisses.size() > 400) lyricMirrorMisses.clear();
-        lyricMirrorMisses.add(songId);
+        if (lyricMirrorRetryAfter.size() > 400) lyricMirrorRetryAfter.clear();
+        lyricMirrorRetryAfter.put(songId, System.currentTimeMillis() + 30_000L);
     }
 
     private static void sleepQuietly(long ms) {
