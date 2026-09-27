@@ -1303,6 +1303,14 @@ public final class PlayerController {
      * never lights it — and that is the honest report, because there is no mix to announce.
      */
     public final Property<Boolean> mixReady = new Property<>(false);
+
+    /** Ⓜ Round 34: the boundary's edit was written by the SLAM path rather than by a relation
+     *  fusion. Two facts rather than one, because the listener asked for both: the strongest-mix
+     *  hint is a claim about a real fusion (「只有真混音才算进去」), so a slam must not light it — and
+     *  the detail page has to say which of the two a boundary got (「在播放详情界面写清楚什么时候混什么时候
+     *  slam」). Set from {@link StemEditRenderer.Result#isSlam()} at the same moment as
+     *  {@link #mixReady}, and cleared with it. */
+    public final Property<Boolean> mixSlam = new Property<>(false);
     public final Property<String> aiPlaylistName = new Property<>("");
     public final Property<String> aiProgress = new Property<>("");
     public final Property<String> aiSummary = new Property<>("");
@@ -5221,8 +5229,12 @@ public final class PlayerController {
         // the edit is the round-12 one (same lane, same moment, documented at requestStemEdit's
         // header).
         // Round 16: a render for a new pair is starting, so a "done" from the previous boundary can
-        // never be read as this one's (see the mixReady property).
-        post(() -> mixReady.set(false));
+        // never be read as this one's (see the mixReady property). Round 34: the slam's flag is the
+        // same kind of fact about the same render, so it is cleared with it.
+        post(() -> {
+            mixReady.set(false);
+            mixSlam.set(false);
+        });
         final Track outgoing = currentTrack();
         final String outgoingKey = outgoing != null ? TransitionPlan.trackKey(outgoing) : null;
         final String outgoingAudio = outgoing != null && outgoing.source == Track.Source.NETEASE
@@ -5380,7 +5392,14 @@ public final class PlayerController {
             // weaker products (the bridge, the plain gate) are still edits, and they are still what
             // the boundary plays — they are simply not 「最强」, and the detail page must not say so.
             if (result.isFusion()) {
-                post(() -> mixReady.set(true));
+                // Ⓜ Round 34: a fusion and a slam are different products and the two facts are
+                // published separately — the hint for a real fusion only (「只有真混音才算进去」), the
+                // slam's own flag for the detail page to name what this boundary got.
+                final boolean slam = result.isSlam();
+                post(() -> {
+                    mixReady.set(!slam);
+                    mixSlam.set(slam);
+                });
             }
             Logger.info("transition: the DJ edit for {} is ready at {} — {}", t.title, result.path,
                     result.note.isEmpty() ? "no bridge in it" : result.note);

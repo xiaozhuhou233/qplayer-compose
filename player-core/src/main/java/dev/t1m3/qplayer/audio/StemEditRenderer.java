@@ -70,6 +70,13 @@ public interface StemEditRenderer {
         /** The renderer's own account of what it did, for the caller's log line. */
         public final String note;
 
+        /** Ⓜ Round 34: whether the two backgrounds were fused as a SLAM (both change hands on the
+         *  same line, one 80 ms splice, no recede table) rather than by the relation family's own
+         *  hand-over. A mutable field rather than a constructor argument, so every caller and every
+         *  fixture that builds a {@code Result} keeps compiling and keeps meaning what it meant —
+         *  the default is "not a slam". See {@link #isSlam}. */
+        public boolean slam;
+
         public Result(String path, long bridgeStartMs, long vocalReturnEndMs, String note) {
             this(path, bridgeStartMs, vocalReturnEndMs, -1L, -1L, -1L, note);
         }
@@ -89,6 +96,16 @@ public interface StemEditRenderer {
          *  outgoing deck on {@link #junctionMs} and start the incoming deck on {@link #entryMs}. */
         public boolean isFusion() {
             return junctionMs >= 0L && entryMs >= 0L;
+        }
+
+        /** Ⓜ Round 34: whether {@link #isFusion}'s hand-over came from the SLAM path — the one fact
+         *  that tells the two products apart for the listener, who asked for exactly that:
+         *  「只有真混音才算进去」 (the "strongest mix" hint is a claim about a relation fusion, and a
+         *  slam is not one) and, in the same breath, for the detail page to say which of the two a
+         *  boundary got. {@link #isFusion} deliberately does not test it: a slam needs the boundary
+         *  to cut on the junction and start the deck on the entry exactly as a fusion does. */
+        public boolean isSlam() {
+            return slam;
         }
 
         /** The suffix the file name carries — the same facts as the fields above, in the form

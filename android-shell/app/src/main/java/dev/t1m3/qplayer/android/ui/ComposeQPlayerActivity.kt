@@ -191,6 +191,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -703,12 +704,24 @@ private data class PlayerUiState(
     val positionMs: Long = 0,
     /** Playback time adjusted by the lyric offset; used only by lyric rendering. */
     val lyricPositionMs: Long = 0,
+    val lyricClockSampleNanos: Long = 0L,
+    val lyricClockRunning: Boolean = false,
+    val lyricPlaybackRevision: Long = 0L,
     val durationMs: Long = 0,
     val liked: Boolean = false,
     val likeable: Boolean = false,
     val playMode: Int = 0,
     val privateFmMode: Boolean = false,
     val loading: Boolean = false,
+    /**
+     * The engine's strongest transition mix — the ACE-Step bed rendered into a DJ edit —
+     * has finished and its file is on disk. Only the playback detail page uses it, as a
+     * one-line hint under the progress bar (see [QmlLyricProgress]).
+     */
+    val mixReady: Boolean = false,
+    /** Ⓜ Round 34: the boundary's edit was the SLAM path's product rather than a relation fusion —
+     *  the two are different things and the detail page names which one it got. */
+    val mixSlam: Boolean = false,
     val loggedIn: Boolean = false,
     val userName: String = "",
     val qrImage: List<List<Boolean>> = emptyList(),
@@ -899,7 +912,9 @@ private fun controllerState(controller: PlayerController, settings: SettingsCore
         if (settings.has(key)) settings.intOf(key) else fallback
     fun settingBool(key: String, fallback: Boolean): Boolean =
         if (settings.has(key)) settings.bool(key) else fallback
+    val lyricClockRunning = controller.isLyricClockRunning()
     val livePositionMs = controller.lyricClockPosition().coerceAtLeast(0L)
+    val lyricClockSampleNanos = System.nanoTime()
     val lyricOffsetMs = controller.lyricOffsetMs.peek() ?: 0
     val liveLyricPositionMs = livePositionMs - lyricOffsetMs
     // Lyrics are already exposed as an immutable Property snapshot. Do not put
@@ -921,12 +936,17 @@ private fun controllerState(controller: PlayerController, settings: SettingsCore
         songId = controller.playingSongId.peek() ?: 0L,
         positionMs = livePositionMs,
         lyricPositionMs = liveLyricPositionMs,
+        lyricClockSampleNanos = lyricClockSampleNanos,
+        lyricClockRunning = lyricClockRunning,
+        lyricPlaybackRevision = controller.playbackRevision(),
         durationMs = controller.durationMs.peek() ?: 0L,
         liked = controller.currentLiked.peek() == true,
         likeable = controller.currentLikeable.peek() == true,
         playMode = controller.playMode.peek() ?: 0,
         privateFmMode = controller.privateFmActive.peek() == true,
         loading = controller.loading.peek() == true,
+        mixReady = controller.mixReady.peek() == true,
+        mixSlam = controller.mixSlam.peek() == true,
         coverBytes = controller.coverBytes.peek(),
         coverPath = controller.coverPath.peek(),
         coverSeed = controller.coverSeed.peek() ?: "",
@@ -1024,17 +1044,16 @@ private fun controllerState(controller: PlayerController, settings: SettingsCore
 }
 
 @Composable
-private fun rememberQPlayerColorScheme(seed: String, dark: Boolean, enabled: Boolean, paletteStyle: Int = 0, paletteChroma: Int = 1, settingsRevision: Int = 0): ColorScheme {
+private fun rememberQPlayerColorScheme(seed: String, dark: Boolean, enabled: Boolean, paletteStyle: Int = 0, paletteChroma: Int = 1): ColorScheme {
     val fallback = ComposeColor(0xFF6750A4)
-    val target = remember(seed, enabled) {
-        if (enabled) parseSeedColor(seed) ?: fallback else fallback
+    // Build the complete destination palette once per actual input change.
+    // Animating the seed used to rerun gamut conversion every frame, and its
+    // neutral-cover threshold could abruptly desaturate the entire palette.
+    val target = remember(seed, enabled, dark, paletteStyle, paletteChroma) {
+        val color = if (enabled) parseSeedColor(seed) ?: fallback else fallback
+        qPlayerColorScheme(color, dark, paletteStyle, paletteChroma)
     }
-    val primary by animateColorAsState(
-        targetValue = target,
-        animationSpec = tween(durationMillis = 700),
-        label = "dynamic_seed_color"
-    )
-    return remember(primary, dark, paletteStyle, paletteChroma, settingsRevision) { qPlayerColorScheme(primary, dark, paletteStyle, paletteChroma) }
+    return rememberAnimatedQPlayerColorScheme(target)
 }
 
 private fun parseSeedColor(seed: String): ComposeColor? {
@@ -1247,6 +1266,14 @@ private fun qPlayerColorScheme(seed: ComposeColor, dark: Boolean, paletteStyle: 
             surfaceContainer = n(12f),
             surfaceContainerHigh = n(17f),
             surfaceContainerHighest = n(22f),
+            surfaceBright = n(24f), surfaceDim = n(6f), surfaceTint = p(80f),
+            inverseSurface = n(90f), inverseOnSurface = nv(20f), inversePrimary = p(40f),
+            primaryFixed = p(90f), primaryFixedDim = p(80f),
+            onPrimaryFixed = p(10f), onPrimaryFixedVariant = p(30f),
+            secondaryFixed = s(90f), secondaryFixedDim = s(80f),
+            onSecondaryFixed = s(10f), onSecondaryFixedVariant = s(30f),
+            tertiaryFixed = tr(90f), tertiaryFixedDim = tr(80f),
+            onTertiaryFixed = tr(10f), onTertiaryFixedVariant = tr(30f),
             outline = nv(60f), outlineVariant = nv(30f)
         )
     } else {
@@ -1265,6 +1292,14 @@ private fun qPlayerColorScheme(seed: ComposeColor, dark: Boolean, paletteStyle: 
             surfaceContainer = n(94f),
             surfaceContainerHigh = n(92f),
             surfaceContainerHighest = n(90f),
+            surfaceBright = n(98f), surfaceDim = n(87f), surfaceTint = p(40f),
+            inverseSurface = n(20f), inverseOnSurface = nv(95f), inversePrimary = p(80f),
+            primaryFixed = p(90f), primaryFixedDim = p(80f),
+            onPrimaryFixed = p(10f), onPrimaryFixedVariant = p(30f),
+            secondaryFixed = s(90f), secondaryFixedDim = s(80f),
+            onSecondaryFixed = s(10f), onSecondaryFixedVariant = s(30f),
+            tertiaryFixed = tr(90f), tertiaryFixedDim = tr(80f),
+            onTertiaryFixed = tr(10f), onTertiaryFixedVariant = tr(30f),
             outline = nv(50f), outlineVariant = nv(80f)
         )
     }
@@ -1536,13 +1571,18 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
         }
     }
 
+    // Polling SettingsCore must not create a fresh target palette every 250ms
+    // or restart an in-flight colour transition when settings are unchanged.
+    val paletteSettings = remember(settings, paletteRevision) {
+        Triple(settings.bool("monet"), settings.intOf("paletteStyle").coerceIn(0, 3),
+            settings.intOf("paletteChroma").coerceIn(0, 2))
+    }
     val scheme = rememberQPlayerColorScheme(
         seed = state.coverSeed,
         dark = state.dark,
-        enabled = settings.bool("monet"),
-        paletteStyle = settings.intOf("paletteStyle").coerceIn(0, 3),
-        paletteChroma = settings.intOf("paletteChroma").coerceIn(0, 2),
-        settingsRevision = paletteRevision
+        enabled = paletteSettings.first,
+        paletteStyle = paletteSettings.second,
+        paletteChroma = paletteSettings.third
     )
     // Same as legado's LegadoTheme: the official expressive motion scheme drives
     // every Material component (sheets, menus, buttons) instead of per-call specs.
@@ -5061,6 +5101,8 @@ private fun ApkDetailTab(
                     wavy = state.lyricProgressStyle == 0,
                     onSeek = controller::seek,
                     formatMs = ::formatPlayerTime,
+                    mixReady = state.mixReady,
+                    mixSlam = state.mixSlam,
                     modifier = Modifier.fillMaxWidth()
                 )
                 PlayerControlsSection(
@@ -6145,6 +6187,13 @@ private fun QmlLyricBackdrop(
         scheme.primaryContainer
     }
     Box(modifier = modifier.background(staticColor)) {
+        if (dynamic && android.os.Build.VERSION.SDK_INT >= 33 && coverBitmap != null) {
+            LyricDynamicBackdrop(
+                image = coverBitmap,
+                dark = state.dark,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
         if (dynamic) {
             val motion = rememberInfiniteTransition(label = "lyrics_background_motion")
             val phase by motion.animateFloat(
@@ -6223,6 +6272,7 @@ private fun QmlLyricBackdrop(
                 .fillMaxSize()
                 .background(scheme.primaryContainer.copy(alpha = if (dynamic) 0.18f else 0.26f))
         )
+        }
     }
 }
 
@@ -6750,6 +6800,12 @@ private sealed interface LyricDisplayRow {
     val startMs: Long
     val endMs: Long
 
+    data class Intro(
+        override val endMs: Long
+    ) : LyricDisplayRow {
+        override val startMs: Long = 0L
+    }
+
     data class Line(
         val sourceIndex: Int,
         val lyric: LyricLine,
@@ -6770,22 +6826,33 @@ private class LyricDisplayMotion(initialScale: Float, initialAlpha: Float) {
 }
 
 /**
- * Direct counterpart of ui.zip's insertInstrumentalBreakRows(). The intro is
- * deliberately left to the existing three intro indicators; only gaps between
- * real lyric lines become timeline rows. This makes a long instrumental section
- * take focus away from the preceding lyric instead of leaving it highlighted.
+ * The intro indicators are the first timeline row, so they share the lyrics'
+ * scrolling, centring and cascade. Keep the row after the intro ends: removing
+ * it would change every later index and jump the list. Instrumental gaps also
+ * own loading rows rather than a fixed overlay or a highlighted stale lyric.
  */
 private fun buildLyricDisplayRows(lines: List<LyricLine>): List<LyricDisplayRow> {
     if (lines.isEmpty()) return emptyList()
     val result = ArrayList<LyricDisplayRow>(lines.size + 4)
+    val firstStartMs = lines.first().startMs().coerceAtLeast(0L)
+    if (firstStartMs >= INTRO_BLOB_MIN_MS) {
+        result += LyricDisplayRow.Intro(endMs = firstStartMs)
+    }
     var previousEnd = 0L
     lines.forEachIndexed { index, line ->
         val start = line.startMs().coerceAtLeast(0L)
         if (index > 0) {
             val gap = start - previousEnd
             if (gap > 7_000L) {
+                val breakStart = previousEnd + 500L
+                // Untimed LRC lines otherwise extend to the next lyric start
+                // and mask the interlude row for its entire duration.
+                val previousLine = result.lastOrNull() as? LyricDisplayRow.Line
+                if (previousLine != null && previousLine.endMs > breakStart) {
+                    result[result.lastIndex] = previousLine.copy(endMs = breakStart)
+                }
                 result += LyricDisplayRow.InstrumentalBreak(
-                    startMs = previousEnd + 500L,
+                    startMs = breakStart,
                     endMs = start
                 )
             }
@@ -6849,51 +6916,45 @@ private fun QmlLyricColumnRestored(
     BoxWithConstraints(modifier = modifier) {
         val centerPadding = (maxHeight * 0.42f).coerceAtLeast(32.dp)
         val listState = rememberLazyListState()
-        val reportedPosition by rememberUpdatedState(state.lyricPositionMs)
-        var smoothPositionMs by remember(state.trackKey) {
+        val latestSnapshot by rememberUpdatedState(state)
+        val smoothPositionState = remember(state.trackKey) {
             mutableLongStateOf(state.lyricPositionMs)
         }
+        var smoothPositionMs by smoothPositionState
         LaunchedEffect(
             state.trackKey,
-            state.playing,
+            state.lyricClockRunning,
             state.lyricsRevision,
-            if (state.playing) 0L else state.lyricPositionMs
+            state.lyricOffsetMs,
+            if (state.lyricClockRunning) 0L else state.lyricPositionMs
         ) {
-            if (!state.playing) {
-                smoothPositionMs = reportedPosition
+            if (!state.lyricClockRunning) {
+                smoothPositionMs = latestSnapshot.lyricPositionMs
                 return@LaunchedEffect
             }
-            var observed = reportedPosition
-            var base = if (kotlin.math.abs(smoothPositionMs - observed) < 600L) {
-                maxOf(smoothPositionMs, observed)
-            } else observed
-            var baseFrameNs = 0L
-            var displayed = base
+            val clock = LyricPlaybackClock()
             while (true) {
                 val frameNs = withFrameNanos { it }
-                val latest = reportedPosition
-                if (latest != observed) {
-                    val predicted = base + if (baseFrameNs == 0L) 0L
-                    else ((frameNs - baseFrameNs) / 1_000_000L).coerceAtLeast(0L)
-                    val discontinuity = kotlin.math.abs(latest - predicted) > 600L ||
-                        latest < observed - 600L
-                    observed = latest
-                    base = if (discontinuity) latest else maxOf(predicted, latest, displayed)
-                    if (discontinuity) displayed = latest
-                    baseFrameNs = frameNs
-                }
-                if (baseFrameNs == 0L) baseFrameNs = frameNs
-                displayed = maxOf(displayed, base + (frameNs - baseFrameNs) / 1_000_000L)
-                smoothPositionMs = displayed.coerceAtLeast(0L)
+                val latest = latestSnapshot
+                smoothPositionMs = clock.positionAt(
+                    latest.lyricPositionMs, latest.lyricClockSampleNanos,
+                    latest.lyricClockRunning, latest.lyricPlaybackRevision, frameNs
+                )
             }
         }
 
         val displayRows = remember(state.trackKey, state.lyricsRevision, state.lyrics) {
             buildLyricDisplayRows(state.lyrics)
         }
-        val activeDisplayIndex = displayLyricIndexForPosition(displayRows, smoothPositionMs)
+        // Observe the frame clock in drawing, not in the entire lyric column.
+        // Composition only needs to run when the active row actually changes.
+        val activeDisplayIndex by remember(displayRows, smoothPositionState) {
+            derivedStateOf(androidx.compose.runtime.structuralEqualityPolicy()) {
+                displayLyricIndexForPosition(displayRows, smoothPositionState.longValue)
+            }
+        }
         val initialDisplayIndex = activeDisplayIndex.takeIf { it in displayRows.indices }
-            ?: displayRows.indexOfFirst { it is LyricDisplayRow.Line }
+            ?: displayRows.indices.firstOrNull() ?: -1
         val activeDisplayIsBreak = displayRows.getOrNull(activeDisplayIndex) is LyricDisplayRow.InstrumentalBreak
         val initialDisplayIsBreak = displayRows.getOrNull(initialDisplayIndex) is LyricDisplayRow.InstrumentalBreak
         val rowMotions = remember(state.trackKey, state.lyricsRevision, displayRows.size) {
@@ -6901,13 +6962,16 @@ private fun QmlLyricColumnRestored(
                 val row = displayRows[index]
                 LyricDisplayMotion(
                     initialScale = if (row is LyricDisplayRow.InstrumentalBreak || index == initialDisplayIndex) 1f else 0.98f,
-                    initialAlpha = if (initialDisplayIsBreak || row is LyricDisplayRow.InstrumentalBreak) 0f
-                    else if (index == initialDisplayIndex) 0.85f else 0.175f
+                    initialAlpha = if (index == initialDisplayIndex) 0.85f
+                    else if (initialDisplayIsBreak || row is LyricDisplayRow.InstrumentalBreak) 0f else 0.175f
                 )
             }
         }
         var previousDisplayIndex by remember(state.trackKey, state.lyricsRevision) {
             mutableIntStateOf(initialDisplayIndex)
+        }
+        var previousSpringEnabled by remember(state.trackKey, state.lyricsRevision) {
+            mutableStateOf(state.lyricSpring)
         }
 
         val rowContentWidth = (maxWidth - ROW_H_PADDING * 2).coerceAtLeast(1.dp)
@@ -6922,11 +6986,14 @@ private fun QmlLyricColumnRestored(
             listState.centerLyricLine(initial, animationSpec = null)
         }
 
-        LaunchedEffect(state.trackKey, state.lyricsRevision, activeDisplayIndex) {
+        LaunchedEffect(state.trackKey, state.lyricsRevision, activeDisplayIndex, state.lyricSpring) {
             val index = activeDisplayIndex
-            if (index !in displayRows.indices || index == previousDisplayIndex) return@LaunchedEffect
+            if (index !in displayRows.indices ||
+                (index == previousDisplayIndex && previousSpringEnabled == state.lyricSpring)
+            ) return@LaunchedEffect
             val oldIndex = previousDisplayIndex
             previousDisplayIndex = index
+            previousSpringEnabled = state.lyricSpring
             val visibleBefore = listState.layoutInfo.visibleItemsInfo
             val targetItem = visibleBefore.firstOrNull { it.index == index }
 
@@ -6943,8 +7010,8 @@ private fun QmlLyricColumnRestored(
                                 if (row is LyricDisplayRow.InstrumentalBreak || rowIndex == index) 1f else 0.98f
                             )
                             motion.alpha.snapTo(
-                                if (activeDisplayIsBreak || row is LyricDisplayRow.InstrumentalBreak) 0f
-                                else if (rowIndex == index) 0.85f else 0.175f
+                                if (rowIndex == index) 0.85f
+                                else if (activeDisplayIsBreak || row is LyricDisplayRow.InstrumentalBreak) 0f else 0.175f
                             )
                         }
                     }
@@ -6954,18 +7021,27 @@ private fun QmlLyricColumnRestored(
 
             val targetDelta = lyricAnchorDelta(listState, targetItem)
             val cascadeAnchor = visibleBefore.firstOrNull()?.index ?: oldIndex
+            val manual = listState.isScrollInProgress
+            // Include a small prefetch margin, but never launch three frame
+            // animations for every off-screen line in a whole song.
+            val animatedRows = (minOf(cascadeAnchor, index) - 2).coerceAtLeast(0)..
+                (maxOf(visibleBefore.lastOrNull()?.index ?: index, index) + 2)
+                    .coerceAtMost(displayRows.lastIndex)
             // Preserve every row's current screen coordinate before moving the
             // underlying list. Interrupted transitions continue from their live
             // value instead of snapping to either endpoint.
-            kotlinx.coroutines.coroutineScope {
-                rowMotions.forEach { motion ->
-                    launch {
-                        motion.offset.stop()
-                        motion.offset.snapTo(motion.offset.value + targetDelta)
-                    }
+            rowMotions.forEachIndexed { rowIndex, motion ->
+                motion.offset.snapTo(
+                    if (rowIndex in animatedRows) motion.offset.value + targetDelta else 0f
+                )
+            }
+            val consumedDelta = listState.scrollBy(targetDelta)
+            if (kotlin.math.abs(consumedDelta - targetDelta) > 0.01f) {
+                for (rowIndex in animatedRows) {
+                    val motion = rowMotions[rowIndex]
+                    motion.offset.snapTo(motion.offset.value + consumedDelta - targetDelta)
                 }
             }
-            listState.scrollBy(targetDelta)
 
             val currentRow = displayRows[index]
             val previousRow = displayRows.getOrNull((index - 1).coerceAtLeast(0))
@@ -6994,17 +7070,24 @@ private fun QmlLyricColumnRestored(
                 }
             }
             val lineSpring = spring<Float>(dampingRatio = damping, stiffness = stiffness)
-            val manual = listState.isScrollInProgress
             kotlinx.coroutines.coroutineScope {
                 rowMotions.forEachIndexed { rowIndex, motion ->
                     val row = displayRows[rowIndex]
-                    val delayMs = if (manual) 0L else
-                        (validDisplayLineDistance(displayRows, cascadeAnchor, rowIndex) - 1)
-                            .coerceAtLeast(0) * 50L
+                    val targetAlpha = if (rowIndex == index) 0.85f
+                        else if (activeDisplayIsBreak || row is LyricDisplayRow.InstrumentalBreak) 0f else 0.175f
+                    val targetScale = if (row is LyricDisplayRow.InstrumentalBreak || rowIndex == index) 1f else 0.98f
+                    if (rowIndex !in animatedRows) {
+                        motion.alpha.snapTo(targetAlpha)
+                        motion.scale.snapTo(targetScale)
+                        return@forEachIndexed
+                    }
+                    val delayMs = lyricCascadeDelayMs(
+                        state.lyricSpring, manual,
+                        validDisplayLineDistance(displayRows, cascadeAnchor, rowIndex)
+                    )
                     launch {
                         motion.alpha.animateTo(
-                            targetValue = if (activeDisplayIsBreak || row is LyricDisplayRow.InstrumentalBreak) 0f
-                            else if (rowIndex == index) 0.85f else 0.175f,
+                            targetValue = targetAlpha,
                             animationSpec = tween(120, easing = lyricSourceOpacityEasing)
                         )
                     }
@@ -7019,7 +7102,7 @@ private fun QmlLyricColumnRestored(
                     launch {
                         if (delayMs > 0L) delay(delayMs)
                         motion.scale.animateTo(
-                            if (row is LyricDisplayRow.InstrumentalBreak || rowIndex == index) 1f else 0.98f,
+                            targetScale,
                             animationSpec = if (state.lyricSpring) lineSpring
                             else tween(320, easing = FastOutSlowInEasing)
                         )
@@ -7041,20 +7124,32 @@ private fun QmlLyricColumnRestored(
             itemsIndexed(
                 items = displayRows,
                 key = { index, row -> "display_lyric_${row.startMs}_${row.endMs}_$index" },
-                contentType = { _, row -> if (row is LyricDisplayRow.Line) "lyric_line" else "instrumental_break" }
+                contentType = { _, row ->
+                    when (row) {
+                        is LyricDisplayRow.Intro -> "lyric_intro"
+                        is LyricDisplayRow.Line -> "lyric_line"
+                        is LyricDisplayRow.InstrumentalBreak -> "instrumental_break"
+                    }
+                }
             ) { displayIndex, row ->
                 val motion = rowMotions[displayIndex]
                 when (row) {
-                    is LyricDisplayRow.InstrumentalBreak -> Spacer(
-                        Modifier
-                            .fillMaxWidth()
-                            .height(40.dp)
-                            .graphicsLayer {
-                                translationY = motion.offset.value
-                                scaleX = motion.scale.value
-                                scaleY = motion.scale.value
-                                alpha = motion.alpha.value
-                            }
+                    is LyricDisplayRow.Intro -> LyricLoadingRow(
+                        startMs = row.startMs,
+                        endMs = row.endMs,
+                        positionState = smoothPositionState,
+                        playing = state.lyricClockRunning,
+                        lyricFontSize = state.lyricFontSize,
+                        motion = motion
+                    )
+                    is LyricDisplayRow.InstrumentalBreak -> LyricLoadingRow(
+                        startMs = row.startMs,
+                        endMs = row.endMs,
+                        positionState = smoothPositionState,
+                        playing = state.lyricClockRunning,
+                        lyricFontSize = state.lyricFontSize,
+                        motion = motion,
+                        compact = true
                     )
                     is LyricDisplayRow.Line -> QmlLyricRow(
                         state = state,
@@ -7064,15 +7159,14 @@ private fun QmlLyricColumnRestored(
                         groupEndMs = row.endMs,
                         focused = activeDisplayIndex == displayIndex,
                         completed = activeDisplayIndex >= 0 && displayIndex < activeDisplayIndex,
-                        animatePerToken = row.lyric.syllables.isNotEmpty() || state.lyricLinearAnim,
-                        positionMs = if (state.playing) smoothPositionMs else state.lyricPositionMs,
+                        animatePerToken = row.lyric.syllables.size > 1 || state.lyricLinearAnim,
+                        positionMs = state.lyricPositionMs,
+                        positionState = smoothPositionState,
                         focusIndex = activeDisplayIndex,
                         springEnabled = state.lyricSpring,
                         edgeBlurEnabled = !listState.isScrollInProgress,
                         nextLineStartMsOverride = row.endMs,
-                        rowTranslationY = motion.offset.value,
-                        rowScaleOverride = motion.scale.value,
-                        rowAlphaOverride = motion.alpha.value,
+                        displayMotion = motion,
                         textWidth = lyricTextWidth,
                         onLineClick = { onLineClick(row.startMs) },
                         modifier = Modifier.fillMaxWidth()
@@ -7089,49 +7183,53 @@ private fun QmlLyricColumnRestored(
             }
         }
 
-        val firstLineStartMs = state.lyrics.firstOrNull()?.startMs() ?: 0L
-        val introMs = firstLineStartMs.coerceAtLeast(0L)
-        val introActive = state.lyrics.isNotEmpty() && introMs >= INTRO_BLOB_MIN_MS &&
-            state.lyricPositionMs < firstLineStartMs
-        val introAlpha by animateFloatAsState(
-            targetValue = if (introActive) 1f else 0f,
-            animationSpec = tween(280),
-            label = "intro_blob_alpha_ported"
-        )
-        if (introAlpha > 0.01f) {
-            val scheme = MaterialTheme.colorScheme
-            val colors = listOf(scheme.primary, scheme.tertiary, scheme.secondary)
-            val idle = scheme.onSurface.copy(alpha = 0.12f)
-            val thirdWindow = (introMs / 3).coerceAtLeast(INTRO_LAST_BEAT_MS)
-            val thirdStart = (introMs - thirdWindow).coerceAtLeast(0L)
-            val secondStart = thirdStart / 2
-            val beat = when {
-                state.lyricPositionMs >= thirdStart -> 2
-                state.lyricPositionMs >= secondStart -> 1
-                else -> 0
+    }
+}
+
+@Composable
+private fun LyricLoadingRow(
+    startMs: Long,
+    endMs: Long,
+    positionState: State<Long>,
+    playing: Boolean,
+    lyricFontSize: Int,
+    motion: LyricDisplayMotion,
+    compact: Boolean = false
+) {
+    val scheme = MaterialTheme.colorScheme
+    val colors = listOf(scheme.primary, scheme.tertiary, scheme.secondary)
+    val idle = scheme.onSurface.copy(alpha = 0.12f)
+    val beat by remember(startMs, endMs, positionState) {
+        derivedStateOf(androidx.compose.runtime.structuralEqualityPolicy()) {
+            lyricLoadingBeat(positionState.value, startMs, endMs, INTRO_LAST_BEAT_MS)
+        }
+    }
+    val blobSize = with(LocalDensity.current) {
+        (lyricFontSize.coerceIn(14, 40).toFloat() * INTRO_BLOB_SIZE_SCALE *
+            if (compact) 0.65f else 1f).sp.toDp()
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .graphicsLayer {
+                translationY = motion.offset.value
+                scaleX = motion.scale.value
+                scaleY = motion.scale.value
+                alpha = motion.alpha.value
+                transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0.5f)
             }
-            val density = LocalDensity.current
-            val blobSize = with(density) {
-                (state.lyricFontSize.coerceIn(14, 40).toFloat() * INTRO_BLOB_SIZE_SCALE).sp.toDp()
-            }
-            Row(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(start = ROW_H_PADDING, top = (maxHeight * INTRO_LYRIC_ANCHOR - blobSize * 1.8f).coerceAtLeast(0.dp))
-                    .graphicsLayer { alpha = introAlpha },
-                horizontalArrangement = Arrangement.spacedBy(blobSize * 0.25f),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                repeat(3) { blobIndex ->
-                    Box(Modifier.size(blobSize)) {
-                        ExpressiveLoadingIndicator(
-                            size = blobSize,
-                            color = if (blobIndex < beat) colors[blobIndex] else idle,
-                            withContainer = true,
-                            running = state.playing
-                        )
-                    }
-                }
+            .padding(horizontal = ROW_H_PADDING, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(blobSize * 0.25f),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        repeat(3) { blobIndex ->
+            Box(Modifier.size(blobSize)) {
+                ExpressiveLoadingIndicator(
+                    size = blobSize,
+                    color = if (blobIndex < beat) colors[blobIndex] else idle,
+                    withContainer = true,
+                    running = playing && beat in 0..2
+                )
             }
         }
     }
@@ -7817,11 +7915,11 @@ private fun expandLyricUnits(line: LyricLine, nextLineStartMs: Long): List<Lyric
         val endMs: Long
     )
     val groups = ArrayList<TimedTextGroup>(syllables.size)
-    syllables.forEach { syllable ->
-        val text = syllable.text ?: return@forEach
-        if (text.isEmpty()) return@forEach
+    syllables.forEachIndexed { syllableIndex, syllable ->
+        val text = syllable.text ?: return@forEachIndexed
+        if (text.isEmpty()) return@forEachIndexed
         val timed = syllable.durationMs > 0L
-        if (text.isTrailingLyricPunctuation() && groups.isNotEmpty()) {
+        if (!timed && text.isTrailingLyricPunctuation() && groups.isNotEmpty()) {
             // Providers often emit punctuation as a zero-duration syllable.
             // Keep it on the preceding phrase's timeline so it cannot colour or
             // spring before the text it visually belongs to.
@@ -7829,8 +7927,11 @@ private fun expandLyricUnits(line: LyricLine, nextLineStartMs: Long): List<Lyric
         } else {
             groups += TimedTextGroup(
                 text = text,
-                startMs = if (timed) syllable.startMs else lineStart,
-                endMs = if (timed) syllable.startMs + syllable.durationMs else lineEnd
+                startMs = syllable.startMs,
+                endMs = if (timed) syllable.startMs + syllable.durationMs else
+                    (syllables.getOrNull(syllableIndex + 1)
+                        ?.takeIf { it.startMs > syllable.startMs }
+                        ?.startMs ?: lineEnd).coerceAtLeast(syllable.startMs + 1L)
             )
         }
     }
@@ -8317,6 +8418,8 @@ private fun QmlLyricRow(
     positionMs: Long,
     focusIndex: Int,
     springEnabled: Boolean,
+    positionState: State<Long>? = null,
+    displayMotion: LyricDisplayMotion? = null,
     edgeBlurEnabled: Boolean = true,
     lineTransition: LyricLineTransition? = null,
     lineTransitionElapsedMs: State<Long>? = null,
@@ -8333,16 +8436,6 @@ private fun QmlLyricRow(
     // animateFloatAsState restarted on every clock sample and made the column
     // twitch during word playback.
     val distance = kotlin.math.abs(index - focusIndex)
-    val activeK = lyricActiveK(positionMs, groupStartMs, groupEndMs)
-    val backgroundAlpha = 0.18f + 0.52f * activeK
-    val scaleTarget = if (isBackground) {
-        lyricBackgroundScale(positionMs, groupStartMs, groupEndMs)
-    } else if (state.lyricScale) {
-        0.97f + 0.17f * activeK
-    } else {
-        1f
-    }
-    val scale = scaleTarget
     // The source renderer scales the active line as one stable layer. Keep the
     // Compose text size stable during a syllable sweep; deriving it from
     // activeK remeasures the row every frame and is the main cause of the
@@ -8428,16 +8521,22 @@ private fun QmlLyricRow(
                 onClick = { onLineClick(line.startMs()) }
             )
             .graphicsLayer {
+                val framePosition = if (displayMotion == null) positionState?.value ?: positionMs else positionMs
+                val activeK = lyricActiveK(framePosition, groupStartMs, groupEndMs)
+                val backgroundAlpha = 0.18f + 0.52f * activeK
+                val scale = if (isBackground) {
+                    lyricBackgroundScale(framePosition, groupStartMs, groupEndMs)
+                } else if (state.lyricScale) 0.97f + 0.17f * activeK else 1f
                 val elapsed = lineTransitionElapsedMs?.value ?: 3000L
-                this.alpha = rowAlphaOverride ?: if (isBackground) backgroundAlpha else if (lineTransition != null) {
+                this.alpha = displayMotion?.alpha?.value ?: rowAlphaOverride ?: if (isBackground) backgroundAlpha else if (lineTransition != null) {
                     lyricRowOpacity(lineTransition, index, elapsed)
                 } else if (focused) 0.85f else 0.175f
-                val layerScale = rowScaleOverride ?: if (isBackground) scale else if (lineTransition != null) {
+                val layerScale = displayMotion?.scale?.value ?: rowScaleOverride ?: if (isBackground) scale else if (lineTransition != null) {
                     lyricRowScale(lineTransition, index, elapsed)
                 } else if (focused) 1f else 0.98f
                 scaleX = layerScale
                 scaleY = layerScale
-                translationY = rowTranslationY ?: if (lineTransition != null) {
+                translationY = displayMotion?.offset?.value ?: rowTranslationY ?: if (lineTransition != null) {
                     lyricRowOffset(lineTransition, index, elapsed)
                 } else 0f
                 transformOrigin = androidx.compose.ui.graphics.TransformOrigin(
@@ -8460,7 +8559,7 @@ private fun QmlLyricRow(
         val particleProgress = ((positionMs - groupStartMs).toFloat() /
             (groupEndMs - groupStartMs).coerceAtLeast(1L).toFloat()).coerceIn(0f, 1f)
         Box(Modifier.width(textWidth)) {
-            if ((focused || outgoing || completed) && animatePerToken && mainTextLayout != null) {
+            if (animatePerToken && mainTextLayout != null) {
                 // The HTML source uses one independently transformed glyph per
                 // grapheme. Keeping that same structure is important: a
                 // BaselineShift inside one AnnotatedString moves color, but it
@@ -8470,7 +8569,7 @@ private fun QmlLyricRow(
                     textLayout = mainTextLayout,
                     filled = outgoing || completed,
                     positionMs = positionMs,
-                    playing = state.playing,
+                    positionState = positionState,
                     fontSize = (baseSize * textScale).sp,
                     lineHeight = lineHeight.sp,
                     fontWeight = lyricWeight,
@@ -8535,131 +8634,13 @@ private fun QmlLyricRow(
     }
 }
 
-private data class LyricGlyphSample(
-    val yLift: Float
-)
-
-/** Critical-damped analytic spring used by ui.zip's per-glyph motion. */
-private class LyricAnalyticSpring(private val response: Double) {
-    private var value = 0.0
-    private var velocity = 0.0
-    private var start = 0.0
-    private var target = 0.0
-    private var initialVelocity = 0.0
-    private var elapsed = 0.0
-
-    fun retarget(newTarget: Double) {
-        start = value
-        initialVelocity = velocity
-        target = newTarget
-        elapsed = 0.0
-    }
-
-    fun reset(newValue: Double) {
-        value = newValue
-        velocity = 0.0
-        start = newValue
-        target = newValue
-        initialVelocity = 0.0
-        elapsed = 0.0
-    }
-
-    fun update(dt: Double): Double {
-        if (value == target && velocity == 0.0) return value
-        elapsed += dt.coerceAtLeast(0.0)
-        val omega = 2.0 * PI / response.coerceAtLeast(0.001)
-        val displacement = start - target
-        val coefficient = initialVelocity + omega * displacement
-        val envelope = kotlin.math.exp(-omega * elapsed)
-        val relative = envelope * (displacement + coefficient * elapsed)
-        velocity = envelope * (coefficient - omega * (displacement + coefficient * elapsed))
-        value = target + relative
-        // An analytic spring converges asymptotically. Leaving the tiny tail alive
-        // forever makes old glyphs keep invalidating and visibly shimmer while the
-        // end of a long line is already lifting. Once imperceptibly close, settle
-        // it exactly and stop all subsequent motion.
-        if (kotlin.math.abs(target - value) < 0.001 && kotlin.math.abs(velocity) < 0.01) {
-            value = target
-            velocity = 0.0
-            start = target
-            initialVelocity = 0.0
-            elapsed = 0.0
-        }
-        return value
-    }
-}
-
-/** Direct Compose port of ui.zip's WordGlyphMotion. */
-private class LyricGlyphMotion(private val unit: LyricUnit) {
-    private val duration = unit.groupDurationMs.coerceAtLeast(1L) / 1000.0
-    private val baseResponse = duration.coerceAtMost(3.0)
-    private val start = LyricAnalyticSpring(baseResponse)
-    private val lift = LyricAnalyticSpring(baseResponse * 1.25)
-    private val tail = LyricAnalyticSpring(baseResponse * 1.25)
-    private val factor = if (unit.containsCjk) 0.8 else 0.4
-    private val step = minOf(factor * duration / unit.glyphCount.coerceAtLeast(1), factor)
-    // ui.zip WordGlyphMotion uses the timed group's grapheme order directly.
-    // Do not clamp this to the painted sweep edge: that extra constraint made
-    // later glyphs start early/late depending on punctuation width and broke
-    // the continuous hand-off from the first character to the last.
-    private val startTrigger = (unit.glyphIndex + 1) * step
-    private val tailTrigger = startTrigger + 2.0 * duration / unit.glyphCount.coerceAtLeast(1)
-    private var started = false
-    private var tailed = false
-    private var hasTimelineSample = false
-
-    fun reset() {
-        start.reset(0.0)
-        lift.reset(0.0)
-        tail.reset(0.0)
-        started = false
-        tailed = false
-        hasTimelineSample = false
-    }
-
-    fun update(positionMs: Long, dt: Double): LyricGlyphSample {
-        if (unit.longAscii || unit.text.all { it.isWhitespace() }) return LyricGlyphSample(0f)
-        val localTime = (positionMs - unit.groupStartMs) / 1000.0
-        if (localTime < 0.0) {
-            if (started || tailed) reset()
-            hasTimelineSample = true
-            return LyricGlyphSample(0f)
-        }
-        // A row can first enter composition after its word has already passed.
-        // Match ui.zip by settling it instead of replaying old glyph motion.
-        if (!hasTimelineSample && localTime >= tailTrigger) {
-            start.reset(1.0)
-            lift.reset(1.0)
-            tail.reset(1.0)
-            started = true
-            tailed = true
-        }
-        hasTimelineSample = true
-        if (!started && localTime >= startTrigger) {
-            started = true
-            start.retarget(1.0)
-            lift.retarget(1.0)
-        }
-        if (!tailed && localTime >= tailTrigger) {
-            tailed = true
-            tail.retarget(1.0)
-        }
-        val springStart = start.update(dt)
-        val springLift = lift.update(dt)
-        val springTail = tail.update(dt)
-        val pulse = springStart * (1.0 - springTail)
-        val longness = duration.coerceIn(1.0, 2.0) - 1.0
-        return LyricGlyphSample((2.0 * springLift + 1.5 * pulse * longness).toFloat())
-    }
-}
-
 @Composable
 private fun LyricGlyphText(
     units: List<LyricUnit>,
     textLayout: androidx.compose.ui.text.TextLayoutResult,
     filled: Boolean,
     positionMs: Long,
-    playing: Boolean,
+    positionState: State<Long>?,
     fontSize: androidx.compose.ui.unit.TextUnit,
     lineHeight: androidx.compose.ui.unit.TextUnit,
     fontWeight: FontWeight,
@@ -8702,14 +8683,12 @@ private fun LyricGlyphText(
             val probeOffset = startOffset.coerceAtMost((textLength - 1).coerceAtLeast(0))
             val lineIndex = textLayout.getLineForOffset(probeOffset)
             val startX = textLayout.getHorizontalPosition(startOffset, true)
+            // At a soft wrap the cursor at endOffset is already on the next
+            // visual line. Looking up endOffset - 1 hid that fact and made the
+            // final glyph consume almost a full line of phantom sweep width.
             val endLine = if (endOffset > startOffset) {
-                textLayout.getLineForOffset((endOffset - 1).coerceAtMost((textLength - 1).coerceAtLeast(0)))
+                textLayout.getLineForOffset(endOffset.coerceAtMost((textLength - 1).coerceAtLeast(0)))
             } else lineIndex
-            val endX = if (endLine == lineIndex) {
-                textLayout.getHorizontalPosition(endOffset, true)
-            } else {
-                textLayout.getLineRight(lineIndex)
-            }
             val wholeGlyphBox = if (startOffset < textLength) {
                 textLayout.getBoundingBox(startOffset)
             } else null
@@ -8727,16 +8706,27 @@ private fun LyricGlyphText(
                 y = if (wholeGlyphBox != null && isolatedGlyphBox != null) {
                     wholeGlyphBox.top - isolatedGlyphBox.top
                 } else textLayout.getLineTop(lineIndex),
-                advance = kotlin.math.abs(endX - startX)
-                    .takeIf { it > 0.01f }
-                    ?: glyphLayouts[index].size.width.toFloat().coerceAtLeast(0.001f)
+                advance = lyricGlyphAdvance(
+                    startX = startX,
+                    endCursorX = textLayout.getHorizontalPosition(endOffset, true),
+                    lineRight = textLayout.getLineRight(lineIndex),
+                    endsOnNextLine = endLine != lineIndex,
+                    fallbackWidth = glyphLayouts[index].size.width.toFloat()
+                )
             )
         }
     }
-    val sweepGeometry = remember(units, glyphGeometry) {
+    // Spaces still occupy their measured layout slots, but must not spend part
+    // of a sung word's duration revealing an invisible glyph.
+    val sweepWidths = remember(units, glyphGeometry) {
+        FloatArray(units.size) { index ->
+            if (units[index].text.all { it.isWhitespace() }) 0f else glyphGeometry[index].advance
+        }
+    }
+    val sweepGeometry = remember(units, sweepWidths) {
         val groupWidths = FloatArray((units.maxOfOrNull { it.groupIndex } ?: -1) + 1)
         units.forEachIndexed { index, unit ->
-            groupWidths[unit.groupIndex] += glyphGeometry[index].advance
+            groupWidths[unit.groupIndex] += sweepWidths[index]
         }
         val groupStarts = FloatArray(groupWidths.size)
         var accumulated = 0f
@@ -8748,86 +8738,73 @@ private fun LyricGlyphText(
         val groupCursor = FloatArray(groupWidths.size)
         units.forEachIndexed { index, unit ->
             glyphStarts[index] = groupStarts[unit.groupIndex] + groupCursor[unit.groupIndex]
-            groupCursor[unit.groupIndex] += glyphGeometry[index].advance
+            groupCursor[unit.groupIndex] += sweepWidths[index]
         }
         Triple(glyphStarts, groupStarts, groupWidths)
     }
-    val (glyphStarts, groupStarts, groupWidths) = sweepGeometry
-    val motions = remember(units) {
-        units.map { unit -> LyricGlyphMotion(unit) }
-    }
-    var glyphSamples by remember(units) {
-        mutableStateOf(List(units.size) { LyricGlyphSample(0f) })
-    }
-    var renderedPositionMs by remember(units) { mutableLongStateOf(positionMs) }
-    val latestPositionMs by rememberUpdatedState(positionMs)
-    val latestPlaying by rememberUpdatedState(playing)
-    LaunchedEffect(springEnabled, motions) {
-        if (!springEnabled) {
-            motions.forEach { it.reset() }
-            glyphSamples = List(units.size) { LyricGlyphSample(0f) }
+    val (glyphStarts, _, groupWidths) = sweepGeometry
+    val lineSweep = remember(units, groupWidths) {
+        val groups = arrayOfNulls<LyricSweepGroup>(groupWidths.size)
+        units.forEach { unit ->
+            if (groups[unit.groupIndex] == null) {
+                groups[unit.groupIndex] = LyricSweepGroup(
+                    unit.groupStartMs,
+                    unit.groupStartMs + unit.groupDurationMs.coerceAtLeast(1L),
+                    groupWidths[unit.groupIndex]
+                )
+            }
         }
-        motions.forEach { it.reset() }
-        var sampledPosition = latestPositionMs.toDouble()
-        var observedPosition = latestPositionMs
-        var previousFrameNanos = withFrameNanos { it }
-        while (true) {
-            val frameNanos = withFrameNanos { it }
-            val dt = ((frameNanos - previousFrameNanos) / 1_000_000_000.0)
-                .coerceIn(0.0, 0.05)
-            previousFrameNanos = frameNanos
-
-            val newestPosition = latestPositionMs
-            if (newestPosition != observedPosition) {
-                val jump = newestPosition - sampledPosition
-                if (jump < -120.0 || jump > 750.0) {
-                    // Seek/track change: discard the old glyph timeline.
-                    motions.forEach { it.reset() }
-                    sampledPosition = newestPosition.toDouble()
-                } else if (kotlin.math.abs(jump) > 150.0) {
-                    // Ignore ordinary callback jitter. Correct only meaningful
-                    // drift and cap the correction so glyph triggers stay smooth
-                    // and monotonic between backend position updates.
-                    sampledPosition += (jump * 0.08).coerceIn(-12.0, 12.0)
-                }
-                observedPosition = newestPosition
-            }
-            if (latestPlaying) {
-                sampledPosition += dt * 1000.0
-            } else {
-                sampledPosition = newestPosition.toDouble()
-            }
-            val framePosition = sampledPosition.toLong()
-            renderedPositionMs = framePosition
-            if (springEnabled) glyphSamples = motions.map { it.update(framePosition, dt) }
+        LyricLineSweep(groups.map { requireNotNull(it) })
+    }
+    val glyphTimings = remember(units, sweepWidths, glyphStarts, lineSweep) {
+        units.mapIndexed { index, unit ->
+            lineSweep.glyphTiming(unit.groupIndex, glyphStarts[index], sweepWidths[index])
+        }
+    }
+    val motions = remember(units, glyphTimings) {
+        units.mapIndexed { index, unit ->
+            LyricWordLift(
+                timing = glyphTimings[index],
+                enabled = !unit.longAscii && unit.text.any { !it.isWhitespace() }
+            )
+        }
+    }
+    val fallbackPosition = rememberUpdatedState(positionMs)
+    val playbackPosition = positionState ?: fallbackPosition
+    val renderRange = remember(units, motions, springEnabled) {
+        val start = units.minOfOrNull { it.groupStartMs } ?: 0L
+        val colorEnd = units.maxOfOrNull { it.groupStartMs + it.groupDurationMs.coerceAtLeast(1L) } ?: start
+        val motionEnd = if (springEnabled) motions.maxOfOrNull { it.settledAtMs } ?: colorEnd else colorEnd
+        start..maxOf(colorEnd, motionEnd)
+    }
+    val renderedPosition = remember(playbackPosition, renderRange) {
+        derivedStateOf(androidx.compose.runtime.structuralEqualityPolicy()) {
+            playbackPosition.value.coerceIn(renderRange)
         }
     }
     Canvas(modifier = modifier.height(with(density) { textLayout.size.height.toDp() })) {
+        // Only draw observes the audio clock. Fill and lift sample exactly the
+        // same time; no per-row frame coroutine, clock correction or sample list.
+        val renderedPositionMs = renderedPosition.value
         units.forEachIndexed { index, unit ->
             if (unit.text.all { it.isWhitespace() }) return@forEachIndexed
-            val groupStart = unit.groupStartMs
-            val groupEnd = groupStart + unit.groupDurationMs.coerceAtLeast(1L)
-            val groupFill = when {
-                filled || renderedPositionMs >= groupEnd -> groupStarts[unit.groupIndex] + groupWidths[unit.groupIndex]
-                renderedPositionMs <= groupStart -> groupStarts[unit.groupIndex]
-                else -> groupStarts[unit.groupIndex] + groupWidths[unit.groupIndex] *
-                    ((renderedPositionMs - groupStart).toFloat() / (groupEnd - groupStart).toFloat())
-            }
             val glyphWidth = glyphGeometry[index].advance.coerceAtLeast(0.001f)
-            val glyphFill = groupFill - glyphStarts[index]
-            val progress = (glyphFill / glyphWidth).coerceIn(0f, 1f)
-            val sample = glyphSamples.getOrElse(index) { LyricGlyphSample(0f) }
+            // Respect every source start AND end, including short rests and
+            // overlapping vocals. Only the colour edge inside a source word is
+            // interpolated by width. Lift samples that very same interval.
+            val progress = if (filled) 1f else glyphTimings[index].progressAt(renderedPositionMs)
+            val lift = if (springEnabled) motions[index].at(renderedPositionMs) else 0f
             val position = glyphGeometry[index]
             val canvas = drawContext.canvas
             canvas.save()
-            canvas.translate(position.x, position.y - sample.yLift * density.density)
+            canvas.translate(position.x, position.y - lift * density.density)
             if (progress <= 0.001f) {
                 drawText(textLayoutResult = glyphLayouts[index], color = normalColor)
             } else if (progress >= 0.999f) {
                 drawText(textLayoutResult = glyphLayouts[index], color = playedColor)
             } else {
                 val width = glyphWidth.coerceAtLeast(1f)
-                val edge = glyphFill.coerceIn(0f, width)
+                val edge = (glyphWidth * progress).coerceIn(0f, width)
                 // One text layer only: paint the unsung glyph, then clip the
                 // played colour to the sweep edge. No glow/shadow/leading copy.
                 drawText(textLayoutResult = glyphLayouts[index], color = normalColor)
@@ -8910,6 +8887,11 @@ private fun QmlLyricProgress(
     onSeek: (Long) -> Unit,
     formatMs: (Long) -> String,
     chapterMarks: List<Float> = emptyList(),
+    /** Show the 「最强混音已完成」 line under the bar. Only the detail page asks for it. */
+    mixReady: Boolean = false,
+    /** Ⓜ Round 34: this boundary's edit was the SLAM path's product — the line then names that
+     *  instead, because the listener asked to be able to tell the two apart by eye. */
+    mixSlam: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val duration = durationMs.coerceAtLeast(1L)
@@ -9067,6 +9049,25 @@ private fun QmlLyricProgress(
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        // Under the bar and its two timestamps: the one line the detail page adds. It
+        // appears only once the engine has actually written the strongest mix, so its
+        // absence means "not yet", never "this pair has none" — the render is
+        // asynchronous and starts when the incoming track is queued.
+        if (mixReady || mixSlam) {
+            Text(
+                // Ⓜ Round 34: the listener asked to be able to tell the two products apart by eye —
+                // a relation fusion is the strongest mix, a SLAM is the one-line cut the pair's
+                // unmatched tempos leave, and they are not the same claim.
+                text = if (mixSlam) "拼接式过渡（SLAM）已生成" else "最强混音已完成",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp),
+                textAlign = TextAlign.Center,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.primary
             )
         }
     }

@@ -820,13 +820,17 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                                 + " track separated for it in %dms)",
                         fusion.plan.junctionMs, fusion.plan.entryMs, fusion.plan.fusionEndMs,
                         fusion.plan.materialWindowMs, fusion.separateMs) : "");
-        return fusion != null
+        // Ⓜ Round 34: the slam flag, so the caller can tell the listener's two products apart —
+        // the "strongest mix" hint is a relation fusion's claim, and a slam is not one.
+        StemEditRenderer.Result result = fusion != null
                 ? new StemEditRenderer.Result(named.getAbsolutePath(), -1L,
                         Math.round(plan.returnEndSec * 1000d), fusion.plan.entryMs,
                         fusion.plan.junctionMs, fusion.plan.fusionEndMs, fusion.report.describe())
                 : new StemEditRenderer.Result(named.getAbsolutePath(), bridgeStartMs,
                         Math.round(plan.returnEndSec * 1000d),
                         bridgeReport != null ? bridgeReport.describe() : "");
+        result.slam = fusion != null && fusion.plan.slam;
+        return result;
     }
 
     // --- the cloud bed -------------------------------------------------------
@@ -1964,7 +1968,13 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         material.stepOnly = stepOnly;
         StemFusion.Report report = StemFusion.measure(plan, edit, material, melody,
                 request.outgoingBeatPeriodMs / 1000d, request.beatPeriodMs / 1000d, guard);
-        Logger.info("transition: DJ edit for {} — {}", request.title(), report.describe());
+        // Ⓜ Round 34: the probe pass's report is truncated on purpose (see Material.stepOnly), so it
+        // is not logged as a verdict — the device log was full of "NOT ACCEPTABLE:" lines with every
+        // reading at 0.0 or NaN, which is a report that never measured anything rather than a fusion
+        // that failed. The caller logs the probe's own step from the line below it.
+        if (!stepOnly) {
+            Logger.info("transition: DJ edit for {} — {}", request.title(), report.describe());
+        }
         Logger.info("transition: DJ edit for {}: one fusion render, make-up {} dB — the carried"
                         + " rows' assembly {}ms, the head's own render {}ms, the report {}ms"
                         + " ({}ms in all)",
