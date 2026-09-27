@@ -4384,6 +4384,53 @@ a 过渡到 b」+「**融合段可以长一点**，尽量用背景音融，**融
 
 **发布**：tag `ai-dj-transition-2026-09-27r`。
 
+### 第 30 轮（2026-09-27）：**融合终于真机上出来了；AI 垫层两端改成两栏淡入淡出；提速的目标定到行**
+
+用户：「最强混音挑出来了，现在很好」+「1 生成时间还是太慢，不大改的前提下优化，且不受暂停影响」+「2 融合段末尾
+做淡出」+「3 看日志继续上一轮要做的」，随后澄清「我说的是 **ai 垫层的收尾**要淡出，最好再有个淡入」。
+
+**真机证据（第一次拿到真 fusion）**：`files/cache/djedit` 里
+`12388522-v11457-e180-j216891-f11537-r23.m4a`、`1599480219-v13100-e47-j137523-f13452-r23.m4a`（同一对在 r23
+后重渲过），日志里 `that edit is a FUSION — the incoming deck will start at 180ms of its file … hand over at
+the outgoing deck's own 216891ms bar line in a 2000ms equal-gain fade`。**第 25 轮那两处修复
+（渲染等节拍网格 + 唤醒锁）确实把融合救回来了。**
+
+**第 29 轮那条推断被证实**：`MediaPlayer: crossfade begin over 10777ms (FUSION, the incoming starts now at
+its offset)` + 增益轨迹（t=0.0955 出曲 −6.27dB、入曲 0.5144；t≈0.186 出曲 −39dB，正是 2000/10777）——
+**入曲 deck 是 ramp 开始（= junction）那一刻才开始播文件的**。所以 junction 之前那段"段落"里听众听到的
+**只有出曲自己的原曲（含人声）**，"没有人声的那半"从 junction 才响。⇒「段落里大量人声」和「出曲太慢」是同一个量：
+**junction 之前那段原曲的长度**；要提前就提前 junction，而不是给现场 deck 加衰减（代码原话：早一小节交接 = 相位台阶）。
+
+**改了（发布 `-27s`）**：`StemBed.BED_FADE_BARS` **1 → 2**（两端同一个包络，所以淡入也一起变长）。垫层一直两端为零
+（这个类的设计），但"一栏"(149BPM 上 1.6s)对打击乐来说还是"结束"而不是"离开"。`RULE_VERSION` 23 → 24。
+两个垫层 fixture 的期望改为**从常量推导**（它们断言的是形状：两端为零、单调、对称，长度是常量的事），19 条全绿。
+
+**提速：目标已经读到行（下一步做）**。日志时间账：S2P 整次渲染 125,260ms，其中"融合那一段"**83,635ms（67%）**；
+4 Days 79,366ms 里 **58,298ms（73%）**。而 S2P 的两次 `fusion measured` 相隔 21.5s（21:00:13 不带 make-up → 21:00:35
+带 +4.26dB），两次渲染 ≈ 80s ≈ 那 83.6s ⇒ **每渲染一遍融合段约 40s，其中 make-up 那次是白花的**。
+
+`attemptFusion` 里的结构（`AndroidStemEditRenderer` 约 1765-1795 行）：
+
+```
+Fusion first  = renderFusion(..., makeup = 0d, ...);
+double makeup = StemFusion.makeupDb(first.report.stepMeasured ? first.report.junctionStepDb : NaN);
+if (!(makeup > 0d)) return first;                  // 已经够响
+Fusion lifted = renderFusion(..., makeup, ...);    // ← 第二次整段渲染
+return lifted;
+```
+
+**不能直接删第二次**：`lifted.report` 才是验收判据读的那个报告，而 `step_with = step_without + makeup` 这条恒等式
+**在 limiter 之前成立**，渲染里 limiter/ClipGuard 是非线性的（`clipping` 计数、`DjEdit.Limiter(rate)` 就建在
+`renderFusion` 里）。**正确的"不大改"做法**：把**交界落差**（融合的前 500ms vs 出曲 master 的后 500ms）**只按 500ms
+算一次**（那里只有 incoming rows × gain + carried rows 的求和，还没过 limiter），据此解出 make-up，然后**只渲染一遍**
+（带 make-up），再从那一遍里量 clipping/limiter 的读数。省下整次渲染的 1/3（125s→约 85s）。
+
+⚠️ 两条本轮没动的：①junction 提前（第 29 轮那条，现在有真机日志可依）；②验收读数里的 **NaN**
+（`its own fade fading material (NaN vs NaN…)`、`the incoming's own drums … NaN after`、`pulse: 0 of 0 beats`）
+= "入曲在交接之后"和"出曲在淡出上的材料"两条判据在空跑，不达标的融合可能过关。
+
+**发布**：tag `ai-dj-transition-2026-09-27s`，192,502,203 bytes，sha256 `992d5d23…`。
+
 ## 九、音频焦点：自动暂停 / 自动恢复（2026-09-21 修复，装机验证）
 
 **用户诉求**：别的 App（B站、别的视频软件、别的音乐）开始放 → qplayer 自动暂停；那个 App 停了/暂停了
