@@ -4349,6 +4349,41 @@ a 过渡到 b」+「**融合段可以长一点**，尽量用背景音融，**融
 
 **发布**：tag `ai-dj-transition-2026-09-27q`，**192,502,203 bytes**，sha256 `da598c88…`。
 
+### 第 29 轮（2026-09-27）：**"过度修正"退回，并且把「不要放人声」和「出曲太慢」归并成同一个杠杆**
+
+用户：「你走了个极端，出曲现在太慢了，我让你不要尽早过于小声但是现在有点长过头了，有点抢调」，随后又一句
+「然后给禁止人声拉进来」。
+
+**改了**：`B_ARRIVAL_LEAD_STEPS` **2 → 1**（退回第 21 轮的形状）。第 28 轮把它设成 2 是个**过度修正**：等功率的
+爬升跨两个小节，意味着**交接前整整一小节入曲就已经在 −3 dB**，两轨各自的调同时大声在场的时间翻倍——听起来
+就是「出曲太慢（赖着不走）」+「抢调」。`RULE_VERSION` **22 → 23**（不能回到 22：`-r22` 的文件可能是两种形状
+里的任一种）。
+
+**这一轮真正的收获是一个归并**（下一轮的第一件事就是它）：**「不要放人声」和「出曲太慢」是同一个杠杆。**
+读 `PlayerController` 的 tick（`fusionCut` 那一支，约 2430-2440 行）可以读到它自己的原话：
+
+> 「……the melodic from exactly that instant, so the two decks hand over there or not at all —
+> starting a bar early would put A's live deck against the file's copy of A at a different
+> instant, which is a phase step rather than a slightly late blend.」
+
+也就是说：**文件里那份素材不允许在 junction 之前与现场 deck 同时响**（换了时刻就是相位台阶），而入曲 deck 在
+被 armed 时是 `setVolume(0f, 0f)`（`AndroidAudioBackend` 里 prepared 那一支）。两件事合起来意味着：
+**junction 之前那段"段落"里，听众听到的其实只有出曲自己的原曲（含人声）**；文件里那份"没有出曲人声"的伴奏
+（`carriedOf` 跳过 VOCALS 行）**要等到 junction 才开始响**。所以：
+
+- 「过渡段大量人声」= junction 之前放的就是出曲原曲，它当然有人声（而且不可能现场去掉——那正是 P0 的来源）；
+- 「出曲太慢 / 长过头」= 同一段原曲太长（第 18/24 轮把段落**加长**了，"融合段可以长一点"）；
+- 「抢调」= 第 28 轮那次过度修正让两轨同调大声的时间翻倍。
+
+**所以三个抱怨是同一个量：junction 之前那段出曲原曲的长度。** 改法是把 **junction 提前**（或缩短 junction 之前
+的那段），让"没有人声的那部分"更早开始，而不是给现场 deck 加衰减（那会违反上面那条相位约束，且失败形态是空档）。
+
+⚠️ **下一轮动手前必须先验一次**：拿一个**真的 fusion**边界（文件名带 `-e/-j/-f`、日志 `curve=FUSION`）的日志，
+确认 junction 之前入曲 deck 的音量确实是 0（`the parked incoming` / `beginCrossfade` 那两行），再改时刻。
+本轮的推断来自代码原话 + prepared 的静音写入，**还没有真机日志确认**。
+
+**发布**：tag `ai-dj-transition-2026-09-27r`。
+
 ## 九、音频焦点：自动暂停 / 自动恢复（2026-09-21 修复，装机验证）
 
 **用户诉求**：别的 App（B站、别的视频软件、别的音乐）开始放 → qplayer 自动暂停；那个 App 停了/暂停了

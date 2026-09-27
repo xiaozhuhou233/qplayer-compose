@@ -104,8 +104,23 @@ public final class StemFusion {
      *  grown passages (round 18/24) left the second track at the floor for most of a 12 s passage
      *  and brought it in only in its last bar — the listener's 「由小变大时不要小声太久，尽快做到背景音与
      *  前一首融合」. {@link #B_ARRIVAL_FADE_STEPS} is consequently the span of a one-step hold, which
-     *  is the shape it documents. */
-    public static final int B_ARRIVAL_LEAD_STEPS = 2;
+     *  is the shape it documents.
+     *
+     *  <p>⚠️ Round 28's first version set this to 2 and the listener answered 「你走了个极端，出曲现在太慢了
+     *  ……现在有点长过头了，有点抢调」: an equal-power rise over two steps puts the incoming track at
+     *  −3 dB a whole step before the hand-over, so the two backings — each in its own key — are both
+     *  loudly present for twice as long, which is heard as the outgoing track hanging around and as
+     *  the two tonalities fighting (抢调). Reverted to one step, i.e. round 21's own shape.
+     *
+     *  <p><b>What the real answer is, and why it is not a number here.</b> The listener wants both
+     *  things at once: the incoming <em>audible</em> early (no long silence) and <em>unity only</em>
+     *  at the hand-over (no long clash). One rise cannot do both — an audible early level on a single
+     *  monotone rise is a loud early level. It needs a <b>two-stage</b> arrival: quick up to a bed
+     *  (the −10 dB the decks' own DJ_BLEND already uses for exactly this "淡一点，要不抢了" reason) and
+     *  then to unity on the hold's end. That is one more instant in the arrival table (a
+     *  {@code arriveBedMs} beside {@link Plan#arriveStartMs}), which is a change to this file, DjEdit
+     *  and the report — the next round's job, not a constant to nudge. */
+    public static final int B_ARRIVAL_LEAD_STEPS = 1;
 
     /** How many steps a <b>SLAM</b> lasts: <b>three</b> (one until the listening that made this
      *  {@link #RULE_VERSION} 10). A pair whose grids are in no relation has no common bar to lay
@@ -462,6 +477,15 @@ public final class StemFusion {
      *       table (see {@link Plan#voiceGateMs}) and always was, while the OUTGOING track's own voice
      *       is never carried here (see {@code carriedOf}) and comes from its live deck, which this
      *       planner cannot touch. See AI_HANDOFF's round 28.</li>
+     *   <li><b>22 → 23</b> — <b>21 → 22 was an extreme and is undone here.</b> The listener: 「你走了个
+     *       极端，出曲现在太慢了……现在有点长过头了，有点抢调」. Two steps of equal-power rise put the
+     *       incoming track at −3 dB a whole step before the hand-over, so both backings — in their own
+     *       keys — were loudly present for twice as long: the outgoing track sounded like it hung
+     *       around (「出曲太慢」) and the two tonalities fought (「抢调」). {@link #B_ARRIVAL_LEAD_STEPS}
+     *       is back to one step, which is round 21's own file; the version is bumped rather than
+     *       restored because a file named {@code -r22} may be either shape. The listener's original
+     *       「不要小声太久」 is NOT answered by any single-step number — see that constant's own note:
+     *       it needs a two-stage arrival (a bed, then unity), which is the next round's change.</li>
      * </ul>
      *
      * <p>The price is one re-render per pair, once, in the pre-lane where there are minutes of
@@ -471,7 +495,7 @@ public final class StemFusion {
      * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
      * name.
      */
-    public static final int RULE_VERSION = 22;
+    public static final int RULE_VERSION = 23;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with
