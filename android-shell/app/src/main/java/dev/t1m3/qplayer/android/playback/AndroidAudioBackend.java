@@ -1342,13 +1342,31 @@ public final class AndroidAudioBackend implements AudioBackend {
      *  that grid (which is the ordinary case now: see {@code MixNaturaliser}); when it
      *  was not, the incoming track's own foundation simply comes in on A's beat, which
      *  is the most this can be placed by. */
-    private void bassSwapNow() {
-        if (bassSwapped || equalizerIn == null) return;
-        bassSwapped = true;
+    /** How long the outgoing track's low end takes to leave once its instant has arrived, ms.
+     *  2 s — a bar at this library's ordinary tempos, and the same span the fusion's own
+     *  hand-over is written in ({@link dev.t1m3.qplayer.audio.FadeCurve#JUNCTION_XFADE_MS}).
+     *  It was one write until round 26; see the call site for the listener's report. */
+    private static final long BASS_SWAP_FADE_MS = 2_000L;
+
+    /**
+     * One tick of the low-end hand-over, {@code u} from 0 (the instant it was armed for, the
+     * outgoing track at its own level) to 1 (the incoming track owns the low end).
+     *
+     * <p>Runs from the ramp's own tick, on the beat the controller picked — a beat of both
+     * tracks, since the incoming is running at the outgoing's tempo. Written as a fraction
+     * rather than as a start instant because the tick already knows how far past the swap it
+     * is, and a {@code bassSwapNow} that had to remember its own beginning would be a second
+     * clock to keep in step with this one.
+     */
+    private void bassSwapLevel(double u) {
+        if (equalizerIn == null) return;
+        double level = Math.max(0d, Math.min(1d, u));
         setLowBands(equalizerIn, lowBands(equalizerIn), (short) 0);
         short[] outBands = lowBands(equalizerOut);
-        short outLevel = minLevel(equalizerOut);
+        short outLevel = (short) Math.round(minLevel(equalizerOut) * level);
         setLowBands(equalizerOut, outBands, outLevel);
+        if (level < 1d) return;
+        bassSwapped = true;
         // The outgoing track's own low end is what this takes away, and the number is the
         // whole of the hand-over as far as that track is concerned: from this instant until
         // it is released, the song the listener is still following has no bottom to it. Logged
@@ -1357,9 +1375,11 @@ public final class AndroidAudioBackend implements AudioBackend {
         // the level was still near full and it was the foundation that had gone.
         Logger.info("MediaPlayer: bass swap done: the incoming track owns the low end now (the"
                         + " outgoing track's {} band(s) below {}Hz are at {}mB from here on,"
-                        + " {}ms into a {}ms ramp — its level is unchanged, its bottom is gone)",
+                        + " {}ms into a {}ms ramp — its level is unchanged, its bottom is gone;"
+                        + " the bottom left over {}ms of fade, not in one write)",
                 outBands.length, (int) BASS_SWAP_HZ, outLevel,
-                (System.nanoTime() - rampStartNs) / 1000000L, rampDurationNs / 1000000L);
+                (System.nanoTime() - rampStartNs) / 1000000L, rampDurationNs / 1000000L,
+                BASS_SWAP_FADE_MS);
     }
 
     private void releaseEqualizers() {
@@ -2248,8 +2268,21 @@ public final class AndroidAudioBackend implements AudioBackend {
                 // (a beat of both tracks, since the incoming is running at the
                 // outgoing's tempo). A level write, so it costs nothing to do it here
                 // rather than on its own clock.
-                if (bassSwapAtMs >= 0L && !bassSwapped && elapsed >= bassSwapAtMs * 1000000L) {
-                    bassSwapNow();
+                //
+                // ⚠️ Round 26: it is a FADE across {@link #BASS_SWAP_FADE_MS}, not one write.
+                // The instant is the same beat it always was; what changed is that the outgoing
+                // track's bottom now leaves over two seconds instead of in a single sample.
+                // The listener's report is the reason and it is about exactly this: 「前一首歌
+                // 音量骤降」 — with the swap a step, the song they are still following lost its
+                // whole foundation between one 32ms tick and the next, which is heard as the
+                // track being cut down rather than as a hand-over. The equalizer is an effect
+                // layer, so writing it every tick costs one small IPC and no audio state.
+                if (bassSwapAtMs >= 0L && !bassSwapped) {
+                    long swapNs = bassSwapAtMs * 1000000L;
+                    if (elapsed >= swapNs) {
+                        bassSwapLevel(Math.min(1d, (elapsed - swapNs)
+                                / (double) (BASS_SWAP_FADE_MS * 1000000L)));
+                    }
                 }
                 if (t >= 1f) {
                     if (promoteIncoming(out, in)) {

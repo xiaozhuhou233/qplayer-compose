@@ -6,6 +6,7 @@ import android.media.MediaCodecInfo;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
 import android.media.MediaMuxer;
+import android.os.PowerManager;
 
 import ai.onnxruntime.NodeInfo;
 import ai.onnxruntime.OnnxTensor;
@@ -121,6 +122,13 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
      *  plausibly" check the audio pre-cache makes, at a lower bar because this is a
      *  re-encode). */
     private static final long MIN_EDIT_BYTES = 100_000L;
+
+    /** How long one render may hold the partial wake lock, ms. A belt rather than the
+     *  mechanism: a render is minutes (the longest measured on the reference device is
+     *  about three, and the model itself is capped at 40 s per separation), so half an
+     *  hour only fires if a native call has wedged — and a device held awake by a stuck
+     *  render is worse than one that let the render be suspended. */
+    private static final long RENDER_WAKE_TIMEOUT_MS = 30L * 60_000L;
 
     private final File modelsDir;
     /** For the APK's own assets, which is where the model is delivered from. The application
@@ -351,6 +359,36 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         File parent = out.getParentFile();
         if (parent != null && !parent.isDirectory()) parent.mkdirs();
         long startedAt = System.currentTimeMillis();
+        // ⚠️ Round 26: this render must survive the listener leaving the app or turning the
+        // screen off, which is what they reported it does not: 「去刷视频或者关闭屏幕都不打断
+        // 混音生成」. Nothing here cancels on a pause or on a focus change (the only two
+        // cancellations are a new track start and the activity being destroyed while playback
+        // is stopped), so what was happening is the CPU: this runs on the precache worker — a
+        // MIN_PRIORITY daemon in the playback service's own process — and neither it nor that
+        // service holds a wake lock of its own (only the MediaPlayer's own playback has one,
+        // AndroidAudioBackend's setWakeMode). With the screen off, or with another app holding
+        // the audio focus so our playback is paused, the device is free to suspend and the
+        // separation simply stops progressing — with no log line to say so, which is why the
+        // render looked "interrupted" rather than slow.
+        //
+        // <p>Held for exactly the length of this render and released in the finally below; the
+        // timeout is a belt rather than the mechanism (a render is minutes, and a native call
+        // that wedges must not hold the device awake for ever). The manifest already declares
+        // WAKE_LOCK for the playback path, so nothing needs to be added there.
+        PowerManager.WakeLock wake = null;
+        try {
+            PowerManager pm = (PowerManager) context.getApplicationContext()
+                    .getSystemService(Context.POWER_SERVICE);
+            if (pm != null) {
+                wake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "qplayer:djedit");
+                wake.setReferenceCounted(false);
+                wake.acquire(RENDER_WAKE_TIMEOUT_MS);
+            }
+        } catch (Throwable e) {
+            Logger.warn("transition: DJ edit for {}: the render could not take a wake lock ({});"
+                            + " it runs anyway, and a screen-off device may suspend it",
+                    request.title(), e.toString());
+        }
         try {
             StemEditRenderer.Result result = run(weights, request, out, startedAt);
             if (result != null) return result;
@@ -365,6 +403,15 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                     + " stream", request.title(), e.toString());
             deleteQuietly(out);
             return null;
+        } finally {
+            if (wake != null) {
+                try {
+                    if (wake.isHeld()) wake.release();
+                } catch (Throwable ignored) {
+                    // A wake lock that cannot be released is the platform's to clean up; the
+                    // render's own result is already decided by here.
+                }
+            }
         }
     }
 
