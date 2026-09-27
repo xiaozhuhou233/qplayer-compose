@@ -4061,6 +4061,51 @@ hold 只改段落的**结尾**，旋律行只会**减少**能量，而落差是"
 而融合按设计把出曲人声去掉，所以它**坐不回出曲的电平**。速度再快也变不出混音；要让它们也有混音，得动那条判据
 （放宽落差 / 短暂携带出曲人声 / 换落点），**那是改音色的事，要升版本、并且要用耳朵定**——留给下一轮，等用户选。
 
+### 第 18 轮（2026-09-27）：**"让混音段长一点" —— 改好了、量过了，但没敢发（已回退）**
+
+用户：「我认为你只需要让混音段长一点他可能就能自然过渡到下一首歌了，目前感觉是过渡了一半」，
+参考对子 `Fortnight -> Passionfruit`。**先读日志定位，再动手**（设备连着的，
+`D:\qplayer-dev\logs\logcat-0927-1501-fp.txt`）。
+
+**日志给出的这一对**：编辑是 `1072460879-v10698-e4272-j204141-f10778-r13.m4a` → **是融合**
+（`-e4272-j204141-f10778`），落差 **−2.92 dB 通过**（3.5 的判据），走的是 **SLAM**
+（"the grids are in no relation"，入曲 112.0 BPM，一小节 2143 ms）：
+
+| 量 | 值 |
+|---|---|
+| 融合段落 = `fusionEnd − entry` = 10778 − 4272 | **6506 ms**（= SLAM 的 3 小节 + 80ms 拼接） |
+| 你设的过渡时长 / 实际斜坡 | **24000 ms** |
+| 入曲 deck 的速度/调性 | **x1.0000**（都没动） |
+
+⇒ 「混音只有几秒」= **段落长度从来不由过渡时长决定**（固定 SLAM 3 小节 / 对拍 4 小节）；
+「突然结束」= SLAM 的收尾是 **80ms 等功率拼接**（设计里唯一还"切"的地方）；
+「调子没降」= 融合路径**故意不动速度/调性**（出曲素材被搬进入曲文件里，给入曲 deck 升降调会把它一起改掉），
+而 SLAM 的前提就是两首歌速度无关。**前两条能改，第三条是融合的本质**（要调性匹配就只能不融合它）。
+
+**做了什么（已在 `git checkout HEAD --` 回退，没有发布）**：让段落长度**跟着这对歌自己的窗口走**——
+`plan` 里按 `maxStepsFor`（分离预算 ∩ 入曲人声放空的窗口）生长，逐步用 `bandHasLine` 校验，
+`SLAM_STEPS` 从"固定长度"变成"下限"，`FUSION_TAIL_MAX_MS` 12 → 20 s，新常量 `SEARCH_BAND_MS = 4000`
+（把预算增量的一半留给 junction 搜索的 band）。**实测成效**（`Dump.java` 打印真实规划器）：
+canonical fixture 的段落 8000 → 12000 ms、hold 4000 → 8000；`slamFixture` 8080 → 12080；
+`slamOf(12k,17k)` 6212 → 10300。**机制是好的。**
+
+**为什么回退**：它和第二批规则打架，而且打架的地方都是用户自己定过的：
+1. **和 junction 搜索的 band 抢同一份预算**。不留余量时，生长把 band 压回起点，fixture
+   `aPassageInsideAFadeIsNotUsedIfAnEarlierLineHasBody` 从"选到更早有 body 的那条线"变成**直接拒绝**
+   —— 覆盖率的真实倒退。留一半余量才两边都好。
+2. **和"落点"打架**。`theLandingIsTheOneThatPutsTheVoiceWhereTheOutgoingLeft` 期望落点 4000、**实际变成 0**
+   —— 段落变长 → 落点上限（`contentStart + removalMs − window`）变小 → **deck 被逼到入曲最开头**，
+   正是第 13 轮「不要太靠后或者太靠前…不要把小半个歌跳过」要防的那件事。
+   `aVoiceTheWindowCannotBringForward…` 的落点也从 8000 掉到 4000。
+
+⇒ **下一轮要做这条，必须连着落点规则一起重新推导**（落点上限、`ENTRY_MAX_MS`/`ENTRY_WORDS_BARS`、
+band 的分配），而且要**成对地**看：段落长度 / 搜索 band / 落点上限是同一个预算的三个出口。
+回退后 player-core 恢复 **323 跑 1 失败**（既有那条 `SettingsCatalogTest…`）。
+
+⚠️ 顺带记录：这一对的**提示该亮**（`that edit is a FUSION`，`mixReady` 在 `-27h` 里已修成只在 `isFusion()` 时点亮），
+而且它的**云垫层没进来**（`the cloud bed brought nothing back — the incoming's head from 10778ms could not be decoded.
+The passage is the local fusion`），这条还没查。
+
 ## 九、音频焦点：自动暂停 / 自动恢复（2026-09-21 修复，装机验证）
 
 **用户诉求**：别的 App（B站、别的视频软件、别的音乐）开始放 → qplayer 自动暂停；那个 App 停了/暂停了
