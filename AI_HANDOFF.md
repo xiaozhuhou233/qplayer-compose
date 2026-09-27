@@ -4219,6 +4219,50 @@ a 过渡到 b」+「**融合段可以长一点**，尽量用背景音融，**融
 - 两条语义型的：`everyValidityClauseRefusesTheFusionOnItsOwn`（上限到 20 秒后，成本条款不再拒那一对）、
   `theFourRealPairsVerdicts`（两个上限现在同值，"which is over the unison cap" 那句要重写）。
 
+### 第 25 轮（2026-09-27）：**「最强混音」从来没被做出来的真原因：渲染比节拍探测早 0.8 秒**
+
+用户一口气三句：「过渡时还是出现了人声」+「现在无法触发最强混音」+「另外现在不要马上压制第一首歌的音量，
+要渐缓」。**三句是同一个根因**，而且不是我推出来的，是设备自己的证据：
+
+- 手机上 `files/cache/djedit` 里**只有 `-x1` 名字**（`1835251101-v16041-x1-r21.m4a`、
+  `842548914-v19802-x1-r21.m4a`）——`-x` 是"没做融合的原因代码"，`1` = `WHY_INCOMING_GRID`
+  （入曲没有节拍网格）。也就是说**装包之后写出的每一个编辑都没有融合**。
+- logcat 自己的时间线（tag `musicplayer`）：
+  - `18:09:29.648` 渲染 `you know 2(Phonk)` 的编辑被请求（此刻它的 `beatPeriodMs` 读到的还是 null）；
+  - `18:09:30.446` 节拍探测才公布 `126.2BPM/0.41` —— **晚了 0.8 秒**；
+  - `18:09:45.774` 渲染器答 "no fusion — the incoming track has no beat grid"，写出那个 `-x1` 文件
+    （**21.4 秒**的分离算力花在一份"用户没要的"文件上）；
+  - `18:12:37` 边界读到的就是 `DEGRADED: no DJ edit for this pair`（用户在 `18:12:28`−`30` 把 `过渡时长`
+    从 20 s 拖到 25 s，键跟着变，那份 20 s 的文件不再匹配）。
+
+于是：**新对子永远拿不到融合**（第 2 句），边界退化成"入曲从第一个采样就带着人声的普通混合"（第 1 句），
+而出曲在那条混合里被 `DJ_BLEND` **在 ramp 的前 30 % 就压到 −10dB**（第 3 句）。三句一个根。
+
+**改动只在 `PlayerController`，`RULE_VERSION` 不动**（planner 一个字节没改，所以已缓存的融合编辑不会作废）：
+
+1. `requestStemEdit`：如果入曲网格为空**且** `beatProbeInFlight(t)`（探测正在跑），就别渲染，改为
+   `profileWarmWorker.schedule(...)` 在 `GRID_PROBE_WAIT_MS = 1200ms` 后**重新问自己一次**。渲染是**分钟级**
+   提前量（在出曲 preload 时请求），等一个"已经在跑的探测"约 1 秒是免费的；**探测放弃了（环境音/说话没有拍）
+   就什么都不在飞，照旧渲染普通编辑**。循环由探测自己的死线封顶——只在该 key 还在 `probingBeats` 里时重问。
+2. `probeBeatProfile`：网格**在 try 里就公布**，早于 `finally` 清 in-flight 标记（否则等待中的渲染可能同时看到
+   "探测没在跑"和"没有网格"，那正是这一轮要关掉的竞态）。
+
+两个已知的 `-x1` 文件**会自愈**：`staleGridRefusal` 在网格已知后重渲（`-x1` + 网格已知 ⇒ stale ⇒ 重渲）。
+
+⚠️ **这一轮没动的地方（等耳朵）**：①`FadeCurve.DJ_BLEND` 的"前 30 % 压到 −10dB 垫底"是**用户自己**早先
+「人声混合得很乱 / 淡一点，要不抢了」要的；融合一旦真的生效，曲线就变成 `FadeCurve.FUSION`（一小节等增益交接），
+这条垫底不再适用——所以先不改它；②`A_DRUMS_FADE_STEPS / A_LOW_END_FADE_STEPS` 是第 6 轮按耳朵调的，同样等听；
+③待办没动：SLAM 的渐进交接、app 内的接缝修补（见上一条）。
+
+**测试**：`mvn -pl player-core test` = 第 24 轮那 15 条"钉着短段落"的 `StemFusionTest` 旧期望（未变）
++ `StemFusionIncomingWaitTest.theGestureGivesWhenTheSearchBandIsWhatThePassageSqueezed`（2266 vs 4532，同一批长度债）
++ 两条与本次无关的既存红（`PlayerControllerPlaybackTest.convertsLegacyTextSearchHistoryToVersionedJson`、
+`SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback` —— 用户当时正在并发改设置目录/歌词）。
+
+**发布**：tag `ai-dj-transition-2026-09-27n`，**192,485,819 bytes**，sha256 `ec12714c…`。
+**验证要点**：编辑文件名带 `-e/-j/-f` 三段锚点、边界日志出现 `curve=FUSION`、详情页出现「最强混音已完成」
+（`mixReady` 只在 `result.isFusion()` 时点亮）。
+
 ## 九、音频焦点：自动暂停 / 自动恢复（2026-09-21 修复，装机验证）
 
 **用户诉求**：别的 App（B站、别的视频软件、别的音乐）开始放 → qplayer 自动暂停；那个 App 停了/暂停了

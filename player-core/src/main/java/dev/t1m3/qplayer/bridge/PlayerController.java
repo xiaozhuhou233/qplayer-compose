@@ -4589,6 +4589,20 @@ public final class PlayerController {
         probeBeatProfile(t, () -> src);
     }
 
+    /** How long a DJ-edit render waits for a beat probe that is already running before it gives
+     *  up and renders what it can. The probe needs about a second on the reference device; this
+     *  is its own margin, not a deadline — the wait ends when the probe does
+     *  ({@link #beatProbeInFlight}). */
+    private static final long GRID_PROBE_WAIT_MS = 1_200L;
+
+    /** Whether a beat probe for {@code t} is running right now — the one fact a render asked for
+     *  at this instant needs before it may read a missing grid as "there is none" (round 25,
+     *  see {@link #requestStemEdit}). */
+    private boolean beatProbeInFlight(Track t) {
+        String key = t != null ? silenceKey(t) : null;
+        return key != null && probingBeats.contains(key);
+    }
+
     /**
      * The next track's grid, asked for at the PRELOAD moment instead of at the
      * boundary — including when its audio is not on disk at all.
@@ -5195,6 +5209,30 @@ public final class PlayerController {
         // check needs it: whether an edit on disk is stale is a question about the grids (see
         // staleGridRefusal).
         final BeatProfile grid = beatProfileOf(t);
+        // ⚠️ Round 25: the grid is measured by a probe that this same preload starts, and the
+        // probe needs about a second (a decode plus an FFT). Reading the grid HERE therefore
+        // raced it, and the race was measured on the device rather than reasoned about: the
+        // render for `you know 2(Phonk)` was asked at 18:09:29.648 and its grid (126.2BPM)
+        // landed at 18:09:30.446, so the request carried `beatPeriodMs = 0` into the renderer,
+        // the renderer answered "no fusion — the incoming track has no beat grid" and wrote a
+        // plain `-x1` edit — twenty-one seconds of separation spent on the file that does
+        // everything the listener did NOT ask for. Every fresh pair lost its fusion that way,
+        // and the `-x1` name then answered "already rendered" for the rest of that pass, which
+        // is the user's 「现在无法触发最强混音」 exactly.
+        //
+        // <p>The render is minutes early (it is asked for at the preload of the outgoing track),
+        // so waiting one second for a probe that is ALREADY RUNNING costs nothing — and it is
+        // the only case that waits: a track whose probe gave up (no beat to find: ambient,
+        // speech) has nothing in flight and renders today's plain edit, exactly as before. The
+        // wait is bounded by the probe's own deadline, because this re-asks only while
+        // `probingBeats` holds the key: the loop cannot outlive the probe it is waiting on.
+        if (grid == null && beatProbeInFlight(t)) {
+            final Track deferred = t;
+            final String deferredSource = sourcePath;
+            profileWarmWorker.schedule(() -> requestStemEdit(deferred, deferredSource),
+                    GRID_PROBE_WAIT_MS, TimeUnit.MILLISECONDS);
+            return;
+        }
         // What already exists, at the name this request would produce. A bridged edit and a plain
         // one are different names, so a pair that could bridge is not skipped just because a
         // round-12 edit for the same track is already lying there — and a pair that cannot bridge
@@ -5406,6 +5444,16 @@ public final class PlayerController {
                     return;
                 }
                 p = profiler.probe(src, durationMs);
+                if (p != null) {
+                    // ⚠️ Round 25: published INSIDE the try, i.e. before the `finally` below
+                    // clears the in-flight key. A render that is waiting on this probe
+                    // (requestStemEdit's own deferral) must never see "the probe is not
+                    // running" and "there is no grid" at the same instant: that pair of
+                    // answers is the race this round exists to close, and the gap between the
+                    // two statements is one store wide.
+                    beatProfiles.put(key, p);
+                    diskCache.cacheBeat(key, p.toBytes());
+                }
             } catch (Throwable e) {
                 Logger.warn("beat probe failed for {}: {}", key, e.toString());
             } finally {
@@ -5418,8 +5466,8 @@ public final class PlayerController {
                 Logger.info("beat probe gave up for {}", key);
                 return;
             }
-            beatProfiles.put(key, p);
-            diskCache.cacheBeat(key, p.toBytes());
+            // The grid itself was published inside the try above; the line here is the last
+            // thing that happens, so whatever a waiting render sees is already consistent.
             Logger.info("beat profile for {}: {}", key, p);
         });
     }
