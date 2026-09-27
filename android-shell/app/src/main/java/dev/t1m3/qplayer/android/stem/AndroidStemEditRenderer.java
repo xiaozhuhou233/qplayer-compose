@@ -378,14 +378,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         }
         long removalMs = request.removalMs;
         long spanMs = returnSpanMs(request.beatPeriodMs);
-        // ⚠️ Round 14: the head has to reach as far as the landing can, and the landing is now decided
-        // by the material (StemFusion.ENTRY_MAX_MS) rather than by the listener's 过渡时长 — so the
-        // separated material covers the deepest landing this build can plan plus its passage and the
-        // return margin. The price is paid here and only here: a longer separation per render (what
-        // the pre-lane's minutes of margin are for), in exchange for a landing the old ceiling refused
-        // outright (the 34 800 ms one).
-        long headMs = Math.max(removalMs + spanMs,
-                StemFusion.ENTRY_MAX_MS + spanMs + Math.max(0L, request.blendMs));
+        long headMs = removalMs + spanMs;
         // ⚠️ Round 33: what gets DECODED and SEPARATED is the head extended to the arrival probe,
         // and what the file is built from is the head's own `headMs` of it (see step 2 below). The
         // two are one separation, so the arrival's own measurement costs the difference between them
@@ -1344,16 +1337,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         // the voice measures the bleed as the body and answers "the voice is already singing" — and
         // that is the only thing this round changes about it (see
         // {@link StemFusion#ARRIVAL_PROBE_MS}).
-        // ⚠️ Round 15: what the landing and the gate are aligned to is the voice's own OPENING, not
-        // "the voice has been loud for a second" — the listener's report was 「混音完接入人声从一句话
-        // 半截开始接入的」, and the row of their own pair proves why: a single continuous sung section,
-        // so a level-based arrival lands mid-line. The phrase reading is preferred and the arrival
-        // reading stays as the fallback for a track that never gives its vocal row a gap (a track that
-        // sings from its first bar has no opening to find, and its landing is decided by the two-bar
-        // floor and the groove clause instead — see StemFusion.ENTRY_WORDS_BARS).
-        long firstPhraseMs = StemFusion.vocalPhraseStartMs(
-                arrivalVocals, StemModel.MODEL_RATE, 0L, DjEdit.SILENT_FRAME_DBFS);
-        long firstVocalMs = firstPhraseMs >= 0L ? firstPhraseMs : StemFusion.vocalStartMs(
+        long firstVocalMs = StemFusion.vocalStartMs(
                 arrivalVocals, StemModel.MODEL_RATE, 0L, DjEdit.SILENT_FRAME_DBFS);
         // ⚠️ Every bar line the fusion is given is in ms, and the renderer's are in seconds (see
         // {@link #inMs}): the conversion happens once, here, for both of the plans below.

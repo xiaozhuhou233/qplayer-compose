@@ -574,11 +574,7 @@ public class AceStepBedTest {
 
         // the passage's own level, as the renderer measures it off the rendered head
         double passageDb = -12.58d;
-        // ⚠️ The knob's own range, not the two levels that were judged when the layer was designed:
-        // round 36 moved BED_LEVEL_DB from 18 to 12 (the listener could not hear the 18 dB bed —
-        // 「让 acestep 生成的过渡段更明显」) and MAX_UNDER_DB follows that constant, so asking for 18 now
-        // answers 12. That clamping is pinned by the assertions below the loop.
-        for (double underDb : new double[] {12d, 6d}) {
+        for (double underDb : new double[] {18d, 12d}) {
             // ⚠️ the real window against the real bar: 6212 ms of a 2043.94 ms bar, so the fades are
             // capped at a third of the window instead of being a whole bar each (see StemBed)
             StemBed.Bed bed = StemBed.prepare(material, SENT_RATE, WINDOW_MS, BAR_MS,
@@ -618,11 +614,10 @@ public class AceStepBedTest {
                 "this material is supposed to leave no room under it: " + peak);
 
         // a passage with room under it: the bed is summed by its own samples, and the seams do not
-        // move because the bed's ends are exactly zero. 0.1 and not 0.2: round 36 made the bed 6 dB
-        // louder (18 → 12 under), so the room this case is about has to be that much deeper.
-        float[][] quiet = scaled(passage, 0.1d);
+        // move because the bed's ends are exactly zero
+        float[][] quiet = scaled(passage, 0.2d);
         double quietPeak = AceStepBed.peakWithBed(quiet, bed.pcm, at);
-        println("with the passage 20 dB down the sum peaks at %.4f (the ceiling is %.0f)",
+        println("with the passage 14 dB down the sum peaks at %.4f (the ceiling is %.0f)",
                 quietPeak, DjEdit.Limiter.CEILING);
         ok(quietPeak <= DjEdit.Limiter.CEILING, "the bed should fit under this passage");
         float[] before = Arrays.copyOf(quiet[0], quiet[0].length);

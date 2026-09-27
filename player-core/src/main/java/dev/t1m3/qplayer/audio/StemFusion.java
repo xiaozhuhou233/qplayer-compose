@@ -323,29 +323,8 @@ public final class StemFusion {
      *       the stretch are the same numbers; only which bar line the deck starts on moved. The
      *       floor gives way to the cap so that no pair which fused before refuses now. Every edit
      *       written before this bump is planned again (the version is in the edit's own key), and the
-     *       renderer's separated head is sized to reach it ({@code headMs} in the renderer), so a
-     *       deeper landing costs a longer separation rather than a broken one.</li>
-     *   <li><b>13 → 14</b> — <b>the landing is no longer budgeted by the listener's 过渡时长.</b> The
-     *       user, after the round-13 build: 「你继续修改落点，你可以直接在设置里把过渡时长刨了，完全 ai 自己定，
-     *       只要不是过于离谱」. Until now every ceiling in this file was written in that setting — the
-     *       landing could not start deeper than {@code removalMs - windowMs}, and the passage could not
-     *       be longer than what it paid for — which is exactly why the landing the listener called
-     *       perfect (34 800 ms into a 187 s incoming) was refused by both this file and the renderer.
-     *       Three things changed, and {@link #ENTRY_MAX_MS} is the whole of the new budget:
-     *       <ul>
-     *         <li>{@link #maxStepsFor} is bounded by {@link #ENTRY_MAX_MS} instead of {@code removalMs},
-     *         so a passage is as long as the <em>material</em> asks for;</li>
-     *         <li>the landing's ceiling is {@code contentStart + ENTRY_MAX_MS - window} instead of
-     *         {@code removalMs - window}, so it is the material's own reading (the coupling's target,
-     *         walked forward out of a silent intro) that decides where the deck starts;</li>
-     *         <li>the renderer separates the incoming's head far enough to reach any landing this file
-     *         can plan.</li>
-     *       </ul>
-     *       What still bounds it is everything that was measured rather than chosen: the coupling
-     *       ({@code firstVocal - goneFile}), the two-bar floor of an already-singing track, the 40 s
-     *       ceiling, and the groove clause — which is what 「只要不是过于离谱」 means here. The
-     *       crossfade the listener <em>hears</em> is unchanged: the deck-level blend and the ramp are
-     *       the same numbers, and the passage's own shape is the same gesture.</li>
+     *       renderer's separated head already reaches as far as the landing can
+     *       ({@code headMs = removalMs + span}), so a deeper landing costs no extra separation.</li>
      * </ul>
      *
      * <p>The price is one re-render per pair, once, in the pre-lane where there are minutes of
@@ -355,20 +334,21 @@ public final class StemFusion {
      * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
      * name.
      */
-    public static final int RULE_VERSION = 14;
+    public static final int RULE_VERSION = 13;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with
      * {@code ceil((steps*stepMs + CUT)/stretch) + 2*slack <= cap} and
-     * {@code steps*stepMs <= ENTRY_MAX_MS} (round 14: the passage's own bound is the material's, not
-     * the listener's 过渡时长 — {@code removalMs} used to be the second term here, which is what capped
-     * every passage at what that setting paid for).
+     * {@code contentStart + steps*stepMs <= removalMs} (the fusion has to stay inside the window the
+     * incoming's vocals are out for — {@link #plan}'s own clause, asked here in the same terms so
+     * that the wait for the incoming's rows cannot push the passage past it).
      */
     private static int maxStepsFor(double stepMs, double stretch, long cap, long removalMs,
                                    long contentStartMs) {
         double ratio = stretch > 0d ? stretch : 1d;
         long byCap = (long) Math.floor(((cap - 2L * A_TAIL_SLACK_MS) * ratio - CUT_MS) / stepMs);
-        long byVocals = Math.floorDiv(ENTRY_MAX_MS, Math.max(1L, Math.round(stepMs)));
+        long byVocals = Math.floorDiv(removalMs - contentStartMs,
+                Math.max(1L, Math.round(stepMs)));
         return (int) Math.max(1L, Math.min(byCap, byVocals));
     }
 
@@ -1446,60 +1426,6 @@ public final class StemFusion {
     /** How long a stretch of the incoming's vocal row has to be above the floor before it counts as
      *  the voice arriving, ms (see {@link #vocalStartMs}). */
     public static final long VOCAL_SUSTAIN_MS = 1_000L;
-
-    /** How long the silence before a phrase start has to last, ms — see
-     *  {@link #vocalPhraseStartMs}. Two seconds, because one is what a singer's own breath between
-     *  two lines looks like and this is meant to find the line, not the breath. */
-    public static final long PHRASE_GAP_MS = 2_000L;
-
-    /** How far under the vocal row's own body that silence has to sit, dB — the other half of
-     *  {@link #vocalPhraseStartMs}. 20 dB, which is the gap the listener's own pair measures
-     *  (4–15 s at −71…−75 dBFS against a −13.6 dBFS body). */
-    public static final double PHRASE_GAP_DB = 20d;
-
-    /**
-     * <b>Where the incoming's voice next opens its mouth</b> — the first phrase start at or after
-     * {@code startMs}, or {@code -1} when the row never opens one (round 15).
-     *
-     * <p>Why this and not {@link #vocalStartMs}: that method answers "how far in does the voice stay
-     * loud enough for a second to be its own body", which is the right question for "is this track
-     * singing yet" and the wrong one for "where do I let the voice back in". On the pair the listener
-     * reported, the row is −75 dBFS until 15 s, −24.7 at 16 s, and −13.6…−15.4 from 17 s <b>with no
-     * gap anywhere after</b> — one continuous sung section — so a gate placed by level alone lands in
-     * the middle of a line: their 「混音完接入人声从一句话半截开始接入的」.
-     *
-     * <p>A phrase start is therefore a rise <b>out of a real gap</b>: a window whose 1 s median clears
-     * the arrival floor ({@link #VOICE_ARRIVAL_DB} under the row's own body) whose preceding
-     * {@link #PHRASE_GAP_MS} of frames all sit {@link #PHRASE_GAP_DB} below that body. The file's own
-     * beginning does not count as a gap — which is what keeps a separation bleed at the head (a
-     * −25 dBFS presence from 75 ms on, the reason round 32 exists) from being read as an opening.
-     */
-    public static long vocalPhraseStartMs(float[][] vocals, int rate, long startMs, double floorDbfs) {
-        if (vocals == null || vocals.length == 0 || vocals[0] == null || !(rate > 0)) return -1L;
-        double[] levels = StemBridge.frameLevelsDb(vocals, rate, vocals[0].length / (double) rate);
-        int frameMs = Math.max(1, (int) Math.round(StemBridge.FRAME_SEC * 1000d));
-        int frames = (int) Math.max(1L, Math.round(VOCAL_SUSTAIN_MS / frameMs));
-        int gapFrames = (int) Math.max(1L, Math.round(PHRASE_GAP_MS / frameMs));
-        double bodyDb = rowBodyDb(vocals, rate, startMs);
-        if (Double.isNaN(bodyDb)) return -1L;
-        double floor = Math.max(floorDbfs, bodyDb - VOICE_ARRIVAL_DB);
-        double gapFloor = bodyDb - PHRASE_GAP_DB;
-        for (int i = gapFrames; i + frames <= levels.length; i++) {
-            if (levels[i] <= floor) continue;
-            boolean gapped = true;
-            for (int j = i - gapFrames; j < i; j++) {
-                if (levels[j] > gapFloor) {
-                    gapped = false;
-                    break;
-                }
-            }
-            if (!gapped) continue;
-            double median = StemBridge.median(
-                    java.util.Arrays.copyOfRange(levels, i, i + frames));
-            if (median > floor) return startMs + (long) i * frameMs;
-        }
-        return -1L;
-    }
 
     /**
      * The level of the vocal row's own <b>body</b>, dBFS — {@link #bodyLevelDb} over the whole of
@@ -3195,13 +3121,11 @@ public final class StemFusion {
                     + entryWhy(in, stepMs), aBar, bBar, lock);
         }
         long fusionEnd = entry + windowMs;
-        // ⚠️ Round 14 DELETED the clause that used to stand here ("the fusion would run Xms past the
-        // Yms the incoming's vocals are out for"). It is not weakened, it is <b>unreachable</b>: the
-        // landing is clamped to {@code contentStart + ENTRY_MAX_MS - windowMs} ({@link #entry}), so
-        // {@code fusionEnd <= contentStart + ENTRY_MAX_MS} holds by construction — and that clamp is
-        // the material's own bound, which is what took the clause's place. What the clause was really
-        // protecting (the incoming's vocals are gated for exactly the passage's length, never stacked)
-        // is entry-relative and lives in the coupling's gate, not here.
+        if (fusionEnd > in.removalMs) {
+            return invalid(String.format(Locale.US,
+                    "the fusion would run %dms past the %dms the incoming's vocals are out for",
+                    fusionEnd - in.removalMs, in.removalMs), aBar, bBar, lock);
+        }
         long barStep = Math.round(stepMs);
         // The gesture's own instants (round 6): the incoming's drums and low end rise over one step
         // starting where the outgoing's hold ends, and the outgoing's rows recede from that same
@@ -3480,13 +3404,7 @@ public final class StemFusion {
         // what the window the incoming's voice is held out for can pay for (the same clause the plan
         // asks as `fusionEnd <= removalMs`, asked here so that a landing the window cannot afford is
         // pulled back to the last one it can rather than making the whole plan invalid).
-        // Round 14: the ceiling is the MATERIAL's bound, not the listener's 过渡时长. It used to be
-        // `removalMs - windowMs`, i.e. "the landing may not start deeper than the blend the user asked
-        // for could pay for" — which is what refused the landing they called perfect (34 800 ms in).
-        // ENTRY_MAX_MS is the whole of the new budget; `removalMs` still exists because the renderer
-        // separates and gates on it, but it no longer decides where the deck starts.
-        long ceiling = Math.max(in.contentStartMs,
-                in.contentStartMs + ENTRY_MAX_MS - Math.max(0L, windowMs));
+        long ceiling = in.removalMs - windowMs;
         long runway = (long) VOCAL_SKIP_RUNWAY_BARS * gridStep;
         long target = in.firstVocalMs - goneFile;
         target = Math.min(target, in.firstVocalMs - runway);

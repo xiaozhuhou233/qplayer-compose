@@ -3977,6 +3977,35 @@ player-core **315 跑 1 失败**，唯一失败仍是既有的
 `VERDICT` / acceptance 行）再往下走。这一轮把三件事打包进一次提交、又顺手升了 `RULE_VERSION`，结果一个听感
 问题同时被三处改动遮住，只能整体回退——回退掉的还包括那条其实有理有据的鼓跨度改动。
 
+### 第 16 轮的第二次回退（同日更晚）：**过渡引擎整体回到昨晚（`cd3c9f7`，RULE_VERSION 13）**
+
+用户回退到第 15 轮之后仍然报「我现在的混音效果还是改废了，没有一点效果」，并要求「请回退**昨晚**的版本」。
+所以范围扩大到**今天所有动过音频的轮次**（36 的垫层、37、14、15、16），最终状态：
+
+- **回退到昨晚的 7 个文件**（逐字节，`git diff cd3c9f7 -- <这 7 个>` = **0 行**）：
+  `StemFusion.java`、`StemBed.java`、`AndroidStemEditRenderer.java`、`SettingsCatalog.java`、`SettingsCore.java`、
+  `StemFusionTest.java`、`AceStepBedTest.java`。于是 **`RULE_VERSION` 回到 13**、`BED_LEVEL_DB` 回到 18、
+  `MIN_BED_OCCUPANCY` 回到 0.80、**过渡时长滑块（`transitionBlendSeconds`，默认 15，4–30）连同 RULE 14 的
+  `ENTRY_MAX_MS` 一起撤销**。`RULE_VERSION` 回 13 还意味着**昨晚渲过的那批 v13 编辑又能被找到**。
+- **没有回退的**（今天新增、且用户今天点名要的）：第 37 轮的听歌识曲（`assets/afp/*`、`recognize/*`、
+  `AudioMatchClient`、`RecognizeDialog`、Manifest 权限）、`PlayerController.mixReady` + 详情页那三行提示。
+- **没有碰**用户正在编辑的 `ComposeQPlayerActivity.kt` / `LyricParser.java`（他们的歌词 WIP 一直在工作树里）。
+
+⚠️ **"回退到昨晚"有两种含义，这一轮的做法是前者**：① 字节意义上的昨晚 App —— 就是 release 资产
+`ai-dj-transition-2026-09-27a` 里那个 `qplayer-aidj-2026-09-27a.apk`（192,277,607 字节，用户自己在他本机构建的）；
+② 源码意义上的昨晚引擎 —— 本轮改的这 7 个文件。**重建不可能逐字节等于 ①**：昨晚那个包里有**用户当时未提交的
+工作树**（他今天还在继续改），所以那个 release 资产是"昨晚版本"唯一忠实的副本。
+
+⚠️ **仍未确证今天的哪一步把过渡改废了**。用户报的两个症状（**从来没见过提示** + **过渡没有一点效果**，
+且回退到第 15 轮也不恢复）指向同一个共同原因：**这条链上一个 DJ 编辑都没被产出**——没编辑就没有融合，
+`mixReady` 也就永远是 false（提示不出现的解释就在这）。今天动过音频的四步里，嫌疑最大的两步：
+`StemBed.BED_LEVEL_DB` 18 → 12（垫层响 6 dB 会改变交界处的电平，直接喂给"交界落差 ≤ 3.5 dB"
+（`JUNCTION_STEP_MAX_DB`）那条判据——**垫层变响 → 回落变大 → 整段融合被判不通过**），
+以及 RULE 14 把分离长度从 `removalMs + span` 拉到 `40 000 + span + blend`（**渲染变长**，
+预渲染通道可能来不及）。**下一步必须先拿到设备日志再动**：
+`transition: DJ edit for …` 的开头那几行 + `VERDICT` / acceptance 的 `bad.append` 结果，
+以及 `no fusion — …` 这句里的拒绝理由。**不要再靠推理改。**
+
 ## 九、音频焦点：自动暂停 / 自动恢复（2026-09-21 修复，装机验证）
 
 **用户诉求**：别的 App（B站、别的视频软件、别的音乐）开始放 → qplayer 自动暂停；那个 App 停了/暂停了

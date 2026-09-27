@@ -344,12 +344,16 @@ public class StemFusionTest {
         // exist: a short blend and a long passage is a fusion that would run off the end of A.
         assertTrue(StemFusion.plan(input(100_000L, 4_000L, 20_000L, 500d, 500d,
                 bars(2000d, 0d, 60), bars(2000d, 0d, 60))).reason.contains("file ends"));
-        // ⚠️ Round 14 deleted the case that used to stand here: the "fusion would run past the window
-        // the incoming's vocals are out for" refusal is unreachable now, because the landing itself is
-        // clamped to ENTRY_MAX_MS (the material's bound), so the fusion can never overrun it. The
-        // fixture that proved the clause ("a blend long enough for the rows to exist, a removal half a
-        // second too short") is a valid fusion today — see theEntryTheWindowCouldNotAffordIsThe-
-        // CouplingsOwnLanding for what took its place.
+        // And the whole fusion has to stay inside the window the incoming's vocals are out for.
+        // ⚠️ The blend has to be long enough for the carried rows to exist in A's file at all
+        // (round 6's gesture takes 8080 ms of it from the junction on, i.e. a blend of about
+        // 8.8 s at a 500 ms beat — the measured real pairs' blends are 15 s), so a fixture that is
+        // meant to fail on the VOCAL window has to clear that clause: 9 s of blend does, and 9.5 s
+        // of removal leaves the fusion's 8 s from a 2 s entry 10 s, half a second too late.
+        StemFusion.Plan late = StemFusion.plan(input(200_000L, 9_000L, 9_500L, 500d, 500d,
+                bars(2000d, 0d, 120), bars(2000d, 0d, 120)));
+        assertFalse(late.reason, late.valid);
+        assertTrue(late.reason, late.reason.contains("past the 9500ms"));
         assertTrue(StemFusion.possible(240_000L, 20_000L, 35_000L, 15_000L, 500d, 500d, 1d));
         assertNull(StemFusion.refusal(240_000L, 20_000L, 35_000L, 15_000L, 500d, 500d, 1d));
     }
@@ -786,45 +790,6 @@ public class StemFusionTest {
     }
 
     /**
-     * ⚠️ <b>Round 15: the phrase's own opening, not the level.</b> The listener: 「混音完接入人声从一句话
-     * 半截开始接入的…应该前一首歌的尾音播完就接入或者过渡的听感听不到前一首歌了就接入」. On their own pair the
-     * vocal row is one continuous sung section from 16 s on, so a gate placed by level lands mid-line —
-     * and the separation's own bleed at the head (−25 dBFS presence from 75 ms, the reason round 32
-     * exists) is what a naive "rise out of anything quiet" rule would read as the opening instead.
-     *
-     * <p>This fixture is those two traps in one row: four seconds of bleed, a real gap, then a phrase.
-     * The level-based arrival answers the bleed; the phrase rule answers the phrase.
-     */
-    @Test
-    public void thePhraseStartIsTheRiseOutOfARealGapAndNotTheBleedAtTheHead() {
-        int rate = 8_000;
-        double[] db = new double[] {-18d, -18d, -18d, -18d,     // the bleed, above the arrival floor
-                -75d, -75d, -75d, -75d, -75d, -75d, -75d,       // a real gap (11 s)
-                -75d, -75d, -75d, -75d,
-                -13.6d, -13.6d, -13.6d, -13.6d};                // the phrase (4 s, from 15 s)
-        float[][] row = sections(rate, db);
-        assertEquals("the phrase rule answers where the voice opens, not where the bleed is",
-                15_000L, StemFusion.vocalPhraseStartMs(row, rate, 0L, -50d), 250L);
-        assertTrue("and the level-based reading is the one that answered the bleed: "
-                        + StemFusion.vocalStartMs(row, rate, 0L, -50d),
-                StemFusion.vocalStartMs(row, rate, 0L, -50d) < 2_000L);
-    }
-
-    /** A vocal row of one-second sections, one per dBFS entry (a 220 Hz tone at that RMS). */
-    private static float[][] sections(int rate, double... db) {
-        float[][] out = new float[2][db.length * rate];
-        for (int s = 0; s < db.length; s++) {
-            float amp = (float) (Math.pow(10d, db[s] / 20d) * Math.sqrt(2d));
-            for (int i = 0; i < rate; i++) {
-                float v = amp * (float) Math.sin(2d * Math.PI * 220d * i / rate);
-                out[0][s * rate + i] = v;
-                out[1][s * rate + i] = v;
-            }
-        }
-        return out;
-    }
-
-    /**
      * ⚠️ <b>The direction the coupling closes, and the fixture the user's own defect report is
      * about.</b> The incoming's voice is already singing two bars in, and the outgoing's own rows
      * play right to the passage's end: at every line this track has, the voice's material is there
@@ -1004,20 +969,17 @@ public class StemFusionTest {
         assertTrue("the pair's grids are in no relation: " + plan.describe(), plan.slam);
         assertEquals("the passage is the slam's own three bars of 2 043.944ms plus the splice",
                 6_212L, plan.windowMs);
-        assertEquals("the old ceiling is still reported (it is the blend less the passage) but it no"
-                + " longer decides the landing", 5_788L, plan.removalMs - plan.windowMs);
+        assertEquals("so the ceiling on a landing is the blend less the passage", 5_788L,
+                plan.removalMs - plan.windowMs);
         assertEquals("the arrival the probe measures is handed in as measured", 17_000L,
                 plan.firstVocalMs);
-        assertEquals("so the deck starts where the coupling says — the voice's own arrival less the"
-                + " departure — and not on the last line the old window could afford", 14_670L,
-                plan.entryMs);
-        assertEquals("which skips 14 308ms of the incoming's intro (14 670 less the 362ms of phase"
-                + " the grid starts on)", 14_308L, plan.skippedIntroMs);
-        assertEquals("and the passage runs past the old window, which is what round 14 is for",
-                20_882L, plan.fusionEndMs);
-        assertTrue("the landing is the coupling's own — the voice's arrival less the departure — and"
-                + " NOT the line the old window pulled it back to (round 14): " + plan.describe(),
-                plan.entryMs > 5_788L);
+        assertEquals("the deck starts on the last bar line at or below the ceiling — 4 450, and"
+                + " not the 2 406 that is a bar of runway before the voice", 4_450L, plan.entryMs);
+        assertEquals("which skips 4 088ms of the incoming's intro", 4_088L, plan.skippedIntroMs);
+        assertEquals("and the passage still fits the window the vocals are out for", 10_662L,
+                plan.fusionEndMs);
+        assertTrue("the landing is the coupling's own, pulled back — not a start off the bar: "
+                + plan.describe(), plan.entryMs < 5_788L);
         assertTrue("round 21's own landing is far later, which is the defect this round closes: "
                 + plan.coupling.uncoupledEntryMs, plan.coupling.uncoupledEntryMs > plan.entryMs);
     }
@@ -1142,18 +1104,15 @@ public class StemFusionTest {
                 gap.coupling.departureInFileMs);
         assertTrue("and it is reported as measured: " + gap.coupling.describe(gap.entryMs,
                 gap.firstVocalMs, gap.removalMs, gap.windowMs), gap.coupling.measured);
-        assertEquals("the coupling's own landing — the voice where the outgoing's rows left — and"
-                + " nothing pulls it back any more (round 14 took the window's ceiling away)",
-                12_000L, gap.entryMs);
-        assertTrue("what is left is the material's own bound: " + gap.fusionEndMs,
-                gap.fusionEndMs <= StemFusion.ENTRY_MAX_MS);
+        assertEquals("the landing is the last the window can afford", 8_000L, gap.entryMs);
+        assertTrue("so the passage still fits the window", gap.fusionEndMs <= gap.removalMs);
         assertEquals(9_000L, gap.removalMs - gap.windowMs);
-        assertEquals("so the voice is 1 000 ms late instead of 5 000 — the landing moved to it"
-                + " rather than the gap being paid", 1_000L, gap.coupling.residualGapMs);
+        assertEquals("the voice arrives 5 000 ms after the outgoing is gone", 5_000L,
+                gap.coupling.residualGapMs);
         assertEquals("and nothing is held: the voice is late, not early", 0L, gap.coupling.heldMs);
         assertEquals("the gate is the voice's own arrival, not the window's end", 15_000L,
                 gap.coupling.voiceGateMs);
-        assertTrue(gap.describe(), gap.describe().contains("first HEARD 1000ms later than the"
+        assertTrue(gap.describe(), gap.describe().contains("first HEARD 5000ms later than the"
                 + " instant this round places the voice on"));
     }
 
