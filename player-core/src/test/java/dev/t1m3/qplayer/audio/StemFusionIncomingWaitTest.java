@@ -72,7 +72,7 @@ public class StemFusionIncomingWaitTest {
         assertEquals("the hold is four steps", 4L * BAR_MS, waited.holdEndMs - waited.entryMs);
         assertTrue("and it covers the incoming's kit: " + waited.describe(),
                 waited.holdEndMs >= waited.incomingDrumsMs);
-        assertEquals("the drums' fade is still one step", BAR_MS,
+        assertEquals("the drums' fade is the low end's two steps (round 15)", 2L * BAR_MS,
                 waited.drumsEndMs - waited.holdEndMs);
         assertEquals("the low end's is still two", 2L * BAR_MS,
                 waited.lowEndEndMs - waited.holdEndMs);
@@ -313,7 +313,7 @@ public class StemFusionIncomingWaitTest {
             assertTrue(more.describe(), more.valid);
             assertEquals("the caller's step is one more step of the same recede",
                     (2L + extra) * step, more.holdEndMs - more.entryMs);
-            assertEquals("and the shape after it is unchanged", step,
+            assertEquals("and the shape after it is unchanged", 2L * step,
                     more.drumsEndMs - more.holdEndMs);
             assertEquals("the low end's two as well", 2L * step, more.lowEndEndMs - more.holdEndMs);
             assertEquals("the passage grows with it", (4L + extra) * step, more.fusionEndMs

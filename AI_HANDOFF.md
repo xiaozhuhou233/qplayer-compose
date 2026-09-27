@@ -3928,6 +3928,68 @@ player-core **315 跑 1 失败**，唯一失败仍是既有的
    再由详情页读它显示"已完成"。顺手要定清"完成"的语义：是"这一轮的编辑文件写好了"，还是"已经开始播它了"
    （前者早、后者准，建议前者 + 文案写成"最强混音已就绪"）。
 
+### 第 16 轮（2026-09-27）：**三件事 —— 提示落地、出曲退场不再"骤减"、放行时刻跟着落点走**
+
+用户：「请一轮完成这些，然后可以在播放详情页写个小提示（进度条下边），如果最强效果的混音完成了就提示已完成」
++「继续」。上一轮欠的三条这一轮全做了，**其中第 3 条我上一轮的判断被实测推翻了一半**。
+
+**①「最强混音已完成」提示（已做，含引擎一半）**
+- 引擎：`PlayerController.mixReady`（`Property<Boolean>`，上一个提交 `2031439` 就已入库）。语义**明确定为
+  "文件写好了"**（渲染器 `renderer.render(request)` 回来、`diskCache.evictDjEdits()` 之后置 true；
+  `requestStemEdit` 开头置 false），不是"开始播它了"——后者要等边界，提示就来得太晚。
+- UI：`PlayerUiState.mixReady` + `controllerState()` 读 `controller.mixReady.peek()`；
+  `QmlLyricProgress` 新增 `mixReady: Boolean = false` 参数，时间行下面居中一行「最强混音已完成」；
+  **只在播放详情页那一个调用点传值**（三个调用点里 `ApkDetailTab` 的是详情页，另两个是视频全屏控制条和
+  `QmlLyricTransport`，保持默认 false）。
+- ⚠️ 没有真机验证：`mixReady` 是否真在预渲染通道里按预期翻转（渲染完成 → true；下一首开始 → false）。
+
+**②「前一首歌音量在过渡时骤减的太快了」（已做，先量后改）**
+- **量**：harness 日志本来就有"the recede, per row: the table's OWN gain on the material"这张表
+  （`D:\qplayer-dev\harness\fusion\round6-huai_owa.log`，一对真实歌，一步 1906 ms）：
+  **A 的鼓 −6 dB 在退场后 1268 ms、−40 dB 在 1898 ms（一步）**；而**低音与旋律行**是
+  **2538 ms / 3788 ms（两步）**。也就是说：听感上"歌"的那一层还剩一半，律动那一层已经没了——用户听到的
+  "骤减"就是这条。上一轮列的两个嫌疑里，**牌面层的 `JUNCTION_XFADE_MS = 2000ms` 不是主因**：
+  它两边同源、等增益（`outGain + inGain = 1`）且文件里 A 的拷贝在这 2 秒内是 unity，A 的总电平是平的。
+- **改**：`StemFusion.A_DRUMS_FADE_STEPS` **1 → 2**（= `A_LOW_END_FADE_STEPS`），三行 carried 一起在
+  `holdEnd → fusionEnd` 上退完，出曲**作为一个整体**结束。第 6 轮选 1 步的理由（"短于一小节会读成切换而不是
+  乐句结束"）仍然成立，2 步只是让低音共享同一个乐句结束。
+- **代价为零**：`windowMs`/`fusionEndMs`/`sourceSpanMs`/`arriveStart/End`/`JUNCTION_XFADE_MS` 全部不变
+  （鼓的跨度从来不是两者中更长的那个），`recedeMs()` 仍是 3 项。**改了音频，所以 `RULE_VERSION` 14 → 15**
+  （旧 DJ 编辑按版本号作废、重渲一次）。
+- 测试：`theAnchorsAreWhereTheSpecPutsThem`（drumsEnd 22 000 → 24 000）、
+  `theOutgoingRecedesAndTheIncomingRises`（鼓的跨度断言 + 半程点从 `holdEnd + step/2` 改 `+ step`）、
+  `theRecedeAndArrivalTimesAreTheOnesTheDesignNames`（鼓与低音的 −6 dB 现在是**同一个数**——这条从"两者不同"
+  改成"两者相同"）、`StemFusionIncomingWaitTest` 两处。
+- ⚠️ harness 的镜像 `round6.py` 里 `A_DRUMS_FADE_STEPS = 1`（它自述镜像 RULE_VERSION 5），**没改**：
+  下次要用它量这轮之后的牌面，先把它改成 2。
+
+**③「放行时刻要贴'出曲听不到的那一刻'」+「落点被 groove 条款推走后仍对齐句首」（已做）**
+- 上一轮我判断"需要把句首作为测量传给计划"，**读完代码后这个判断只对了一半**：句首**已经**作为
+  `firstVocalMs` 进了计划的 4 个调用点（第 15 轮就接了）。真正缺的是**只传了一个数**——而 gate 是
+  **相对落点**写的，第 33 轮的 groove 条款会把落点往后推（落点那一小节的 incoming 没在演奏时），
+  于是 `landing + goneFile` 一并后移、越过了原来对齐的那个句首，人声又在句子中间进来了。
+- **改**：`StemFusion.vocalPhraseStartsMs(...)`（把第 15 轮的读数从"第一个开口"改成**开口列表**，
+  注意找到一句后要 `i += frames` 跳过这句自己的持续窗，否则一整段连续演唱会在每一帧都报一个开口）+
+  `StemFusion.VocalPhrases` 测量接口（`firstAtOrAfter(fromMs)`）+ `phrasesOf(long[])` 纯算术实现 +
+  `Input` 新增第 20 个参数（19 参重载委托 `NO_VOCAL_PHRASES`，所以所有旧测试行为逐位不变）。
+  `entry()` 里：`departureAt > voiceAt` 时向测量**要落点之后的第一个开口**，有就用它当到达时刻。
+- **不变量保住了**：`held = max(0, departureAt − voiceAt)`、`residualGap = max(0, gate − departureAt)`
+  （后者从 `firstVocalMs` 改成从 **gate** 量），而 `gate = max(departureAt, voiceAt)`——所以两者仍然
+  **恰好一个非零**，"这个窗口付不起"那条 doc 不用改。
+- 测量只能把 gate 往**后**推，不能往**前**拉（`next > voiceAt` 才采用）——round 30 的
+  "出曲还听得见就别叠人声"因此不可能被一张不一致的开口表推翻。
+- 新测试 `aGateTheLandingWasWalkedPastWaitsForTheNextOpening`：同一 fixture 下，无测量 → gate 10 663
+  （句中间）；给了 `{4000, 14000}` → gate **14 000**、held 0、residual 3 337、**落点/退场/牌面一步没动**；
+  给了 `{4000}`（在落点之前）→ gate 仍是 10 663；`firstAtOrAfter` 的三个边界（往后找、往前找、找不到）
+  也逐条钉住。
+- ⚠️ 仍未做：`describe()` 里"first HEARD Xms later"那句的措辞还是"这个窗口付不起"，而现在也可能是
+  "等到下一个句首"，日志读起来会有歧义（数值本身是对的）。
+
+**本轮验证**：player-core **325 跑 1 失败**，唯一失败仍是既有的
+`SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`（与本轮无关；325 = 上一轮 324 + 本轮
+新增的 `aGateTheLandingWasWalkedPastWaitsForTheNextOpening`）。**三件事都没有真机验证**——提示只能在设备上看，
+② 只能听，③ 的 groove 走位也不是每对都会触发。
+
 ## 九、音频焦点：自动暂停 / 自动恢复（2026-09-21 修复，装机验证）
 
 **用户诉求**：别的 App（B站、别的视频软件、别的音乐）开始放 → qplayer 自动暂停；那个 App 停了/暂停了
