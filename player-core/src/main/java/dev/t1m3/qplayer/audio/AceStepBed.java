@@ -105,42 +105,43 @@ public final class AceStepBed {
      *  server rejects — and the self-hosted server's own id is namespaced the same way. */
     public static final String MODEL_NAMESPACE = "acemusic/";
 
-    /** The caption — <b>the bed's whole job description, and round 18 is the round that finally says
-     *  what the job is.</b> It used to ask for "a sustained, even harmonic pad" whose only claim was
-     *  continuity, and it said in as many words that it must have <em>no lead line, no vocals and no
-     *  beat of its own</em> and that "the tempo does not change". That is a texture with nothing in it
-     *  that belongs to either track — and the user, hearing a passage built on one: 「融合段很明显是生成
-     *  的那段出了问题……与后面的歌曲压根没有关联」. They are right, and it was written here: a
-     *  beatless, melodyless, directionless pad cannot relate to the next track, because nothing asked
-     *  it to.
+    /** The caption — <b>the bed's whole job description.</b> Two listening rounds have now been spent
+     *  on this one string, and each is a lesson about what the model does with a word.
      *
-     *  <p>So the ask now has a <b>direction</b>: it begins in the first track's key and mood, turns
-     *  through its middle, and ends already in the <em>second</em> track's key, harmony and mood, so the
-     *  join reads as the second track beginning rather than as a wash that stops. What is deliberately
-     *  KEPT is everything that fixed the failure this caption replaced: it stays continuous and even
-     *  (the "never drops out, no silence, no thinning at the join" clauses — the property that made a
-     *  pad the right answer in the first place), it stays instrumental, and it still has <b>no drum beat
-     *  of its own</b>, because it sits under a passage that already carries the outgoing track's kit and
-     *  a second pulse would fight it. The model hears 12 s of each track either side of the stretch it
-     *  is asked to fill (see {@code Geometry}), so "in the second track's key" is something it can
-     *  actually do.
+     *  <p><b>Round 18</b> replaced "a sustained, even harmonic pad … no lead line, no vocals, no beat of
+     *  its own" — a texture that by construction belongs to neither track — with a directional ask
+     *  (「融合段很明显是生成的那段出了问题……与后面的歌曲压根没有关联，能不能让生成段更符合过渡逻辑」). That was
+     *  better and still wrong, and the user named the mistake precisely: <b>「你不要让她延续前一首歌的
+     *  歌曲做续写，而是做收尾然后变到第二首」</b> — do not have it continue the first track, have it
+     *  <em>end</em> the first track and then change into the second. The round-18 wording said "its first
+     *  part belongs to the first track: the same key, the same mood", which is an instruction to keep
+     *  writing that track, and that is what they heard.
      *
-     *  <p>⚠️ What this does NOT fix, and the next reader should not expect it to: nothing about the
-     *  request carries the two tracks' measured tempo or key as data — the model has the audio and this
-     *  sentence, and that is all. And the gates in {@link StemBed} (occupancy, spread) were tuned on the
-     *  material the OLD caption produced, so a more musical take may be refused by numbers that were
-     *  never meant to judge it; if the log starts saying the bed is not in the edit, those are the
-     *  numbers to re-derive, not this text. */
+     *  <p>So the ask is a <b>function</b>, not a mood: the first part is the first track's own
+     *  <em>ending</em> — the phrase that comes to rest, explicitly not more of the same music — the middle
+     *  turns, and the later part is the <em>second</em> track's beginning, in its key and harmony, so the
+     *  join reads as the second track arriving. What is KEPT from both earlier attempts: it stays
+     *  continuous and even (the layer must never leave a hole — a wind-down is a musical gesture, not a
+     *  level drop), it stays instrumental, and it still has <b>no drum beat of its own</b> (the passage
+     *  already carries the outgoing track's kit). The model hears 12 s of each track either side of the
+     *  stretch it fills (see {@code Geometry}), so both ends are things it can actually do.
+     *
+     *  <p>⚠️ What this does NOT fix: nothing in the request carries the two tracks' measured tempo or key
+     *  as data — the model has the audio and this sentence. And the gates in {@link StemBed} (occupancy,
+     *  spread) were tuned on the material the FIRST caption produced, so a take with this shape may be
+     *  refused by numbers that were never meant to judge it; if the log starts saying the bed is not in
+     *  the edit, those are the numbers to re-derive, not this text. */
     public static final String CAPTION =
-            "A continuous instrumental transition layer that carries the ending of the first track"
-            + " into the beginning of the second. Its first part belongs to the first track: the same"
-            + " key, the same mood, a sustained harmonic texture under the music. Through its middle it"
-            + " turns, and its later part already belongs to the SECOND track — that track's key, its"
-            + " harmony and its mood — so that the join sounds like the second track beginning rather"
-            + " than like a fade. It keeps a steady tempo throughout and its level stays even from"
-            + " start to finish: it never stops, never drops out, no silence and no thinning out at the"
-            + " join. It is a harmonic layer and not a lead line: no vocals, no melody of its own, and"
-            + " no drum beat of its own.";
+            "A transition that ends the first track and begins the second. Its first part is the first"
+            + " track's own ENDING: a resolving, winding-down harmonic phrase in the first track's key"
+            + " that brings that music to rest — the closing bars of the piece, NOT more of the same"
+            + " music and not a continuation of it. Through its middle it turns, and its later part is"
+            + " the SECOND track's beginning: that track's key, its harmony and its mood, arriving as"
+            + " that track starts, so the join sounds like the second track beginning rather than like"
+            + " a fade. It is one continuous layer and it never leaves a hole: whatever the music does,"
+            + " the layer itself keeps sounding from start to finish with no silence and no thinning out"
+            + " at the join. It is a harmonic layer and not a lead line: no vocals, no melody of its"
+            + " own, and no drum beat of its own.";
 
     /** ACE-Step's own sentinel for an instrumental take, sent beside
      *  {@code audio_config.instrumental} because they are two different switches. */

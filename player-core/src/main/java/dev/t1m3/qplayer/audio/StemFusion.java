@@ -402,6 +402,17 @@ public final class StemFusion {
      *       between them; they are both "make the generated segment work", and the bed's level is the
      *       one with a measured cost (the sum now reaches the limiter on a dense passage — the
      *       {@code aBedThatWouldPushTheSumOverFullScale} fixture had to be given 6 dB more room).</li>
+     *   <li><b>17 → 18</b> — <b>the bed's caption says what the segment is FOR, after the second
+     *       listening round.</b> Round 18's wording asked the first part to "belong to the first track:
+     *       the same key, the same mood", and the user heard exactly that — a continuation. Their
+     *       correction is the requirement in one sentence: 「你不要让她延续前一首歌的歌曲做续写，而是做收尾
+     *       然后变到第二首」. The caption now asks for the first track's own <em>ending</em> (resolving and
+     *       winding down, "not more of the same music and not a continuation of it"), then the turn, then
+     *       the <em>second</em> track's beginning in its key and harmony; the continuity clauses (no
+     *       silence, no thinning at the join) and "no drum beat of its own" are kept from both earlier
+     *       attempts. Only the request text changed — the level, the geometry, the gates and everything
+     *       upstream are untouched — but the take the model returns is different audio, so the cached
+     *       edits are re-rendered once.</li>
      * </ul>
      *
      * <p>The price is one re-render per pair, once, in the pre-lane where there are minutes of
@@ -411,7 +422,7 @@ public final class StemFusion {
      * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
      * name.
      */
-    public static final int RULE_VERSION = 17;
+    public static final int RULE_VERSION = 18;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with

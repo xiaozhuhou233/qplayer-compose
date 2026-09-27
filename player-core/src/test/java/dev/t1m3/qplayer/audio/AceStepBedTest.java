@@ -295,11 +295,14 @@ public class AceStepBedTest {
                 .getAsJsonArray("content");
         String text = content.get(0).getAsJsonObject().get("text").getAsString();
         assertTrue(text, text.contains("<prompt>"));
-        // ⚠️ Round 18: the ask is a TRANSITION with a direction, not the flat pad it used to be. Both
-        // halves are pinned here because the direction is the half the user's own report was about
-        // (「与后面的歌曲压根没有关联」) while the continuity clauses are what fixed the sparse-junk
-        // failure this caption replaced — dropping either one is a different request.
-        assertTrue(text, text.contains("its later part already belongs to the SECOND track"));
+        // ⚠️ Round 19: the ask is a FUNCTION, and the two listening rounds are both pinned here. The
+        // user's second report is the sharpest statement of it — 「不要让她延续前一首歌的歌曲做续写，
+        // 而是做收尾然后变到第二首」 — so "ending, not a continuation" and "the second track's beginning"
+        // are asserted as clauses of their own, and the continuity clauses from the first fix stay:
+        // dropping any one of the four is a different request, not a rewording.
+        assertTrue(text, text.contains("the first track's own ENDING"));
+        assertTrue(text, text.contains("NOT more of the same music and not a continuation of it"));
+        assertTrue(text, text.contains("its later part is the SECOND track's beginning"));
         assertTrue(text, text.contains("no thinning out at the join"));
         assertTrue(text, text.contains("no drum beat of its own"));
         assertTrue(text, text.contains("[Instrumental]"));
