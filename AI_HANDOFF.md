@@ -4514,6 +4514,30 @@ the two backgrounds can be fused — SLAM (the grids are in no relation ...: 3 b
 第 6 轮修过一次同类问题），要按 SLAM 自己的时刻重新审一遍；Ⓒ 报告里的 NaN；Ⓓ `mixReady` 是否该对 SLAM 也亮
 （现在只对 RELATION 家族的 fusion 亮——若用户把 SLAM 也算"最强混音"，那要改，但先问清）。
 
+### 第 33 轮（2026-09-28）：**Ⓐ 探针只量落差（省 ~20s/次尝试）落地；用户裁定"提示只认真混音"**
+
+用户先答了 Ⓓ：**「只有真混音才算进去」**——所以 `mixReady` 只对 RELATION 家族的 fusion 亮是**正确行为**，
+SLAM **不该**点亮提示（这一条不用改，写在这里免得下次又提）。
+
+**Ⓐ 落地（发布 `-28a`）**：`StemFusion.Material` 增加 `boolean stepOnly`（默认 false ⇒ 其它调用者与所有 fixture
+行为一字不变），`measure(...)` 在落差那一支之后 `if (m.stepOnly) return r;`，renderer 的 `renderFusion` 多一个
+`stepOnly` 参数：探针那遍传 true、留下的那遍传 false；**不需要 make-up 的分支补渲染一次拿完整报告**（只付头部
+本身那 1.3–1.9 秒）。
+
+- 需要 make-up 的对子：原来两遍完整测量 → 现在一遍，**省约 20 秒/次尝试**；
+- 不需要 make-up 的对子：多约 2 秒（补渲染的头部）。
+- **探针不可能算出不同的值**：两遍走同一个 `renderFusion` + 同一个 `StemFusion.referenceDb` 夹取。
+
+**下一轮的验证**：装 `-28a` 播一对会融合的歌，日志里探针那行的"报告"应该塌到几十毫秒量级
+（`one fusion render, make-up +0.00 dB — 装配 0ms, 头部 …ms, 报告 …ms`），留下的那遍仍是完整报告。
+
+**还欠的两条**（按价值）：Ⓑ SLAM 的 "the incoming's own drums/low end never arrive" 在 −58.2 / −54.9 dBFS
+（地板 −50）附近**误杀**——Shape of You 那一对就是这样被判掉、什么都没写出来；切片是按 SLAM 自己的 `swap` 之后取的，
+第 6 轮修过一次同类问题，要再审一遍。Ⓒ 报告里的 **NaN**（`its own fade fading material (NaN vs NaN dBFS)`、
+`pulse: 0 of 0 beats`）——两条判据在空跑。
+
+**发布**：tag `ai-dj-transition-2026-09-28a`，192,502,203 bytes，sha256 `3b187209…`。
+
 ## 九、音频焦点：自动暂停 / 自动恢复（2026-09-21 修复，装机验证）
 
 **用户诉求**：别的 App（B站、别的视频软件、别的音乐）开始放 → qplayer 自动暂停；那个 App 停了/暂停了
