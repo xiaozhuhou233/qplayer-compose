@@ -461,6 +461,21 @@ public final class AceStepBed {
      * is already several megabytes.
      */
     public static String body(Config config, Geometry geometry, byte[] buffer) {
+        return body(config, geometry, buffer, CAPTION);
+    }
+
+    /**
+     * The same request with the caption <b>given</b> rather than taken from {@link #CAPTION} — for the
+     * PC bench that iterates on the wording ({@code D:\qplayer-dev\harnessusion\BedFetch.java}),
+     * so that a caption can be compared by ear without an APK install and a full re-render per attempt.
+     *
+     * <p>The app itself never calls this overload: the wording it ships is the constant above, and the
+     * point of routing the bench through the same method is that the request it sends is the request
+     * the app would send — only the sentence differs. A null or empty caption falls back to
+     * {@link #CAPTION} rather than sending an empty prompt, which the server answers with silence.
+     */
+    public static String body(Config config, Geometry geometry, byte[] buffer, String caption) {
+        if (caption == null || caption.isEmpty()) return body(config, geometry, buffer, CAPTION);
         String audio = Base64.getEncoder().encodeToString(buffer);
         JsonObject audioInput = new JsonObject();
         JsonObject inputAudio = new JsonObject();
@@ -471,7 +486,7 @@ public final class AceStepBed {
 
         JsonObject text = new JsonObject();
         text.addProperty("type", "text");
-        text.addProperty("text", "<prompt>" + CAPTION + "</prompt><lyrics>"
+        text.addProperty("text", "<prompt>" + caption + "</prompt><lyrics>"
                 + INSTRUMENTAL_LYRICS + "</lyrics>");
 
         JsonArray content = new JsonArray();

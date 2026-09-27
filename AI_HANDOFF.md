@@ -4114,6 +4114,39 @@ band 的分配），而且要**成对地**看：段落长度 / 搜索 band / 落
 而且它的**云垫层没进来**（`the cloud bed brought nothing back — the incoming's head from 10778ms could not be decoded.
 The passage is the local fusion`），这条还没查。
 
+### 第 21 轮（2026-09-27）：**生成段（ACE-Step 垫层）现在可以在 PC 上迭代了，不用装包**
+
+用户给了 `ACESTEP_API_KEY`（**只从环境变量读：不打印、不写文件、不进仓库、不进 APK**），于是把"改提示词 →
+出 197 MB 包 → 等一次预渲染"这个十几分钟的循环，换成了**四分钟出四版**：
+
+```bash
+cd D:/qplayer-dev/harness/r18
+CP="C:/Users/xiaoz/Desktop/SkidTime/qplayer/player-core/target/classes;$(cat cp.txt);."
+ACESTEP_API_KEY=... java -cp "$CP" BedFetch audio_huai audio_owa 185200 8000 8000 12 captions.txt
+```
+
+- **`BedFetch.java`**（`D:/qplayer-dev/harness/r18/`）：走 **app 自己那套代码** ——
+  `AceStepBed.geometry/wav/body/reply/wav`（几何、请求体、解析、解码）+ `AceStepClient.post`（transport），
+  所以**发的请求和 app 发的是同一个，只有 caption 那句话不同**。每版输出两个 WAV：
+  `-context`（模型返回的整段：A 的尾巴 12s + 段落 + B 的开头 12s ⇒ 交界处听得出来"收住了没有、接手了没有"）
+  和 `-span`（只截生成的那段，app 实际取的部分）。
+- `cp.txt` = `mvn -pl player-core dependency:build-classpath` 的输出（**PC 上缺 Gson**，Android 系统自带，
+  所以要把它加到 classpath，否则 `NoClassDefFoundError: com/google/gson/JsonElement`；Gson 用
+  `D:\qplayer-dev\cache\maven\com\google\code\gson\...` 里那份）。
+- 为了能换 caption，`AceStepBed.body` 加了一个**带 caption 参数的重载**（原来那个委托给 `CAPTION`）；
+  app 自己永远只用常量那一版，这个重载是给 bench 的。
+- 四版 caption 与结果：release **`bed-ab-2026-09-27`**（`bed-ab.zip`，26.4 MB，4×context + 4×span + README）。
+  **生成是随机的**，同一句话每次不同，所以比的是一句话把模型往哪个方向带，不是"这句一定好"。
+- ⚠️ 还没做「按 app 的混音进段落」的那一版（段落下面 12 dB）：要混的话用 `StemBed.prepare` +
+  `AceStepBed.addBed`，段落的素材在 `stemcache/*.npz` 里（`BedBench.java` 就是干这个的）。
+- **用户那一对真歌已经在 harness 里了**（2026-09-27 从手机 `files/cache/audio/` 拉的原样 FLAC，已解码）：
+  `dec/audio_fortnight.f32`（A，NetEase **2147408164**，≈228.9s）、`dec/audio_passionfruit.f32`
+  （B，NetEase **466343434**，**298,890 ms** —— 和日志逐位一致，可用来核对）；
+  原始 FLAC 留在 `harness/r18/pair/*.bin`、`harness/audio_fortnight.bin` 等。
+  那一对的真实几何：**交界 204141 / 段落 6506 ms / 入曲 10778**（日志原文）。
+  跑法：`BED_OUT=.../<out>/ ACESTEP_API_KEY=... java -cp "$CP" BedFetch audio_fortnight audio_passionfruit 204141 6506 10778 12 captions.txt`
+  → release **`bed-ab-fortnight-passionfruit-2026-09-27`**（`bed-fp.zip`，4×context + 4×span + README）。
+
 ## 九、音频焦点：自动暂停 / 自动恢复（2026-09-21 修复，装机验证）
 
 **用户诉求**：别的 App（B站、别的视频软件、别的音乐）开始放 → qplayer 自动暂停；那个 App 停了/暂停了
