@@ -455,8 +455,22 @@ public enum FadeCurve {
      * <p>Public because the boundary's log line quotes it: "the decks hand over in 2000 ms rather
      * than being cut" is a claim about this number, and a log that spelled the 2000 itself would
      * be able to disagree with the curve it is describing.
+     *
+     * <p>Ⓐ Round 31: <b>four seconds instead of two, and the listener's ear is the whole reason.</b>
+     * 「在过渡段时保留第一首歌的人声渐隐，这样显得不那么突兀」 — what they are describing is exactly
+     * what this fade IS, and why its length is the only knob that can answer them: the file the
+     * incoming deck plays carries the outgoing track's own material but never its VOICE, so across
+     * this fade the two decks are the same backing (equal-gain, so the backing's level is constant
+     * by construction) <em>minus</em> the voice, which only the live deck has. The outgoing track's
+     * voice therefore leaves over exactly this fade rather than being cut at the junction — and at
+     * two seconds a singer stopping is heard as a stop, which is the 「突兀」 they reported. Four
+     * seconds is a phrase at this library's tempos. Nothing else moves with it: the two decks are
+     * still aligned at the junction and for the whole fade (the file's copy is the same material at
+     * the same instant, which is why this is an equal-gain rather than an equal-power hand-over),
+     * and {@code StemFusion} does not read this constant at all — the file's own vocal gate is its
+     * own arithmetic, so the incoming track's voice still comes back where it did.
      */
-    public static final long JUNCTION_XFADE_MS = 2_000L;
+    public static final long JUNCTION_XFADE_MS = 4_000L;
 
     /** How far apart the two tracks may be, dB, and still count as "both audible"
      *  for the measurement below. Six decibels is the usual "clearly quieter but

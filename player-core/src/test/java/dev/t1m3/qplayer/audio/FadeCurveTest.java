@@ -311,9 +311,16 @@ public class FadeCurveTest {
                     DjEdit.vocalOutMs(LONG_MS, symmetric) >= LONG_MS - 25L);
         }
         // A fusion's hand-over is a duration rather than a share, so its answer moves with the
-        // ramp: 2000ms of a 15s blend, and a quarter of a 2s one.
-        assertEquals(0.1333d, FadeCurve.FUSION.outLeftAt(LONG_MS), 0.001d);
-        assertEquals(0.5d, FadeCurve.FUSION.outLeftAt(4_000L), 0.001d);
+        // ramp: JUNCTION_XFADE_MS of a 15s blend, and the whole of a ramp no longer than itself.
+        // (Round 31 raised that duration from two seconds to four, so that the outgoing track's
+        // voice leaves over a phrase instead of a beat — see FadeCurve's own note.)
+        assertEquals(FadeCurve.JUNCTION_XFADE_MS / 15_000d, FadeCurve.FUSION.outLeftAt(LONG_MS),
+                0.001d);
+        // One tick short of the whole ramp, which is the same "to within a sample" reading the two
+        // symmetric shapes are held to above: a ramp no longer than the hand-over is entirely it.
+        assertTrue("a ramp this short is the fade itself, was "
+                        + FadeCurve.FUSION.outLeftAt(FadeCurve.JUNCTION_XFADE_MS),
+                FadeCurve.FUSION.outLeftAt(FadeCurve.JUNCTION_XFADE_MS) > 0.998d);
         // And the three lengths the round is judged on, on the shape every ordinary boundary gets:
         // 75.2% of the blend, to the millisecond the search resolves it to.
         assertEquals("a 4s blend", 3_008L, DjEdit.vocalOutMs(4_000L, FadeCurve.DJ_BLEND), 3L);
