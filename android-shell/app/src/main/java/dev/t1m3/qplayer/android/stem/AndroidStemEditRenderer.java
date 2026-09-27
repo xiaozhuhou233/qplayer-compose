@@ -1351,18 +1351,10 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         // reading stays as the fallback for a track that never gives its vocal row a gap (a track that
         // sings from its first bar has no opening to find, and its landing is decided by the two-bar
         // floor and the groove clause instead — see StemFusion.ENTRY_WORDS_BARS).
-        long[] phraseStartsMs = StemFusion.vocalPhraseStartsMs(
+        long firstPhraseMs = StemFusion.vocalPhraseStartMs(
                 arrivalVocals, StemModel.MODEL_RATE, 0L, DjEdit.SILENT_FRAME_DBFS);
-        long firstPhraseMs = phraseStartsMs.length > 0 ? phraseStartsMs[0] : -1L;
         long firstVocalMs = firstPhraseMs >= 0L ? firstPhraseMs : StemFusion.vocalStartMs(
                 arrivalVocals, StemModel.MODEL_RATE, 0L, DjEdit.SILENT_FRAME_DBFS);
-        // ⚠️ Round 16: the openings go into the plan as a MEASUREMENT too, not just as the one
-        // arrival above. Round 15's single number is exact only while the landing stays where the
-        // coupling put it, and the groove walk moves it — the gate is written relative to the
-        // landing, so a walked landing drags it past the opening it was aimed at and the voice
-        // re-enters mid-line, which is the report round 15 answers. The list lets the gate follow
-        // the landing to the next line instead.
-        final StemFusion.VocalPhrases phrases = StemFusion.phrasesOf(phraseStartsMs);
         // ⚠️ Every bar line the fusion is given is in ms, and the renderer's are in seconds (see
         // {@link #inMs}): the conversion happens once, here, for both of the plans below.
         double[] headBarsMs = inMs(headBars);
@@ -1377,7 +1369,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 request.removalMs, request.incomingContentStartMs, aBeatMs,
                 request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
                 headBarsMs, StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT, body,
-                firstVocalMs, incomingOn, 0, null, incomingGrooveOf(headStems), phrases));
+                firstVocalMs, incomingOn, 0, null, incomingGrooveOf(headStems)));
         if (!plan.valid) {
             refusedWhy[0] = WHY_PLAN;
             Logger.info("transition: DJ edit for {}: no fusion — {}. The render is today's edit",
@@ -1468,7 +1460,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 request.removalMs, request.incomingContentStartMs, aBeatMs,
                 request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
                 headBarsMs, quiet, groove, body, firstVocalMs, incomingOn, 0, null,
-                incomingGrooveOf(headStems), phrases));
+                incomingGrooveOf(headStems)));
         if (!chosen.valid) {
             refusedWhy[0] = WHY_PLAN;
             Logger.info("transition: DJ edit for {}: no fusion — the junction could not be placed"
@@ -1522,7 +1514,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 request.removalMs, request.incomingContentStartMs, aBeatMs,
                 request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
                 headBarsMs, quiet, groove, body, firstVocalMs, incomingOn, 0, exit,
-                incomingGrooveOf(headStems), phrases));
+                incomingGrooveOf(headStems)));
         if (!coupled.valid) {
             refusedWhy[0] = WHY_PLAN;
             Logger.info("transition: DJ edit for {}: no fusion — the coupling could not place the"
@@ -1581,7 +1573,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         for (int extra = 0; extra <= StemFusion.FUSION_WAIT_EXTRA_STEPS; extra++) {
             StemFusion.Plan attempt = extra == 0 ? plan
                     : extendHold(request, extra, headStems, body, firstVocalMs, incomingOn, aBeatMs,
-                            bBeatMs, aBars, headBarsMs, aDurMs, quiet, groove, exit, phrases);
+                            bBeatMs, aBars, headBarsMs, aDurMs, quiet, groove, exit);
             if (attempt == null) break;
             Fusion made = fusionWithMakeup(request, headStems, attempt, edit, windowSec, clipped,
                     tail, melodyFor, separateMs, outgoingMaster, bodyDb);
@@ -1734,13 +1726,12 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                                               double aBeatMs, double bBeatMs, double[] aBars,
                                               double[] headBarsMs, long aDurMs,
                                               StemFusion.VocalQuiet quiet, StemFusion.Groove groove,
-                                              StemFusion.OutgoingExit exit,
-                                              StemFusion.VocalPhrases phrases) {
+                                              StemFusion.OutgoingExit exit) {
         StemFusion.Plan attempt = StemFusion.plan(new StemFusion.Input(aDurMs, request.blendMs,
                 request.removalMs, request.incomingContentStartMs, aBeatMs,
                 request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
                 headBarsMs, quiet, groove, body, firstVocalMs, incomingOn, extra, exit,
-                incomingGrooveOf(headStems), phrases));
+                incomingGrooveOf(headStems)));
         return attempt != null && attempt.valid ? attempt : null;
     }
 

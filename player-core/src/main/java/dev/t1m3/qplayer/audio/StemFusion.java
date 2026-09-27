@@ -81,24 +81,9 @@ public final class StemFusion {
     public static final int A_HOLD_STEPS = 2;
 
     /** How many steps of the table the outgoing's <b>drums</b> take to fade to the floor (round 6:
-     *  「可以加淡出」 — a fade is allowed, a cut is not).
-     *
-     *  <p><b>Two since round 15, and the listening report is the whole reason.</b> The user, after
-     *  a transition: 「顺便说一下，前一首歌音量在过渡时骤减的太快了」 — the previous song's level drops
-     *  too fast. It is the drums' span that was the fast half of it: the rendered rows of a real
-     *  pair measured the table's gain on the drums at −6 dB {@code 1268 ms} into its recede and
-     *  −40 dB at {@code 1898 ms} (one step, 1906 ms), against the low end's and the melodic row's
-     *  {@code 2538 ms} and {@code 3788 ms} — so the groove vanished in half the time it took the
-     *  music under it to go, and the track fell away in two audible stages. At two steps all three
-     *  carried rows leave on one curve over {@code holdEnd → fusionEnd}.
-     *
-     *  <p>One step was chosen in round 6 as the <em>minimum</em> that still reads as a phrase
-     *  ending rather than as a switch, and that reasoning still holds — two steps is simply a
-     *  phrase ending that the low end shares, which is what "the outgoing track ends as one
-     *  gesture" means. It costs nothing anywhere else: {@link #A_LOW_END_FADE_STEPS} is already
-     *  two, so this span is never the longer of the two and {@code fusionEndMs}, the passage's
-     *  length and the material the file carries are all exactly where they were. */
-    public static final int A_DRUMS_FADE_STEPS = 2;
+     *  「可以加淡出」 — a fade is allowed, a cut is not). One step: a drum fade shorter than a bar
+     *  still reads as the drummer stopping at a phrase's end rather than as a switch. */
+    public static final int A_DRUMS_FADE_STEPS = 1;
 
     /** How many steps the outgoing's <b>low end and melodic row</b> take to fade to the floor. Two,
      *  because the low end is what carries the groove across the handover and it is the part the
@@ -361,23 +346,6 @@ public final class StemFusion {
      *       ceiling, and the groove clause — which is what 「只要不是过于离谱」 means here. The
      *       crossfade the listener <em>hears</em> is unchanged: the deck-level blend and the ramp are
      *       the same numbers, and the passage's own shape is the same gesture.</li>
-     *   <li><b>14 → 15</b> — <b>the outgoing's drums recede with its low end, not a bar ahead of it.</b>
-     *       The user, listening to a transition: 「顺便说一下，前一首歌音量在过渡时骤减的太快了」. The
-     *       measurement agrees, and it is the drums' own span that is the fast half of it: read on
-     *       the rendered rows of a real pair ({@code audio_huai -> audio_owa}, one step 1906 ms,
-     *       harness log {@code round6-huai_owa.log}), the table's gain on the outgoing's
-     *       <b>drums</b> is −6 dB <b>1268 ms</b> into its recede and −40 dB at <b>1898 ms</b>, i.e.
-     *       one step, while the <b>low end and the melodic row</b> — the rows that carry the song
-     *       rather than the beat — take <b>2538 ms</b> and <b>3788 ms</b>. The listener therefore
-     *       loses the groove in half the time it takes to lose the music under it, and hears the
-     *       track fall away in two stages. {@link #A_DRUMS_FADE_STEPS} is now two steps, the same
-     *       as {@link #A_LOW_END_FADE_STEPS}, so all three carried rows leave on one curve over
-     *       {@code holdEnd → fusionEnd} and the outgoing track ends as one gesture. Nothing else
-     *       moves: the passage is still {@link #FUSION_BARS} bars (the drums' span was never the
-     *       longer of the two, so {@code fusionEndMs} is where it was), the hold is still
-     *       {@link #A_HOLD_STEPS} steps, the incoming's arrival and the deck-level hand-over
-     *       ({@code FadeCurve.JUNCTION_XFADE_MS}) are untouched, and the material the file carries
-     *       is bounded by the low end's span exactly as before.</li>
      * </ul>
      *
      * <p>The price is one re-render per pair, once, in the pre-lane where there are minutes of
@@ -387,7 +355,7 @@ public final class StemFusion {
      * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
      * name.
      */
-    public static final int RULE_VERSION = 15;
+    public static final int RULE_VERSION = 14;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with
@@ -1507,52 +1475,17 @@ public final class StemFusion {
      * −25 dBFS presence from 75 ms on, the reason round 32 exists) from being read as an opening.
      */
     public static long vocalPhraseStartMs(float[][] vocals, int rate, long startMs, double floorDbfs) {
-        long[] all = vocalPhraseStartsMs(vocals, rate, startMs, floorDbfs);
-        return all.length == 0 ? -1L : all[0];
-    }
-
-    /**
-     * <b>Every</b> phrase start the incoming's vocal row opens, in its own file's ms and in order —
-     * {@link #vocalPhraseStartMs}'s rule, read as a list rather than as one instant (round 16).
-     *
-     * <p>Round 15 measured the <em>first</em> opening and gave it to the plan as the arrival, which
-     * is what aligned the gate with a line instead of with a level. What that could not survive is
-     * the landing moving afterwards: the groove clause walks the landing forward when the bar it
-     * chose is inside the incoming's own quiet intro ({@code entry}'s own walk, round 33), and the
-     * gate is written <em>relative</em> to the landing — so a walked landing drags the gate past the
-     * opening it was aligned with, and the voice re-enters mid-line again, which is exactly the
-     * report round 15 set out to answer. The list is what makes the walk recoverable: the gate can
-     * ask for the first opening at or after the instant the departure actually lands on, so a deeper
-     * landing waits for the next line rather than cutting into this one.
-     *
-     * <p>An empty array means the row never opens a phrase inside this material (a track that sings
-     * from its first bar has no opening to find), which leaves the caller with the level reading and
-     * the two-bar floor — {@link #ENTRY_WORDS_BARS}.
-     */
-    public static long[] vocalPhraseStartsMs(float[][] vocals, int rate, long startMs,
-                                             double floorDbfs) {
-        if (vocals == null || vocals.length == 0 || vocals[0] == null || !(rate > 0)) {
-            return new long[0];
-        }
+        if (vocals == null || vocals.length == 0 || vocals[0] == null || !(rate > 0)) return -1L;
         double[] levels = StemBridge.frameLevelsDb(vocals, rate, vocals[0].length / (double) rate);
         int frameMs = Math.max(1, (int) Math.round(StemBridge.FRAME_SEC * 1000d));
         int frames = (int) Math.max(1L, Math.round(VOCAL_SUSTAIN_MS / frameMs));
         int gapFrames = (int) Math.max(1L, Math.round(PHRASE_GAP_MS / frameMs));
         double bodyDb = rowBodyDb(vocals, rate, startMs);
-        if (Double.isNaN(bodyDb)) return new long[0];
+        if (Double.isNaN(bodyDb)) return -1L;
         double floor = Math.max(floorDbfs, bodyDb - VOICE_ARRIVAL_DB);
         double gapFloor = bodyDb - PHRASE_GAP_DB;
-        // A phrase's own frames are part of it, so the next opening may not be looked for inside
-        // the one just found: the scan resumes where this phrase's sustain window ends. Without
-        // that, one continuous sung section answers an opening at every frame it is loud on.
-        int[] found = new int[Math.max(8, levels.length / Math.max(1, frames))];
-        int count = 0;
-        int i = gapFrames;
-        while (i + frames <= levels.length) {
-            if (levels[i] <= floor) {
-                i++;
-                continue;
-            }
+        for (int i = gapFrames; i + frames <= levels.length; i++) {
+            if (levels[i] <= floor) continue;
             boolean gapped = true;
             for (int j = i - gapFrames; j < i; j++) {
                 if (levels[j] > gapFloor) {
@@ -1560,25 +1493,12 @@ public final class StemFusion {
                     break;
                 }
             }
-            if (!gapped) {
-                i++;
-                continue;
-            }
+            if (!gapped) continue;
             double median = StemBridge.median(
                     java.util.Arrays.copyOfRange(levels, i, i + frames));
-            if (!(median > floor)) {
-                i++;
-                continue;
-            }
-            if (count == found.length) {
-                found = java.util.Arrays.copyOf(found, count * 2);
-            }
-            found[count++] = i;
-            i += frames;
+            if (median > floor) return startMs + (long) i * frameMs;
         }
-        long[] out = new long[count];
-        for (int k = 0; k < count; k++) out[k] = startMs + (long) found[k] * frameMs;
-        return out;
+        return -1L;
     }
 
     /**
@@ -1998,44 +1918,6 @@ public final class StemFusion {
     public static final Groove NO_GROOVE_MEASUREMENT = (atMs, beatMs) -> false;
 
     /**
-     * The <b>incoming</b> track's own vocal phrase openings, in its own file's ms (round 16) — the
-     * list {@link #vocalPhraseStartsMs} measures, handed to the planner as a measurement so the
-     * gate can follow a landing that moves.
-     *
-     * <p>Round 15 aligned the gate by giving the plan one number: the first opening. That is enough
-     * while the landing stays where the coupling put it, and not enough once the groove clause walks
-     * the landing forward (a bar line inside the incoming's own quiet intro), because the gate is
-     * written relative to the landing — so the walk drags the gate off the line it was aligned with
-     * and the voice re-enters mid-phrase, the report round 15 exists to answer. With the list, a
-     * walked landing asks for the first opening at or after where its departure actually lands.
-     */
-    public interface VocalPhrases {
-        /** The first phrase opening at or after {@code fromMs} in the incoming's own file, or -1
-         *  when this material has none that far in. */
-        long firstAtOrAfter(long fromMs);
-    }
-
-    /** No measurement: the gate keeps the level-based arrival it always had. */
-    public static final VocalPhrases NO_VOCAL_PHRASES = fromMs -> -1L;
-
-    /**
-     * A {@link VocalPhrases} over the openings {@link #vocalPhraseStartsMs} measured.
-     *
-     * <p>Pure arithmetic over a list, so it is defined here rather than at each call site: the
-     * renderer measures once per render and the planner may ask more than once (the first plan and
-     * every retry the wait makes).
-     */
-    public static VocalPhrases phrasesOf(final long[] startsMs) {
-        if (startsMs == null || startsMs.length == 0) return NO_VOCAL_PHRASES;
-        return fromMs -> {
-            for (long at : startsMs) {
-                if (at >= fromMs) return at;
-            }
-            return -1L;
-        };
-    }
-
-    /**
      * A {@link Groove} over the outgoing's separated drums and bass: the per-frame levels of their
      * sum, in the stem's own timeline — the same instrument {@link #quietnessOf} uses on the vocal
      * row, asked about the low end instead of the voice.
@@ -2214,15 +2096,6 @@ public final class StemFusion {
          */
         public final Groove incomingGroove;
 
-        /**
-         * The <b>incoming</b> track's own vocal phrase openings (round 16) — what keeps
-         * {@link #firstVocalMs} an arrival the gate can respect once the landing has been walked
-         * away from the instant the coupling chose for it. {@link #NO_VOCAL_PHRASES} for every
-         * caller without a vocal separation, which leaves the gate exactly where rounds 25–30 put
-         * it (the same behaviour {@link #firstVocalMs} alone gives).
-         */
-        public final VocalPhrases vocalPhrases;
-
         public Input(long aDurMs, long blendMs, long removalMs, long contentStartMs,
                      double aBeatMs, double aPhaseMs, double bBeatMs, double bPhaseMs, double speed,
                      double[] aBarLinesMs, double[] bBarLinesMs, VocalQuiet quiet) {
@@ -2281,22 +2154,8 @@ public final class StemFusion {
                      double[] aBarLinesMs, double[] bBarLinesMs, VocalQuiet quiet, Groove groove,
                      BodyLevel body, long firstVocalMs, IncomingOn incoming, int extraHoldSteps,
                      OutgoingExit exit, Groove incomingGroove) {
-            this(aDurMs, blendMs, removalMs, contentStartMs, aBeatMs, aPhaseMs, bBeatMs, bPhaseMs,
-                    speed, aBarLinesMs, bBarLinesMs, quiet, groove, body, firstVocalMs, incoming,
-                    extraHoldSteps, exit, incomingGroove, NO_VOCAL_PHRASES);
-        }
-
-        /** Round 16: the same input with the incoming's own <b>phrase openings</b> measured — see
-         *  {@link #vocalPhrases}. The renderer's call sites use this one; every fixture that only
-         *  asks about the arithmetic keeps the overloads above and the gate rounds 25–30 produce. */
-        public Input(long aDurMs, long blendMs, long removalMs, long contentStartMs,
-                     double aBeatMs, double aPhaseMs, double bBeatMs, double bPhaseMs, double speed,
-                     double[] aBarLinesMs, double[] bBarLinesMs, VocalQuiet quiet, Groove groove,
-                     BodyLevel body, long firstVocalMs, IncomingOn incoming, int extraHoldSteps,
-                     OutgoingExit exit, Groove incomingGroove, VocalPhrases vocalPhrases) {
             this.exit = exit == null ? NO_EXIT_MEASUREMENT : exit;
             this.incomingGroove = incomingGroove == null ? NO_GROOVE_MEASUREMENT : incomingGroove;
-            this.vocalPhrases = vocalPhrases == null ? NO_VOCAL_PHRASES : vocalPhrases;
             this.aDurMs = aDurMs;
             this.blendMs = blendMs;
             this.removalMs = removalMs;
@@ -2360,11 +2219,7 @@ public final class StemFusion {
          *  promise is unchanged in content ("the outgoing is not still clearly audible when the
          *  incoming's voice begins") and earlier in time, which is exactly what was asked for. */
         public final long voiceGateMs;
-        /** The incoming's voice is heard this much later than the departure, ms — measured from
-         *  {@link #voiceGateMs} rather than from the arrival (round 16), so it is the honest "no
-         *  voice here yet" whether the gate is late because the material is
-         *  (the landing's own departure) or because the first opening after it is (a landing the
-         *  groove clause walked, whose next line the gate waited for). */
+        /** The incoming's voice is heard this much later than the departure, ms. */
         public final long residualGapMs;
         /** The incoming's own singing is held out for this much because its voice arrives before
          *  the departure at the only landings this pair's window can afford, ms. */
@@ -2611,14 +2466,10 @@ public final class StemFusion {
         public final long removalMs;
 
         /** Round 6's gesture instants, in the file's own timeline: the outgoing's rows hold at
-         *  unity until {@link #holdEndMs}, then its drums reach the floor at {@link #drumsEndMs}
-         *  and its low end (with its melodic row) at {@link #lowEndEndMs} = {@link #fusionEndMs};
-         *  the incoming's drums and low end rise from {@link #arriveStartMs} (its own drums' swap)
-         *  to unity at {@link #arriveEndMs}. All equal-power, all monotone. Since round 15
-         *  {@link #A_DRUMS_FADE_STEPS} equals {@link #A_LOW_END_FADE_STEPS}, so on a fusion
-         *  {@code drumsEndMs == lowEndEndMs} and the three carried rows leave as one gesture;
-         *  {@link #recedeMs} still reports them as three spans because a SLAM's own zero-length
-         *  shape is read through the same accessor. */
+         *  unity until {@link #holdEndMs}, its drums reach the floor at {@link #drumsEndMs} and its
+         *  low end (with its melodic row) at {@link #lowEndEndMs} = {@link #fusionEndMs}; the
+         *  incoming's drums and low end rise from {@link #arriveStartMs} (its own drums' swap) to
+         *  unity at {@link #arriveEndMs}. All equal-power, all monotone. */
         public final long holdEndMs;
         public final long drumsEndMs;
         public final long lowEndEndMs;
@@ -3354,8 +3205,7 @@ public final class StemFusion {
         long barStep = Math.round(stepMs);
         // The gesture's own instants (round 6): the incoming's drums and low end rise over one step
         // starting where the outgoing's hold ends, and the outgoing's rows recede from that same
-        // instant — all three over two steps since round 15 ({@link #A_DRUMS_FADE_STEPS} =
-        // {@link #A_LOW_END_FADE_STEPS}), which is what makes the outgoing leave as one gesture.
+        // instant — its drums over one step, its low end and its melodic row over two.
         long holdEnd = entry + (long) holdSteps * barStep;
         // ⚠️ The incoming arrives UNDER the outgoing's hold, not after it: its rise starts one step
         // before the hold ends, so it reaches unity exactly where the outgoing starts to recede. That
@@ -3773,26 +3623,12 @@ public final class StemFusion {
         // arrives at its own position, by which time the outgoing is long gone either way).
         long departureAt = landing + goneFile;
         long voiceAt = Math.max(0L, in.firstVocalMs);
-        // ⚠️ Round 16: the arrival the gate has to respect is the phrase opening its departure
-        // actually lands on. Round 15 aligned the gate by handing this method the voice's own
-        // opening, which is exact only while the landing stays where the coupling put it — and the
-        // groove walk above moves it. When the departure has been pushed past the opening, the gate
-        // asks for the NEXT opening instead of cutting into the line the walk ran into; when the
-        // material has no further opening it keeps the departure, which is the honest answer ("the
-        // voice is not there yet", reported as the residual gap it is).
-        if (departureAt > voiceAt) {
-            long next = in.vocalPhrases.firstAtOrAfter(departureAt);
-            if (next > voiceAt) voiceAt = next;
-        }
         long gate = Math.min(Math.max(departureAt, voiceAt), in.removalMs);
         double speed = in.speed > 0d ? in.speed : 1d;
         // The two directions of the same miss, both in the ramp's own wall clock: how much later
         // than the departure the voice is first heard (a gap of no voice — the material is simply
-        // not there yet), and how much of the incoming's own singing the gate had to hold out. They
-        // are measured one against the gate and one against the arrival, so exactly one of them is
-        // non-zero — the gate is the LATER of the two instants by construction (round 16: and the
-        // arrival may be a later phrase opening than the one the landing was aimed at).
-        long residualGap = Math.round((gate - departureAt) / speed);
+        // not there yet), and how much of the incoming's own singing the gate had to hold out.
+        long residualGap = Math.round((in.firstVocalMs - departureAt) / speed);
         long held = Math.round((departureAt - voiceAt) / speed);
         long skipped = Math.max(0L, landing - in.contentStartMs);
         return new Landing(landing, matched, bestError, skipped, uncoupled, departureMs, rawFile,

@@ -105,17 +105,6 @@ public class StemFusionTest {
                 exit));
     }
 
-    /** The same plan with the incoming's own vocal <b>phrase openings</b> measured off its file
-     *  (round 16) — what lets the gate follow a landing the groove clause walked. */
-    private static StemFusion.Plan coupled(long removalMs, long firstVocalMs,
-                                           StemFusion.OutgoingExit exit, long[] phraseStartsMs) {
-        return StemFusion.plan(new StemFusion.Input(240_000L, 20_000L, removalMs, 0L,
-                500d, 0d, 500d, 0d, 1d, bars(2000d, 0d, 120), bars(2000d, 0d, 120),
-                StemFusion.NO_VOICE_MEASUREMENT, StemFusion.NO_GROOVE_MEASUREMENT,
-                StemFusion.NO_BODY_MEASUREMENT, firstVocalMs, StemFusion.NO_INCOMING_MEASUREMENT, 0,
-                exit, StemFusion.NO_GROOVE_MEASUREMENT, StemFusion.phrasesOf(phraseStartsMs)));
-    }
-
     @Test
     public void theAnchorsAreWhereTheSpecPutsThem() {
         // A and B both on a 500 ms beat (120 BPM), so a bar is 2000 ms and the tempo lock is exact
@@ -130,13 +119,13 @@ public class StemFusionTest {
         assertEquals(15_000L, 15_000L);
         assertEquals(16_000L, plan.entryMs);
         // ⚠️ Round 6's instants, not the old splices': the outgoing's rows hold at unity until the
-        // hold ends (which is `swapMs` = `bassMs`, where its low end starts to recede), and since
-        // round 15 its drums recede with its low end and melodic row — one gesture, so all three
-        // reach the floor on the same line, which is the window's end.
+        // hold ends (which is `swapMs` = `bassMs`, where its low end starts to recede), its drums
+        // reach the floor one step later, its low end and melodic row two steps later, and the
+        // incoming's rise begins one step BEFORE the hold ends — that overlap is the coexistence.
         assertEquals(20_000L, plan.holdEndMs);
         assertEquals(20_000L, plan.swapMs);
         assertEquals(20_000L, plan.bassMs);
-        assertEquals(24_000L, plan.drumsEndMs);
+        assertEquals(22_000L, plan.drumsEndMs);
         assertEquals(24_000L, plan.lowEndEndMs);
         assertEquals(24_000L, plan.fusionEndMs);
         assertEquals(18_000L, plan.arriveStartMs);
@@ -610,8 +599,7 @@ public class StemFusionTest {
         assertEquals("the hold at unity is two steps", 12L + 2L * step, plan.swapMs);
         assertEquals("the low end starts to recede with the drums' hold over", plan.swapMs,
                 plan.bassMs);
-        assertEquals("round 15: the drums' fade is the low end's two steps", 12L + 4L * step,
-                plan.drumsEndMs);
+        assertEquals("the drums' fade is one step", 12L + 3L * step, plan.drumsEndMs);
         assertEquals("the low end's and the melodic row's fade is two", 12L + 4L * step,
                 plan.fusionEndMs);
         assertEquals(Math.round(4d * 1906.394556d), plan.windowMs);
@@ -880,69 +868,6 @@ public class StemFusionTest {
                 held.coupling.voiceGateMs < held.entryMs + held.coupling.departureInFileMs);
         // And what round 21 would have taken is still reported, as the "before" of the coupling.
         assertEquals("the line a runway before the voice", 2_000L, held.coupling.uncoupledEntryMs);
-    }
-
-    /**
-     * ⚠️ <b>Round 16: when the departure has already been walked past the voice's opening, the gate
-     * waits for the NEXT opening instead of cutting into the line the walk ran into.</b> The fixture
-     * is the one above — the incoming is already singing at 4 000 and the departure lands at 10 663 —
-     * so the gate's own answer without a measurement is 10 663, which is the middle of whatever the
-     * incoming is singing there: exactly the listener's report round 15 answers
-     * (「混音完接入人声从一句话半截开始接入的」), surviving because the gate is written relative to the
-     * landing and the landing moved.
-     *
-     * <p>The measurement is what makes it recoverable, and two properties of it are asserted here
-     * rather than described: an opening LATER than the departure moves the gate onto it (the voice
-     * waits a line instead of being cut in), and an opening EARLIER than the departure does not move
-     * the gate at all — the measurement may only ever move the gate later, so the round-30 invariant
-     * ("the outgoing is not still clearly audible when the incoming's voice begins") cannot be undone
-     * by a phrase list that happens to disagree with the departure.
-     */
-    @Test
-    public void aGateTheLandingWasWalkedPastWaitsForTheNextOpening() {
-        StemFusion.Plan plain = coupled(20_000L, 4_000L, neverQuiet());
-        assertEquals("without a measurement the gate is where round 30 puts it, mid-phrase",
-                10_663L, plain.coupling.voiceGateMs);
-
-        // The material opens a line at 14 000 — past the departure — so that is where the voice
-        // goes back on, and the 3 337 ms between them is reported as the gap it is.
-        StemFusion.Plan waited = coupled(20_000L, 4_000L, neverQuiet(),
-                new long[]{4_000L, 14_000L});
-        assertTrue(waited.reason, waited.valid);
-        assertEquals("the gate waits for the next opening after the departure", 14_000L,
-                waited.coupling.voiceGateMs);
-        assertEquals("so nothing of the incoming's own singing is held out", 0L,
-                waited.coupling.heldMs);
-        assertEquals("and the wait is reported as the gap it is", 14_000L - 10_663L,
-                waited.coupling.residualGapMs);
-        assertEquals("the landing itself is not moved by the measurement", plain.entryMs,
-                waited.entryMs);
-        assertEquals("nor is the departure", plain.coupling.departureInFileMs,
-                waited.coupling.departureInFileMs);
-        // The table's own shape is untouched: this round moves an instant the render gates a voice
-        // with, not the gesture that carries the outgoing's rows out.
-        assertEquals(plain.holdEndMs, waited.holdEndMs);
-        assertEquals(plain.fusionEndMs, waited.fusionEndMs);
-        assertEquals(plain.windowMs, waited.windowMs);
-
-        // An opening the gate has already passed cannot pull it back: the list's first entry is the
-        // one round 15 aligned on, and the departure is later than it.
-        StemFusion.Plan behind = coupled(20_000L, 4_000L, neverQuiet(), new long[]{4_000L});
-        assertEquals("an opening before the departure leaves round 30's gate alone", 10_663L,
-                behind.coupling.voiceGateMs);
-        assertEquals("and the singing is still held out rather than stacked", 6_663L,
-                behind.coupling.heldMs);
-        assertEquals(0L, behind.coupling.residualGapMs);
-        // Only the first opening at or after an instant is ever asked for, which is what makes a
-        // walked landing land on the NEXT line rather than on a line the walk has already passed.
-        assertEquals(14_000L, StemFusion.phrasesOf(new long[]{4_000L, 14_000L})
-                .firstAtOrAfter(11_000L));
-        assertEquals(4_000L, StemFusion.phrasesOf(new long[]{4_000L, 14_000L})
-                .firstAtOrAfter(1_000L));
-        assertEquals(-1L, StemFusion.phrasesOf(new long[]{4_000L, 14_000L})
-                .firstAtOrAfter(20_000L));
-        assertEquals("no measurement is no candidate, never instant zero", -1L,
-                StemFusion.NO_VOCAL_PHRASES.firstAtOrAfter(0L));
     }
 
     /**
@@ -1574,11 +1499,8 @@ public class StemFusionTest {
     public void theOutgoingRecedesAndTheIncomingRises() {
         // ⚠️ Round 6, from listening: A recedes, it does not cut (the user heard the 80 ms splices
         // as the outgoing track being stopped). A's rows hold at unity through the hold, then fade
-        // out over their own spans — since round 15 all three over the low end's two steps, because
-        // the user heard the drums' single step as 「前一首歌音量在过渡时骤减的太快了」 (the previous
-        // song's level dropping too fast: the groove went in half the time the music under it did).
-        // Equal-power and monotone, so no element ever comes back. B's drums and low end rise over
-        // one step from one step before the hold's end.
+        // out over their own spans — the drums over one step, the low end and the melodic row over
+        // two — equal-power and monotone. B's drums and low end rise over one step from there.
         StemFusion.Plan plan = fixture();
         long entry = plan.entryMs;
         long step = Math.round(plan.barStepMs);
@@ -1589,8 +1511,7 @@ public class StemFusionTest {
         double aOther = Math.pow(10d, StemFusion.A_OTHER_DB / 20d);
         assertEquals("the hold is A_HOLD_STEPS steps", entry + StemFusion.A_HOLD_STEPS * step,
                 holdEnd);
-        assertEquals("round 15: the drums' fade is the low end's own span", 2 * step,
-                drumsEnd - holdEnd);
+        assertEquals("the drums' fade is one step", step, drumsEnd - holdEnd);
         assertEquals("the low end's fade is two", 2 * step, lowEndEnd - holdEnd);
         assertEquals("and the gesture ends where the low end's fade does", lowEndEnd,
                 plan.fusionEndMs);
@@ -1608,11 +1529,10 @@ public class StemFusionTest {
                     StemFusion.gainAt(plan, true, row, holdEnd), 1e-9);
         }
         // Each fade is an equal-power decline — a cosine to the floor — so half way through ITS OWN
-        // span each side is at cos(pi/4) of its own level (every span is two steps since round 15,
-        // so half way is one step for all three rows), and the floor is reached on the step line,
-        // never before.
+        // span each side is at cos(pi/4) of its own level (the drums' span is one step, the low
+        // end's and the melodic row's two), and the floor is reached on the step line, never before.
         assertEquals(unity * Math.cos(Math.PI / 4),
-                StemFusion.gainAt(plan, true, StemGesture.Stem.DRUMS, holdEnd + step), 1e-9);
+                StemFusion.gainAt(plan, true, StemGesture.Stem.DRUMS, holdEnd + step / 2), 1e-9);
         assertEquals(0d, StemFusion.gainAt(plan, true, StemGesture.Stem.DRUMS, drumsEnd), 1e-9);
         assertEquals(unity * Math.cos(Math.PI / 4),
                 StemFusion.gainAt(plan, true, StemGesture.Stem.BASS, holdEnd + step), 1e-9);
@@ -1669,26 +1589,20 @@ public class StemFusionTest {
         long drumsSix = reachMs(plan, true, StemGesture.Stem.DRUMS, plan.holdEndMs, 0d, 0.5d);
         long lowEndSix = reachMs(plan, true, StemGesture.Stem.BASS, plan.holdEndMs, 0d, 0.5d);
         long arriveSix = reachMs(plan, false, StemGesture.Stem.DRUMS, plan.arriveStartMs, 1d, 0.5d);
-        println("A's drums reach -6 dB %dms into their 2-step fade, its low end %dms into its"
+        println("A's drums reach -6 dB %dms into their 1-step fade, its low end %dms into its"
                         + " 2-step one; B's drums reach -6 dB %dms into their 1-step rise",
                 drumsSix, lowEndSix, arriveSix);
-        // ⚠️ Round 15: the drums' span IS the low end's, so the two -6 dB instants are the same
-        // number — which is the whole change (the user heard the drums' single step as
-        // 「前一首歌音量在过渡时骤减的太快了」). The measurement that used to separate them is what
-        // still proves it, so it stays an assertion rather than becoming a deleted line.
-        assertEquals(Math.round(4d / 3d * step), drumsSix, 15L);
-        assertEquals("the drums recede over the low end's own span, so their -6 dB is the same"
-                + " instant", drumsSix, lowEndSix, 15L);
-        assertEquals(Math.round(4d / 3d * step), lowEndSix, 15L);
+        assertEquals(Math.round(2d / 3d * step), drumsSix, 15L);
+        assertEquals("the low end's fade is twice as long, so its -6 dB is twice as far in",
+                Math.round(4d / 3d * step), lowEndSix, 15L);
         assertEquals(Math.round(1d / 3d * step), arriveSix, 15L);
         // The coexistence the user asked to keep (rule 3), as the TABLE'S GAINS give it: the stretch
         // over which both backings' gains are within 6 dB of their own levels — B's drums on their
-        // way up, A's on their way down — which is two steps since round 15 (it was 1.33 steps while
-        // A's drums left a step ahead of its low end). It is a BOUND on what a listener hears, not
-        // that number: the prototype's instrument on the device's own material reads 1750 ms in all
-        // with a 450 ms longest run (reproduced as 1750/530 by fusion/coexist.py, the same
-        // instrument) because the rows' own material — the incoming's kit arriving late, the bed
-        // carrying the passage — is what decides the audible part.
+        // way up, A's on their way down — which is 1.33 steps, an identity of the spans. It is a
+        // BOUND on what a listener hears, not that number: the prototype's instrument on the device's
+        // own material reads 1750 ms in all with a 450 ms longest run (reproduced as 1750/530 by
+        // fusion/coexist.py, the same instrument) because the rows' own material — the incoming's kit
+        // arriving late, the bed carrying the passage — is what decides the audible part.
         long from = plan.arriveStartMs + arriveSix;
         long to = plan.holdEndMs + drumsSix;
         println("the table's own gain overlap (both backings within 6 dB of their own level): %dms"
