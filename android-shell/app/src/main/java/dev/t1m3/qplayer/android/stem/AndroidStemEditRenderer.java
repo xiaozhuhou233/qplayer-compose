@@ -1818,10 +1818,21 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 plan, melody, StemModel.MODEL_RATE);
         Fusion first = renderFusion(request, headStems, plan, gate, windowSec, clipped, tail,
                 melody, separateMs, outgoingMaster, 0d, bodyDb, carriedRows, true);
-        double makeup = StemFusion.makeupDb(
-                first.report.stepMeasured ? first.report.junctionStepDb : Double.NaN);
+        // Ⓜ Round 35b: the probe's step is all that call is kept for, so it is read into locals and
+        // the probe itself is DROPPED before the render below. A Fusion holds a whole window of
+        // material — the carried rows, the head as rendered, and four per-row copies at the model's
+        // rate, tens of megabytes on a 20 s window — and letting the probe's window and the kept
+        // render's window be alive at the same time is what killed this render on the device:
+        // 「两分来钟了我没收到任何混音提示或者 slam」, whose log says
+        // `java.lang.OutOfMemoryError: Failed to allocate a 2641784 byte allocation with 2361088 free
+        // bytes and 2305KB until OOM ... growth limit 268435456`. The probe's own cost was never the
+        // point of it — its report is the answer and it is 184 ms of work — so its material goes.
+        final boolean stepMeasured = first.report.stepMeasured;
+        final double stepDb = first.report.junctionStepDb;
+        first = null;
+        double makeup = StemFusion.makeupDb(stepMeasured ? stepDb : Double.NaN);
         if (!(makeup > 0d)) {
-            if (first.report.stepMeasured && first.report.junctionStepDb > 0d) {
+            if (stepMeasured && stepDb > 0d) {
                 // ⚠️ `{}` slots and `fmtDb`, not a printf specifier: this line carried a literal
                 // `%+.2f` that nothing ever substituted, and its third slot took the step's own
                 // double — so the device log read "the fusion's first 500ms measures %+.2f dB
@@ -1831,7 +1842,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                                 + " against the outgoing track's own last {}ms — it is already at"
                                 + " (or above) the listener's level, so no make-up gain is applied",
                         request.title(), StemFusion.STEP_WINDOW_MS,
-                        fmtDb(first.report.junctionStepDb), StemFusion.STEP_WINDOW_MS);
+                        fmtDb(stepDb), StemFusion.STEP_WINDOW_MS);
             }
             // Ⓜ Round 33: the probe's report stops at the step, so this branch has to render once
             // more to get the report the acceptance reads. It costs the head's own render (1.3–1.9 s
@@ -1849,7 +1860,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                         + " (the most is {} dB; the incoming's rows are untouched and nothing"
                         + " outside the fusion window is moved). The step is now {} dB, against the"
                         + " {} dB the clause allows",
-                request.title(), fmtDb(first.report.junctionStepDb), StemFusion.STEP_WINDOW_MS,
+                request.title(), fmtDb(stepDb), StemFusion.STEP_WINDOW_MS,
                 fmtDb(makeup), (int) StemFusion.MAKEUP_MAX_DB,
                 lifted.report.stepMeasured ? fmtDb(lifted.report.junctionStepDb) : "not measurable",
                 fmtDb(StemFusion.JUNCTION_STEP_MAX_DB));
