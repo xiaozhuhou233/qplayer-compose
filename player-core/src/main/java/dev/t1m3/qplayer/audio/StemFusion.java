@@ -176,9 +176,42 @@ public final class StemFusion {
 
     /** The most of the outgoing track that may be separated for one fusion, ms — the separation
      *  window, which is the material the carry needs ({@link #sourceSpanMs}) plus the lead the
-     *  take's own alignment wants. 12 s, and it is the clause a slow track fails: at a 3 s bar of
-     *  the incoming's grid the window is already 8 s, so the bound bites around a 50 BPM pair. */
-    public static final long FUSION_TAIL_MAX_MS = 12_000L;
+     *  take's own alignment wants.
+     *
+     *  <p><b>12 000 until round 18, now 20 000 — the number {@link #RELATIVE_TAIL_MAX_MS} has used
+     *  since round 5.</b> The passage is now as long as the listener's own window can pay for (see
+     *  the growth in {@code plan}) instead of the table's fixed three or four steps, and the cap is
+     *  also what the junction search's own band is paid out of — so a longer passage under a 12 s cap
+     *  did not just shorten the mix, it <b>narrowed the search onto the outgoing track's own fade</b>
+     *  and made the planner refuse pairs it used to fuse (measured: {@code
+     *  aPassageInsideAFadeIsNotUsedIfAnEarlierLineHasBody} went from choosing the earlier line with
+     *  body to refusing outright, because the only line left in the band was the fade). The two
+     *  quantities are one budget, so the budget is what moved.
+     *
+     *  <p>What it costs: the audio through the model grows linearly with the window (a 17 s passage is
+     *  ~2.6x the separation of a 6.5 s one, i.e. on the order of +20 to +50 s of render CPU), and the
+     *  render runs minutes ahead of its boundary, which is why the relative family has been allowed
+     *  this much since round 5. The device log is where the real number belongs. */
+    public static final long FUSION_TAIL_MAX_MS = 20_000L;
+
+    /**
+     * How much of the cap's increase {@link #FUSION_TAIL_MAX_MS} bought goes to the search's band
+     * rather than to the mix, ms (round 18).
+     *
+     * <p>The passage and the junction search's reach are paid for out of one budget ({@code cap}):
+     * the take's own span comes off it, and what is left is the band the junction is chosen from
+     * ({@code budget = cap − sourceSpan − 2·slack}). The design has always let the <em>passage</em>
+     * give when the band is too small to hold a line ({@code shortenedForBand}), which is the
+     * priority this constant keeps: a mix is only worth having if there is somewhere good to cut it.
+     *
+     * <p>⚠️ The growth is bounded by {@code cap − SEARCH_BAND_MS} for that reason, and the number was
+     * measured rather than chosen. With the whole increase reserved (8 000) a unison pair's mix did
+     * not grow at all — {@code maxStepsFor} then reports the old budget back, and the canonical
+     * fixture came up at its pre-round-18 four steps — while with none reserved the growth ate the
+     * band down to where it started and a fixture refused a pair it used to fuse. Half the increase is
+     * the split that serves both: on the pair the listener reported ({@code Fortnight -> Passionfruit},
+     * a 112 BPM incoming, a 24 000 ms ramp) the mix goes from 6.5 s to 12.9 s. */
+    public static final long SEARCH_BAND_MS = 4_000L;
 
     /** The same cap for a <b>relative</b> pair (round 5, revised), ms: 20 000.
      *
@@ -200,7 +233,12 @@ public final class StemFusion {
     public static final long RELATIVE_TAIL_MAX_MS = 20_000L;
 
     /** Which cap a plan is measured against: {@link #RELATIVE_TAIL_MAX_MS} for a relative
-     *  (non-unison) relation, {@link #FUSION_TAIL_MAX_MS} otherwise. */
+     *  (non-unison) relation, {@link #FUSION_TAIL_MAX_MS} otherwise.
+     *
+     *  <p>⚠️ Round 18: the two numbers are the same (20 000) since the passage follows the window the
+     *  listener set, so this branch no longer changes the answer — it is kept because the two
+     *  <em>families</em> are still different quantities (a relative pair's step is {@code p} bars
+     *  where a unison pair's is one), and the log lines that name the cap name the family with it. */
     public static long tailMaxMs(Relation relation) {
         return relation != null && !relation.locked() ? RELATIVE_TAIL_MAX_MS : FUSION_TAIL_MAX_MS;
     }
@@ -325,6 +363,30 @@ public final class StemFusion {
      *       written before this bump is planned again (the version is in the edit's own key), and the
      *       renderer's separated head already reaches as far as the landing can
      *       ({@code headMs = removalMs + span}), so a deeper landing costs no extra separation.</li>
+     *   <li><b>13 → 16</b> — <b>the passage is as long as the pair can afford, not the table's fixed
+     *       three or four steps.</b> The user, hearing a boundary: 「我认为你只需要让混音段长一点他可能就能
+     *       自然过渡到下一首歌了，目前感觉是过渡了一半」. Measured on their own pair, straight out of the
+     *       device log ({@code Fortnight -> Passionfruit}, a SLAM, {@code -e4272-j204141-f10778}): the
+     *       fused passage is {@code fusionEnd − entry} = <b>6 506 ms inside a ramp they had set to
+     *       24 000 ms</b> — three bars of a 112 BPM incoming, because the length never followed that
+     *       setting at all. {@link #SLAM_STEPS} is now a FLOOR and the passage grows into the window
+     *       the pair already pays for ({@link #maxStepsFor}: the smaller of the separation cap and the
+     *       stretch the incoming's own vocals are held out for), one step at a time against
+     *       {@link #bandHasLine}, with {@link #FUSION_TAIL_MAX_MS} raised 12 000 → 20 000 and
+     *       {@link #SEARCH_BAND_MS} reserving half of that increase for the junction search's own
+     *       band. <b>Only the length moves</b>: the recede's shape, the landing's rules and the
+     *       deck-level curves are untouched, and a SLAM keeps its 80 ms splice — the user ruled a
+     *       recede out for it (「退场可能导致淡入淡出」).
+     *
+     *       <p>⚠️ Two things this round knowingly trades, both measured and both recorded here so
+     *       they can be re-derived with the length: the passage and the search's band are one budget
+     *       (a growth that ignores {@link #SEARCH_BAND_MS} makes the planner refuse pairs it used to
+     *       fuse), and the landing's ceiling is {@code contentStart + removalMs − window}, so a longer
+     *       passage pushes the deck back toward the incoming's own start — the fixture
+     *       {@code theLandingIsTheOneThatPutsTheVoiceWhereTheOutgoingLeft} reads 0 where it read
+     *       4 000, which is round 13's 「不要把小半个歌跳过」 in the opposite direction. This build is
+     *       shipped to be LISTENED to, with its fixture expectations not yet retuned (15 of 48 in
+     *       {@code StemFusionTest} pin the old, fixed length).</li>
      * </ul>
      *
      * <p>The price is one re-render per pair, once, in the pre-lane where there are minutes of
@@ -334,7 +396,7 @@ public final class StemFusion {
      * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
      * name.
      */
-    public static final int RULE_VERSION = 13;
+    public static final int RULE_VERSION = 16;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with
@@ -3004,11 +3066,55 @@ public final class StemFusion {
             shortenedForBand |= !bandHasLine(in, target, cap, holdSteps + lowEndFadeSteps, stepMs,
                     stretch);
         }
-        int steps = slam ? SLAM_STEPS : holdSteps + lowEndFadeSteps;
+        // ⚠️ Round 18: **the passage is as LONG as the pair can afford, not the fixed three or four
+        // steps of the table's own shape.** The user, after listening to a boundary on the device:
+        // 「我认为你只需要让混音段长一点他可能就能自然过渡到下一首歌了，目前感觉是过渡了一半」 — and the
+        // numbers agree with the ear: the edit was a SLAM (`-e4272-j204141-f10778`), i.e.
+        // {@link #SLAM_STEPS} bars of a 112 BPM incoming = 6 506 ms, inside a ramp the listener had set
+        // to 24 000 ms. The passage's length never followed that setting, which is what "only a few
+        // seconds, and it feels half done" is. **这只动长度**: the shape of the recede, the landing's
+        // rules and the deck-level curves are all untouched, and the SLAM keeps its own 80 ms splice
+        // (the user ruled a recede out for it in as many words: 「退场可能导致淡入淡出」).
+        //
+        // <p>What it grows into is not a new number: it is the window this pair ALREADY pays for.
+        // {@link #maxStepsFor} is the same arithmetic the wait and the cost clause use — the smaller
+        // of the separation budget ({@code cap}) and the stretch the incoming's own vocals are held
+        // out for ({@link Input#removalMs}, which the renderer takes from the listener's 过渡时长) —
+        // and until this round it was used only as a CEILING that could shorten the shape. Now it is
+        // the length, with the shape's own steps as the floor.
+        //
+        // <p>⚠️ And it is grown only out of the room the cap has BESIDES the search's own band — see
+        // {@link #SEARCH_BAND_MS}, which is reserved first. A growth that ate the band was measured
+        // and rejected: it narrowed the search onto the outgoing track's own fade and made the
+        // planner refuse a pair it used to fuse (the fixture
+        // {@code aPassageInsideAFadeIsNotUsedIfAnEarlierLineHasBody} went from choosing the earlier
+        // line with body to refusing outright). The two quantities are one budget, so the budget is
+        // asked twice — once for the whole cap, once for the cap with the band reserved — and the
+        // smaller answer is what the passage may be. The one-step-at-a-time test below is still asked
+        // on top, because a band that HAS room can still have no line of A's grid in it.
+        //
+        // <p>⚠️ KNOWN, AND IN THIS BUILD ON PURPOSE: a longer passage raises the floor on the landing
+        // ({@code ceiling = contentStart + removalMs − window}), so on some pairs the deck is pushed
+        // back toward the incoming's own start — the fixture
+        // {@code theLandingIsTheOneThatPutsTheVoiceWhereTheOutgoingLeft} reads 0 where it read 4 000,
+        // which is round 13's 「不要把小半个歌跳过」 in the opposite direction. That trade is the reason
+        // this round is being listened to before it is retuned: the passage's length, the search's
+        // band and the landing's ceiling are three exits of one budget.
+        int roomSteps = Math.min(
+                maxStepsFor(stepMs, stretch, cap, in.removalMs, in.contentStartMs),
+                maxStepsFor(stepMs, stretch, cap - SEARCH_BAND_MS, in.removalMs, in.contentStartMs))
+                + in.extraHoldSteps;
+        int passageSteps = slam ? SLAM_STEPS : holdSteps + lowEndFadeSteps;
+        for (int candidate = passageSteps + 1; candidate <= roomSteps; candidate++) {
+            if (!bandHasLine(in, target, cap, candidate, stepMs, stretch)) break;
+            passageSteps = candidate;
+        }
+        if (!slam) holdSteps = passageSteps - lowEndFadeSteps;
+        int steps = passageSteps;
         // How many steps of the table carry the outgoing's own rows: all of them, for a slam (its
         // one cut is the window's own end) and for a fusion too (its rows reach the floor ON the
         // window's last step, so the material has to last that far).
-        int cutSteps = slam ? SLAM_STEPS : steps;
+        int cutSteps = steps;
         // ⚠️ A SLAM's window is its SLAM_STEPS bars PLUS the splice: every element changes hands on
         // the line at `swapMs`, and the 80 ms splice that de-clicks that hand-over runs from the line
         // to {@code swap + CUT_MS}. When the window ended ON the line (it did until round 6's tenth
@@ -3026,8 +3132,8 @@ public final class StemFusion {
         // construction; at three they can differ by a millisecond, and a window a millisecond short
         // of `swap + CUT_MS` is the sampled defect above, not a rounding detail.
         long windowMs = slam
-                ? Math.max(Math.round(SLAM_STEPS * stepMs + CUT_MS),
-                        (long) SLAM_STEPS * Math.round(stepMs) + CUT_MS)
+                ? Math.max(Math.round(steps * stepMs + CUT_MS),
+                        (long) steps * Math.round(stepMs) + CUT_MS)
                 : Math.round(steps * stepMs);
         // The material the take needs: the rows are cut at `swapMs` (which for a slam is the line
         // that hands over, one splice before the window's own end) plus the splice, in the outgoing's
@@ -3110,7 +3216,7 @@ public final class StemFusion {
         // `sourceSpan` are handed over because the landing's own ceiling and the departure's own
         // reading are both written in them (see `entry`).
         Landing landing = entry(in, junction, stepMs, slam ? 1 : relation.p, windowMs, sourceSpan,
-                stretch, voiceFloorMs(slam ? SLAM_STEPS : holdSteps, slam ? 0 : lowEndFadeSteps,
+                stretch, voiceFloorMs(slam ? steps : holdSteps, slam ? 0 : lowEndFadeSteps,
                         Math.round(stepMs)));
         long entry = landing.entryMs;
         if (entry < 0L) {
@@ -3139,13 +3245,14 @@ public final class StemFusion {
         // keep (rule 3 of round 6: the fade must not dominate). With a one-step hold the rise starts
         // at the entry itself.
         //
-        // ⚠️ A SLAM's hold is {@link #SLAM_STEPS} bars of the incoming's own grid — round 5's one bar
-        // until the listening that set it to three — and it is that count everywhere on this path and
-        // nowhere written out as a literal: `slamHold` below is the one spot the line is computed, and
-        // the arrival, the swap, the bass and the window's own end are all read off it. The window
-        // contains `slamHold + CUT_MS` by construction (see `windowMs`), which is the property the
-        // sampled defect at the end of round 6 bought: the splice's last sample is inside the file.
-        long slamHold = entry + (long) SLAM_STEPS * barStep;
+        // ⚠️ A SLAM's hold is its own passage — {@link #SLAM_STEPS} steps of the incoming's own grid
+        // as a FLOOR (round 18: it grows with the window the pair pays for, see the growth above), and
+        // it is that count everywhere on this path and nowhere written out as a literal: `slamHold`
+        // below is the one spot the line is computed, and the arrival, the swap, the bass and the
+        // window's own end are all read off it. The window contains `slamHold + CUT_MS` by
+        // construction (see `windowMs`), which is the property the sampled defect at the end of round
+        // 6 bought: the splice's last sample is inside the file.
+        long slamHold = entry + (long) steps * barStep;
         long arriveStart = slam ? slamHold
                 : entry + (long) Math.max(0, holdSteps - 1) * barStep;
         long arriveEnd = slam ? slamHold + CUT_MS
