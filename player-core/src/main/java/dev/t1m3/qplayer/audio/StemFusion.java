@@ -421,6 +421,14 @@ public final class StemFusion {
      *       clause is gone and the ask is a melodic hand-over (the first track's tune, then the second's
      *       over it, then only the second's). Kept: no fade-in from quiet and no swell, continuous and
      *       even, instrumental (「过渡里尽量没人声」), and no drum beat of its own.</li>
+     *   <li><b>19 → 20</b> — <b>the model's job is a percussion layer and nothing else.</b> The user's
+     *       requirement: 「现在不让ai生成任何旋律了只打鼓点做背景帮助融合」. Every earlier wording asked for
+     *       music — a pad, a transition, a fusion of the two tunes — and the melodic ones were rejected by
+     *       ear outright; the caption now asks for a steady drum groove as a background under the passage
+     *       and forbids melody, harmony, bass and pads explicitly. The app's own acceptance is what makes
+     *       "steady" part of the requirement rather than a preference: measured on the listener's pair, a
+     *       steady groove took 100.0% occupancy and a "minimal drum backing" 57.7% (refused, "a few hits
+     *       over near-silence"), so the gate is left alone and the wording carries the load.</li>
      * </ul>
      *
      * <p>The price is one re-render per pair, once, in the pre-lane where there are minutes of
@@ -430,7 +438,7 @@ public final class StemFusion {
      * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
      * name.
      */
-    public static final int RULE_VERSION = 19;
+    public static final int RULE_VERSION = 20;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with

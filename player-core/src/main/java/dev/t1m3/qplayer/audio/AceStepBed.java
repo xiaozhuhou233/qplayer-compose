@@ -105,33 +105,32 @@ public final class AceStepBed {
      *  server rejects — and the self-hosted server's own id is namespaced the same way. */
     public static final String MODEL_NAMESPACE = "acemusic/";
 
-    /** The caption — <b>the job description, and the job has changed twice.</b>
+    /** The caption — <b>the job description, and the job has changed three times.</b>
      *
-     *  <p><b>Rounds 18–21 were all spent on the wrong job.</b> They asked the model for a layer that runs
-     *  under the whole passage — a pad first, then a directional transition, then a fusion of the two
-     *  tracks' tunes — and the listener's verdict on that whole line of work is 「算了算了别让他生成歌曲了，
-     *  太狗屎了，还是用当时的本地融合，然后 ai 只负责生成帮助衔接最突兀的那一段的融合」: stop having it
-     *  write songs; the local stem fusion stays exactly as it is, and the model's only job is the stretch
-     *  where that fusion is at its most abrupt.
+     *  <p><b>Rounds 18–22 were wrong jobs.</b> A pad under the passage, then a directional transition, then
+     *  a fusion of the two tracks' tunes, then a seam repair — and the listener's verdict on the melodic
+     *  ones was 「现在不让ai生成任何旋律了只打鼓点做背景帮助融合」: <b>no melody at all</b>, percussion only, as a
+     *  background that helps the fusion. So the ask is a drum layer and nothing else: kick, snare and hats,
+     *  steady and continuous, under the music.
      *
-     *  <p>So the ask is no longer a piece of music at all — it is a <b>continuation</b>, which is what a
-     *  repaint model is best at and what the audio in the buffer already describes. The buffer is short
-     *  (the caller's own context length either side of the seam, not {@link #CONTEXT_MS}), the model hears
-     *  the music immediately before and immediately after the seam, and this sentence asks it to carry
-     *  that music across: same instruments, same energy, one unbroken line, nothing new started. Every
-     *  clause about "no fade-in, no swell" is the negative half of the same request — a patch that rises
-     *  or falls in level is the thing being replaced, not a repair.
+     *  <p>⚠️ <b>"Steady" is not a nicety — the app's own acceptance is what makes it a requirement.</b>
+     *  {@link StemBed#MIN_BED_OCCUPANCY} was written for the material that measured 52.3% occupancy and was
+     *  heard as "a few hits over near-silence, a bit of a cop-out", i.e. a SPARSE take is refused by
+     *  design. Measured on the listener's own pair, four drum-only wordings (same geometry, same run):
+     *  a steady groove measured <b>100.0%</b> occupancy and the plain "holds one tempo" wording 88.5%,
+     *  both accepted; "a minimal drum backing … dry and steady" measured <b>57.7%</b> and was REFUSED with
+     *  that same sentence. So the caption must ask for a groove that runs continuously, and the gate stays
+     *  as it is — the numbers above are why.
      *
-     *  <p>⚠️ Two things this wording CANNOT do, so the next reader does not expect them: it cannot make the
-     *  patch musically right if the model improvises anyway (the take is stochastic; the listener judges,
-     *  and {@code BedFetch} is how several wordings are compared in one sitting), and it says nothing about
-     *  WHERE the seam is — the caller picks that (for a SLAM it is the outgoing's rows' own cut at
-     *  {@code Plan.swapMs}; for a beat-matched fusion there are two candidates, the incoming's arrival and
-     *  the deck-level hand-over). */
+     *  <p>What the request deliberately does NOT carry: any melodic or harmonic content (that is the point
+     *  of this round), any tempo or key of either track (the model has their audio and this sentence), and
+     *  any favouring of one track's beat — the layer holds one tempo of its own, which is what a DJ's
+     *  percussion layer does under a join. */
     public static final String CAPTION =
-            "Continue this audio seamlessly across the gap: the same music, the same instruments, the"
-            + " same energy, one unbroken line — nothing fades in, nothing swells, no silence, and do"
-            + " not start anything new. It should sound as if the recording had never stopped.";
+            "A drum layer and NOTHING else: a steady percussive groove — kick, snare and hi-hat — playing"
+            + " continuously under the music across the join. Percussion only: no melody, no harmony, no"
+            + " chords, no bass line, no pads, no vocals. The groove is even and constant from start to"
+            + " finish, never fades in, never swells, and has no fills or breaks.";
 
     /** ACE-Step's own sentinel for an instrumental take, sent beside
      *  {@code audio_config.instrumental} because they are two different switches. */
