@@ -767,8 +767,21 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
             writer.write(editedForSource);
             headEncodeMs = System.currentTimeMillis() - headEncodeStart;
             long bodyEncodeStart = System.currentTimeMillis();
+            // Ⓜ Round 35: once the passage is written, the rest of the file is a decode of the
+            // incoming track's own body — and the file is keyed by (outgoing track, incoming track,
+            // removal window), none of which the current queue position is part of. So a queue that
+            // moves on while this runs does NOT make the file useless: it is exactly the file that
+            // pair will look for the next time it comes round, and the expensive part (the
+            // separation, the fusion's own render, its acceptance) is already spent.
+            //
+            // <p>The listener paid for this: a fusion that had MEASURED ACCEPTABLE was thrown away at
+            // this line — 「生成 secondhand 的混音用了三分多钟，都播完了」 — because they skipped to
+            // the track it was for, which is a new track start and therefore a new
+            // `precacheGeneration`. The remaining work is seconds of decoding; discarding minutes of
+            // measured material to save it is the wrong trade, so the body is written out from here
+            // whether or not the queue still wants this pair.
             if (!decodeBody(request.sourcePath, editedForSource[0].length, writer,
-                    request.stillWanted, phases)) {
+                    () -> true, phases)) {
                 Logger.info("transition: DJ edit for {} cancelled while writing the body (the"
                         + " queue moved on)", request.title());
                 return null;
@@ -1687,6 +1700,34 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
             // seconds, and a refusal on the first round's own reading). Every remaining retry would
             // re-measure the whole passage to read the same number back, and what the render writes is
             // unaffected — so it stops, and says which clause it stopped on.
+            // Ⓜ Round 35: the wait's levers move ONE clause — the passage's pulse (the bookkeeping
+            // just above is `betterPulse`, which is what "extend the hold" is for). A refusal that is
+            // NOT about the pulse is therefore not something another step of hold can answer, and
+            // every remaining retry would re-measure the whole passage to read the same answer back:
+            // the listener's own pair is the measurement — 「生成 secondhand 的混音用了三分多钟」 — with
+            // four attempts in the device log, every one of them refused on a row-absence reading
+            // (−58.2 then −54.9 dBFS against a −50 floor) that no lever here can lift.
+            //
+            // <p>Read off the report's own verdict rather than a new structured field, so nothing in
+            // StemFusion has to grow an accessor for one caller's loop: the text after
+            // "NOT ACCEPTABLE" IS the clause that failed, and only that part is examined (the pulse's
+            // own reading appears in every report's prose, passing or not).
+            if (!made.report.acceptable) {
+                String verdict = made.report.describe();
+                int at = verdict.indexOf("NOT ACCEPTABLE");
+                String clause = at < 0 ? "" : verdict.substring(at);
+                if (at >= 0 && !clause.contains("pulse")) {
+                    Logger.info("transition: DJ edit for {}: the wait stops after {} step{} — this"
+                                    + " attempt was refused on a clause the hold cannot move ({}),"
+                                    + " and the {} remaining measurement{} of the passage would"
+                                    + " report the same reading back. The render falls back as it did",
+                            request.title(), extra + 1, extra == 0 ? "" : "s",
+                            clause.length() > 240 ? clause.substring(0, 240) + "…" : clause,
+                            StemFusion.FUSION_WAIT_EXTRA_STEPS - extra,
+                            StemFusion.FUSION_WAIT_EXTRA_STEPS - extra == 1 ? "" : "s");
+                    break;
+                }
+            }
             if (stepRefused) {
                 Logger.info("transition: DJ edit for {}: the wait stops after {} step{} — the"
                                 + " fusion's junction step is {} dB against the {} dB clause, and"
