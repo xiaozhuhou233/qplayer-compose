@@ -429,6 +429,16 @@ public final class StemFusion {
      *       "steady" part of the requirement rather than a preference: measured on the listener's pair, a
      *       steady groove took 100.0% occupancy and a "minimal drum backing" 57.7% (refused, "a few hits
      *       over near-silence"), so the gate is left alone and the wording carries the load.</li>
+     *   <li><b>20 → 21</b> — <b>the passage's growth is bounded by the LANDING, and the voice comes back
+     *       the moment the fusion is over.</b> The listener, in one breath: 「融合段可以长一点，尽量用背景音融，
+     *       融完立马接人声不要耽搁」 — and one round earlier 「尽量找到最末尾最开头这种淡入淡出的效果」 (the
+     *       landing must not be pushed to the incoming's own start). The growth now stops at whichever
+     *       comes first, the junction search's band or the landing's own floor: {@code entry} clamps the
+     *       landing to {@code removalMs - windowMs}, so growing the window lowers that ceiling until it
+     *       falls under {@link #ENTRY_WORDS_BARS} bars — which is the fixture that read 0 instead of
+     *       4 000 before this clause. And the vocal gate is clamped to the passage's own end
+     *       ({@code landing + windowMs}), so 「融完立马接人声」 is a property of the arithmetic rather than a
+     *       hope about where the curve snaps.</li>
      * </ul>
      *
      * <p>The price is one re-render per pair, once, in the pre-lane where there are minutes of
@@ -438,7 +448,7 @@ public final class StemFusion {
      * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
      * name.
      */
-    public static final int RULE_VERSION = 20;
+    public static final int RULE_VERSION = 21;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with
@@ -3146,8 +3156,32 @@ public final class StemFusion {
                 maxStepsFor(stepMs, stretch, cap, in.removalMs, in.contentStartMs),
                 maxStepsFor(stepMs, stretch, cap - SEARCH_BAND_MS, in.removalMs, in.contentStartMs))
                 + in.extraHoldSteps;
+        // ⚠️ Round 24: the growth stops at whichever comes FIRST — the search's band (above) or the
+        // landing's own floor (here). The listener's two requirements in one breath: 「融合段可以长一点」
+        // and 「尽量避免找在最末尾最开头这种淡入淡出的效果」 — the passage may be long, but not so long that
+        // the incoming deck has to start inside its own opening bars.
+        //
+        // <p>Why the window is what pushes the landing: {@code entry} clamps the landing to
+        // {@code ceiling = in.removalMs - windowMs}, so every step the passage grows lowers that ceiling
+        // by a step, and once it falls under the floor (a track already singing at the top of its file
+        // must still start {@link #ENTRY_WORDS_BARS} bars in) the deck is dragged to the file's own
+        // start. Measured before this clause: the fixture
+        // {@code theLandingIsTheOneThatPutsTheVoiceWhereTheOutgoingLeft} read a landing of 0 where the
+        // design's answer is 4 000, and the listener heard exactly that as a fade-in. The floor is
+        // recomputed here in {@code entry}'s own terms rather than passed, because the growth runs before
+        // the entry does — the two are the same two numbers.
+        long landingGrid = Math.max(1L, Math.round(stepMs));
+        long landingFloor = Math.max(in.contentStartMs,
+                in.firstVocalMs - in.contentStartMs <= (long) ENTRY_AT_ONCE_BARS * landingGrid
+                        ? in.contentStartMs + (long) ENTRY_WORDS_BARS * landingGrid
+                        : in.contentStartMs);
         int passageSteps = slam ? SLAM_STEPS : holdSteps + lowEndFadeSteps;
         for (int candidate = passageSteps + 1; candidate <= roomSteps; candidate++) {
+            long candidateWindow = slam
+                    ? Math.max(Math.round(candidate * stepMs + CUT_MS),
+                            (long) candidate * Math.round(stepMs) + CUT_MS)
+                    : Math.round(candidate * stepMs);
+            if (in.removalMs - candidateWindow < landingFloor) break;
             if (!bandHasLine(in, target, cap, candidate, stepMs, stretch)) break;
             passageSteps = candidate;
         }
@@ -3688,9 +3722,19 @@ public final class StemFusion {
         // own material. Capped at the window's end, which is the last instant this file's head is
         // separated at (a voice whose own first line is past it is not gated by this file at all and
         // arrives at its own position, by which time the outgoing is long gone either way).
+        //
+        // ⚠️ Round 24, and this is the listener's own sentence: 「融完立马接人声不要耽搁」 — the moment the
+        // fusion is over, the voice comes back, with nothing added on top. The clamp to
+        // {@code landing + windowMs} is what makes that a property of the code rather than a hope: the
+        // passage's end is where the outgoing's own rows have all reached the floor, so it is the last
+        // instant the voice may still be held, and every later one (a bar line the curve might have
+        // snapped to, a margin added after that) would be the delay being complained about. The two
+        // clamps are the same instant by construction for most pairs — {@code goneFile} never exceeds
+        // {@code windowMs} — and saying it here is what keeps it true if either number moves.
         long departureAt = landing + goneFile;
         long voiceAt = Math.max(0L, in.firstVocalMs);
-        long gate = Math.min(Math.max(departureAt, voiceAt), in.removalMs);
+        long gate = Math.min(Math.min(Math.max(departureAt, voiceAt), in.removalMs),
+                landing + windowMs);
         double speed = in.speed > 0d ? in.speed : 1d;
         // The two directions of the same miss, both in the ramp's own wall clock: how much later
         // than the departure the voice is first heard (a gap of no voice — the material is simply
