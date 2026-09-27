@@ -1562,7 +1562,30 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
             Fusion made = fusionWithMakeup(request, headStems, attempt, edit, windowSec, clipped,
                     tail, melodyFor, separateMs, outgoingMaster, bodyDb);
             if (made == null) break;
-            if (!made.report.acceptable && melodyFor
+            // ⚠️ The junction's step is read FIRST, because it is the one clause the two things this
+            // loop can do — extend the hold, drop the melodic carry — provably cannot fix. The step is
+            // the passage's first STEP_WINDOW_MS against the outgoing track's master tail, and the
+            // make-up that lifts the carried rows is already at its cap; extending the hold moves where
+            // the passage ENDS, and dropping the melodic row can only take energy OUT of the passage
+            // (the row is carried at A_OTHER_DB under unity), so a step that has failed gets worse,
+            // never better. Both of the loop's own levers are therefore wasted on it, and so is every
+            // measurement they would each cost.
+            //
+            // The user's pair is the measurement, straight out of the device log: the fusion was
+            // refused with "the junction measured -6.96 dB" against the 3.5 dB clause THREE times,
+            // once per retry, across landings that had moved (the gate read 10424 then 12326 in the
+            // file), each round paying two full measurements of the passage — "the fusion attempt in
+            // all 372616ms" inside "421680ms of render in all", 88% of a seven-minute render, spent
+            // arriving at what the first round had already established.
+            //
+            // What the render WRITES is untouched: every attempt that reaches here is unacceptable,
+            // and the caller's fallback (the bridge, else the plain edit-with-vocal-gate) is what it
+            // takes either way. The only loss is the log line about the melodic carry on a render that
+            // is refused regardless, and `best`/`bestExtra` still point at the attempt the loop
+            // stopped on, so the warning below quotes the same measurement it would have.
+            boolean stepRefused = made.report.stepMeasured
+                    && Math.abs(made.report.junctionStepDb) > StemFusion.JUNCTION_STEP_MAX_DB;
+            if (!made.report.acceptable && melodyFor && !stepRefused
                     && made.report.voiceAlignmentMelody > StemFusion.VOICE_CARRY_LIMIT) {
                 // The melodic carry is the outgoing's voice. Not a reason to abandon the fusion: the
                 // row is dropped, the drums and the low end stay, and the passage is measured again
@@ -1576,6 +1599,11 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 made = fusionWithMakeup(request, headStems, attempt, edit, windowSec, clipped,
                         tail, false, separateMs, outgoingMaster, bodyDb);
                 if (made == null) break;
+                // The re-measure replaced the report, so the step is re-read: dropping the melodic
+                // carry can only take energy out of the passage, so a step that survived WITH the
+                // melody can still have failed without it — and then the loop stops on it too.
+                stepRefused = made.report.stepMeasured
+                        && Math.abs(made.report.junctionStepDb) > StemFusion.JUNCTION_STEP_MAX_DB;
             }
             if (made.report.acceptable) {
                 if (extra > 0) {
@@ -1602,6 +1630,27 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
             if (StemFusion.betterPulse(made.report, best == null ? null : best.report)) {
                 best = made;
                 bestExtra = extra;
+            }
+            // ⚠️ The wait stops the moment it is chasing a clause it CANNOT move (see the note where
+            // `stepRefused` is read above, and the device log's numbers there: 372 of a render's 422
+            // seconds, and a refusal on the first round's own reading). Every remaining retry would
+            // re-measure the whole passage to read the same number back, and what the render writes is
+            // unaffected — so it stops, and says which clause it stopped on.
+            if (stepRefused) {
+                Logger.info("transition: DJ edit for {}: the wait stops after {} step{} — the"
+                                + " fusion's junction step is {} dB against the {} dB clause, and"
+                                + " neither of this loop's two levers raises the level the passage"
+                                + " starts at: extending the hold moves where the passage ENDS, and"
+                                + " dropping the melodic carry only takes energy out. The make-up is"
+                                + " solved per attempt and its lift is capped at {} dB. The remaining"
+                                + " {} measurement{} of the passage would report the same number, and"
+                                + " the fallback is unchanged",
+                        request.title(), extra, extra == 1 ? "" : "s",
+                        String.format(java.util.Locale.US, "%+.2f", made.report.junctionStepDb),
+                        StemFusion.JUNCTION_STEP_MAX_DB, StemFusion.MAKEUP_MAX_DB,
+                        StemFusion.FUSION_WAIT_EXTRA_STEPS - extra,
+                        StemFusion.FUSION_WAIT_EXTRA_STEPS - extra == 1 ? "" : "s");
+                break;
             }
         }
         if (best == null) return null;

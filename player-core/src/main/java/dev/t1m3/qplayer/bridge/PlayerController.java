@@ -1284,12 +1284,19 @@ public final class PlayerController {
      * <b>Whether the strongest mix this app can make for the boundary that is coming is already
      * rendered</b> (round 16) — the tag the playback detail page's hint reads (「最强混音已完成」).
      *
-     * <p>What it means, exactly: the renderer' own completion, i.e. the DJ edit file for the
-     * incoming track and the outgoing that is playing has been written (and would be found by
-     * {@code djEditPath} when the boundary comes). It is deliberately the <em>earlier</em> of the two
-     * possible meanings — the alternative, "the edit is now playing", cannot be a hint because by
-     * then the listener is already listening to it. It is cleared when a render for a new pair is
-     * asked for, so a "done" from the previous boundary can never be read as this one's.
+     * <p>What it means, exactly, and it is the second sense only since round 17: <b>the boundary's
+     * edit is a FUSION</b> — the two backgrounds fused inside one file, which is the strongest thing
+     * this feature produces — and that file is written and would be found by {@code djEditPath} when
+     * the boundary comes. It is deliberately the <em>earlier</em> of the two possible times ("it is
+     * now playing" cannot be a hint, because by then the listener is already hearing it), and
+     * deliberately not "a file was written": the first build of this hint said so, and the user
+     * caught it lying (「passionfruit 显示最强混音制作完成但是根本没有应用」) because a render whose
+     * fusion the acceptance refused still writes the plain edit-with-vocal-gate. An edit that is not
+     * a fusion is not 「最强」, so the hint stays dark for it.
+     *
+     * <p>It is cleared when a render for a new pair is asked for, so a "done" from the previous
+     * boundary can never be read as this one's. A pair whose fusion is refused therefore simply
+     * never lights it — and that is the honest report, because there is no mix to announce.
      */
     public final Property<Boolean> mixReady = new Property<>(false);
     public final Property<String> aiPlaylistName = new Property<>("");
@@ -5301,10 +5308,17 @@ public final class PlayerController {
             // The renderer wrote the file; the cap on how many of them exist is this cache's
             // business, not the renderer's.
             diskCache.evictDjEdits();
-            // Round 16: this is the instant the detail page's 「最强混音已完成」 becomes true — the file
-            // for the boundary that is coming exists. See the property's own note for why the later
-            // meaning ("it is playing") would be useless as a hint.
-            post(() -> mixReady.set(true));
+            // ⚠️ Round 17: the hint is about the STRONGEST mix, and "a file was written" is not that.
+            // A render whose fusion the acceptance refused still writes an edit — the plain
+            // edit-with-vocal-gate — and the first build of this hint lit up for those, which is a
+            // lie the user caught: 「passionfruit 显示最强混音制作完成但是根本没有应用」. That pair's own
+            // log line is why (「the fusion's junction measured -4.19 dB」 against the 3.5 dB clause),
+            // so the property is now the fusion's own answer: no fusion in the file, no hint. The
+            // weaker products (the bridge, the plain gate) are still edits, and they are still what
+            // the boundary plays — they are simply not 「最强」, and the detail page must not say so.
+            if (result.isFusion()) {
+                post(() -> mixReady.set(true));
+            }
             Logger.info("transition: the DJ edit for {} is ready at {} — {}", t.title, result.path,
                     result.note.isEmpty() ? "no bridge in it" : result.note);
             if (result.isFusion()) {

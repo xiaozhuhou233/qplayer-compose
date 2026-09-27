@@ -4006,6 +4006,61 @@ player-core **315 跑 1 失败**，唯一失败仍是既有的
 `transition: DJ edit for …` 的开头那几行 + `VERDICT` / acceptance 的 `bad.append` 结果，
 以及 `no fusion — …` 这句里的拒绝理由。**不要再靠推理改。**
 
+### 第 17 轮（2026-09-27）：**只提速 —— 融合的重试在"交界落差"这条判据上提前停**
+
+用户：「我认为最强混音的生成太慢了，不信你看日志」，随后明确「只提高速度……you know2 全程没出现提示也没有混音，
+都要给混音」。**设备连着，所以是实测的，不是推测**（`adb logcat -d -s musicplayer`，
+`D:\qplayer-dev\logs\logcat-0927-1428.txt`）。
+
+**渲染器自己的账目（一次 `you know 2(Phonk)` 的 DJ 编辑）**：
+
+```
+head decode 645, model+head separation 32451, probe decode 3365, tail separation 36487,
+the fusion attempt in all 372616 (junction search + the wait's retries),
+the bridge's tail separation 9377, head encode 1103, body decode+encode 5054,
+the cloud bed's own wait 0  →  421680ms of render in all
+```
+
+**88% 在那句 "the fusion attempt in all"（372.6 秒）**，而这一段里 **`fusion measured` 出现了 7 次**
+（重试循环 `FUSION_WAIT_EXTRA_STEPS = 2` → 3 轮，**每轮两次测量**：正常一次 + "旋律行就是出曲人声"后去掉它重测一次）。
+日志时间戳给出**单次测量 ≈ 25 秒**（`与我无关` 同一份渲染里两次读数相隔 25 秒）。
+
+**关键是这七次全是白跑的**：三次读数一模一样 —— `the fusion's junction measured -6.96 dB`，而判据是
+`JUNCTION_STEP_MAX_DB = 3.5`。而重试循环的两个手段（**延长 hold**、**去掉旋律行**）**都动不了这个数**：
+hold 只改段落的**结尾**，旋律行只会**减少**能量，而落差是"段落开头 500ms 对出曲 master 尾段"的**电平**比较，
+它的补丁（make-up）是每次尝试单独解出来的、且有 8 dB 上限。所以 → **改了**：
+[`AndroidStemEditRenderer.java`](/C:/Users/xiaoz/Desktop/SkidTime/qplayer/android-shell/app/src/main/java/dev/t1m3/qplayer/android/stem/AndroidStemEditRenderer.java)
+的重试循环里，**先读落差这条判据**（`stepRefused`），失败就**立刻 break 并打一行说明**，同时**跳过那次注定无效的
+旋律行重测**。这块记录里 7 次测量 → 1 次，约省 **150 秒**（7 分钟 → 约 4.5 分钟）。
+
+⚠️ **产出文件逐字节不变**：走到 break 的每一次尝试都是 `!acceptable`，而循环后面两条路都 `return null`
+（`best == null` 时静默返回，否则打一条 warn 再返回），调用方的回落（bridge，否则带人声门的普通编辑）**完全一样**；
+差别只有"引用哪一次尝试的数字"，`best`/`bestExtra` 已经指向停下的那一次。落差**通过**的对子（如 `与我无关` −2.27）
+行为完全不变（提前停只在 `stepRefused` 时触发）。
+
+**同一份日志里的另外两个事实，都还没动**：
+
+1. **单次测量 ≈ 25 秒**，7 次就是整个渲染的大头。要再快就得攻这里（测量路径里 `gated`/`carried` 每个采样、
+   每行、每声道都算一次增益并**物化一整块 float 数组**，一次测量约 58 MB 垃圾 → 手机上大概率是 GC 在吃时间）。
+   **没有动它：先用 PC 侧的 harness 量出热点再改**（别再凭推理优化）。
+2. **同一次落差被读两次**（`与我无关` 14:35:41 与 14:36:06 相隔 25 秒，数值相同）——那是"旋律行重测"，
+   不是重复渲染；但 `Fortnight` 在 14:27:52 "no DJ edit" 之后 1.3 秒**又整体渲染了一遍**，那条重复是真的，还没查。
+
+**⭐ 同一轮里还有第二件事，是用户当场抓到的**：「passionfruit 显示最强混音制作完成但是根本没有应用」。
+`mixReady`（第 16 轮那半）原来的语义是"**有个 DJ 编辑文件写好了**"，而**融合被验收拒掉的对子照样会写出一个普通编辑**
+（带人声门的那个）→ 提示点亮，可文件里根本没有混音。**日志里 Passionfruit 那行正是原因**：
+`the fusion's junction measured -4.19 dB`（> 3.5 就被拒）。所以改成 **`result.isFusion()` 才点亮**
+（`PlayerController` 里一行 if），`mixReady` 的 doc 也改写成"**最强**（= 融合）已经就绪"。
+→ 对被拒的对子，提示**从此不亮**——那才是诚实的报告，因为确实没有混音可报。
+⚠️ 这个语义**没有单元测试**（`requestStemEdit` 走的是 worker 线程 + 需要磁盘上的音频，现有 `FakeStemEditRenderer`
+只会返回 null）；要验证就看日志里有没有 "is ready at … -e…-j…-f…" 那种带锚点的文件名 + 提示是否同时亮。
+
+**"都要给混音"这条这一轮没有做到，而且不是速度问题**：同一份日志里四个对子的落差读数分别是
+**Fortnight −0.46 ✓ / 与我无关 −2.27 ✓ / Passionfruit −4.19 ✗ / you know 2(Phonk) −6.96 ✗**。
+**落差不过就是融合被拒**，于是这两对永远拿不到混音——它们的出曲尾段里**人声本身就是 4–7 dB 的能量**，
+而融合按设计把出曲人声去掉，所以它**坐不回出曲的电平**。速度再快也变不出混音；要让它们也有混音，得动那条判据
+（放宽落差 / 短暂携带出曲人声 / 换落点），**那是改音色的事，要升版本、并且要用耳朵定**——留给下一轮，等用户选。
+
 ## 九、音频焦点：自动暂停 / 自动恢复（2026-09-21 修复，装机验证）
 
 **用户诉求**：别的 App（B站、别的视频软件、别的音乐）开始放 → qplayer 自动暂停；那个 App 停了/暂停了
