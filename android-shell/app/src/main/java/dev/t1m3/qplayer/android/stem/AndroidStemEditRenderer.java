@@ -1772,7 +1772,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                         request.speed, melody),
                 plan, melody, StemModel.MODEL_RATE);
         Fusion first = renderFusion(request, headStems, plan, gate, windowSec, clipped, tail,
-                melody, separateMs, outgoingMaster, 0d, bodyDb, carriedRows);
+                melody, separateMs, outgoingMaster, 0d, bodyDb, carriedRows, true);
         double makeup = StemFusion.makeupDb(
                 first.report.stepMeasured ? first.report.junctionStepDb : Double.NaN);
         if (!(makeup > 0d)) {
@@ -1788,10 +1788,16 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                         request.title(), StemFusion.STEP_WINDOW_MS,
                         fmtDb(first.report.junctionStepDb), StemFusion.STEP_WINDOW_MS);
             }
-            return first;
+            // Ⓜ Round 33: the probe's report stops at the step, so this branch has to render once
+            // more to get the report the acceptance reads. It costs the head's own render (1.3–1.9 s
+            // measured) and NOT a second measurement of the same passage: the probe already skipped
+            // the 18–25 s of it, which is the trade this round makes — a pair that needs no make-up
+            // pays ~2 s, a pair that needs one saves ~20 s.
+            return renderFusion(request, headStems, plan, gate, windowSec, clipped, tail,
+                    melody, separateMs, outgoingMaster, 0d, bodyDb, carriedRows, false);
         }
         Fusion lifted = renderFusion(request, headStems, plan, gate, windowSec, clipped, tail,
-                melody, separateMs, outgoingMaster, makeup, bodyDb, carriedRows);
+                melody, separateMs, outgoingMaster, makeup, bodyDb, carriedRows, false);
         Logger.info("transition: DJ edit for {}: the fusion's junction measured {} dB against the"
                         + " outgoing track's own last {}ms — the voice the fusion removes was that"
                         + " much of the energy — so the outgoing's carried rows are lifted {} dB"
@@ -1891,7 +1897,8 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
     private Fusion renderFusion(Request request, float[][][] headStems, StemFusion.Plan plan,
                                 DjEdit.Plan edit, double windowSec, int[] clipped, Tail tail,
                                 boolean melody, long separateMs, float[][] outgoingMaster,
-                                double makeupDb, double bodyDb, float[][][] carriedRows) {
+                                double makeupDb, double bodyDb, float[][][] carriedRows,
+                                boolean stepOnly) {
         // Ⓜ Round 31: where this call's own time goes, because the only way to cut the fusion's
         // cost is to know WHICH half of it to cut. `attemptFusion` renders the passage twice — once
         // at make-up 0 to learn the junction's step, once with the solved make-up, whose report is
@@ -1944,17 +1951,19 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                             StemFusion.STEP_WINDOW_MS / 1000d)), fmtDb(bodyDb),
                     (int) StemFusion.QUIET_PASSAGE_DB, fmtDb(reference));
         }
-        StemFusion.Report report = StemFusion.measure(plan, edit,
-                new StemFusion.Material(rate, frames, request.speed, makeupDb, carried, source,
-                        incoming, incomingVocals,
-                        copyOf(tail.stems[StemGesture.Stem.VOCALS.row()], takeFrame, spanFrames),
-                        head, outgoingMaster, reference,
-                        // Round 25: the voice clause is judged over the stretch this file's own gate
-                        // holds the incoming's voice at exactly zero — the coupling's instant less the
-                        // return ramp — because the voice comes back AT the departure by design.
-                        Math.max(0L, plan.coupling.voiceGateMs - DjEdit.RETURN_RAMP_MS
-                                - plan.entryMs)),
-                melody, request.outgoingBeatPeriodMs / 1000d, request.beatPeriodMs / 1000d, guard);
+        StemFusion.Material material = new StemFusion.Material(rate, frames, request.speed, makeupDb,
+                carried, source, incoming, incomingVocals,
+                copyOf(tail.stems[StemGesture.Stem.VOCALS.row()], takeFrame, spanFrames),
+                head, outgoingMaster, reference,
+                // Round 25: the voice clause is judged over the stretch this file's own gate
+                // holds the incoming's voice at exactly zero — the coupling's instant less the
+                // return ramp — because the voice comes back AT the departure by design.
+                Math.max(0L, plan.coupling.voiceGateMs - DjEdit.RETURN_RAMP_MS - plan.entryMs));
+        // Ⓜ Round 33: on the probe pass the report stops after the step, which is the only number
+        // this call exists for — see StemFusion.Material's own note.
+        material.stepOnly = stepOnly;
+        StemFusion.Report report = StemFusion.measure(plan, edit, material, melody,
+                request.outgoingBeatPeriodMs / 1000d, request.beatPeriodMs / 1000d, guard);
         Logger.info("transition: DJ edit for {} — {}", request.title(), report.describe());
         Logger.info("transition: DJ edit for {}: one fusion render, make-up {} dB — the carried"
                         + " rows' assembly {}ms, the head's own render {}ms, the report {}ms"

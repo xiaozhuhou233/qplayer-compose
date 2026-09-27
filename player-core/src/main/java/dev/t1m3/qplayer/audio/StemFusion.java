@@ -4265,6 +4265,18 @@ public final class StemFusion {
      *  was taken from. Every array is over the fusion window ({@link Material#frames} samples at
      *  {@link Material#rate}) unless its own note says otherwise. */
     public static final class Material {
+        /** Ⓜ Round 33: this material was built only to solve the make-up gain, so its report stops
+         *  after the junction's step — see {@link #measure}. Set by the renderer on the probe pass
+         *  and false everywhere else, so every other caller and every fixture measures exactly what
+         *  it always measured.
+         *
+         *  <p>Why it is worth a flag: the device's own timing line put the report at 18–25 s of a
+         *  20–24 s render (the carried rows' assembly 0 ms, the head's own render 1.3–1.9 s), and
+         *  {@code attemptFusion} renders the passage TWICE per attempt — once at make-up 0 only to
+         *  learn the step, then with the solved make-up whose report the acceptance reads. On the
+         *  probe pass the other twenty-odd measurements exist to be thrown away. */
+        public boolean stepOnly;
+
         public final int rate;
         /** The fusion window's length, samples. */
         public final int frames;
@@ -4647,6 +4659,12 @@ public final class StemFusion {
             r.junctionStepDb = r.fusionHeadDb - r.referenceDb;
             r.stepMeasured = true;
         }
+        // Ⓜ Round 33: the probe pass stops here. Everything below measures the passage the make-up
+        // is applied to — the carried rows' levels, the voices, the pulse, the fade — and on this
+        // pass none of it can change the one number the caller wants ({@link #junctionStepDb}, and
+        // through it {@link #makeupDb}), because the step is read off {@code m.head} and
+        // {@code m.outgoingMaster} alone. The whole of the probe's cost was below this line.
+        if (m.stepOnly) return r;
 
         // The voice question is asked over the part of the window where the row is audible: a row
         // that is silent for the second half of the passage would otherwise "align" less with the
