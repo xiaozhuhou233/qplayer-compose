@@ -4187,32 +4187,37 @@ do not start anything new. It should sound as if the recording had never stopped
 **落点机制本身没动**（还是"耦合 + band 内按 groove/安静/body 偏好选线"），动的是它可用的空间。
 若要连长度也回到以前（3 小节 SLAM / 4 小节融合），说一声就退——代价是又一次全量重渲。
 
-### 第 24 轮（2026-09-27）：**段落可以长，但生长到会顶掉落点就停；人声融完立刻回来**
+### 第 24 轮（2026-09-27）：**段落"可以长"，但生长到会顶掉落点就停；人声融完立刻回来**
 
 用户两句话（是一对）：「本地融合落点自己找，尽量避免找在最末尾最开头这种淡入淡出的效果，落点之间的段落融合并慢慢从
 a 过渡到 b」+「**融合段可以长一点**，尽量用背景音融，**融完立马接人声不要耽搁**」。
-（这一轮开头我本想按前一句退掉第 18 轮的长度生长，**脚本没跑成、Java 文件没被改**，正好后一句把它留住了。）
+（这一轮开头我本想按前一句退掉第 18 轮的长度生长，**脚本没跑成、Java 文件一个字节没被改**，正好后一句把它留住了。）
 
-**改了两处（都在 /）**：
-1. **生长多了一个刹车：落点的下限**。 把落点夹在 ，所以段落每长一步、
-   上限就低一步；低到已经开口唱的歌也必须跳过的两小节以下，deck 就被拖到入曲第一个采样 —— 就是找在最开头。
-   现在生长到**刚好压到这个下限就停**（，在生长循环里按  的同一套算）。**实测：**
-    从 **0 回到 4000** ✓（它已不在失败列表里）。
-2. **人声门夹在融合段结束那一刻**（）：段落结束正是出曲各层全部落到地板的时候，
-   所以那是人声**最晚**该回来的时刻；之后再拖（吸附到下一小节线、再加余量）就是用户听到的耽搁。
-   （两条夹子在多数对子上本来就是同一个瞬间—— 不超过 ——写出来是为了让另一条数一动就看得见。）
+**改了两处（都在 `StemFusion` 的 `plan` / `entry` 里）**：
 
- **20 → 21**。⚠️ **欠账**： 里那 15 个钉着短段落的旧期望仍红（长度不再是常量），
-**故意没在这一轮顺手改**——逐条重推语义才是正确做法，急改正是上次 RULE 14 把回归藏起来的路子。
-清单（都是同一个原因，长度/落点/到达时刻跟着变）：（窗口 8000→12000、hold 4000→8000、
-searchBand 960→2960）、、、
-、、
-、、
-、、
-（名字与 doc 都要改：3 小节已不是长度而是下限）、
-、（落点到下限 4000），
-plus 两条语义型：（20 秒上限后成本条款不再拒那一对）、
-（两个上限现在同值，那句断言要重写）。
+1. **生长多了一个刹车：落点的下限。** `entry` 把落点夹在 `ceiling = removalMs − windowMs`，所以段落每长一步、这个上限
+   就低一步；低到"已经开口唱的歌也必须跳过的两小节"以下，deck 就被拖到入曲**第一个采样**——正是"找在最开头"的那种
+   淡入淡出感。现在生长到**刚好压到这个下限就停**（`landingFloor`，在生长循环里按 `entry` 的同一套算出来）。
+   **实测**：`theLandingIsTheOneThatPutsTheVoiceWhereTheOutgoingLeft` 从 **0 回到 4000** ✓（已不在失败列表里）。
+2. **人声门夹在融合段结束那一刻**：`gate = min(gate, landing + windowMs)`。段落结束正是出曲各层全部落到地板的时候，
+   所以那是人声**最晚**该回来的时刻；之后再拖（吸附到下一条小节线、再加一段余量）就是用户听到的"耽搁"。
+   两条夹子在多数对子上本来就是同一个瞬间（`goneFile` 不超过 `windowMs`），写出来是为了让其中任一条数一动就看得见。
+
+`RULE_VERSION` **20 → 21**。
+
+⚠️ **欠账（故意没在这一轮顺手改）**：`StemFusionTest` 里那 15 个"钉着短段落"的旧期望仍红——长度不再是常量了。
+逐条重新推导语义才是正确做法，**批量改数字正是上次 RULE 14 把回归藏起来的路子**。清单：
+
+- 长度/落点/到达时刻跟着变的：`theAnchorsAreWhereTheSpecPutsThem`（窗口 8 000→12 000、hold 4 000→8 000、
+  searchBand 960→2 960）、`theOutgoingRecedesAndTheIncomingRises`、`theIncomingBedFadesInOverItsFirstBar`、
+  `theIncomingSidesLinesArePinnedForThePlacementChange`、`aLedVoiceOnAPassageThatNeverFallsIsBoundedByTheFilesOwnGesture`、
+  `aVoiceAlreadySingingWhenTheDepartureComesIsHeldAndNotStacked`、`aVoiceInTheFirstSampleIsHeldUntilTheDeparture`、
+  `aLandingBeforeTheGridIsThePlainEntryAndNotAStartOffTheBar`、`aCarryThatEndsBeforeItsOwnLastCutIsCaught`、
+  `aSlamHoldsForThreeBars`（**名字与 doc 都要改**：3 小节已经从"长度"变成"下限"）、
+  `theArrivalMeasuredOnTheProbeIsTheLandingTheListenerChose`、`aVoiceTheWindowCannotBringForwardLeavesAGapThePlanReports`
+  （落点被夹到下限 4 000）。
+- 两条语义型的：`everyValidityClauseRefusesTheFusionOnItsOwn`（上限到 20 秒后，成本条款不再拒那一对）、
+  `theFourRealPairsVerdicts`（两个上限现在同值，"which is over the unison cap" 那句要重写）。
 
 ## 九、音频焦点：自动暂停 / 自动恢复（2026-09-21 修复，装机验证）
 
