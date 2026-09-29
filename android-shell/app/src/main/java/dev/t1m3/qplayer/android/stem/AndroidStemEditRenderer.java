@@ -123,6 +123,15 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
      *  re-encode). */
     private static final long MIN_EDIT_BYTES = 100_000L;
 
+    /** Ⓜ Round 37: how many junction candidates the search band's best lines are rendered and
+     *  scored as fast fusions, before the full report is spent on the winner — the listener's own
+     *  instruction (「重新寻找最佳落点，多取几个进行本地快速融合，融合出来进行评分，取不同融合中的最高分应用」).
+     *  The first is the answer the single-candidate search always gave, so 1 is exactly the old
+     *  behaviour; each extra candidate costs one fast render (~3 s measured on the device) and its
+     *  score, and none of them can change what the acceptance judges — it still measures the
+     *  passage that gets written. */
+    private static final int FUSION_CANDIDATES = 3;
+
     /** How long one render may hold the partial wake lock, ms. A belt rather than the
      *  mechanism: a render is minutes (the longest measured on the reference device is
      *  about three, and the model itself is capped at 40 s per separation), so half an
@@ -1567,18 +1576,86 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         // this does not touch) and the separated tail stays exactly the material the passage needs.
         StemFusion.OutgoingExit exit = StemFusion.exitOf(tail.stems, StemModel.MODEL_RATE,
                 tail.startMs);
-        StemFusion.Plan coupled = StemFusion.plan(new StemFusion.Input(aDurMs, request.blendMs,
+        StemFusion.Input couplingInput = new StemFusion.Input(aDurMs, request.blendMs,
                 request.removalMs, request.incomingContentStartMs, aBeatMs,
                 request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
                 headBarsMs, quiet, groove, body, firstVocalMs, incomingOn, 0, exit,
-                incomingGrooveOf(headStems)));
-        if (!coupled.valid) {
+                incomingGrooveOf(headStems));
+        // Ⓜ Round 37, and it is the listener's own instruction verbatim: 「重新寻找最佳落点，多取几个
+        // 进行本地快速融合，融合出来进行评分，取不同融合中的最高分应用」. The search band is the same
+        // band the single-junction search always had — the separation already covers every line in
+        // it, which is what the band's reservation inside the cost cap pays for — so each candidate
+        // is a full plan of the SAME material, rendered here as a FAST fusion (make-up 0, a report
+        // that stops at the junction's step: ~3 s measured, against ~20 s for a full one) and scored
+        // on the two clauses that decide a fusion's fate — the level hand-over at the junction, and
+        // whether the incoming's own rows arrive under the table at all (the clause that refused the
+        // listener's Shape of You pair four times in one render, every refusal identical). The
+        // winner is the only candidate the full report is spent on, and the acceptance below still
+        // judges what gets written exactly as it always did.
+        plan = null;                       // the winner, set by the search below
+        boolean melody = true;
+        int winnerIndex = 0;
+        double winnerScore = Double.MAX_VALUE;
+        String firstInvalidReason = null;
+        int offered = 0;
+        int scored = 0;
+        for (int candidate = 0; candidate < FUSION_CANDIDATES; candidate++) {
+            StemFusion.Plan p = StemFusion.plan(couplingInput, candidate);
+            if (p == null || !p.valid) {
+                if (firstInvalidReason == null) firstInvalidReason = p == null
+                        ? "the junction search offered no candidate" : p.reason;
+                continue;
+            }
+            offered++;
+            float[][] masterHere = masterBefore(decoded, format.rate, probeStart[0], p.junctionMs);
+            if (masterHere == null) {
+                Logger.info("transition: DJ edit for {}: junction candidate {} at {}ms is skipped"
+                                + " — its master tail is not inside the {}ms of the file this render"
+                                + " decoded from {}ms",
+                        request.title(), candidate, p.junctionMs, probe[1], probe[0]);
+                continue;
+            }
+            boolean melodyHere = !melodyIsTheVoice(tail, p);
+            DjEdit.Plan gateHere = gateFor(p, edit);
+            float[][][] carriedRows = StemFusion.gate(
+                    StemFusion.carry(tail.stems, StemModel.MODEL_RATE, tail.startMs, p,
+                            request.speed, melodyHere),
+                    p, melodyHere, StemModel.MODEL_RATE);
+            Fusion fast = renderFusion(request, headStems, p, gateHere, windowSec, clipped, tail,
+                    melodyHere, separateMs, masterHere, 0d, bodyDb, carriedRows, true);
+            double score = candidateScore(p, edit, fast == null ? null : fast.report, headStems);
+            Logger.info("transition: DJ edit for {}: junction candidate {} of the band — {}ms,"
+                            + " its fast fusion scores {} (the step is {} dB, the clause allows"
+                            + " {})",
+                    request.title(), candidate, p.junctionMs,
+                    score == Double.MAX_VALUE ? "not at all"
+                            : String.format(java.util.Locale.US, "%.2f", score),
+                    fast != null && fast.report.stepMeasured
+                            ? fmtDb(fast.report.junctionStepDb) : "not measurable",
+                    fmtDb(StemFusion.JUNCTION_STEP_MAX_DB));
+            fast = null;
+            carriedRows = null;
+            if (score < Double.MAX_VALUE) scored++;
+            if (score < winnerScore) {
+                winnerScore = score;
+                plan = p;
+                melody = melodyHere;
+                winnerIndex = candidate;
+            }
+        }
+        if (plan == null) {
             refusedWhy[0] = WHY_PLAN;
-            Logger.info("transition: DJ edit for {}: no fusion — the coupling could not place the"
-                    + " landing on the separated material ({}). The render is today's edit",
-                    request.title(), coupled.reason);
+            Logger.info("transition: DJ edit for {}: no fusion — {}. The render is today's edit",
+                    request.title(), firstInvalidReason != null ? firstInvalidReason
+                            : "none of the junction candidates could be measured");
             return null;
         }
+        Logger.info("transition: DJ edit for {}: the junction search offered {} candidate(s) in"
+                        + " its band, {} of them were rendered as fast fusions and scored — applying"
+                        + " the best, junction candidate {} at {}ms of the outgoing's file{}",
+                request.title(), offered, scored, winnerIndex, plan.junctionMs,
+                winnerIndex > 0 ? " — NOT the search's first answer, whose fusion scored worse"
+                        : "");
         // ⚠️ Round 30: the gate is the coupling's instant still — one measured number, and the
         // landing is written around it — led by one bar of the outgoing's grid and floored by the
         // file's own gesture (see StemFusion.VOICE_GATE_LEAD_BARS / voiceFloorMs). The coupling's
@@ -1588,14 +1665,11 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                         + " led by the outgoing's grid and floored by the file's own gesture —"
                         + " {}. The incoming's voice is back at unity by {}ms of its file, and the"
                         + " deck starts at {}ms of it{}",
-                request.title(), coupled.coupling.describe(coupled.entryMs, firstVocalMs,
-                        request.removalMs, coupled.windowMs),
-                coupled.coupling.voiceGateMs, coupled.entryMs,
-                coupled.coupling.heldMs > 0L ? " (it is HELD there: see the coupling's own line)"
+                request.title(), plan.coupling.describe(plan.entryMs, firstVocalMs,
+                        request.removalMs, plan.windowMs),
+                plan.coupling.voiceGateMs, plan.entryMs,
+                plan.coupling.heldMs > 0L ? " (it is HELD there: see the coupling's own line)"
                         : "");
-        plan = coupled;
-
-        boolean melody = !melodyIsTheVoice(tail, plan);
         if (!melody) {
             Logger.info("transition: DJ edit for {}: the outgoing's melodic row over this passage"
                             + " measures as its VOICE, so it is not carried at all — the fusion is"
@@ -1630,7 +1704,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         for (int extra = 0; extra <= StemFusion.FUSION_WAIT_EXTRA_STEPS; extra++) {
             StemFusion.Plan attempt = extra == 0 ? plan
                     : extendHold(request, extra, headStems, body, firstVocalMs, incomingOn, aBeatMs,
-                            bBeatMs, aBars, headBarsMs, aDurMs, quiet, groove, exit);
+                            bBeatMs, aBars, headBarsMs, aDurMs, quiet, groove, exit, winnerIndex);
             if (attempt == null) break;
             Fusion made = fusionWithMakeup(request, headStems, attempt, edit, windowSec, clipped,
                     tail, melodyFor, separateMs, outgoingMaster, bodyDb);
@@ -1800,9 +1874,7 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
         // the passage, and the incoming's voice is back at unity by then — the same number the
         // landing was placed around (see StemFusion.entry). The window's own plan stays the answer
         // for a plan that has no coupling measurement, and `edit` is the window's plan.
-        DjEdit.Plan gate = plan.coupling.voiceGateMs > 0L
-                ? DjEdit.planAt(plan.coupling.voiceGateMs / 1000d, false)
-                : edit;
+        DjEdit.Plan gate = gateFor(plan, edit);
         if (plan.coupling.voiceGateMs > 0L && plan.coupling.voiceGateMs < request.removalMs) {
             Logger.info("transition: DJ edit for {}: the fusion's own vocal gate is the coupling's"
                             + " instant, not the window's end — the incoming's voice is back at"
@@ -1888,12 +1960,15 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                                               double aBeatMs, double bBeatMs, double[] aBars,
                                               double[] headBarsMs, long aDurMs,
                                               StemFusion.VocalQuiet quiet, StemFusion.Groove groove,
-                                              StemFusion.OutgoingExit exit) {
+                                              StemFusion.OutgoingExit exit, int candidateIndex) {
+        // Ⓜ Round 37: the candidateIndex of the junction the render APPLIED — the wait extends
+        // THAT candidate's hold, not the band's first answer, or an extension would silently move
+        // the junction back (see StemFusion.plan(Input, int)).
         StemFusion.Plan attempt = StemFusion.plan(new StemFusion.Input(aDurMs, request.blendMs,
                 request.removalMs, request.incomingContentStartMs, aBeatMs,
                 request.outgoingBeatPhaseMs, bBeatMs, request.beatPhaseMs, request.speed, aBars,
                 headBarsMs, quiet, groove, body, firstVocalMs, incomingOn, extra, exit,
-                incomingGrooveOf(headStems)));
+                incomingGrooveOf(headStems)), candidateIndex);
         return attempt != null && attempt.valid ? attempt : null;
     }
 
@@ -2071,6 +2146,61 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                 tail.stems[StemGesture.Stem.VOCALS.row()], StemModel.MODEL_RATE,
                 plan.sourceFromMs - tail.startMs, plan.sourceSpanMs);
         return alignment > StemFusion.VOICE_CARRY_LIMIT;
+    }
+
+    /** The vocal gate a fusion's head is rendered with: the coupling's own instant when the plan
+     *  measured one, else the window's plan. {@code fusionWithMakeup} logs the name of the one it
+     *  took; the candidate loop (round 37) uses this silently, once per candidate. */
+    private static DjEdit.Plan gateFor(StemFusion.Plan plan, DjEdit.Plan windowPlan) {
+        return plan.coupling.voiceGateMs > 0L
+                ? DjEdit.planAt(plan.coupling.voiceGateMs / 1000d, false)
+                : windowPlan;
+    }
+
+    /**
+     * A candidate fusion's score, from its fast (step-only) render — lower wins.
+     *
+     * <p>Two clauses decide a fusion's fate before the full report is ever spent, and this reads
+     * both the way the report does:
+     * <ul>
+     *   <li>the <b>junction's step</b> — how far the fusion's first {@link
+     *       StemFusion#STEP_WINDOW_MS} sits from the outgoing master's last, dB. Zero is a perfect
+     *       hand-over; the clause allows ±{@link StemFusion#JUNCTION_STEP_MAX_DB}. The score is the
+     *       absolute distance, so a candidate that sits exactly at the listener's level beats one
+     *       that needs the make-up to get there;</li>
+     *   <li>whether the incoming's own <b>rows arrive</b> under the table — measured on the same
+     *       gated material, over the same [arrival, window-end] span the acceptance's "never
+     *       arrive" clauses read, against the same {@link StemFusion#SILENT_DBFS} floor. A row that
+     *       never arrives is a fusion the acceptance will refuse (the listener's Shape of You pair
+     *       was refused on exactly this four times in one render), so each silent row costs 100 —
+     *       enough that no plausible step could win it back.</li>
+     * </ul>
+     *
+     * <p>It is a scorer, not a second acceptance: it cannot pass anything the acceptance would
+     * refuse, it only decides WHICH passage the acceptance is asked to judge. {@link
+     * Double#MAX_VALUE} for anything unmeasurable.
+     */
+    private double candidateScore(StemFusion.Plan plan, DjEdit.Plan edit, StemFusion.Report probe,
+                                  float[][][] headStems) {
+        int rate = StemModel.MODEL_RATE;
+        if (plan == null || !plan.valid || probe == null || !probe.stepMeasured) {
+            return Double.MAX_VALUE;
+        }
+        double score = Math.abs(probe.junctionStepDb);
+        int frames = (int) Math.round(plan.windowMs * (double) rate / 1000d);
+        int from = (int) Math.round(Math.max(0L, plan.arriveEndMs - plan.entryMs) * rate / 1000d);
+        int to = (int) Math.round(Math.max(0L,
+                Math.min(plan.fusionEndMs, plan.entryMs + plan.windowMs) - plan.entryMs)
+                * rate / 1000d);
+        if (to <= from) return Double.MAX_VALUE;
+        for (StemGesture.Stem stem : new StemGesture.Stem[] {
+                StemGesture.Stem.DRUMS, StemGesture.Stem.BASS}) {
+            float[][] row = StemFusion.gatedIncomingRow(headStems, stem, plan, edit, rate, frames);
+            float[][] slice = copyOf(row, from, to - from);
+            double db = StemFusion.levelOf(slice, rate, (to - from) / (double) rate);
+            if (Double.isNaN(db) || !(db > StemFusion.SILENT_DBFS)) score += 100d;
+        }
+        return score;
     }
 
     /** A beat grid for a log line, or "none measured". */

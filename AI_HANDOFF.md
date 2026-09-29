@@ -4538,6 +4538,39 @@ SLAM **不该**点亮提示（这一条不用改，写在这里免得下次又�
 
 **发布**：tag `ai-dj-transition-2026-09-28a`，192,502,203 bytes，sha256 `3b187209…`。
 
+### 第 37 轮（2026-09-29）：**落点选择重做——搜索整条候选带，每个候选快速融合并评分，取最高分应用**
+
+用户原话：「请重新编写本地过渡筛选算法：重新寻找最佳落点，**多取几个进行本地快速融合，融合出来进行评分，取不同融合中的
+最高分应用**」。
+
+**规划器（`StemFusion`）**：
+- `nearestBar` 重构为 `nearestBars`（返回按既有偏好排序的**整条候选带**：出曲还在响 > 有 groove > 安静一拍 > 最近；
+  同分取近）。`nearestBar` = 第 0 个，行为逐位不变。
+- 新入口 `plan(Input, int candidateIndex)`；`plan(Input)` 委托 index 0。index 超出带长时拒（拒绝文本带
+  "the band held N candidates; candidate K was asked for"，渲染器据此停止循环）。
+- 公开 `gatedIncomingRow(...)`（包内 `gated` 的出口）：门后的入曲行，与验收的 "never arrive" 两句量的是**同一份材料**。
+- `RULE_VERSION` **24 → 25**（渲染器现在可能选非第 0 候选 ⇒ 写出的文件会变；同时补了缺失的 23→24 条目）。
+
+**渲染器（`AndroidStemEditRenderer.attemptFusion`）**：耦合 plan 之后、等待循环之前，插入候选搜索：
+1. 对 `candidate = 0..FUSION_CANDIDATES-1`（=3）各规划一次；无效候选跳过（记录第一条无效原因；全部无效 ⇒ 照旧拒）。
+2. 每个有效候选：各自的 `masterBefore`（junction 不同 ⇒ 出曲母带尾不同）+ 各自的 `melodyIsTheVoice` + `gateFor` +
+   carry/gate 装配 + **一次快速融合渲染**（make-up 0、stepOnly 报告——第 33 轮的探针，实测 ~3s/个）→
+   `candidateScore` 评分 → **立即丢弃数组**（第 35b 轮 OOM 的教训：任何时刻只允许一份整窗素材活着）。
+3. **评分** = |junction step|（越贴近出曲电平越好）+ 每个"never arrive"的行 +100（用验收同一把尺：
+   `gatedIncomingRow` 切 [arriveEnd, fusionEnd] 对 `SILENT_DBFS`）。Shape of You 那对被拒四次的就是这条。
+4. 赢家拿完整报告、走原有的等待循环与验收——**验收一字未动**，它仍然只裁判写进文件的那一段。
+5. 日志：每个候选一行 `junction candidate N of the band — Xms, its fast fusion scores ...`，选定后一行
+   `the junction search offered N candidate(s) ... applying the best, junction candidate K ...`（K>0 时注明
+   "NOT the search's first answer"）。
+
+**关键接线**：`extendHold` 增加 `candidateIndex` 参数——等待循环延长的是**赢家的** hold，否则延长一次就会把 junction
+悄悄挪回第 0 候选。云端垫层不用挪：`BedRunner` 本来就会在几何变动时按写出的几何重问（其注释原话）。
+
+**测试**：`StemFusionTest` + 两邻居 + `StemBedTest` = 67 条，16 红——**与改动前完全同一批**（15 条长度债 +
+`theGestureGivesWhenTheSearchBandIsWhatThePassageSqueezed`），无新增失败 ⇒ index 0 逐位不变。
+
+**成本**：每对子多 2 次快速渲染（~6s）；赢家的完整报告只有一份（第 33/35b 轮的探针与内存修复都保留）。
+
 ## 九、音频焦点：自动暂停 / 自动恢复（2026-09-21 修复，装机验证）
 
 **用户诉求**：别的 App（B站、别的视频软件、别的音乐）开始放 → qplayer 自动暂停；那个 App 停了/暂停了

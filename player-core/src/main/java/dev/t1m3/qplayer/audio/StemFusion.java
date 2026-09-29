@@ -477,6 +477,18 @@ public final class StemFusion {
      *       table (see {@link Plan#voiceGateMs}) and always was, while the OUTGOING track's own voice
      *       is never carried here (see {@code carriedOf}) and comes from its live deck, which this
      *       planner cannot touch. See AI_HANDOFF's round 28.</li>
+     *   <li><b>23 → 24</b> — not this file's arithmetic: the cloud bed's own envelope grew to two
+     *       bars at each end ({@code StemBed.BED_FADE_BARS}), the listener's 「ai 垫层的收尾要淡出，最好再
+     *       有个淡入」. Bumped here only because the written file changes.</li>
+     *   <li><b>24 → 25</b> — <b>the junction search offers its whole band, and the render picks the
+     *       fusion that scores best.</b> The listener's instruction, verbatim: 「重新寻找最佳落点，多取
+     *       几个进行本地快速融合，融合出来进行评分，取不同融合中的最高分应用」. {@link #plan(Input, int)}
+     *       hands out the band's lines best-preference-first (index 0 is bit-for-bit the old answer),
+     *       the renderer renders a fast fusion per candidate (make-up 0, a report that stops at the
+     *       junction's step — the round-33 probe), scores each on the step plus whether the incoming's
+     *       rows arrive under the table (the clause that refused the listener's Shape of You pair
+     *       four times in one render), and spends the full report on the winner only. The acceptance
+     *       itself is untouched: it still judges the rendered passage that gets written.</li>
      *   <li><b>22 → 23</b> — <b>21 → 22 was an extreme and is undone here.</b> The listener: 「你走了个
      *       极端，出曲现在太慢了……现在有点长过头了，有点抢调」. Two steps of equal-power rise put the
      *       incoming track at −3 dB a whole step before the hand-over, so both backings — in their own
@@ -495,7 +507,7 @@ public final class StemFusion {
      * {@code PlayerController.staleGridRefusal} treats one that is found anyway as stale by its own
      * name.
      */
-    public static final int RULE_VERSION = 24;
+    public static final int RULE_VERSION = 25;
 
     /**
      * How many steps of the gesture the pair can afford in all: {@code steps} with
@@ -2982,6 +2994,23 @@ public final class StemFusion {
      * </ul>
      */
     public static Plan plan(Input in) {
+        return plan(in, 0);
+    }
+
+    /**
+     * The plan for the {@code candidateIndex}-th best junction of the search band (round 37).
+     *
+     * <p>Index 0 is exactly what {@link #plan(Input)} always answered — the same choice, by the same
+     * preference (a line the outgoing is playing on, then one with groove, then a quiet beat, then
+     * the nearest) — so every existing caller, fixture and refusal is bit-for-bit what it was. Index
+     * 1 and up are the band's NEXT lines in that same preference order, for the renderer to render
+     * and score against each other: the listener's own instruction was that the search should not
+     * bet the whole render on one line — 「重新寻找最佳落点，多取几个进行本地快速融合，融合出来进行评分，取不同融合中的
+     * 最高分应用」. A plan is still a plan: every clause, the budget, the coupling and the acceptance
+     * apply to a candidate exactly as they do to the first answer, and an index past the band's end
+     * is refused with the band's own message plus how many candidates it held.
+     */
+    public static Plan plan(Input in, int candidateIndex) {
         double aBar = in.aBeatMs * BEATS_PER_BAR;
         double bBar = in.bBeatMs * BEATS_PER_BAR;
         double lock = lockError(in.aBeatMs, in.bBeatMs, in.speed);
@@ -3291,14 +3320,14 @@ public final class StemFusion {
         // sit in that fade), then one where its groove is playing, then one where its voice is quiet
         // for a beat, then the nearest. A line whose passage does not fit the material window is not
         // a candidate at all.
-        Choice choice = nearestBar(in.aBarLinesMs, target, aBar, materialFrom,
+        java.util.List<Choice> choices = nearestBars(in.aBarLinesMs, target, aBar, materialFrom,
                 materialFrom + materialWindow, sourceSpan, back, forward, in.quiet, in.groove,
                 in.body);
-        if (choice == null) {
+        if (choices == null || choices.isEmpty() || candidateIndex >= choices.size()) {
             return invalid(String.format(Locale.US,
                     "no line of the outgoing's grid is inside the %dms the passage can be taken"
                             + " from (the search covers %dms back and %dms forward of %d outside"
-                            + " it)%s",
+                            + " it)%s%s",
                     materialWindow, back, forward, target,
                     shortenedForBand
                             ? String.format(Locale.US, ", with the gesture already shortened to its"
@@ -3310,8 +3339,14 @@ public final class StemFusion {
                             holdForIncomingSteps > 0 ? "hold A's rows at unity until they arrive"
                                     : "need no wait",
                             (double) cap)
+                            : "",
+                    choices != null && candidateIndex > 0 && candidateIndex >= choices.size()
+                            ? String.format(Locale.US,
+                                    " (the band held %d candidate%s; candidate %d was asked for)",
+                                    choices.size(), choices.size() == 1 ? "" : "s", candidateIndex)
                             : ""), aBar, bBar, lock);
         }
+        Choice choice = choices.get(candidateIndex);
         if (choice.measured && choice.usable == 0) {
             return invalid(String.format(Locale.US,
                     "every bar line of the outgoing's grid the search reached (from %dms back of"
@@ -3450,15 +3485,33 @@ public final class StemFusion {
     private static Choice nearestBar(double[] bars, long target, double aBarMs, long fitsFrom,
                                      long fitsTo, long spanMs, long backMs, long forwardMs,
                                      VocalQuiet quiet, Groove groove, BodyLevel body) {
+        java.util.List<Choice> all = nearestBars(bars, target, aBarMs, fitsFrom, fitsTo, spanMs,
+                backMs, forwardMs, quiet, groove, body);
+        return all == null || all.isEmpty() ? null : all.get(0);
+    }
+
+    /**
+     * Every junction the band offers, best preference first (round 37).
+     *
+     * <p>The order is the one {@link #nearestBar} has always scored by — a line the outgoing track
+     * is playing on, then one with groove on it, then a quiet beat, then the rest, nearer lines
+     * winning ties — so element 0 is the answer the single-candidate search gave, and the renderer's
+     * candidate loop renders elements 1 and 2 as alternative fusions to score against it. The
+     * band-wide fields ({@code usable}, {@code measured}, {@code bodyDb}, {@code bestAt…}) are
+     * properties of the whole band and are set on every element alike.
+     */
+    private static java.util.List<Choice> nearestBars(double[] bars, long target, double aBarMs,
+                                                      long fitsFrom, long fitsTo, long spanMs,
+                                                      long backMs, long forwardMs,
+                                                      VocalQuiet quiet, Groove groove,
+                                                      BodyLevel body) {
         boolean measured = body != null && body.measured();
         double bodyDb = body == null ? Double.NaN : body.bodyDb();
-        Choice best = null;
-        int bestRank = Integer.MAX_VALUE;
-        double bestDistance = Double.MAX_VALUE;
         int usable = 0;
         long bestAt = -1L;
         double bestAtLevel = Double.NaN;
         double bestAtDrop = Double.NaN;
+        java.util.List<RankedChoice> ranked = new java.util.ArrayList<RankedChoice>();
         for (double bar : bars) {
             long at = Math.round(bar);
             double offset = at - target;
@@ -3476,21 +3529,39 @@ public final class StemFusion {
             boolean hasGroove = groove.presentAround(at, aBarMs / BEATS_PER_BAR);
             boolean isQuiet = quiet.quietBeatAround(at, aBarMs / BEATS_PER_BAR);
             int rank = (atBody ? 0 : 3) + (hasGroove ? 0 : (isQuiet ? 1 : 2));
-            double distance = Math.abs(offset);
-            if (best == null || rank < bestRank || (rank == bestRank && distance < bestDistance)) {
-                best = new Choice(at, isQuiet, hasGroove, atBody, level, drop);
-                bestRank = rank;
-                bestDistance = distance;
-            }
+            ranked.add(new RankedChoice(
+                    new Choice(at, isQuiet, hasGroove, atBody, level, drop), rank,
+                    Math.abs(offset)));
         }
-        if (best == null) return null;
-        best.usable = usable;
-        best.measured = measured;
-        best.bodyDb = bodyDb;
-        best.bestAt = bestAt;
-        best.bestAtLevel = bestAtLevel;
-        best.bestAtDrop = bestAtDrop;
-        return best;
+        if (ranked.isEmpty()) return null;
+        ranked.sort((x, y) -> x.rank != y.rank ? Integer.compare(x.rank, y.rank)
+                : Double.compare(x.distance, y.distance));
+        java.util.List<Choice> choices = new java.util.ArrayList<Choice>(ranked.size());
+        for (RankedChoice r : ranked) choices.add(r.choice);
+        // The band-wide facts, on every element: they describe the band, not a line.
+        for (Choice c : choices) {
+            c.usable = usable;
+            c.measured = measured;
+            c.bodyDb = bodyDb;
+            c.bestAt = bestAt;
+            c.bestAtLevel = bestAtLevel;
+            c.bestAtDrop = bestAtDrop;
+        }
+        return choices;
+    }
+
+    /** One band line and the two numbers its place in the preference order is decided by — a
+     *  holder for the sort, thrown away as soon as the list is ordered. */
+    private static final class RankedChoice {
+        final Choice choice;
+        final int rank;
+        final double distance;
+
+        RankedChoice(Choice choice, int rank, double distance) {
+            this.choice = choice;
+            this.rank = rank;
+            this.distance = distance;
+        }
     }
 
     /** One candidate's choice: where it is, what its own bar offered, and the numbers the refusal
@@ -4907,6 +4978,15 @@ public final class StemFusion {
     private static float[][] source(Material m, int row) {
         return m.carriedSource != null && row < m.carriedSource.length
                 && m.carriedSource[row] != null ? m.carriedSource[row] : new float[0][];
+    }
+
+    /** Ⓜ Round 37: one of the incoming's rows AS THE FILE WILL CARRY IT — the table applied, the
+     *  result window-relative — for the renderer's candidate scoring. The report measures these same
+     *  rows for its "the incoming's own drums/low end never arrive" clauses; the scorer needs the
+     *  same material before choosing which candidate to spend the full report on. */
+    public static float[][] gatedIncomingRow(float[][][] stems, StemGesture.Stem row, Plan plan,
+                                             DjEdit.Plan edit, int rate, int frames) {
+        return gated(stems, row, plan, edit, rate, frames);
     }
 
     /** One of the incoming's rows with the fusion's table applied — what the row actually is in
