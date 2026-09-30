@@ -21,15 +21,12 @@ import java.net.URL
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.isActive
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibilityScope
-import androidx.compose.animation.ExperimentalSharedTransitionApi
-import androidx.compose.animation.SharedTransitionLayout
-import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.EnterTransition
@@ -59,6 +56,7 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -71,10 +69,13 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.requiredWidth
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -136,8 +137,8 @@ import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
+import dev.t1m3.qplayer.android.ui.IosAwareAlertDialog as AlertDialog
+import dev.t1m3.qplayer.android.ui.IosAwareButton as Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.LinearProgressIndicator
@@ -154,26 +155,30 @@ import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import dev.t1m3.qplayer.android.ui.IosAwareIconButton as IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MotionScheme
+import com.kyant.backdrop.backdrops.layerBackdrop
+import com.kyant.backdrop.backdrops.rememberCanvasBackdrop
+import com.kyant.backdrop.backdrops.rememberLayerBackdrop
+import com.kyant.backdrop.catalog.components.LiquidButton
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.OutlinedButton
+import dev.t1m3.qplayer.android.ui.IosAwareOutlinedButton as OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
+import dev.t1m3.qplayer.android.ui.IosAwareSlider as Slider
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
+import dev.t1m3.qplayer.android.ui.IosAwareSwitch as Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import dev.t1m3.qplayer.android.ui.IosAwareTextButton as TextButton
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -200,6 +205,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.graphics.Brush
@@ -267,6 +273,7 @@ import dev.t1m3.qplayer.bridge.PlayerController
 import dev.t1m3.qplayer.bridge.SearchRow
 import dev.t1m3.qplayer.model.Track
 import dev.t1m3.qplayer.netease.dto.NeteaseAlbum
+import dev.t1m3.qplayer.netease.NeteaseClient
 import dev.t1m3.qplayer.netease.dto.NeteasePlaylist
 import dev.t1m3.qplayer.netease.dto.NeteaseSong
 import dev.t1m3.qplayer.settings.SettingsCatalog
@@ -274,6 +281,7 @@ import dev.t1m3.qplayer.settings.SettingsCore
 import dev.t1m3.qplayer.settings.SettingSpec
 import io.github.timer_err.qml4j.android.R
 import dev.t1m3.qplayer.lyric.LyricLine
+import dev.t1m3.qplayer.lyric.LyricTiming
 import dev.t1m3.qplayer.lyric.LyricTimeline
 import kotlinx.coroutines.delay
 import sh.calvin.reorderable.ReorderableItem
@@ -732,6 +740,10 @@ private data class PlayerUiState(
     val webLoginSuccessRevision: Long = 0L,
     val recommendations: List<NeteaseSong> = emptyList(),
     val recommendPlaylists: List<NeteasePlaylist> = emptyList(),
+    val homeSongSections: List<NeteaseClient.HomeSongSection> = emptyList(),
+    val homePlaylistSections: List<NeteaseClient.HomePlaylistSection> = emptyList(),
+    val homeAlbumRecommendations: List<NeteaseAlbum> = emptyList(),
+    val homeFeedError: String = "",
     val myPlaylists: List<NeteasePlaylist> = emptyList(),
     val tracks: List<Track> = emptyList(),
     val searchRows: List<SearchRow> = emptyList(),
@@ -970,6 +982,10 @@ private fun controllerState(controller: PlayerController, settings: SettingsCore
         webLoginSuccessRevision = controller.webLoginSuccessRevision.peek() ?: 0L,
         recommendations = cached("recommendations", controller.recommendations.peek()),
         recommendPlaylists = cached("recommendPlaylists", controller.recommendPlaylists.peek()),
+        homeSongSections = cached("homeSongSections", controller.homeSongSections.peek()),
+        homePlaylistSections = cached("homePlaylistSections", controller.homePlaylistSections.peek()),
+        homeAlbumRecommendations = cached("homeAlbumRecommendations", controller.homeAlbumRecommendations.peek()),
+        homeFeedError = controller.homeFeedError.peek() ?: "",
         myPlaylists = cached("myPlaylists", controller.myPlaylists.peek()),
         tracks = cached("tracks", controller.tracks.peek()),
         searchRows = cached("searchRows", controller.searchRows.peek()),
@@ -1325,88 +1341,16 @@ private fun rememberPlayerState(controller: PlayerController, settings: Settings
     return state
 }
 
-private fun pageTransitionTransform(preset: Int, forward: Boolean): ContentTransform {
-    // Ported from legado-with-MD3's MainActivity NavDisplay transitionSpec: only one
-    // layer translates (the incoming page crosses a full width) while the other
-    // moves a quarter and fades, and the motion is slow (480ms slide / 360ms fade)
-    // so each frame covers less distance — a dropped frame stops being visible,
-    // which is what "not stuttering" actually comes down to.
-    val fosin = androidx.compose.animation.core.FastOutSlowInEasing
-    val linOut = androidx.compose.animation.core.LinearOutSlowInEasing
-    if (forward) {
-        return (slideInHorizontally(
-            animationSpec = tween(480, easing = fosin),
-            initialOffsetX = { it }
-        ) + fadeIn(tween(360, easing = linOut))).togetherWith(
-            slideOutHorizontally(
-                animationSpec = tween(480, easing = fosin),
-                targetOffsetX = { it / 4 }
-            ) + fadeOut(tween(360, easing = linOut))
-        )
-    }
-    // Pop: the page being returned to comes back from a quarter away, while the
-    // page being left shrinks and fades.
-    return (slideInHorizontally(
-        animationSpec = tween(480, easing = fosin),
-        initialOffsetX = { -it / 4 }
-    ) + fadeIn(tween(360, easing = linOut))).togetherWith(
-        scaleOut(targetScale = 0.8f, animationSpec = tween(480, easing = fosin)) +
-            fadeOut(tween(360))
-    )
-}
+private data class ShellAppearance(
+    val iosDesign: Boolean, val refraction: Boolean, val monet: Boolean,
+    val paletteStyle: Int, val paletteChroma: Int, val pageTransition: Int,
+    val showLocalTab: Boolean,
+)
 
-@Suppress("unused")
-private fun legacyPageTransitionTransform(preset: Int, forward: Boolean): ContentTransform {
-    val easing = androidx.compose.animation.core.FastOutSlowInEasing
-    return when (preset) {
-        SettingsCatalog.PAGE_TRANSITION_FADE -> {
-            fadeIn(tween(260, easing = easing)) togetherWith
-                fadeOut(tween(180, easing = easing))
-        }
-        SettingsCatalog.PAGE_TRANSITION_SLIDE_HORIZONTAL -> {
-            val inFrom = if (forward) 1 else -1
-            val outTo = -inFrom
-            (slideInHorizontally(
-                initialOffsetX = { inFrom * it / 4 },
-                animationSpec = tween(280, easing = easing)
-            ) + fadeIn(tween(280, easing = easing))).togetherWith(
-                slideOutHorizontally(
-                    targetOffsetX = { outTo * it / 4 },
-                    animationSpec = tween(180, easing = easing)
-                ) + fadeOut(tween(180, easing = easing))
-            )
-        }
-        SettingsCatalog.PAGE_TRANSITION_SLIDE_VERTICAL -> {
-            val inFrom = if (forward) 1 else -1
-            val outTo = -inFrom
-            (slideInVertically(
-                initialOffsetY = { inFrom * it / 4 },
-                animationSpec = tween(300, easing = easing)
-            ) + fadeIn(tween(280, easing = easing))).togetherWith(
-                slideOutVertically(
-                    targetOffsetY = { outTo * it / 4 },
-                    animationSpec = tween(190, easing = easing)
-                ) + fadeOut(tween(180, easing = easing))
-            )
-        }
-        SettingsCatalog.PAGE_TRANSITION_NONE ->
-            EnterTransition.None togetherWith ExitTransition.None
-        else -> {
-            // Zoom In / Out, matching the original default preset.
-            (fadeIn(tween(300, easing = easing)) + scaleIn(
-                initialScale = if (forward) 0.92f else 1.08f,
-                animationSpec = tween(320, easing = easing)
-            )).togetherWith(
-                fadeOut(tween(220, easing = easing)) + scaleOut(
-                    targetScale = if (forward) 1.08f else 0.92f,
-                    animationSpec = tween(220, easing = easing)
-                )
-            )
-        }
-    }
-}
+private fun pageTransitionTransform(preset: Int, forward: Boolean): ContentTransform =
+    dev.t1m3.qplayer.android.ui.motion.SealMotion.page(forward, preset)
 
-private const val DETAIL_MOTION_MS = 360
+private const val DETAIL_MOTION_MS = 400
 private const val DETAIL_META_DELAY_MS = 60L
 private const val DETAIL_CONTROLS_DELAY_MS = 110L
 private const val DETAIL_EXIT_TOTAL_MS = DETAIL_MOTION_MS.toLong()
@@ -1414,21 +1358,8 @@ private const val DETAIL_EXIT_TOTAL_MS = DETAIL_MOTION_MS.toLong()
 /** How long the 定时条 must be left alone before its countdown starts. */
 private const val SLEEP_SETTLE_MS = 3_500L
 
-/** Flight time of the shared container/cover, per the Material container transform. */
-private const val SHARED_MOTION_MS = 460
-
-/** Pages joined by a shared cover/container: their page transition stays a plain
- *  fade, because the official guidance is to keep everything that is not the
- *  shared element simple instead of running a second full-screen animation. */
-private fun sharedCoverRoute(screen: ComposeScreen): Boolean =
-    screen == ComposeScreen.ARTIST ||
-        screen == ComposeScreen.ALBUM ||
-        screen == ComposeScreen.PLAYLIST
-
 @OptIn(
-    androidx.compose.animation.ExperimentalAnimationApi::class,
-    ExperimentalSharedTransitionApi::class,
-    ExperimentalMaterial3ExpressiveApi::class,
+    androidx.compose.animation.ExperimentalAnimationApi::class,ExperimentalMaterial3ExpressiveApi::class,
 )
 @Composable
 private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCore) {
@@ -1481,16 +1412,16 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
             runCatching { biliCookieFile.writeText(controller.biliClient().cookieHeader()) }
         }
     }
-    // SettingsCore is also used by the legacy QML settings bridge and its
-    // values are not Compose snapshot state.  Observe the small settings
-    // surface used by the theme so palette changes are visible immediately,
-    // without requiring a route change or activity restart.
-    var paletteRevision by remember { mutableIntStateOf(0) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(250)
-            paletteRevision++
-        }
+    // The legacy bridge is not snapshot state. Publish only changed appearance
+    // values, not a ticking revision that refreshes every glass layer at 4 Hz.
+    fun readAppearance() = ShellAppearance(
+        settings.bool("iosDesign"), settings.bool("iosGlassRefraction"), settings.bool("monet"),
+        settings.intOf("paletteStyle").coerceIn(0, 3), settings.intOf("paletteChroma").coerceIn(0, 2),
+        settings.intOf(SettingsCatalog.PAGE_TRANSITION_KEY), settings.bool("showLocalTab")
+    )
+    var appearance by remember(settings) { mutableStateOf(readAppearance()) }
+    LaunchedEffect(settings) {
+        while (true) { delay(250); appearance = readAppearance() }
     }
     var navigationStack by remember {
         mutableStateOf(listOf(ComposeRoute(ComposeScreen.HOME)))
@@ -1508,9 +1439,25 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
     var miniPlayerVisible by remember { mutableStateOf(true) }
     val miniScrollConnection = remember {
         object : NestedScrollConnection {
+            // Ⓜ The listener: 「非常细微非常慢的滑动界面不触发收缩和放出」. This flipped on a ONE PIXEL
+            // delta, which any slow drift or touch jitter crosses within a frame or two, and a
+            // slow drag delivers dozens of sub-pixel deltas per frame — so the dock moved when
+            // the finger barely did. The direction now has to be HELD for a real distance before
+            // the dock moves (24dp at 3x density), and a reversal resets the run, so a hesitant
+            // finger cannot toggle it on its own.
+            private var run = 0f
+            private val triggerPx = 72f
+
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                if (available.y < -1f) miniPlayerVisible = false
-                else if (available.y > 1f) miniPlayerVisible = true
+                if (available.y == 0f) return Offset.Zero
+                run = if (run * available.y < 0f) available.y else run + available.y
+                if (run <= -triggerPx) {
+                    miniPlayerVisible = false
+                    run = 0f
+                } else if (run >= triggerPx) {
+                    miniPlayerVisible = true
+                    run = 0f
+                }
                 return Offset.Zero
             }
         }
@@ -1521,18 +1468,27 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
     var detailClosing by remember { mutableStateOf(false) }
     val route = navigationStack.last()
     val screen = route.screen
-    val pageTransitionPreset = settings.intOf(SettingsCatalog.PAGE_TRANSITION_KEY).coerceIn(
+    val baseRoute = navigationStack.lastOrNull { it.screen != ComposeScreen.LYRICS }
+        ?: ComposeRoute(ComposeScreen.HOME)
+    val playerExpansion = rememberPlayerExpansionState()
+    val pageTransitionPreset = appearance.pageTransition.coerceIn(
         SettingsCatalog.PAGE_TRANSITION_ZOOM,
         SettingsCatalog.PAGE_TRANSITION_NONE
     )
 
+    var navigatingBack by remember { mutableStateOf(false) }
     fun navigateTo(target: ComposeRoute, asRoot: Boolean = false) {
         if (target == navigationStack.last()) return
-        if (target.screen == ComposeScreen.LYRICS) detailClosing = false
+        navigatingBack = false
+        if (target.screen == ComposeScreen.LYRICS) {
+            detailClosing = false
+            playerExpansion.prepareOpen()
+        }
         navigationStack = if (asRoot) listOf(target) else navigationStack + target
     }
 
     fun goBack() {
+        navigatingBack = true
         navigationStack = when {
             navigationStack.size > 1 -> navigationStack.dropLast(1)
             screen != ComposeScreen.HOME -> listOf(ComposeRoute(ComposeScreen.HOME))
@@ -1543,12 +1499,9 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
         }
     }
 
-    // Leaves the detail page. The reversal of the entrance starts in the same
-    // frame as the slide-down, so nothing pauses before the page starts moving.
-    // Pop the route in the same state transaction as the closing flag. The
-    // AnimatedContent target then changes immediately, while its outgoing
-    // PlayerDetailScreen still receives closing=true and reverses its child
-    // timeline during the very same 220 ms window.
+    // Pop immediately, but keep detail mounted in PlayerExpansionHost until the
+    // one shared container clock reaches zero. No delayed pop can close a page
+    // the user has just reopened.
     fun closeDetail() {
         if (detailClosing) return
         detailClosing = true
@@ -1571,82 +1524,62 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
         }
     }
 
-    // Polling SettingsCore must not create a fresh target palette every 250ms
-    // or restart an in-flight colour transition when settings are unchanged.
-    val paletteSettings = remember(settings, paletteRevision) {
-        Triple(settings.bool("monet"), settings.intOf("paletteStyle").coerceIn(0, 3),
-            settings.intOf("paletteChroma").coerceIn(0, 2))
-    }
-    val scheme = rememberQPlayerColorScheme(
+    val iosDesign = appearance.iosDesign
+    val glassRefraction = appearance.refraction
+    val scheme = (if (iosDesign) iosDesignColorScheme(state.dark) else rememberQPlayerColorScheme(
         seed = state.coverSeed,
         dark = state.dark,
-        enabled = paletteSettings.first,
-        paletteStyle = paletteSettings.second,
-        paletteChroma = paletteSettings.third
-    )
+        enabled = appearance.monet,
+        paletteStyle = appearance.paletteStyle,
+        paletteChroma = appearance.paletteChroma
+    )).withReadableContent()
     // Same as legado's LegadoTheme: the official expressive motion scheme drives
     // every Material component (sheets, menus, buttons) instead of per-call specs.
+    // Glass colour is intentionally derived from the current surface, not the
+    // previous track's cover seed. The live LayerBackdrop supplies the actual
+    // pixels underneath, so surfaces follow scrolling/page changes without a
+    // stale red (or other cover-colour) cast.
+    val glassTint = scheme.background
+    val expansionProgress = playerExpansion.progress.value
+    val glassMotionActive = detailClosing ||
+        (expansionProgress > 0.001f && expansionProgress < 0.999f)
+    val glassLuminance = if (state.dark) 0f else 1f
+    androidx.compose.runtime.CompositionLocalProvider(
+        LocalIosDesign provides iosDesign,
+        LocalGlassRefraction provides glassRefraction,
+        LocalGlassTint provides glassTint,
+        LocalGlassLuminance provides glassLuminance,
+        LocalGlassMotionActive provides glassMotionActive,
+        LocalGlassDark provides state.dark
+    ) {
     MaterialTheme(
         colorScheme = scheme,
         motionScheme = MotionScheme.expressive()
     ) {
+        QPlayerDialogBackdropHost(enabled = iosDesign) {
         Surface(modifier = Modifier.fillMaxSize(), color = scheme.background) {
-            // Official shared-element host, wrapping the whole navigation (Scaffold
-            // included) so a container flying between pages is composited above the
-            // bottom navigation and the mini player instead of being cut by them.
-            SharedTransitionLayout {
-            val sharedTransitionScope = this
-            // The row that flew away gets its text back once the flight is over —
-            // otherwise its title would stay hidden until the next tap.
-            LaunchedEffect(sharedTransitionScope.isTransitionActive) {
-                if (!sharedTransitionScope.isTransitionActive) leavingCoverKey = null
-            }
-            AnimatedContent(
-                modifier = Modifier.fillMaxSize(),
-                targetState = route.screen == ComposeScreen.LYRICS && !detailClosing,
-                transitionSpec = {
-                    val motion = tween<Float>(
-                        durationMillis = DETAIL_MOTION_MS,
-                        easing = androidx.compose.animation.core.FastOutSlowInEasing
-                    )
-                    if (targetState && !initialState) {
-                        // The detail page grows out of the same bottom zone as
-                        // the MiniPlayer.  Scale and translation share one
-                        // clock, so the cover/container do not appear as two
-                        // unrelated page transitions.
-                        (slideInVertically(
-                            initialOffsetY = { fullHeight -> fullHeight },
-                            animationSpec = tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing)
-                        ) + scaleIn(
-                            initialScale = 0.92f,
-                            transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 1f),
-                            animationSpec = motion
-                        ) + fadeIn(motion)).togetherWith(
-                            fadeOut(tween(DETAIL_MOTION_MS / 2))
-                        )
-                    } else {
-                        // Exact reverse: the detail surface contracts toward
-                        // the MiniPlayer anchor while the base surface fades
-                        // in underneath it.
-                        fadeIn(motion).togetherWith(
-                            slideOutVertically(
-                                targetOffsetY = { fullHeight -> fullHeight },
-                                animationSpec = tween(DETAIL_MOTION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing)
-                            ) + scaleOut(
-                                targetScale = 0.92f,
-                                transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 1f),
-                                animationSpec = motion
-                            ) + fadeOut(motion)
-                        )
-                    }
-                },
-                label = "player_detail_screen_transition"
+            // Seal handles page transitions; the player keeps its measured,
+            // reversible container transition and the mounted page underneath.
+            Box(Modifier.fillMaxSize()) {
+            PlayerExpansionHost(
+                expanded = route.screen == ComposeScreen.LYRICS && !detailClosing,
+                state = playerExpansion,
+                background = scheme.background,
+                durationMillis = DETAIL_MOTION_MS,
             ) { isDetail ->
                 if (isDetail) {
                     Surface(
                         modifier = Modifier.fillMaxSize(),
                         color = scheme.background
                     ) {
+                        androidx.compose.runtime.CompositionLocalProvider(LocalIosControls provides false) {
+                        // ui.zip uses a dark scrim in either system theme.
+                        // Keep titles readable without changing control shapes.
+                        MaterialTheme(colorScheme = if (state.lyricCoverBackground || iosDesign) scheme.copy(
+                            onSurface = ComposeColor.White,
+                            onSurfaceVariant = ComposeColor(0xFFDDDDDD),
+                            onBackground = ComposeColor.White,
+                        ) else scheme) {
                         PlayerDetailScreen(
                             state = state,
                             controller = controller,
@@ -1664,19 +1597,51 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                             },
                             close = ::closeDetail,
                             closing = detailClosing,
+                            containerAnimated = true,
                             sleepMinutes = sleepMinutes,
                             sleepRemaining = sleepRemaining,
                             sleepArmed = sleepArmed,
                             onSleepMinutesChanged = { sleepMinutes = it }
                         )
+                        }
+                        }
                     }
                 } else {
+                    val route = baseRoute
+                    val screen = route.screen
                     val isMainTab = screen in listOf(
                         ComposeScreen.HOME,
                         ComposeScreen.SEARCH,
                         ComposeScreen.LIBRARY,
                         ComposeScreen.LOCAL
                     )
+                    val useIosNavigation = iosDesign && isMainTab
+                    val liquidBackdrop = if (iosDesign) rememberLayerBackdrop() else null
+                    var iosHomeCollapsed by remember(screen) { mutableStateOf(false) }
+                    val collapseThreshold = with(LocalDensity.current) { 24.dp.toPx() }
+                    val iosScrollConnection = remember(screen, collapseThreshold) {
+                        object : NestedScrollConnection {
+                            private var distance = 0f
+                            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                                // React to real vertical page scrolling, not marquee,
+                                // fling bounce, programmatic scrolling or tiny jitter.
+                                if (screen != ComposeScreen.HOME || source != NestedScrollSource.UserInput) return Offset.Zero
+                                val dy = consumed.y
+                                if (dy == 0f) return Offset.Zero
+                                // The page is the source sampled by the iOS
+                                // glass.  Force a draw-only recapture while it
+                                // moves; this does not recompose the page.
+                                liquidBackdrop?.invalidate()
+                                if (distance * dy < 0f) distance = 0f
+                                distance += dy
+                                if (kotlin.math.abs(distance) >= collapseThreshold) {
+                                    iosHomeCollapsed = distance < 0f
+                                    distance = 0f
+                                }
+                                return Offset.Zero
+                            }
+                        }
+                    }
                     // 听歌识曲 (round 37): the dialog owns its engine, its microphone and its own
                     // lifetime — see RecognizeDialog.kt.
                     var recognizeOpen by remember { mutableStateOf(false) }
@@ -1685,13 +1650,20 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                         onDismiss = { recognizeOpen = false },
                         playById = { id -> controller.playNetease(id) }
                     )
+                    RouteArtworkSurface(route, state, openedPlaylist, openedAlbum) {
+                    androidx.compose.runtime.CompositionLocalProvider(
+                        LocalGlassSamplingEnabled provides !playerExpansion.active,
+                    ) {
                     Scaffold(
                         modifier = Modifier
                             .fillMaxSize()
                             .statusBarsPadding(),
-                        containerColor = scheme.background,
+                        containerColor = ComposeColor.Transparent,
                         topBar = {
-                            ComposeTopBar(route, state,
+                            // iOS controls are overlaid in the content layer below.
+                            // Leaving this slot empty removes the Scaffold top-bar
+                            // measurement and prevents a hidden 56dp layout gap.
+                            if (!iosDesign) ComposeTopBar(route, state,
                                 canGoBack = navigationStack.size > 1,
                                 onBack = ::goBack,
                                 onRecognize = { recognizeOpen = true },
@@ -1706,11 +1678,11 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                         // Surface; NavigationBar owns its height, insets, and
                         // selection indicator.
                         bottomBar = {
-                            if (isMainTab) {
+                            if (isMainTab && !iosDesign) {
                                 StandardBottomNav(
-                                    modifier = Modifier.fillMaxWidth(),
+                                    modifier = Modifier.fillMaxWidth().playerChromeExit(playerExpansion),
                                     screen = screen,
-                                    showLocalTab = settings.bool("showLocalTab"),
+                                    showLocalTab = appearance.showLocalTab,
                                     onScreen = { navigateTo(ComposeRoute(it), asRoot = true) },
                                     onSearch = {
                                         navigateTo(ComposeRoute(ComposeScreen.SEARCH), asRoot = true)
@@ -1719,50 +1691,76 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                             }
                         }
                     ) { padding ->
-                    Box(Modifier.fillMaxSize().padding(padding).nestedScroll(miniScrollConnection)) {
-                        // Official shared-element API: the layout owns the overlay and
-                        // the two scopes that a screen needs to bind an element.
+                    Box(Modifier.fillMaxSize().padding(padding)) {
+                        if (iosDesign) {
+                            // iOS controls float above the page instead of occupying
+                            // Scaffold's top-bar slot. The page keeps a matching
+                            // content inset in the inner box below.
+                            androidx.compose.runtime.CompositionLocalProvider(
+                                LocalIosTopBarBackdrop provides liquidBackdrop
+                            ) {
+                                IosTopBar(
+                                    title = when (route.screen) {
+                                        ComposeScreen.HOME -> "推荐"
+                                        ComposeScreen.SEARCH -> "搜索"
+                                        ComposeScreen.LIBRARY -> "我的"
+                                        ComposeScreen.LOCAL -> "本地"
+                                        ComposeScreen.QUEUE -> "播放队列"
+                                        ComposeScreen.SETTINGS -> "设置"
+                                        ComposeScreen.ACCOUNT -> "账户"
+                                        ComposeScreen.PLAYLIST -> state.playlistTitle.ifBlank { "歌单" }
+                                        ComposeScreen.ALBUM -> state.albumTitle.ifBlank { "专辑" }
+                                        ComposeScreen.ARTIST -> state.artistName.ifBlank { "歌手" }
+                                        else -> "QPlayer"
+                                    },
+                                    canGoBack = navigationStack.size > 1,
+                                    onBack = ::goBack,
+                                    onRecognize = { recognizeOpen = true },
+                                    onQueue = { navigateTo(ComposeRoute(ComposeScreen.QUEUE)) },
+                                    onSettings = { navigateTo(ComposeRoute(ComposeScreen.SETTINGS)) },
+                                    onAccount = {
+                                        if (state.loggedIn) navigateTo(ComposeRoute(ComposeScreen.ACCOUNT)) else loginOpen = true
+                                    },
+                                    loggedIn = state.loggedIn,
+                                    modifier = Modifier.align(Alignment.TopCenter).zIndex(4f)
+                                )
+                            }
+                        }
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .then(if (iosDesign) Modifier.padding(top = 56.dp) else Modifier)
+                                .nestedScroll(if (useIosNavigation) iosScrollConnection else miniScrollConnection)
+                        ) {
+                        // Seal shared-axis transitions keep list geometry stable.
                         AnimatedContent(
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier.fillMaxSize().then(
+                                // Record only page content, never the glass itself.
+                                if (liquidBackdrop != null) Modifier.layerBackdrop(liquidBackdrop)
+                                    .background(MaterialTheme.colorScheme.background) else Modifier
+                            ),
                             targetState = route,
                             transitionSpec = {
-                                // Restore the shared page-transition setting used by
-                                // the original QML shell. Lyrics keeps its own
-                                // player-sheet animation above.
-                                if (sharedCoverRoute(targetState.screen) || sharedCoverRoute(initialState.screen)) {
-                                    if (sharedCoverRoute(targetState.screen)) {
-                                        // Opening: the page's own content stays invisible
-                                        // for the first ~60% of the container's 450ms
-                                        // expansion, then fades in over 150ms with a
-                                        // slight rise — so nothing is ever stretched or
-                                        // half-printed over the list it came from.
-                                        (fadeIn(tween(150, delayMillis = 270)) +
-                                            slideInVertically(
-                                                animationSpec = tween(150, delayMillis = 270),
-                                                initialOffsetY = { it / 28 }
-                                            )) togetherWith fadeOut(tween(120))
-                                    } else {
-                                        // Going back: the list fades straight in while
-                                        // the detail page leaves early, which is the
-                                        // entrance played in reverse.
-                                        fadeIn(tween(220)) togetherWith fadeOut(tween(140))
-                                    }
-                                } else {
-                                    val forward = screenOrder.indexOf(targetState.screen) >= screenOrder.indexOf(initialState.screen)
-                                    pageTransitionTransform(pageTransitionPreset, forward)
-                                }
+                                pageTransitionTransform(pageTransitionPreset, !navigatingBack)
                             },
                             label = "page_transition"
                         ) { visibleRoute ->
                             when (visibleRoute.screen) {
                                 ComposeScreen.HOME -> HomeScreen(
+                                    iosNavigation = useIosNavigation,
                                     state = state,
-                                    sharedTransitionScope = sharedTransitionScope,
-                                    animatedVisibilityScope = this,
+
                                     openPlaylist = { id, cover ->
                                         controller.openPlaylist(id)
                                         openedPlaylist = id to cover
                                         navigateTo(ComposeRoute(ComposeScreen.PLAYLIST, id))
+                                    },
+                                    openAlbum = { id, cover ->
+                                        if (id != 0L) {
+                                            controller.openAlbum(id)
+                                            openedAlbum = id to cover
+                                            navigateTo(ComposeRoute(ComposeScreen.ALBUM, id))
+                                        }
                                     },
                                     playRecommendation = { index -> controller.playRecommendation(index) },
                                     refresh = { controller.loadHome() },
@@ -1770,10 +1768,10 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                     settings = settings
                                 )
                                 ComposeScreen.SEARCH -> SearchScreen(
+                                    iosNavigation = useIosNavigation,
                                     state = state,
                                     controller = controller,
-                                    sharedTransitionScope = sharedTransitionScope,
-                                    animatedVisibilityScope = this
+
                                 ) { id ->
                                     if (id != 0L) {
                                         controller.openArtist(id)
@@ -1781,9 +1779,9 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                     }
                                 }
                                 ComposeScreen.LIBRARY -> LibraryScreen(
+                                    iosNavigation = useIosNavigation,
                                     state = state,
-                                    sharedTransitionScope = sharedTransitionScope,
-                                    animatedVisibilityScope = this,
+
                                     openLogin = { loginOpen = true },
                                     openBiliFav = {
                                         navigateTo(ComposeRoute(ComposeScreen.BILI_FAV))
@@ -1795,7 +1793,7 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                     },
                                     controller = controller
                                 )
-                                ComposeScreen.LOCAL -> LocalScreen(state, controller)
+                                ComposeScreen.LOCAL -> LocalScreen(state, controller, iosNavigation = useIosNavigation)
                                 ComposeScreen.QUEUE -> QueueScreen(state, controller, sleepMinutes, sleepRemaining, sleepArmed) { sleepMinutes = it }
                                 ComposeScreen.SETTINGS -> SettingsScreen(settings, controller)
                                 ComposeScreen.ACCOUNT -> AccountScreen(state, controller)
@@ -1824,8 +1822,7 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                     fallbackCoverPath = openedPlaylist
                                         ?.takeIf { it.first == visibleRoute.id }
                                         ?.second.orEmpty(),
-                                    sharedTransitionScope = sharedTransitionScope,
-                                    animatedVisibilityScope = this
+
                                 )
                                 ComposeScreen.ALBUM -> AlbumScreen(
                                     state = state,
@@ -1834,15 +1831,13 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                     fallbackCoverPath = openedAlbum
                                         ?.takeIf { it.first == visibleRoute.id }
                                         ?.second.orEmpty(),
-                                    sharedTransitionScope = sharedTransitionScope,
-                                    animatedVisibilityScope = this
+
                                 )
                                 ComposeScreen.ARTIST -> ArtistScreen(
                                     state = state,
                                     controller = controller,
                                     artistId = visibleRoute.id,
-                                    sharedTransitionScope = sharedTransitionScope,
-                                    animatedVisibilityScope = this,
+
                                     openAlbum = { id, cover ->
                                         controller.openAlbum(id)
                                         openedAlbum = id to cover
@@ -1852,14 +1847,72 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                 else -> Unit
                             }
                         }
-                        Column(
+                        if (useIosNavigation && liquidBackdrop != null) {
+                            IosPlayerDock(
+                                collapsed = iosHomeCollapsed,
+                                hasTrack = state.title.isNotBlank(),
+                                destination = when (screen) {
+                                    ComposeScreen.LIBRARY -> IosNavigationDestination.LIBRARY
+                                    ComposeScreen.LOCAL -> IosNavigationDestination.LOCAL
+                                    ComposeScreen.SEARCH -> IosNavigationDestination.SEARCH
+                                    else -> IosNavigationDestination.HOME
+                                },
+                                showLocal = appearance.showLocalTab,
+                                dark = state.dark,
+                                backdrop = liquidBackdrop,
+                                playerExpansion = playerExpansion,
+                                onHome = {
+                                    iosHomeCollapsed = false
+                                    navigateTo(ComposeRoute(ComposeScreen.HOME), asRoot = true)
+                                },
+                                onSearch = {
+                                    navigateTo(ComposeRoute(ComposeScreen.SEARCH), asRoot = true)
+                                },
+                                onDestination = { target ->
+                                    val next = when (target) {
+                                        IosNavigationDestination.HOME -> ComposeScreen.HOME
+                                        IosNavigationDestination.LIBRARY -> ComposeScreen.LIBRARY
+                                        IosNavigationDestination.LOCAL -> ComposeScreen.LOCAL
+                                        IosNavigationDestination.SEARCH -> ComposeScreen.SEARCH
+                                    }
+                                    navigateTo(ComposeRoute(next), asRoot = true)
+                                },
+                                // The Dock owns a full-screen host for its
+                                // bottom shadow; its inner chrome applies the
+                                // 20dp/12dp visual insets itself.
+                                modifier = Modifier.align(Alignment.BottomCenter).fillMaxSize(),
+                                topAction = {
+                                    PrivateFmFab(onClick = {
+                                        if (state.loggedIn) {
+                                            controller.startPrivateFm()
+                                            navigateTo(ComposeRoute(ComposeScreen.LYRICS))
+                                        } else loginOpen = true
+                                    })
+                                },
+                                player = { playerModifier, compactProgress ->
+                                    MiniPlayer(
+                                        glassBackdrop = liquidBackdrop,
+                                        compactProgress = compactProgress,
+                                        playerExpansion = playerExpansion,
+                                        modifier = playerModifier,
+                                        state = state,
+                                        onOpen = { navigateTo(ComposeRoute(ComposeScreen.LYRICS)) },
+                                        onSeek = { controller.seek(it) },
+                                        onToggle = { controller.toggle() },
+                                        onPrevious = { controller.prev() },
+                                        onNext = { controller.next() },
+                                    )
+                                },
+                            )
+                        }
+                        if (!useIosNavigation) Column(
                             modifier = Modifier
                                 .align(Alignment.BottomCenter)
                                 .fillMaxWidth()
                                 // Scaffold already reserves the NavigationBar
                                 // area. Keep an explicit visual gap so the
                                 // MiniPlayer does not touch the MD3 bar.
-                                .padding(top = 8.dp, bottom = 12.dp),
+                                .padding(top = 8.dp, bottom = if (useIosNavigation) 100.dp else 12.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             AnimatedVisibility(
@@ -1868,8 +1921,8 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                 // must not carry it.
                                 visible = miniPlayerVisible && state.title.isNotBlank() &&
                                     screen != ComposeScreen.SETTINGS,
-                                enter = slideInVertically { it } + fadeIn(tween(300)),
-                                exit = slideOutVertically { it } + fadeOut(tween(220))
+                                enter = dev.t1m3.qplayer.android.ui.motion.SealMotion.sheetIn(),
+                                exit = dev.t1m3.qplayer.android.ui.motion.SealMotion.sheetOut()
                             ) {
                                 Column(Modifier.fillMaxWidth()) {
                                     // Private FM is a separate action row at the
@@ -1882,7 +1935,7 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                             .padding(end = 8.dp)
                                     ) {
                                         PrivateFmFab(
-                                            modifier = Modifier.align(Alignment.TopEnd),
+                                            modifier = Modifier.align(Alignment.TopEnd).playerChromeExit(playerExpansion),
                                             onClick = {
                                                 if (state.loggedIn) {
                                                     controller.startPrivateFm()
@@ -1895,6 +1948,8 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                     }
                                     Spacer(Modifier.height(8.dp))
                                     MiniPlayer(
+                                        glassBackdrop = liquidBackdrop,
+                                        playerExpansion = playerExpansion,
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .padding(horizontal = 16.dp),
@@ -1909,16 +1964,53 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                             }
                         }
                     }
+                    }
                 }
             }
         }
         }
+        }
+        } // Background page glass sampling pauses while covered by the player.
         // Drawn last among the app's own layers: above every screen and the mini player
         // strip, below the login dialog. This is the app's only video node.
         VideoLayer(state = state, controller = controller)
         if (loginOpen) LoginDialog(controller, state) { loginOpen = false }
+        } // QPlayerDialogBackdropHost
+    }
     }
 }
+}
+
+/** Page artwork belongs to the route, not the last playing song. */
+@Composable
+private fun RouteArtworkSurface(
+    route: ComposeRoute,
+    state: PlayerUiState,
+    openedPlaylist: Pair<Long, String>?,
+    openedAlbum: Pair<Long, String>?,
+    content: @Composable () -> Unit,
+) {
+    val enabled = route.screen in listOf(ComposeScreen.PLAYLIST, ComposeScreen.ALBUM,
+        ComposeScreen.ARTIST, ComposeScreen.QUEUE, ComposeScreen.BILI_FAV_DETAIL)
+    val path = when (route.screen) {
+        ComposeScreen.PLAYLIST -> {
+            val fallback = openedPlaylist?.takeIf { it.first == route.id }?.second.orEmpty()
+            if (state.playlistLoading) fallback else state.playlistCoverPath.ifBlank { fallback }
+        }
+        ComposeScreen.ALBUM -> {
+            val fallback = openedAlbum?.takeIf { it.first == route.id }?.second.orEmpty()
+            if (state.openAlbumId != route.id || state.albumLoading) fallback
+            else state.albumCoverPath.ifBlank { fallback }
+        }
+        ComposeScreen.ARTIST -> if (state.openArtistId == route.id)
+            state.artistHeaderPath.ifBlank { state.artistCoverPath } else ""
+        ComposeScreen.QUEUE -> state.coverPath
+        ComposeScreen.BILI_FAV_DETAIL -> state.biliFavItems.firstOrNull()?.coverUrl
+        else -> null
+    }
+    val image = rememberCoverBitmap(if (route.screen == ComposeScreen.QUEUE) state.coverBytes else null, path)
+    ArtworkPageSurface(image, "${route.screen}:${route.id}:$path", state.dark,
+        modifier = Modifier.fillMaxSize(), enabled = enabled) { content() }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1951,8 +2043,11 @@ private fun ComposeTopBar(
     }
     TopAppBar(
         colors = TopAppBarDefaults.topAppBarColors(
-            containerColor = MaterialTheme.colorScheme.background,
-            scrolledContainerColor = MaterialTheme.colorScheme.background
+            containerColor = if (LocalArtworkPage.current) ComposeColor.Transparent else MaterialTheme.colorScheme.background,
+            scrolledContainerColor = if (LocalArtworkPage.current) ComposeColor.Transparent else MaterialTheme.colorScheme.background,
+            titleContentColor = MaterialTheme.colorScheme.onBackground,
+            navigationIconContentColor = MaterialTheme.colorScheme.onBackground,
+            actionIconContentColor = MaterialTheme.colorScheme.onBackground
         ),
         title = { Text(title) },
         navigationIcon = {
@@ -2074,6 +2169,9 @@ private fun WindowGlassBackdrop(
 @Composable
 @OptIn(androidx.compose.animation.ExperimentalAnimationApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 private fun MiniPlayer(
+    glassBackdrop: com.kyant.backdrop.Backdrop? = null,
+    playerExpansion: PlayerExpansionState? = null,
+    compactProgress: () -> Float = { 0f },
     modifier: Modifier = Modifier,
     state: PlayerUiState,
     onOpen: () -> Unit,
@@ -2086,19 +2184,42 @@ private fun MiniPlayer(
     val miniHaptic = LocalView.current
     val hapticOpen = rememberHapticAction(onOpen)
     val openInteraction = remember { MutableInteractionSource() }
+    val iosMini = glassBackdrop != null
+    val adaptiveGlass = glassBackdrop?.let { rememberIosAdaptiveGlass(it) }
+    val miniInk = adaptiveGlass?.contentColor ?: MaterialTheme.colorScheme.onSurface
+    val miniMuted = if (iosMini) miniInk.copy(alpha = .65f) else MaterialTheme.colorScheme.onSurfaceVariant
+    val glassHighlight = if (iosMini) rememberIosGlassHighlight() else null
+    val glassInteraction = if (glassHighlight != null)
+        rememberIosGlassInteraction(glassHighlight, drawHighlight = false) else Modifier
+    val controlsEnabled by remember(compactProgress) { derivedStateOf { compactProgress() < 0.01f } }
+    val iosCoverSize = 32.dp
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .height(64.dp)
+            .then(if (iosMini) Modifier.layout { measurable, constraints ->
+                val h = (48f - 4f * compactProgress()).dp.roundToPx()
+                val child = measurable.measure(constraints.copy(minHeight = h, maxHeight = h))
+                layout(child.width, child.height) { child.placeRelative(0, 0) }
+            } else Modifier.height(64.dp))
+            .then(if (playerExpansion != null) Modifier.playerExpansionSource(playerExpansion) else Modifier)
+            .then(glassInteraction)
             .clickable(interactionSource = openInteraction, indication = null) { hapticOpen() },
-        shape = RoundedCornerShape(32.dp),
-        tonalElevation = 1.dp,
-        shadowElevation = 7.dp,
+        shape = if (iosMini) CircleShape else RoundedCornerShape(32.dp),
+        tonalElevation = if (glassBackdrop != null) 0.dp else 1.dp,
+        shadowElevation = if (glassBackdrop != null) 0.dp else 7.dp,
         // The root stays transparent so only the backdrop is blurred; the
         // controls and album art remain crisp.
         color = ComposeColor.Transparent
     ) {
         Box(Modifier.fillMaxSize()) {
+            if (glassBackdrop != null) {
+                IosLiquidGlass(glassBackdrop, state.dark, Modifier.fillMaxSize(), requireNotNull(adaptiveGlass))
+                // The same pointer-tracking light as navigation, drawn above
+                // the glass and below artwork/buttons, never hidden by Surface.
+                if (glassHighlight != null) Box(
+                    Modifier.fillMaxSize().then(glassHighlight.modifier)
+                )
+            } else {
             // Safe Compose-only backdrop. The cover is intentionally subdued
             // and blurred as the colour source; the foreground controls stay
             // crisp and this path is safe during Activity route transitions.
@@ -2128,16 +2249,21 @@ private fun MiniPlayer(
                     .fillMaxSize()
                     .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f))
             )
+            }
             Row(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 8.dp),
+                    .padding(start = if (iosMini) 16.dp else 8.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
             Box(
                 modifier = Modifier
-                    .size(52.dp)
-                    .pointerInput(state.durationMs) {
+                    .size(if (iosMini) iosCoverSize else 52.dp)
+                    .graphicsLayer {
+                        val scale = if (iosMini) 1f - compactProgress() / 16f else 1f
+                        scaleX = scale; scaleY = scale
+                    }
+                    .then(if (iosMini) Modifier else Modifier.pointerInput(state.durationMs) {
                         detectTapGestures { offset ->
                             val center = Offset(size.width / 2f, size.height / 2f)
                             val angle = Math.toDegrees(
@@ -2150,13 +2276,13 @@ private fun MiniPlayer(
                             val duration = state.durationMs.coerceAtLeast(1L)
                             onSeek((duration * fraction).roundToInt().toLong())
                         }
-                    },
+                    }),
                 contentAlignment = Alignment.Center
             ) {
                 // The ring is the music queue's progress. A B站 video is not part of it
                 // and carries its own bar in full-screen, so the ring is left off while
                 // one is playing.
-                if (!state.biliPlaying) {
+                if (!iosMini && !state.biliPlaying) {
                     CircularCoverProgress(
                         state = state,
                         modifier = Modifier.fillMaxSize()
@@ -2165,14 +2291,13 @@ private fun MiniPlayer(
                 AnimatedContent(
                     targetState = state.trackKey to coverBitmap,
                     transitionSpec = {
-                        (fadeIn(tween(240)) + scaleIn(initialScale = 0.9f, animationSpec = tween(240))) togetherWith
-                            (fadeOut(tween(160)) + scaleOut(targetScale = 1.05f, animationSpec = tween(160)))
+                        dev.t1m3.qplayer.android.ui.motion.SealMotion.fade()
                     },
                     label = "mini_cover_transition"
                 ) { (_, bitmap) ->
                     Surface(
-                        modifier = Modifier.size(42.dp),
-                        shape = CircleShape,
+                        modifier = Modifier.size(if (iosMini) iosCoverSize else 42.dp),
+                        shape = if (iosMini) RoundedCornerShape(8.dp) else CircleShape,
                         color = MaterialTheme.colorScheme.surfaceContainerHighest
                     ) {
                         if (bitmap != null) {
@@ -2203,7 +2328,7 @@ private fun MiniPlayer(
                     maxLines = 1,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface,
+                    color = miniInk,
                     modifier = Modifier.basicMarquee(
                         iterations = Int.MAX_VALUE,
                         initialDelayMillis = 600
@@ -2212,11 +2337,50 @@ private fun MiniPlayer(
                 Text(
                     state.artist,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = miniMuted
                 )
             }
             Spacer(Modifier.width(5.dp))
+            if (iosMini) {
+                val controlsWidth = if (state.privateFmMode) 80.dp else 120.dp
+                Row(Modifier.layout { measurable, constraints ->
+                    val full = controlsWidth.roundToPx()
+                    val child = measurable.measure(constraints.copy(minWidth = full, maxWidth = full))
+                    val width = (full * (1f - compactProgress())).roundToInt()
+                    layout(width, child.height) { child.placeRelative(0, 0) }
+                }
+                    .then(if (!controlsEnabled) Modifier.clearAndSetSemantics {} else Modifier)
+                    .graphicsLayer { clip = true; alpha = (1f - compactProgress() * 3f).coerceAtLeast(0f) }) {
+                Row(Modifier.requiredWidth(controlsWidth)) {
+                if (!state.privateFmMode) {
+                    IconButton(
+                        enabled = controlsEnabled,
+                        onClick = { miniHaptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); onPrevious() },
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(Icons.Default.SkipPrevious, "上一首", Modifier.size(24.dp), tint = miniInk)
+                    }
+                }
+                IconButton(
+                    enabled = controlsEnabled,
+                    onClick = { miniHaptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); onToggle() },
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Icon(if (state.playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        if (state.playing) "暂停" else "播放", Modifier.size(26.dp), tint = miniInk)
+                }
+                IconButton(
+                    enabled = controlsEnabled,
+                    onClick = { miniHaptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); onNext() },
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Icon(Icons.Default.SkipNext, "下一首", Modifier.size(24.dp), tint = miniInk)
+                }
+                }
+                }
+            } else {
             val playCorner by animateDpAsState(
                 targetValue = if (state.playing) 12.dp else 16.dp,
                 animationSpec = tween(255),
@@ -2259,6 +2423,7 @@ private fun MiniPlayer(
                 enabled = true,
                 onClick = { miniHaptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); onNext() }
             )
+            }
             }
         }
     }
@@ -2450,15 +2615,14 @@ private fun rememberCoverBitmap(bytes: ByteArray?, path: String?): androidx.comp
 }
 
 @OptIn(
-    androidx.compose.material3.ExperimentalMaterial3Api::class,
-    ExperimentalSharedTransitionApi::class,
-)
+    androidx.compose.material3.ExperimentalMaterial3Api::class,)
 @Composable
 private fun HomeScreen(
+    iosNavigation: Boolean = false,
     state: PlayerUiState,
-    sharedTransitionScope: SharedTransitionScope,
-    animatedVisibilityScope: AnimatedVisibilityScope,
+
     openPlaylist: (Long, String) -> Unit,
+    openAlbum: (Long, String) -> Unit = { _, _ -> },
     playRecommendation: (Int) -> Unit,
     refresh: () -> Unit,
     controller: PlayerController? = null,
@@ -2475,6 +2639,31 @@ private fun HomeScreen(
     var aiProgress by remember { mutableStateOf("") }
     var aiSummary by remember { mutableStateOf("") }
     var aiDetails by remember { mutableStateOf("") }
+    val firstPlaylists = remember(state.recommendPlaylists, state.homePlaylistSections) {
+        state.recommendPlaylists.ifEmpty { state.homePlaylistSections.firstOrNull()?.playlists ?: emptyList() }
+    }
+    val morePlaylists = remember(state.homePlaylistSections, firstPlaylists) {
+        val seen = firstPlaylists.mapTo(mutableSetOf()) { it.id }
+        state.homePlaylistSections.mapNotNull { section ->
+            val unique = section.playlists.filter { seen.add(it.id) }
+            if (unique.isEmpty()) null else section to unique
+        }
+    }
+    val suggestedAlbums = remember(state.homeAlbumRecommendations, state.recommendations) {
+        if (state.homeAlbumRecommendations.isNotEmpty()) state.homeAlbumRecommendations
+        else state.recommendations.asSequence()
+            .filter { it.albumId > 0L && !it.album.isNullOrBlank() }
+            .distinctBy { it.albumId }.take(12).map { song ->
+                NeteaseAlbum().apply {
+                    id = song.albumId
+                    name = song.album
+                    artistName = song.artist
+                    artistId = song.artistId
+                    coverUrl = song.coverUrl
+                    coverThumbPath = song.coverThumbPath
+                }
+            }.toList()
+    }
     LaunchedEffect(aiOpen, controller) {
         while (aiOpen && controller != null) {
             controller.pump()
@@ -2487,9 +2676,9 @@ private fun HomeScreen(
             delay(150)
         }
     }
-    LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        item { Text(if (state.userName.isBlank()) "你好" else "你好，${state.userName}", fontSize = 27.sp, fontWeight = FontWeight.SemiBold) }
-        item {
+    LazyColumn(contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = if (iosNavigation) 200.dp else 16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        item(key = "home_greeting") { Text(if (state.userName.isBlank()) "你好" else "你好，${state.userName}", fontSize = 27.sp, fontWeight = FontWeight.SemiBold) }
+        item(key = "home_ai") {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(aiText, { aiText = it }, Modifier.weight(1f), placeholder = { Text("今天想听点什么呢？告诉你的ai吧！") }, singleLine = true, shape = RoundedCornerShape(18.dp))
                 Box(
@@ -2515,56 +2704,108 @@ private fun HomeScreen(
                 ) { Icon(Icons.Default.AutoAwesome, contentDescription = "打开 AI DJ") }
             }
         }
-        item {
-            SectionTitle("推荐歌单")
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
-                items(state.recommendPlaylists, key = { it.id }) { playlist ->
-                    PlaylistCard(
-                        playlist = playlist,
-                        sharedTransitionScope = sharedTransitionScope,
-                        animatedVisibilityScope = animatedVisibilityScope,
-                        onClick = {
-                            leavingCoverKey = "playlist_card_${playlist.id}"
-                            openPlaylist(playlist.id, playlist.coverThumbPath ?: playlist.coverUrl ?: "")
-                        }
-                    )
+        // Keep playlists as the first recommendation shelf (not albums).
+        if (firstPlaylists.isEmpty() && state.homeLoading) item(key = "home_playlists_loading") {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionTitle("推荐歌单")
+                LoadingPlaceholder(Modifier.fillMaxWidth().height(176.dp), text = "正在加载推荐歌单…")
+            }
+        }
+        if (firstPlaylists.isNotEmpty()) item(key = "home_playlists") {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionTitle("推荐歌单")
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
+                    items(firstPlaylists, key = { it.id }) { playlist ->
+                        PlaylistCard(
+                            playlist = playlist,
+
+                            onClick = {
+
+                                openPlaylist(playlist.id, playlist.coverThumbPath ?: playlist.coverUrl ?: "")
+                            }
+                        )
+                    }
                 }
             }
         }
-        item { SectionTitle("每日推荐") }
-        itemsIndexed(
-            state.recommendations,
-            key = { index, song -> "recommend_${song.id}_$index" },
-            contentType = { _, _ -> "song" }
-        ) { index, song ->
-            SongRow(
-                title = song.name ?: "未知歌曲",
-                artist = song.artist ?: "未知歌手",
-                coverPath = song.coverThumbPath ?: song.coverUrl,
-                onClick = { playRecommendation(index) },
-                onLongPressQueue = { controller?.enqueueNeteaseSong(song) }
+        if (state.recommendations.isNotEmpty()) {
+            item(key = "home_daily_songs") {
+                HomeSongPages(
+                    title = "每日推荐",
+                    songs = state.recommendations,
+                    onPlay = playRecommendation,
+                    onEnqueue = { controller?.enqueueNeteaseSong(it) }
+                )
+            }
+        }
+        if (suggestedAlbums.isNotEmpty()) item(key = "home_albums") {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionTitle("专辑推荐")
+                if (state.homeAlbumRecommendations.isEmpty()) Text(
+                    "继续探索每日推荐中的专辑",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
+                    items(suggestedAlbums, key = { it.id }) { album ->
+                        HomeAlbumCard(album) {
+                            openAlbum(album.id, album.coverThumbPath ?: album.coverUrl ?: "")
+                        }
+                    }
+                }
+            }
+        }
+        items(
+            state.homeSongSections,
+            key = { "home_section_${it.id}" },
+            contentType = { "home_song_pages" }
+        ) { section ->
+            HomeSongPages(
+                title = section.title,
+                songs = section.songs,
+                onPlay = { index ->
+                    section.songs.getOrNull(index)?.let { song ->
+                        controller?.playHomeRecommendation(section.id, song.id)
+                    }
+                },
+                onEnqueue = { controller?.enqueueNeteaseSong(it) }
             )
         }
-        if (state.recommendPlaylists.isEmpty() && state.recommendations.isEmpty()) {
-            item {
-                // Same rule as the playlist/album/artist pages: while the fetch
-                // is in flight the page waits with the expressive loader; once
-                // it ends (success or failure) the empty state with its refresh
-                // button takes over. Kept as an item instead of an early return
-                // so the AI DJ dialog this screen owns is never unmounted.
-                if (state.homeLoading) {
-                    LoadingPlaceholder(
-                        modifier = Modifier.fillMaxWidth().height(260.dp),
-                        text = "正在加载推荐歌单…"
-                    )
-                } else {
-                    EmptyState("暂无推荐内容", "点击刷新后重新加载", refresh)
+        items(morePlaylists, key = { "home_playlist_section_${it.first.id}" },
+            contentType = { "home_playlist_shelf" }) { (section, playlists) ->
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionTitle(section.title)
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
+                    items(playlists, key = { it.id }) { playlist ->
+                        PlaylistCard(playlist) {
+
+                            openPlaylist(playlist.id, playlist.coverThumbPath ?: playlist.coverUrl ?: "")
+                        }
+                    }
                 }
+            }
+        }
+        if (firstPlaylists.isEmpty() && state.recommendations.isEmpty()
+            && state.homeSongSections.isEmpty() && suggestedAlbums.isEmpty()) {
+            if (!state.homeLoading) item(key = "home_empty") {
+                // Loading already occupies the first playlist shelf. Do not
+                // mount a second loader or unmount the AI dialog's owner.
+                EmptyState("暂无推荐内容", "点击刷新后重新加载", refresh)
+            }
+        } else if (state.homeLoading) {
+            item(key = "home_loading_more") {
+                LoadingPlaceholder(Modifier.fillMaxWidth().height(100.dp), text = "正在加载更多推荐…")
+            }
+        }
+        if (!state.homeLoading && state.homeFeedError.isNotEmpty()) {
+            item(key = "home_retry") {
+                TextButton(onClick = refresh) { Text(state.homeFeedError) }
             }
         }
     }
     if (aiOpen) AlertDialog(
         onDismissRequest = { aiOpen = false; aiPreferenceMode = false },
+        showActions = false,
         title = { Text("AI DJ") },
         text = { Column(
             modifier = Modifier.widthIn(max = 360.dp),
@@ -2645,12 +2886,11 @@ private fun extractAiCount(request: String): Int {
 }
 
 @Composable
-@OptIn(ExperimentalSharedTransitionApi::class)
 private fun SearchScreen(
+    iosNavigation: Boolean = false,
     state: PlayerUiState,
     controller: PlayerController,
-    sharedTransitionScope: SharedTransitionScope,
-    animatedVisibilityScope: AnimatedVisibilityScope,
+
     openPlaylist: (Long, String) -> Unit = { _, _ -> },
     openArtist: (Long) -> Unit
 ) {
@@ -2685,7 +2925,7 @@ private fun SearchScreen(
             SearchSourceTab("网易云", searchTab == 0, Modifier.weight(1f)) { searchTab = 0 }
             SearchSourceTab("B站", searchTab == 1, Modifier.weight(1f)) { searchTab = 1 }
         }
-        LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        LazyColumn(state = listState, contentPadding = PaddingValues(bottom = if (iosNavigation) 200.dp else 0.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             if (state.searchArtistId != 0L && searchTab == 0) {
                 item(key = "search_artist_pinned") {
                     SearchArtistCard(
@@ -2879,12 +3119,11 @@ private fun SearchArtistCard(
     }
 }
 
-@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 private fun LibraryScreen(
+    iosNavigation: Boolean = false,
     state: PlayerUiState,
-    sharedTransitionScope: SharedTransitionScope,
-    animatedVisibilityScope: AnimatedVisibilityScope,
+
     openLogin: () -> Unit,
     openPlaylist: (Long, String) -> Unit,
     openBiliFav: () -> Unit,
@@ -2898,7 +3137,7 @@ private fun LibraryScreen(
         EmptyState("登录后查看你的歌单", "使用网易云账号登录", openLogin)
         return
     }
-    LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    LazyColumn(contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = if (iosNavigation) 200.dp else 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item(key = "bili_fav_entry") {
             Surface(
                 modifier = Modifier
@@ -2944,10 +3183,9 @@ private fun LibraryScreen(
         ) { playlist ->
             PlaylistListRow(
                 playlist = playlist,
-                sharedTransitionScope = sharedTransitionScope,
-                animatedVisibilityScope = animatedVisibilityScope,
+
                 onClick = {
-                    leavingCoverKey = "playlist_row_${playlist.id}"
+
                     openPlaylist(playlist.id, playlist.coverThumbPath ?: playlist.coverUrl ?: "")
                 },
                 onDelete = { controller.deletePlaylist(playlist.id) }
@@ -2964,12 +3202,12 @@ private fun LibraryScreen(
 }
 
 @Composable
-private fun LocalScreen(state: PlayerUiState, controller: PlayerController) {
+private fun LocalScreen(state: PlayerUiState, controller: PlayerController, iosNavigation: Boolean = false) {
     if (state.tracks.isEmpty()) {
         EmptyState("还没有本地音乐", "授权音乐权限后会自动扫描") { }
         return
     }
-    LazyColumn(contentPadding = PaddingValues(16.dp)) {
+    LazyColumn(contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = if (iosNavigation) 200.dp else 16.dp)) {
         item { Text("本地音乐 · ${state.tracks.size}", fontSize = 18.sp, fontWeight = FontWeight.Medium) }
         itemsIndexed(
             state.tracks,
@@ -3317,41 +3555,23 @@ private fun SleepTimerControl(minutes: Int, remaining: Long, onMinutesChanged: (
     }
 }
 
-
-@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 private fun PlaylistScreen(
     state: PlayerUiState,
     controller: PlayerController,
     playlistId: Long,
     fallbackCoverPath: String = "",
-    sharedTransitionScope: SharedTransitionScope,
-    animatedVisibilityScope: AnimatedVisibilityScope,
+
 ) {
     // The core flags an in-flight playlist fetch; until the first track lands
     // there is nothing to show, so the page waits with the expressive loader
     // instead of an empty "0 首歌曲" header (the QML shell does the same with
     // player.playlistLoading).
-    val sharedMotion = tween<androidx.compose.ui.geometry.Rect>(
-        durationMillis = SHARED_MOTION_MS,
-        easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
-    )
     Box(
         Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .then(
-                with(sharedTransitionScope) {
-                    Modifier.sharedBounds(
-                        sharedContentState = rememberSharedContentState(
-                            "playlist_container_$playlistId"
-                        ),
-                        animatedVisibilityScope = animatedVisibilityScope,
-                        
-                        clipInOverlayDuringTransition = OverlayClip(RoundedCornerShape(0.dp))
-                    )
-                }
-            )
+            .background(ComposeColor.Transparent)
+
     ) {
         // The card this page grows out of. Zero radius here against the card's
         // 16dp is what makes the corners flatten as the container expands.
@@ -3365,20 +3585,7 @@ private fun PlaylistScreen(
                 Surface(
                     modifier = Modifier
                         .size(112.dp)
-                        .then(
-                            with(sharedTransitionScope) {
-                                Modifier.sharedBounds(
-                                    sharedContentState = rememberSharedContentState(
-                                        "playlist_cover_$playlistId"
-                                    ),
-                                    animatedVisibilityScope = animatedVisibilityScope,
-                                    
-                                    clipInOverlayDuringTransition = OverlayClip(
-                                        RoundedCornerShape(rememberSharedCoverTransitionRadius("playlist_cover_$playlistId", COVER_OVERLAY_CLIP, animatedVisibilityScope))
-                                    )
-                                )
-                            }
-                        ),
+                        ,
                     shape = ShapeLarge,
                     color = MaterialTheme.colorScheme.secondaryContainer
                 ) {
@@ -3400,8 +3607,7 @@ private fun PlaylistScreen(
             }
             Button(onClick = { if (state.playlistTracks.isNotEmpty()) controller.playPlaylistTrack(0) }, modifier = Modifier.padding(vertical = 12.dp)) { Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text("播放全部") }
         }
-        if (state.playlistLoading && state.playlistTracks.isEmpty()
-            && !sharedTransitionScope.isTransitionActive) {
+        if (state.playlistLoading && state.playlistTracks.isEmpty()) {
             item {
                 LoadingPlaceholder(
                     Modifier.fillMaxWidth().height(200.dp),
@@ -3426,41 +3632,23 @@ private fun PlaylistScreen(
     }
 }
 
-@OptIn(ExperimentalSharedTransitionApi::class, ExperimentalMaterial3ExpressiveApi::class)
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun AlbumScreen(
     state: PlayerUiState,
     controller: PlayerController,
     albumId: Long,
     fallbackCoverPath: String = "",
-    sharedTransitionScope: SharedTransitionScope,
-    animatedVisibilityScope: AnimatedVisibilityScope,
+
 ) {
     // Material's decelerate curve (0.2, 0, 0, 1): leaves quickly and settles softly.
     // A linear tween reads as mechanical and a spring overshoots the container's
     // bounds, so this is the curve the container transform is specified with.
-    val sharedMotion = tween<androidx.compose.ui.geometry.Rect>(
-        durationMillis = SHARED_MOTION_MS,
-        easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
-    )
     Box(
         Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .then(
-                with(sharedTransitionScope) {
-                    Modifier.sharedBounds(
-                        sharedContentState = rememberSharedContentState(
-                            "album_container_$albumId"
-                        ),
-                        animatedVisibilityScope = animatedVisibilityScope,
-                        
-                        // Square against the card's 16dp: each end carries its own
-                        // shape, so nothing is re-cut mid-flight.
-                        clipInOverlayDuringTransition = OverlayClip(RoundedCornerShape(0.dp))
-                    )
-                }
-            )
+            .background(ComposeColor.Transparent)
+
     ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -3476,20 +3664,7 @@ private fun AlbumScreen(
                 Surface(
                     modifier = Modifier
                         .size(168.dp)
-                        .then(
-                            with(sharedTransitionScope) {
-                                Modifier.sharedBounds(
-                                    sharedContentState = rememberSharedContentState(
-                                        "album_cover_$albumId"
-                                    ),
-                                    animatedVisibilityScope = animatedVisibilityScope,
-                                    
-                                    clipInOverlayDuringTransition = OverlayClip(
-                                        RoundedCornerShape(rememberSharedCoverTransitionRadius("album_cover_$albumId", COVER_OVERLAY_CLIP, animatedVisibilityScope))
-                                    )
-                                )
-                            }
-                        ),
+                        ,
                     shape = ShapeLarge,
                     color = MaterialTheme.colorScheme.secondaryContainer
                 ) {
@@ -3517,8 +3692,7 @@ private fun AlbumScreen(
                 Text("播放全部")
             }
         }
-        if (state.albumLoading && state.albumTracks.isEmpty()
-            && !sharedTransitionScope.isTransitionActive) {
+        if (state.albumLoading && state.albumTracks.isEmpty()) {
             item {
                 LoadingPlaceholder(
                     Modifier.fillMaxWidth().height(200.dp),
@@ -3798,13 +3972,12 @@ private fun BiliLoginDialog(state: PlayerUiState, onDismiss: () -> Unit) {
 }
 
 @Composable
-@OptIn(ExperimentalSharedTransitionApi::class, ExperimentalMaterial3ExpressiveApi::class)
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 private fun ArtistScreen(
     state: PlayerUiState,
     controller: PlayerController,
     artistId: Long,
-    sharedTransitionScope: SharedTransitionScope,
-    animatedVisibilityScope: AnimatedVisibilityScope,
+
     openAlbum: (Long, String) -> Unit
 ) {
     if (state.artistLoading && state.artistSongs.isEmpty() && state.artistAlbums.isEmpty()) {
@@ -3815,18 +3988,13 @@ private fun ArtistScreen(
     // Material's decelerate curve (0.2, 0, 0, 1): leaves quickly and settles softly.
     // A linear tween reads as mechanical and a spring overshoots the container's
     // bounds, so this is the curve the container transform is specified with.
-    val sharedMotion = tween<androidx.compose.ui.geometry.Rect>(
-        durationMillis = SHARED_MOTION_MS,
-        easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
-    )
     val listState = rememberLazyListState()
     val heroBitmap = rememberCoverBitmap(
         null,
         state.artistHeaderPath.ifBlank { state.artistCoverPath }
     )
-    // Monet again: the page keeps the cover-derived theme (the same palette every
-    // other screen uses) instead of a colour sampled out of the artist's photo, and
-    // the hero only has to blend into that theme's surface.
+    // RouteArtworkSurface derives this page's palette from the artist's large
+    // header, not the currently playing album. The hero fades into that palette.
     val backdrop = MaterialTheme.colorScheme.background
     Box(Modifier.fillMaxSize()) {
     LazyColumn(
@@ -3871,11 +4039,6 @@ private fun ArtistScreen(
             ) { album ->
     // The card's own text is not part of the shared element: it has to be gone in
     // 80ms so it can never ghost underneath the detail page's text.
-    val listTextAlpha by animateFloatAsState(
-        targetValue = if (leavingCoverKey == "album_row_${album.id}") 0f else 1f,
-        animationSpec = tween(80),
-        label = "list_text_fade"
-    )
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -3890,27 +4053,10 @@ private fun ArtistScreen(
                         .fillMaxWidth()
                         .padding(vertical = 4.dp)
                         .clickable {
-                            leavingCoverKey = "album_row_${album.id}"
+
                             openAlbum(album.id, album.coverThumbPath ?: album.coverUrl ?: "")
                         }
-                        .then(
-                            with(sharedTransitionScope) {
-                                Modifier.sharedBounds(
-                                    sharedContentState = rememberSharedContentState(
-                                        "album_container_${album.id}"
-                                    ),
-                                    animatedVisibilityScope = animatedVisibilityScope,
-                                    // M3 expressive motion scheme — the same source the
-                                    // framework uses, a spatial spring with an emphasised
-                                    // curve instead of a linear tween.
-                                    
-                                    resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
-                                    clipInOverlayDuringTransition = OverlayClip(
-                                        RoundedCornerShape(16.dp)
-                                    )
-                                )
-                            }
-                        ),
+                        ,
                     shape = RoundedCornerShape(16.dp),
                     color = ComposeColor.Transparent
                 ) {
@@ -3924,20 +4070,7 @@ private fun ArtistScreen(
                     Surface(
                         modifier = Modifier
                             .size(60.dp)
-                            .then(
-                                with(sharedTransitionScope) {
-                                    Modifier.sharedBounds(
-                                        sharedContentState = rememberSharedContentState(
-                                            "album_cover_${album.id}"
-                                        ),
-                                        animatedVisibilityScope = animatedVisibilityScope,
-                                        
-                                        clipInOverlayDuringTransition = OverlayClip(
-                                            RoundedCornerShape(rememberSharedCoverTransitionRadius("album_cover_${album.id}", COVER_OVERLAY_CLIP, animatedVisibilityScope))
-                                        )
-                                    )
-                                }
-                            ),
+                            ,
                         shape = ShapeMedium,
                         color = MaterialTheme.colorScheme.secondaryContainer
                     ) {
@@ -3952,7 +4085,7 @@ private fun ArtistScreen(
                             Icon(Icons.Default.Album, null, Modifier.padding(16.dp))
                         }
                     }
-                    Column(Modifier.padding(start = 12.dp).graphicsLayer { alpha = listTextAlpha }) {
+                    Column(Modifier.padding(start = 12.dp)) {
                         Text(album.name ?: "未命名专辑", fontWeight = FontWeight.Medium)
                         Text(
                             "${album.trackCount} 首歌曲",
@@ -3969,13 +4102,13 @@ private fun ArtistScreen(
             item { EmptyState("暂无歌手信息", "网易云未返回该歌手的公开资料") { controller.openArtist(state.openArtistId) } }
         }
         if (state.artistBriefDesc.isNotBlank()) {
-            item { SectionTitle("歌手简介") }
+            item { Box(Modifier.padding(horizontal = 16.dp)) { SectionTitle("歌手简介") } }
             item {
                 Text(
                     state.artistBriefDesc,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     lineHeight = 20.sp,
-                    modifier = Modifier.padding(bottom = 8.dp)
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp)
                 )
             }
         }
@@ -4069,7 +4202,7 @@ private fun ArtistHero(
             Column(Modifier.padding(start = 14.dp)) {
                 Text(
                     state.artistName.ifBlank { "歌手" },
-                    color = ComposeColor.White,
+                    color = MaterialTheme.colorScheme.onBackground,
                     fontSize = 26.sp,
                     fontWeight = FontWeight.Black,
                     maxLines = 1,
@@ -4077,81 +4210,13 @@ private fun ArtistHero(
                 )
                 Text(
                     "${minOf(state.artistSongs.size, ARTIST_TOP_SONG_COUNT)} 首热门歌曲 · ${state.artistAlbums.size} 张专辑",
-                    color = ComposeColor.White.copy(alpha = 0.72f),
+                    color = MaterialTheme.colorScheme.onBackground,
                     fontSize = 13.sp
                 )
             }
         }
     }
 }
-
-/**
- * MD3 Emphasized motion for the container transform, chosen by direction: the
- * expansion launches fast and settles with a long, soft damping tail
- * (Emphasized Decelerate); the collapse runs the same motion backwards, which is
- * shorter and steeper (Emphasized Accelerate).
- */
-private val CoverExpandEasing = CubicBezierEasing(0.05f, 0.7f, 0.1f, 1.0f)
-private val CoverCollapseEasing = CubicBezierEasing(0.3f, 0f, 0.8f, 0.15f)
-private const val COVER_EXPAND_MS = 450
-private const val COVER_COLLAPSE_MS = 250
-
-/** Enter or exit, decided by whether the shared bounds are growing. */
-private fun coverBoundsTransform(
-    initial: androidx.compose.ui.geometry.Rect,
-    target: androidx.compose.ui.geometry.Rect
-): androidx.compose.animation.core.FiniteAnimationSpec<androidx.compose.ui.geometry.Rect> {
-    val expanding = target.width * target.height >= initial.width * initial.height
-    return tween(
-        durationMillis = if (expanding) COVER_EXPAND_MS else COVER_COLLAPSE_MS,
-        easing = if (expanding) CoverExpandEasing else CoverCollapseEasing
-    )
-}
-
-private const val SHARED_COVER_RADIUS_CACHE_MAX = 256
-
-/** Same corner-radius hand-over as legado-with-MD3's CoilBookCover: the source page
- *  records the cover's radius while it sits still, and the destination reads it back
- *  under the same key so both ends of the flight agree on the corners. */
-private val sharedCoverRadiusCache =
-    androidx.compose.runtime.mutableStateMapOf<String, androidx.compose.ui.unit.Dp>()
-
-@Composable
-private fun rememberSharedCoverTransitionRadius(
-    sharedCoverKey: String?,
-    radius: androidx.compose.ui.unit.Dp,
-    animatedVisibilityScope: AnimatedVisibilityScope?
-): androidx.compose.ui.unit.Dp {
-    if (sharedCoverKey == null || animatedVisibilityScope == null) return radius
-    val transition = animatedVisibilityScope.transition
-    val startRadius = sharedCoverRadiusCache[sharedCoverKey] ?: radius
-    val animatedRadiusValue by transition.animateFloat(label = "cover_corner_radius") { state ->
-        if (state == androidx.compose.animation.EnterExitState.Visible) radius.value
-        else startRadius.value
-    }
-    LaunchedEffect(sharedCoverKey, radius, transition.currentState, transition.targetState) {
-        if (transition.currentState == androidx.compose.animation.EnterExitState.Visible &&
-            transition.targetState == androidx.compose.animation.EnterExitState.Visible
-        ) {
-            sharedCoverRadiusCache[sharedCoverKey] = radius
-            if (sharedCoverRadiusCache.size > SHARED_COVER_RADIUS_CACHE_MAX) {
-                sharedCoverRadiusCache.keys.firstOrNull { it != sharedCoverKey }
-                    ?.let(sharedCoverRadiusCache::remove)
-            }
-        }
-    }
-    return animatedRadiusValue.dp
-}
-
-/**
- * Key of the cover the user just tapped. Only that row's text fades out for the
- * flight — `isTransitionActive` is true for the whole page, so using it directly
- * blanked every row's text (and looked like the list "refreshing itself").
- */
-private var leavingCoverKey by mutableStateOf<String?>(null)
-
-/** Corner radius the flying cover is clipped to (ShapeLarge-ish). */
-private val COVER_OVERLAY_CLIP = 20.dp
 
 /** Height of the artist page's hero band (backdrop + avatar/name). */
 private val ARTIST_HERO_HEIGHT = 200.dp
@@ -4204,8 +4269,6 @@ private fun darkMutedBackdrop(bitmap: androidx.compose.ui.graphics.ImageBitmap?)
 /** How many of an artist's best-known songs the artist page lists up front. */
 private const val ARTIST_TOP_SONG_COUNT = 10
 
-
-
 @Composable
 @OptIn(androidx.compose.animation.ExperimentalAnimationApi::class)
 private fun PlayerControlsSection(
@@ -4215,6 +4278,22 @@ private fun PlayerControlsSection(
     onLikeToggle: () -> Unit,
     onLikeLongPress: () -> Unit = {}
 ) {
+    if (LocalIosDesign.current) {
+        var biliFavorites by remember { mutableStateOf(false) }
+        IosPlayerTransport(
+            playing = state.playing, previousEnabled = !state.privateFmMode,
+            playMode = state.playMode, liked = isLiked,
+            previous = { controller.prev() }, toggle = { controller.toggle() }, next = { controller.next() },
+            shuffle = { controller.setPlayMode(if (state.playMode == 1) 0 else 1) },
+            repeat = { controller.setPlayMode(if (state.playMode == 2) 0 else 2) },
+            favorite = { if (state.biliPlaying) biliFavorites = true else onLikeToggle() },
+            favoriteLongPress = onLikeLongPress
+        )
+        if (biliFavorites) BiliFavPickerDialog(state = state, controller = controller,
+            bvid = state.queueTracks.getOrNull(state.queueIndex)?.biliBvid.orEmpty(),
+            onDismiss = { biliFavorites = false })
+        return
+    }
     val haptic = LocalView.current
     val previousEnabled = !state.privateFmMode
     val heartScale by animateFloatAsState(
@@ -4595,12 +4674,18 @@ private fun PlayerDetailScreen(
     openArtist: (Long) -> Unit,
     close: () -> Unit,
     closing: Boolean = false,
+    containerAnimated: Boolean = false,
     sleepMinutes: Int = 0,
     sleepRemaining: Long = 0L,
     sleepArmed: Boolean = true,
     onSleepMinutesChanged: (Int) -> Unit = {}
 ) {
+    val iosPlayer = LocalIosDesign.current
+    val playerBackdrop = if (iosPlayer) rememberLayerBackdrop() else null
     var activeTab by remember(state.trackKey) { mutableIntStateOf(0) }
+    // Initial fallback only; each glass control samples its own local backdrop.
+    val playerLuminance = 0.1f
+    val playerTint = ComposeColor(0xFF202124)
     // A bili video has no lyrics: never leave the page on the lyric tab while one
     // is playing.
     LaunchedEffect(state.biliPlaying) {
@@ -4637,7 +4722,7 @@ private fun PlayerDetailScreen(
         animationSpec = tween(260, easing = androidx.compose.animation.core.FastOutSlowInEasing),
         label = "detail_cover_scale"
     )
-    val detailProgress = remember { Animatable(0f) }
+    val detailProgress = remember { Animatable(if (containerAnimated) 1f else 0f) }
     val coverExpand = detailProgress
     val metaEnter = detailProgress
     val controlsEnter = detailProgress
@@ -4646,8 +4731,8 @@ private fun PlayerDetailScreen(
         if (queueSheetOpen) queueSheetOpen = false else close()
     }
 
-    LaunchedEffect(closing) {
-        detailProgress.animateTo(if (closing) 0f else 1f, tween(DETAIL_MOTION_MS, easing = FastOutSlowInEasing))
+    LaunchedEffect(closing, containerAnimated) {
+        if (!containerAnimated) detailProgress.animateTo(if (closing) 0f else 1f, tween(DETAIL_MOTION_MS, easing = FastOutSlowInEasing))
     }
 
     // Opening the queue is intentionally idempotent.  A new coroutine scope
@@ -4695,14 +4780,33 @@ private fun PlayerDetailScreen(
                 )
             }
     ) {
-        // Detail and navigation use the same MD3 surface container. Keeping a
-        // single colour source avoids the full-screen detail page becoming a
-        // different shade after repeated route transitions.
+        // Keep the source backdrop behind both tabs, not inside the lyrics
+        // content area. The setting applies even when iOS design is enabled.
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(MaterialTheme.colorScheme.surfaceContainer)
-        )
+                .then(if (playerBackdrop != null) Modifier.layerBackdrop(playerBackdrop) else Modifier)
+                .background(if (state.lyricCoverBackground) ComposeColor(0xFF202534)
+                    else if (iosPlayer) ComposeColor(0xFF171719)
+                    else MaterialTheme.colorScheme.surfaceContainer)
+        ) {
+        if (state.lyricCoverBackground && coverBitmap != null) {
+            // Keep the detail page on the ui.zip renderer as well. This is the
+            // source implementation with the 480px downsample, 80px blur and
+            // white bloom; using a second native shader here made the two pages
+            // visibly disagree in strength.
+            SourceDynamicBackdrop(
+                coverBitmap,
+                lyrics = activeTab == 1,
+                dark = state.dark,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+        }
+        androidx.compose.runtime.CompositionLocalProvider(LocalPlayerGlassBackdrop provides playerBackdrop,
+            LocalGlassLuminance provides playerLuminance,
+            LocalGlassTint provides playerTint,
+            LocalGlassDark provides state.dark) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -4732,8 +4836,7 @@ private fun PlayerDetailScreen(
                 AnimatedContent(
                     targetState = activeTab,
                     transitionSpec = {
-                        fadeIn(tween(300, easing = androidx.compose.animation.core.FastOutSlowInEasing))
-                            .togetherWith(fadeOut(tween(220, easing = androidx.compose.animation.core.FastOutLinearInEasing)))
+                        dev.t1m3.qplayer.android.ui.motion.SealMotion.fade()
                     },
                     label = "player_detail_tab"
                 ) { tab ->
@@ -4765,6 +4868,7 @@ private fun PlayerDetailScreen(
             }
         }
 
+        } // Player backdrop provider; queue owns its own artwork theme.
         // The root VideoLayer draws above this page's content, so it would float over
         // this sheet. Park it while the sheet is up; parking keeps the Surface alive, so
         // closing the sheet does not rebuild the picture.
@@ -4774,14 +4878,8 @@ private fun PlayerDetailScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .zIndex(20f),
-            enter = slideInVertically(
-                initialOffsetY = { it },
-                animationSpec = tween(360, easing = androidx.compose.animation.core.FastOutSlowInEasing)
-            ) + fadeIn(tween(240)),
-            exit = slideOutVertically(
-                targetOffsetY = { it },
-                animationSpec = tween(280, easing = androidx.compose.animation.core.FastOutLinearInEasing)
-            ) + fadeOut(tween(180))
+            enter = dev.t1m3.qplayer.android.ui.motion.SealMotion.sheetIn(),
+            exit = dev.t1m3.qplayer.android.ui.motion.SealMotion.sheetOut()
         ) {
             Box(
                 modifier = Modifier
@@ -4802,10 +4900,12 @@ private fun PlayerDetailScreen(
                             indication = null
                         ) {},
                     shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-                    color = MaterialTheme.colorScheme.surfaceContainer,
-                    tonalElevation = 6.dp,
+                    color = ComposeColor.Transparent,
+                    tonalElevation = 0.dp,
                     shadowElevation = 12.dp
                 ) {
+                    ArtworkPageSurface(coverBitmap, "queue:${state.trackKey}:${state.coverPath}",
+                        dark = state.dark, modifier = Modifier.fillMaxSize()) {
                     Column(Modifier.fillMaxSize()) {
                         Box(
                             modifier = Modifier
@@ -4865,6 +4965,7 @@ private fun PlayerDetailScreen(
                             }
                         )
                     }
+                    }
                 }
             }
         }
@@ -4881,6 +4982,10 @@ private fun PlayerDetailHeader(
     onShare: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    if (LocalIosDesign.current) {
+        IosPlayerHeader(activeTab, state.biliPlaying, onTab, onClose, onShare, onQueue, modifier)
+        return
+    }
     Row(
         modifier = modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -5064,10 +5169,19 @@ private fun ApkDetailTab(
                     .fillMaxWidth()
                     .height(34.dp)
                     .clickable(
-                        enabled = state.albumId != 0L,
+                        // Ⓜ The listener: 「点歌名不能跳转专辑」. The tap was gated on the album ID
+                        // alone, so a track whose entry carried no `al.id` had a dead title for
+                        // ever — even though the album's NAME is right there and the core can open
+                        // the page from it (openAlbumByName, which resolves through search). The id
+                        // path stays primary; the name is the fallback, and when both are missing
+                        // the tap is disabled exactly as before.
+                        enabled = state.albumId != 0L || state.album.isNotBlank(),
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null
-                    ) { openAlbum(state.albumId) },
+                    ) {
+                        if (state.albumId != 0L) openAlbum(state.albumId)
+                        else controller.openAlbumByName(state.album)
+                    },
                 color = MaterialTheme.colorScheme.onSurface,
                 fontSize = titleSize,
                 fontWeight = FontWeight.Bold,
@@ -5117,6 +5231,7 @@ private fun ApkDetailTab(
     }
     if (playlistDialog) AlertDialog(
         onDismissRequest = { playlistDialog = false },
+        scrollableContent = false,
         title = { Text("添加到歌单") },
         text = {
             LazyColumn(Modifier.heightIn(max = 360.dp)) {
@@ -5377,6 +5492,7 @@ private fun BiliFavPickerDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("收藏到 B站收藏夹") },
+        scrollableContent = false,
         text = {
             when {
                 state.biliFavLoading -> Text("正在加载收藏夹…")
@@ -5413,25 +5529,17 @@ private fun BiliFavPickerDialog(
             }
         },
         confirmButton = {
-            Box(
-                Modifier
-                    .clickable(enabled = bvid.isNotBlank()) {
+            TextButton(enabled = bvid.isNotBlank(), onClick = {
                         val add = selected.filter { it !in original }
                         val del = original.filter { it !in selected }
                         if (add.isNotEmpty() || del.isNotEmpty()) {
                             controller.setBiliFavs(bvid, add, del)
                         }
                         onDismiss()
-                    }
-                    .padding(horizontal = 10.dp, vertical = 8.dp)
-            ) { Text("确定") }
+                    }) { Text("确定") }
         },
         dismissButton = {
-            Box(
-                Modifier
-                    .clickable { onDismiss() }
-                    .padding(horizontal = 10.dp, vertical = 8.dp)
-            ) { Text("取消") }
+            TextButton(onClick = onDismiss) { Text("取消") }
         }
     )
 }
@@ -6180,6 +6288,14 @@ private fun QmlLyricBackdrop(
     modifier: Modifier = Modifier
 ) {
     val scheme = MaterialTheme.colorScheme
+    if (state.lyricCoverBackground && coverBitmap != null) {
+        SourceDynamicBackdrop(coverBitmap, lyrics = true, dark = state.dark, modifier = modifier)
+        return
+    }
+    if (LocalIosDesign.current) {
+        Box(modifier.background(scheme.background))
+        return
+    }
     val dynamic = state.lyricCoverBackground
     val staticColor = if (state.dark) {
         scheme.surfaceContainerHighest
@@ -7159,7 +7275,6 @@ private fun QmlLyricColumnRestored(
                         groupEndMs = row.endMs,
                         focused = activeDisplayIndex == displayIndex,
                         completed = activeDisplayIndex >= 0 && displayIndex < activeDisplayIndex,
-                        animatePerToken = row.lyric.syllables.size > 1 || state.lyricLinearAnim,
                         positionMs = state.lyricPositionMs,
                         positionState = smoothPositionState,
                         focusIndex = activeDisplayIndex,
@@ -7469,7 +7584,6 @@ private fun QmlLyricColumnRestoredLegacySharedScroll(
                             ?: (state.lyrics.getOrNull(index + 1)?.startMs()
                                 ?: (line.startMs() + 960L)),
                         focused = activeLyricIndex == index,
-                        animatePerToken = line.syllables.isNotEmpty() || state.lyricLinearAnim,
                         positionMs = if (activeLyricIndex == index ||
                             (lineTransition.fromIndex == index &&
                                 lineTransitionElapsedMs.longValue < 900L)
@@ -7894,8 +8008,7 @@ private class LyricUnit(
     val groupIndex: Int,
     val glyphIndex: Int,
     val glyphCount: Int,
-    val containsCjk: Boolean,
-    val longAscii: Boolean
+    val containsCjk: Boolean
 )
 
 /**
@@ -7967,7 +8080,6 @@ private fun spreadLyricUnits(
         index += width
     }
     val containsCjk = text.any { it in '\u3400'..'\u9fff' || it in '\u3040'..'\u30ff' }
-    val longAscii = span >= 1_000L && text.length > 7 && text.all { it.code in 0x09..0x7e }
     val animatedCount = pieces.count { piece ->
         !piece.all { it.isWhitespace() } && !piece.isTrailingLyricPunctuation()
     }.coerceAtLeast(1)
@@ -7987,8 +8099,7 @@ private fun spreadLyricUnits(
             groupIndex = groupIndex,
             glyphIndex = glyphIndex,
             glyphCount = animatedCount,
-            containsCjk = containsCjk,
-            longAscii = longAscii
+            containsCjk = containsCjk
         )
     }
 }
@@ -8394,7 +8505,6 @@ private fun QmlLyricColumn(
                     groupStartMs = groupStart,
                     groupEndMs = groupEnd,
                     focused = groupIndex >= 0 && groupIndex == liveCurrentGroupIndex,
-                    animatePerToken = prepared.animatablePerToken,
                     positionMs = smoothPositionMs,
                     focusIndex = activeLineIndex,
                     springEnabled = state.lyricSpring,
@@ -8414,7 +8524,6 @@ private fun QmlLyricRow(
     groupEndMs: Long,
     focused: Boolean,
     completed: Boolean = false,
-    animatePerToken: Boolean,
     positionMs: Long,
     focusIndex: Int,
     springEnabled: Boolean,
@@ -8459,6 +8568,9 @@ private fun QmlLyricRow(
         ?: (line.endMs().takeIf { it > line.startMs() } ?: (line.startMs() + 960L))
     val units = remember(line, nextLineStartMs) {
         expandLyricUnits(line, nextLineStartMs)
+    }
+    val motionPolicy = remember(line, state.lyricLinearAnim, springEnabled) {
+        lyricRenderPolicy(LyricTiming.hasWordTiming(line), state.lyricLinearAnim, springEnabled)
     }
     val outgoing = lineTransition?.fromIndex == index &&
         (lineTransitionElapsedMs?.value ?: 3000L) < 900L
@@ -8559,7 +8671,7 @@ private fun QmlLyricRow(
         val particleProgress = ((positionMs - groupStartMs).toFloat() /
             (groupEndMs - groupStartMs).coerceAtLeast(1L).toFloat()).coerceIn(0f, 1f)
         Box(Modifier.width(textWidth)) {
-            if (animatePerToken && mainTextLayout != null) {
+            if (motionPolicy.glyphs && mainTextLayout != null) {
                 // The HTML source uses one independently transformed glyph per
                 // grapheme. Keeping that same structure is important: a
                 // BaselineShift inside one AnnotatedString moves color, but it
@@ -8567,7 +8679,7 @@ private fun QmlLyricRow(
                 LyricGlyphText(
                     units = units,
                     textLayout = mainTextLayout,
-                    filled = outgoing || completed,
+                    filled = outgoing || completed || (!motionPolicy.sweep && focused),
                     positionMs = positionMs,
                     positionState = positionState,
                     fontSize = (baseSize * textScale).sp,
@@ -8575,7 +8687,7 @@ private fun QmlLyricRow(
                     fontWeight = lyricWeight,
                     normalColor = unplayedColor,
                     playedColor = playedColor,
-                    springEnabled = springEnabled,
+                    policy = motionPolicy,
                     modifier = Modifier.width(textWidth)
                 )
             } else {
@@ -8646,9 +8758,36 @@ private fun LyricGlyphText(
     fontWeight: FontWeight,
     normalColor: ComposeColor,
     playedColor: ComposeColor,
-    springEnabled: Boolean,
+    policy: LyricRenderPolicy,
     modifier: Modifier = Modifier
 ) {
+    if (!policy.sweep) {
+        // Plain LRC + spring on: reuse the already shaped whole line. Do not
+        // create/measure one text layout per letter just to translate them all
+        // by the same amount. The playback clock is observed only when drawing.
+        val start = remember(units) { units.minOfOrNull { it.groupStartMs } ?: 0L }
+        val motion = remember(units, start) {
+            val end = units.maxOfOrNull { it.groupStartMs + it.groupDurationMs } ?: start
+            LyricWordLift(LyricGlyphTiming(start, (end - start).coerceAtLeast(1L), 0f, 1f))
+        }
+        val fallback = rememberUpdatedState(positionMs)
+        val playback = positionState ?: fallback
+        val position = remember(playback, motion, start) {
+            derivedStateOf(androidx.compose.runtime.structuralEqualityPolicy()) {
+                playback.value.coerceIn(start, motion.settledAtMs)
+            }
+        }
+        val density = LocalDensity.current
+        Canvas(modifier.height(with(density) { textLayout.size.height.toDp() })) {
+            val lift = if (policy.lift) motion.at(position.value) else 0f
+            val canvas = drawContext.canvas
+            canvas.save()
+            canvas.translate(0f, -lift * density.density)
+            drawText(textLayoutResult = textLayout, color = if (filled) playedColor else normalColor)
+            canvas.restore()
+        }
+        return
+    }
     val textMeasurer = rememberTextMeasurer()
     val density = LocalDensity.current
     val glyphStyle = remember(fontSize, lineHeight, fontWeight) {
@@ -8761,20 +8900,32 @@ private fun LyricGlyphText(
             lineSweep.glyphTiming(unit.groupIndex, glyphStarts[index], sweepWidths[index])
         }
     }
-    val motions = remember(units, glyphTimings) {
-        units.mapIndexed { index, unit ->
-            LyricWordLift(
-                timing = glyphTimings[index],
-                enabled = !unit.longAscii && unit.text.any { !it.isWhitespace() }
-            )
-        }
+    // Colour still follows each glyph's measured timing. Lift is different:
+    // it belongs to the source word/syllable, so every glyph in one timing
+    // group shares one motion clock and rises as a single word.
+    val motions = remember(units, lineSweep) {
+        val groupMotions = units
+            .groupBy { it.groupIndex }
+            .mapValues { (_, group) ->
+                val first = group.first()
+                LyricWordLift(
+                    timing = LyricGlyphTiming(
+                        first.groupStartMs,
+                        first.groupDurationMs,
+                        0f,
+                        1f
+                    ),
+                    enabled = group.any { it.text.any { ch -> !ch.isWhitespace() } }
+                )
+            }
+        units.map { unit -> requireNotNull(groupMotions[unit.groupIndex]) }
     }
     val fallbackPosition = rememberUpdatedState(positionMs)
     val playbackPosition = positionState ?: fallbackPosition
-    val renderRange = remember(units, motions, springEnabled) {
+    val renderRange = remember(units, motions, policy.lift) {
         val start = units.minOfOrNull { it.groupStartMs } ?: 0L
         val colorEnd = units.maxOfOrNull { it.groupStartMs + it.groupDurationMs.coerceAtLeast(1L) } ?: start
-        val motionEnd = if (springEnabled) motions.maxOfOrNull { it.settledAtMs } ?: colorEnd else colorEnd
+        val motionEnd = if (policy.lift) motions.maxOfOrNull { it.settledAtMs } ?: colorEnd else colorEnd
         start..maxOf(colorEnd, motionEnd)
     }
     val renderedPosition = remember(playbackPosition, renderRange) {
@@ -8792,8 +8943,8 @@ private fun LyricGlyphText(
             // Respect every source start AND end, including short rests and
             // overlapping vocals. Only the colour edge inside a source word is
             // interpolated by width. Lift samples that very same interval.
-            val progress = if (filled) 1f else glyphTimings[index].progressAt(renderedPositionMs)
-            val lift = if (springEnabled) motions[index].at(renderedPositionMs) else 0f
+            val progress = if (filled) 1f else if (policy.sweep) glyphTimings[index].progressAt(renderedPositionMs) else 0f
+            val lift = if (policy.lift) motions[index].at(renderedPositionMs) else 0f
             val position = glyphGeometry[index]
             val canvas = drawContext.canvas
             canvas.save()
@@ -8895,15 +9046,18 @@ private fun QmlLyricProgress(
     modifier: Modifier = Modifier
 ) {
     val duration = durationMs.coerceAtLeast(1L)
+    val seek by rememberUpdatedState(onSeek)
     var dragging by remember { mutableStateOf(false) }
     var dragPosition by remember { mutableLongStateOf(0L) }
     val current = if (dragging) dragPosition else positionMs.coerceIn(0L, duration)
     val rawProgress = (current.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
-    val progress by animateFloatAsState(
+    val animatedProgress by animateFloatAsState(
         targetValue = rawProgress,
-        animationSpec = tween(180, easing = LinearEasing),
+        animationSpec = tween(if (dragging) 0 else 180, easing = LinearEasing),
         label = "md3_progress_position"
     )
+    val progress = if (dragging) rawProgress else animatedProgress
+    val iosProgress = LocalIosDesign.current
     val trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
     val progressColor = MaterialTheme.colorScheme.primary
     val progressHandleColor = MaterialTheme.colorScheme.primary
@@ -8917,7 +9071,7 @@ private fun QmlLyricProgress(
                 .pointerInput(duration, wavy) {
                     fun seekAt(x: Float) {
                         val fraction = (x / size.width.toFloat()).coerceIn(0f, 1f)
-                        onSeek((fraction * duration).toLong())
+                        seek((fraction * duration).toLong())
                     }
                     detectTapGestures { offset -> seekAt(offset.x) }
                 }
@@ -8929,7 +9083,7 @@ private fun QmlLyricProgress(
                                 .coerceIn(0f, 1f) * duration).toLong()
                         },
                         onDragEnd = {
-                            onSeek(dragPosition)
+                            seek(dragPosition)
                             dragging = false
                         },
                         onDragCancel = { dragging = false },
@@ -8943,7 +9097,17 @@ private fun QmlLyricProgress(
         ) {
             Canvas(Modifier.fillMaxSize()) {
                 val centerY = size.height / 2f
-                if (wavy) {
+                if (iosProgress) {
+                    // A continuous Apple-style track: no MD handle or handle gap.
+                    val height = if (dragging) 9.dp.toPx() else 5.dp.toPx()
+                    val radius = height / 2f
+                    drawRoundRect(ComposeColor.White.copy(alpha = .22f),
+                        topLeft = Offset(0f, centerY - radius), size = Size(size.width, height),
+                        cornerRadius = CornerRadius(radius, radius))
+                    if (progress > 0f) drawRoundRect(ComposeColor.White.copy(alpha = .92f),
+                        topLeft = Offset(0f, centerY - radius), size = Size(size.width * progress, height),
+                        cornerRadius = CornerRadius(radius, radius))
+                } else if (wavy) {
                     val amplitude = if (dragging) 4.dp.toPx() else 2.5.dp.toPx()
                     val stroke = Stroke(
                         width = if (dragging) 5.dp.toPx() else 3.dp.toPx(),
@@ -9237,65 +9401,29 @@ private fun LoginDialog(controller: PlayerController, state: PlayerUiState, clos
     )
 }
 
-@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 private fun PlaylistCard(
     playlist: NeteasePlaylist,
-    sharedTransitionScope: SharedTransitionScope,
-    animatedVisibilityScope: AnimatedVisibilityScope,
+
     onClick: () -> Unit,
 ) {
-    val sharedMotion = tween<androidx.compose.ui.geometry.Rect>(
-        durationMillis = SHARED_MOTION_MS,
-        easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
-    )
     val coverBitmap = rememberCoverBitmap(null, playlist.coverThumbPath ?: playlist.coverUrl)
     // The card's text is not part of the shared element, so it disappears fast
     // instead of lingering半透明 under the detail page's own text.
-    val listTextAlpha by animateFloatAsState(
-        targetValue = if (leavingCoverKey == "playlist_card_${playlist.id}") 0f else 1f,
-        animationSpec = tween(80),
-        label = "card_text_fade"
-    )
     Card(
         Modifier
             .width(164.dp)
             .clickable { onClick() }
-            .then(
-                with(sharedTransitionScope) {
-                    Modifier.sharedBounds(
-                        sharedContentState = rememberSharedContentState(
-                            "playlist_container_${playlist.id}"
-                        ),
-                        animatedVisibilityScope = animatedVisibilityScope,
-                        
-                        resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
-                        clipInOverlayDuringTransition = OverlayClip(RoundedCornerShape(16.dp))
-                    )
-                }
-            ),
+            ,
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = ComposeColor.Transparent)
     ) {
-        Column(Modifier.graphicsLayer { alpha = listTextAlpha }) {
+        Column {
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(164.dp)
-                    .then(
-                        with(sharedTransitionScope) {
-                            Modifier.sharedBounds(
-                                sharedContentState = rememberSharedContentState(
-                                    "playlist_cover_${playlist.id}"
-                                ),
-                                animatedVisibilityScope = animatedVisibilityScope,
-                                
-                                clipInOverlayDuringTransition = OverlayClip(
-                                    RoundedCornerShape(rememberSharedCoverTransitionRadius("playlist_cover_${playlist.id}", COVER_OVERLAY_CLIP, animatedVisibilityScope))
-                                )
-                            )
-                        }
-                    ),
+                    ,
                 color = MaterialTheme.colorScheme.secondaryContainer
             ) {
                 if (coverBitmap != null) {
@@ -9317,48 +9445,24 @@ private fun PlaylistCard(
 
 @Composable
 @OptIn(
-    androidx.compose.foundation.ExperimentalFoundationApi::class,
-    ExperimentalSharedTransitionApi::class,
-)
+    androidx.compose.foundation.ExperimentalFoundationApi::class,)
 private fun PlaylistListRow(
     playlist: NeteasePlaylist,
-    sharedTransitionScope: SharedTransitionScope,
-    animatedVisibilityScope: AnimatedVisibilityScope,
+
     onClick: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    val sharedMotion = tween<androidx.compose.ui.geometry.Rect>(
-        durationMillis = SHARED_MOTION_MS,
-        easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
-    )
     var menu by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
     // The card's own text is not part of the shared element: it has to be gone in
     // 80ms so it can never ghost underneath the detail page's text.
-    val listTextAlpha by animateFloatAsState(
-        targetValue = if (leavingCoverKey == "playlist_row_${playlist.id}") 0f else 1f,
-        animationSpec = tween(80),
-        label = "list_text_fade"
-    )
 
     val coverBitmap = rememberCoverBitmap(null, playlist.coverThumbPath ?: playlist.coverUrl)
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp)
-            .then(
-                with(sharedTransitionScope) {
-                    Modifier.sharedBounds(
-                        sharedContentState = rememberSharedContentState(
-                            "playlist_container_${playlist.id}"
-                        ),
-                        animatedVisibilityScope = animatedVisibilityScope,
-                        
-                        resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
-                        clipInOverlayDuringTransition = OverlayClip(RoundedCornerShape(16.dp))
-                    )
-                }
-            ),
+            ,
         shape = RoundedCornerShape(16.dp),
         color = ComposeColor.Transparent
     ) {
@@ -9367,17 +9471,7 @@ private fun PlaylistListRow(
         Surface(
             modifier = Modifier
                 .size(60.dp)
-                .then(
-                    with(sharedTransitionScope) {
-                        Modifier.sharedBounds(
-                            sharedContentState = rememberSharedContentState(
-                                "playlist_cover_${playlist.id}"
-                            ),
-                            animatedVisibilityScope = animatedVisibilityScope,
-                            
-                        )
-                    }
-                ),
+                ,
             shape = ShapeMedium,
             color = MaterialTheme.colorScheme.secondaryContainer
         ) {
@@ -9392,7 +9486,7 @@ private fun PlaylistListRow(
                 Icon(Icons.Default.Album, null, Modifier.padding(16.dp))
             }
         }
-        Column(Modifier.padding(start = 12.dp).graphicsLayer { alpha = listTextAlpha }) { Text(playlist.name ?: "未命名歌单", fontWeight = FontWeight.Medium); Text("${playlist.trackCount} 首歌曲", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        Column(Modifier.padding(start = 12.dp)) { Text(playlist.name ?: "未命名歌单", fontWeight = FontWeight.Medium); Text("${playlist.trackCount} 首歌曲", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     }
     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
         DropdownMenuItem(text = { Text("删除歌单") }, onClick = { menu = false; confirmDelete = true })
@@ -9415,7 +9509,8 @@ private fun SongRow(
     coverBytes: ByteArray? = null,
     coverPath: String? = null,
     onClick: () -> Unit,
-    onLongPressQueue: (() -> Unit)? = null
+    onLongPressQueue: (() -> Unit)? = null,
+    horizontalInset: Dp = 12.dp
 ) {
     val coverBitmap = rememberCoverBitmap(coverBytes, coverPath)
     val interactionSource = remember { MutableInteractionSource() }
@@ -9426,7 +9521,7 @@ private fun SongRow(
     Box(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp)
+            .padding(horizontal = horizontalInset)
     ) {
         Row(
             Modifier
@@ -9462,6 +9557,78 @@ private fun SongRow(
                 onClick = { menu = false; onLongPressQueue?.invoke() }
             )
         }
+    }
+}
+
+/** One swipe reveals another three songs; the parent remains the only vertical scroller. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun HomeSongPages(
+    title: String,
+    songs: List<NeteaseSong>,
+    onPlay: (Int) -> Unit,
+    onEnqueue: (NeteaseSong) -> Unit
+) {
+    val pageCount = (songs.size + 2) / 3
+    if (pageCount == 0) return
+    val pager = androidx.compose.foundation.pager.rememberPagerState(pageCount = { pageCount })
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f)) { SectionTitle(title) }
+            if (pageCount > 1) Text(
+                "${(pager.currentPage + 1).coerceAtMost(pageCount)} / $pageCount",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        androidx.compose.foundation.pager.HorizontalPager(
+            state = pager,
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(end = if (pageCount > 1) 16.dp else 0.dp),
+            pageSpacing = 12.dp,
+            verticalAlignment = Alignment.Top,
+            key = { page -> "${songs.getOrNull(page * 3)?.id}_$page" }
+        ) { page ->
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                repeat(3) { slot ->
+                    val index = page * 3 + slot
+                    val song = songs.getOrNull(index)
+                    if (song != null) {
+                        SongRow(
+                            title = song.name ?: "未知歌曲",
+                            artist = song.artist ?: "未知歌手",
+                            coverPath = song.coverThumbPath ?: song.coverUrl,
+                            onClick = { onPlay(index) },
+                            onLongPressQueue = { onEnqueue(song) },
+                            horizontalInset = 0.dp
+                        )
+                    } else {
+                        Spacer(Modifier.height(64.dp))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HomeAlbumCard(album: NeteaseAlbum, onClick: () -> Unit) {
+    val coverBitmap = rememberCoverBitmap(null, album.coverThumbPath ?: album.coverUrl)
+    Column(
+        modifier = Modifier.width(132.dp).clip(RoundedCornerShape(14.dp)).clickable(onClick = onClick),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth().aspectRatio(1f),
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHighest
+        ) {
+            if (coverBitmap != null) Image(coverBitmap, "专辑封面", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            else Icon(Icons.Default.Album, null, Modifier.padding(32.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Text(album.name ?: "未知专辑", maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(album.artistName ?: "", maxLines = 1, overflow = TextOverflow.Ellipsis,
+            fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -9585,7 +9752,6 @@ private fun EmptyState(title: String, subtitle: String, action: () -> Unit) {
     widthDp = 412,
     heightDp = 892
 )
-@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 private fun QPlayerHomePreview() {
     val state = remember { previewPlayerState() }
@@ -9616,13 +9782,13 @@ private fun QPlayerHomePreview() {
             Box(Modifier.fillMaxSize().padding(padding)) {
                 // A preview hosts the same layout, so it needs the two scopes the
                 // page composables now take.
-                SharedTransitionLayout {
+                Box(Modifier.fillMaxSize()) {
                     AnimatedVisibility(visible = true) {
                         HomeScreen(
                             state = state,
-                            sharedTransitionScope = this@SharedTransitionLayout,
-                            animatedVisibilityScope = this,
+
                             openPlaylist = { _, _ -> },
+                            openAlbum = { _, _ -> },
                             playRecommendation = {},
                             refresh = {}
                         )
@@ -9658,12 +9824,13 @@ private fun previewPlayerState(): PlayerUiState {
             trackCount = 24 + index * 8
         }
     }
-    val songs = (1..3).map { index ->
+    val songs = (1..7).map { index ->
         NeteaseSong().apply {
             id = index.toLong()
             name = "示例歌曲 $index"
             artist = "示例歌手"
-            album = "示例专辑"
+            album = "示例专辑 ${(index + 1) / 2}"
+            albumId = ((index + 1) / 2).toLong()
         }
     }
     return PlayerUiState(
@@ -9675,6 +9842,11 @@ private fun previewPlayerState(): PlayerUiState {
         durationMs = 215_000,
         coverSeed = "#2d6a75",
         recommendPlaylists = playlists,
-        recommendations = songs
+        recommendations = songs,
+        homeSongSections = listOf(
+            NeteaseClient.HomeSongSection("preview_radar", "私人雷达 · 预览", 0L).apply {
+                this.songs.addAll(songs.reversed())
+            }
+        )
     )
 }

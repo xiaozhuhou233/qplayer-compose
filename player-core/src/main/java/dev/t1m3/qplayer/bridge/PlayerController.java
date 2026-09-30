@@ -10725,9 +10725,35 @@ public final class PlayerController {
     }
 
     /** Open an album page: profile (name/cover/artist) + full tracklist. */
+    /**
+     * Ⓜ The title tap's fallback, for the listener's 「点歌名不能跳转专辑」: the album page opens just
+     * the same from the album's NAME, resolved through the search endpoint this app already calls
+     * elsewhere — so the tap works whether or not the played entry carried an {@code al.id} (the
+     * parser takes it when the payload has it, but a payload without one leaves the track's
+     * albumId at zero for ever, and the UI's tap is gated on that id having arrived).
+     *
+     * <p>The id path stays the primary one: this is only reached when the id is missing, and it
+     * does nothing at all when the name is blank too. The resolve runs on the worker and the page
+     * itself is opened on the main thread, exactly like the id path's own state writes.
+     */
+    public void openAlbumByName(String name) {
+        if (name == null || name.trim().isEmpty()) return;
+        final String query = name.trim();
+        worker.submit(() -> {
+            try {
+                List<NeteaseAlbum> found = netease.searchAlbums(query, 1);
+                if (found == null || found.isEmpty()) return;
+                final long id = found.get(0).id;
+                if (id == 0L) return;
+                onMain(() -> openAlbum(id));
+            } catch (Throwable e) {
+                Logger.warn("openAlbumByName failed for {}: {}", query, e.toString());
+            }
+        });
+    }
+
     public void openAlbum(long albumId) {
-        if (albumId == 0L) return;
-        currentAlbumId = albumId;
+        if (albumId == 0L) return;        currentAlbumId = albumId;
         openAlbumId.set(albumId);
         albumPageOpen.set(true);
         pageNavigationTarget.set("album");
