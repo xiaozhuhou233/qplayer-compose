@@ -120,6 +120,16 @@ public final class PlayerController {
         t.setDaemon(true);
         return t;
     });
+    // Home discovery has its own bounded queue too: refreshing it must not queue
+    // several Radar previews ahead of an interactive playlist/playback request.
+    private final ExecutorService homeWorker = new ThreadPoolExecutor(
+            1, 1, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(1), r -> {
+                Thread t = new Thread(r, "qplayer-home");
+                t.setDaemon(true);
+                return t;
+            }, new ThreadPoolExecutor.DiscardOldestPolicy());
+    private final AtomicLong homeLoadGeneration = new AtomicLong();
+
     // Interactive searches must not queue behind cover/home/playlist requests on
     // worker, and rapid typing must not leave an unbounded list of obsolete searches
     // in memory. Keep at most the request currently running plus the newest pending
@@ -1274,6 +1284,11 @@ public final class PlayerController {
     public final Property<List<String>> searchHistory = new Property<>(Collections.<String>emptyList());
     public final Property<List<NeteaseSong>> recommendations = new Property<>(Collections.<NeteaseSong>emptyList());
     public final Property<List<NeteasePlaylist>> recommendPlaylists = new Property<>(Collections.<NeteasePlaylist>emptyList());
+    /** Real discovery sections with the server's titles; never relabels daily songs as Radar. */
+    public final Property<List<NeteaseClient.HomeSongSection>> homeSongSections = new Property<>(Collections.<NeteaseClient.HomeSongSection>emptyList());
+    public final Property<List<NeteaseClient.HomePlaylistSection>> homePlaylistSections = new Property<>(Collections.<NeteaseClient.HomePlaylistSection>emptyList());
+    public final Property<List<NeteaseAlbum>> homeAlbumRecommendations = new Property<>(Collections.<NeteaseAlbum>emptyList());
+    public final Property<String> homeFeedError = new Property<>("");
     /** True while {@link #loadHome} is in flight — lets HomePage.qml tell "still
      *  loading" from "tried and failed" (both look like empty lists otherwise) so
      *  it can show a tap-to-retry affordance instead of a permanent spinner. */
@@ -1749,6 +1764,7 @@ public final class PlayerController {
         myPlaylists.set(Collections.<NeteasePlaylist>emptyList());
         recommendations.set(Collections.<NeteaseSong>emptyList());
         recentSongs.set(Collections.<NeteaseSong>emptyList());
+        resetHomeFeed();
     }
 
     /** User-triggered migration from owner-only storage back to the system store. */
@@ -6788,6 +6804,18 @@ public final class PlayerController {
         playSongList(recommendations.peek(), i);
     }
 
+    public void playHomeRecommendation(String sectionId, long songId) {
+        for (NeteaseClient.HomeSongSection section : homeSongSections.peek()) {
+            if (!section.id.equals(sectionId)) continue;
+            for (int i = 0; i < section.songs.size(); i++) {
+                if (section.songs.get(i).id == songId) {
+                    playSongList(section.songs, i, section.playlistId);
+                    return;
+                }
+            }
+        }
+    }
+
     /** Start NetEase's server-driven Personal FM stream ("私人漫游"). */
     public void startPrivateFm() {
         if (!loggedIn.peek()) {
@@ -10431,32 +10459,116 @@ public final class PlayerController {
         playAt((playIndex + 1) % queue.size());
     }
 
-    /** Load the home content: recommended songs (login) + recommended playlists. */
+    /** Publish sections as they arrive; a failed optional block never blanks the daily feed. */
     public void loadHome() {
-        post(() -> homeLoading.set(true));
-        worker.submit(() -> {
-            try {
-                List<NeteasePlaylist> picks = netease.personalizedPlaylists(12);
-                String size = gridCoverSize();
-                for (NeteasePlaylist p : picks) {
-                    p.coverThumbPath = thumbUrl(p.coverUrl, size);
-                }
-                post(() -> recommendPlaylists.set(picks));
-            } catch (Throwable e) {
-                Logger.warn("personalized playlists failed: {}", e.toString());
-            }
+        final long generation = homeLoadGeneration.incrementAndGet();
+        postHome(generation, () -> { homeLoading.set(true); homeFeedError.set(""); });
+        homeWorker.submit(() -> {
+            if (homeLoadGeneration.get() != generation) return;
             if (netease.isLoggedIn()) {
                 try {
                     List<NeteaseSong> daily = netease.recommendSongs();
                     fillMissingCovers(daily);
                     buildSongThumbs(daily, "128");
-                    post(() -> recommendations.set(daily));
+                    postHome(generation, () -> recommendations.set(daily));
                 } catch (Throwable e) {
                     Logger.warn("daily recommend failed: {}", e.toString());
                 }
             }
-            post(() -> homeLoading.set(false));
+            if (homeLoadGeneration.get() != generation) return;
+            try {
+                List<NeteasePlaylist> picks = netease.personalizedPlaylists(12);
+                String size = gridCoverSize();
+                for (NeteasePlaylist p : picks) p.coverThumbPath = thumbUrl(p.coverUrl, size);
+                postHome(generation, () -> recommendPlaylists.set(picks));
+            } catch (Throwable e) {
+                Logger.warn("personalized playlists failed: {}", e.toString());
+            }
+            if (homeLoadGeneration.get() != generation) return;
+            try {
+                NeteaseClient.HomeFeed feed = netease.homepageFeed();
+                List<NeteaseSong> allSongs = new ArrayList<>();
+                List<NeteaseClient.HomeSongSection> ready = new ArrayList<>();
+                for (NeteaseClient.HomeSongSection section : feed.sections) {
+                    allSongs.addAll(section.songs);
+                    if (!section.songs.isEmpty()) ready.add(section);
+                }
+                fillMissingCovers(allSongs);
+                buildSongThumbs(allSongs, "128");
+                applyAlbumCoverSize(feed.albums);
+                String playlistCoverSize = gridCoverSize();
+                for (NeteaseClient.HomePlaylistSection section : feed.playlistSections) {
+                    for (NeteasePlaylist playlist : section.playlists)
+                        playlist.coverThumbPath = thumbUrl(playlist.coverUrl, playlistCoverSize);
+                }
+                List<NeteaseClient.HomeSongSection> firstSections = new ArrayList<>(ready);
+                postHome(generation, () -> {
+                    homeSongSections.set(firstSections);
+                    homePlaylistSections.set(feed.playlistSections);
+                    homeAlbumRecommendations.set(feed.albums);
+                });
+                for (NeteaseClient.HomeSongSection section : feed.sections) {
+                    if (homeLoadGeneration.get() != generation) return;
+                    if (section.playlistId <= 0 || !section.songs.isEmpty()) continue;
+                    try {
+                        List<NeteaseSong> preview = netease.homepagePlaylistPreview(section.playlistId);
+                        fillMissingCovers(preview);
+                        buildSongThumbs(preview, "128");
+                        if (preview.isEmpty()) continue;
+                        NeteaseClient.HomeSongSection loaded = new NeteaseClient.HomeSongSection(
+                                section.id, section.title, section.playlistId);
+                        loaded.songs.addAll(preview);
+                        ready.add(loaded);
+                        List<NeteaseClient.HomeSongSection> snapshot = new ArrayList<>(ready);
+                        postHome(generation, () -> homeSongSections.set(snapshot));
+                    } catch (Throwable e) {
+                        Logger.warn("home Radar preview failed: {}", e.toString());
+                        postHome(generation, () -> homeFeedError.set("部分推荐暂未加载，点击重试"));
+                    }
+                }
+                // Ⓜ The listener: 「主页再往下扩内容，推荐更多的专辑和歌曲，都按照现有的格式排版，内容从 api 找」.
+                // The daily-recommendation feed is the one more shelf this app can ask for with a
+                // call it already makes elsewhere, about thirty songs of it — appended after the
+                // discovery blocks so the page has more to scroll, and the whole existing pipeline
+                // is reused: the same HomeSongSection the feed's own song rows are, the same cover
+                // fill and thumbs, and a UI that renders it without a line of new code. Its id is
+                // unique among the sections ("daily"), which is what playHomeRecommendation looks a
+                // shelf up by; playlistId 0 means "play the list it was handed" (see playSongList).
+                try {
+                    List<NeteaseSong> daily = netease.recommendSongs();
+                    if (!daily.isEmpty()) {
+                        fillMissingCovers(daily);
+                        buildSongThumbs(daily, "128");
+                        NeteaseClient.HomeSongSection extra =
+                                new NeteaseClient.HomeSongSection("daily", "每日推荐", 0L);
+                        extra.songs.addAll(daily);
+                        ready.add(extra);
+                        List<NeteaseClient.HomeSongSection> snapshot = new ArrayList<>(ready);
+                        postHome(generation, () -> homeSongSections.set(snapshot));
+                    }
+                } catch (Throwable e) {
+                    Logger.warn("home daily recommendation failed: {}", e.toString());
+                }
+            } catch (Throwable e) {
+                Logger.warn("homepage discovery blocks failed: {}", e.toString());
+                postHome(generation, () -> homeFeedError.set("更多推荐暂未加载，点击重试"));
+            }
+            postHome(generation, () -> homeLoading.set(false));
         });
+    }
+
+    private void postHome(long generation, Runnable update) {
+        post(() -> { if (homeLoadGeneration.get() == generation) update.run(); });
+    }
+
+    private void resetHomeFeed() {
+        homeLoadGeneration.incrementAndGet();
+        homeSongSections.set(Collections.<NeteaseClient.HomeSongSection>emptyList());
+        homePlaylistSections.set(Collections.<NeteaseClient.HomePlaylistSection>emptyList());
+        homeAlbumRecommendations.set(Collections.<NeteaseAlbum>emptyList());
+        recommendPlaylists.set(Collections.<NeteasePlaylist>emptyList());
+        homeFeedError.set("");
+        homeLoading.set(false);
     }
 
     /** Opens SongContextMenu's "查看歌手" picker. QML hands over the song's full
@@ -12618,6 +12730,7 @@ public final class PlayerController {
         recommendations.set(Collections.<NeteaseSong>emptyList());
         recentSongs.set(Collections.<NeteaseSong>emptyList());
         showToast("已退出登录");
+        resetHomeFeed();
     }
 
     /** Persist the queue + live playback position + play mode right now. The only
@@ -12647,6 +12760,8 @@ public final class PlayerController {
         fadeWorker.shutdownNow();
         backend.release();
         worker.shutdownNow();
+        homeLoadGeneration.incrementAndGet();
+        homeWorker.shutdownNow();
         searchWorker.shutdownNow();
         customWorker.shutdownNow();
         customSearchWorker.shutdownNow();
