@@ -8862,6 +8862,21 @@ public final class PlayerController {
                 if (playIndex != expectedIndex) return;   // user moved on
                 if (t.title == null || t.title.isEmpty()) t.title = sd.name;
                 if (t.artist == null || t.artist.isEmpty()) t.artist = sd.artist;
+                // Ⓜ The listener: 「在源头补 Track.albumId / artistId，这个功能你早就写过了……你只要把它
+                // 找回来」. This block is where it was lost: every other copy site (the two Track
+                // builders) copies the artist's id and both csvs, and this one filled the album's
+                // id, the artist's NAME and the cover — but not the artist's ID. So a track built
+                // from a list whose entry carried no artistId kept a zero for ever, and the
+                // detail page's artist tap was gated shut on its own `enabled = artistId != 0L`
+                // (the album tap worked as soon as this same block landed its albumId). Filled
+                // here exactly like the album's, so the two taps are restored together.
+                if (t.artistId == 0L) t.artistId = sd.artistId;
+                if (t.artistIdsCsv == null || t.artistIdsCsv.isEmpty()) {
+                    t.artistIdsCsv = sd.artistIdsCsv;
+                }
+                if (t.artistNamesCsv == null || t.artistNamesCsv.isEmpty()) {
+                    t.artistNamesCsv = sd.artistNamesCsv;
+                }
                 if (t.album == null || t.album.isEmpty()) t.album = sd.album;
                 if (t.albumId == 0L) t.albumId = sd.albumId;
                 if (t.coverUrl == null || t.coverUrl.isEmpty()) t.coverUrl = sd.coverUrl;
