@@ -100,6 +100,7 @@ internal fun IosAwareAlertDialog(
     Dialog(onDismissRequest, properties = DialogProperties(
         usePlatformDefaultWidth = false, decorFitsSystemWindows = false
     )) {
+        SystemBarAppearance(dark = !light)
         val view = LocalView.current
         SideEffect {
             (view.parent as? DialogWindowProvider)?.window?.let { window ->

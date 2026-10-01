@@ -328,7 +328,7 @@ class ComposeQPlayerActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Let Compose own the complete window, including the status-bar region.
-        // The status bar itself is recolored from the active Monet scheme below.
+        // SystemBarAppearance keeps system icons in sync with the visible theme.
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
@@ -1539,6 +1539,10 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
 
     val iosDesign = appearance.iosDesign
     val glassRefraction = appearance.refraction
+    // The iOS/cover player has a dark backdrop even when the app uses a light theme.
+    val systemBarsDark = state.dark ||
+        (playerExpansion.active && (iosDesign || state.lyricCoverBackground))
+    SystemBarAppearance(dark = systemBarsDark)
     val scheme = (if (iosDesign) iosDesignColorScheme(state.dark) else rememberQPlayerColorScheme(
         seed = state.coverSeed,
         dark = state.dark,
@@ -1679,8 +1683,7 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                     ) {
                     Scaffold(
                         modifier = Modifier
-                            .fillMaxSize()
-                            .then(if (iosDesign) Modifier else Modifier.statusBarsPadding()),
+                            .fillMaxSize(),
                         contentWindowInsets = if (iosDesign) WindowInsets(0, 0, 0, 0)
                             else ScaffoldDefaults.contentWindowInsets,
                         containerColor = ComposeColor.Transparent,
@@ -1748,7 +1751,6 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                         Box(
                             Modifier
                                 .fillMaxSize()
-                                .then(if (iosDesign) Modifier.statusBarsPadding() else Modifier)
                                 .then(if (iosDesign) Modifier.nestedScroll(iosScrollConnection) else Modifier)
                                 .then(if (!useIosNavigation) Modifier.nestedScroll(miniScrollConnection) else Modifier)
                         ) {
@@ -1991,6 +1993,9 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
         }
         }
         } // Background page glass sampling pauses while covered by the player.
+        if (!(videoFullscreen && state.biliPlaying)) {
+            StatusBarShadow(dark = systemBarsDark)
+        }
         // Drawn last among the app's own layers: above every screen and the mini player
         // strip, below the login dialog. This is the app's only video node.
         VideoLayer(state = state, controller = controller)
@@ -2063,8 +2068,8 @@ private fun ComposeTopBar(
     }
     TopAppBar(
         colors = TopAppBarDefaults.topAppBarColors(
-            containerColor = if (LocalArtworkPage.current) ComposeColor.Transparent else MaterialTheme.colorScheme.background,
-            scrolledContainerColor = if (LocalArtworkPage.current) ComposeColor.Transparent else MaterialTheme.colorScheme.background,
+            containerColor = ComposeColor.Transparent,
+            scrolledContainerColor = ComposeColor.Transparent,
             titleContentColor = MaterialTheme.colorScheme.onBackground,
             navigationIconContentColor = MaterialTheme.colorScheme.onBackground,
             actionIconContentColor = MaterialTheme.colorScheme.onBackground
@@ -2380,7 +2385,7 @@ private fun MiniPlayer(
                     .graphicsLayer { clip = true; alpha = (1f - compactProgress() * 3f).coerceAtLeast(0f) }) {
                 Row(Modifier.requiredWidth(controlsWidth)) {
                 if (!state.privateFmMode) {
-                    IconButton(
+                    androidx.compose.material3.IconButton(
                         enabled = controlsEnabled,
                         onClick = { miniHaptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); onPrevious() },
                         modifier = Modifier.size(40.dp)
@@ -2388,7 +2393,7 @@ private fun MiniPlayer(
                         Icon(Icons.Default.SkipPrevious, "上一首", Modifier.size(24.dp), tint = miniInk)
                     }
                 }
-                IconButton(
+                androidx.compose.material3.IconButton(
                     enabled = controlsEnabled,
                     onClick = { miniHaptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); onToggle() },
                     modifier = Modifier.size(40.dp)
@@ -2396,7 +2401,7 @@ private fun MiniPlayer(
                     Icon(if (state.playing) Icons.Default.Pause else Icons.Default.PlayArrow,
                         if (state.playing) "暂停" else "播放", Modifier.size(26.dp), tint = miniInk)
                 }
-                IconButton(
+                androidx.compose.material3.IconButton(
                     enabled = controlsEnabled,
                     onClick = { miniHaptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); onNext() },
                     modifier = Modifier.size(40.dp)
@@ -2701,7 +2706,7 @@ private fun HomeScreen(
             delay(150)
         }
     }
-    LazyColumn(contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = if (iosNavigation) 200.dp else 16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    LazyColumn(contentPadding = pageContentPadding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = if (iosNavigation) 200.dp else 16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item(key = "home_greeting") { Text(if (state.userName.isBlank()) "你好" else "你好，${state.userName}", fontSize = 27.sp, fontWeight = FontWeight.SemiBold) }
         item(key = "home_ai") {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -2939,7 +2944,7 @@ private fun SearchScreen(
         controller.searchArtist(value)
         controller.searchBili(value)
     }
-    Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+    Column(Modifier.fillMaxSize().padding(horizontal = 16.dp).padding(top = pageStatusBarInset())) {
         Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(query, { value -> query = value; submitSearch(value) }, Modifier.weight(1f), label = { Text("搜索歌曲、专辑或歌手") }, singleLine = true)
             IconButton(onClick = {
@@ -3162,7 +3167,7 @@ private fun LibraryScreen(
         EmptyState("登录后查看你的歌单", "使用网易云账号登录", openLogin)
         return
     }
-    LazyColumn(contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = if (iosNavigation) 200.dp else 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    LazyColumn(contentPadding = pageContentPadding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = if (iosNavigation) 200.dp else 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item(key = "bili_fav_entry") {
             Surface(
                 modifier = Modifier
@@ -3232,7 +3237,7 @@ private fun LocalScreen(state: PlayerUiState, controller: PlayerController, iosN
         EmptyState("还没有本地音乐", "授权音乐权限后会自动扫描") { }
         return
     }
-    LazyColumn(contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = if (iosNavigation) 200.dp else 16.dp)) {
+    LazyColumn(contentPadding = pageContentPadding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = if (iosNavigation) 200.dp else 16.dp)) {
         item { Text("本地音乐 · ${state.tracks.size}", fontSize = 18.sp, fontWeight = FontWeight.Medium) }
         itemsIndexed(
             state.tracks,
@@ -3532,7 +3537,7 @@ private fun DraggableQueueList(
 
 @Composable
 private fun QueueScreen(state: PlayerUiState, controller: PlayerController, sleepMinutes: Int, sleepRemaining: Long, sleepArmed: Boolean, onMinutesChanged: (Int) -> Unit) {
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().padding(top = pageStatusBarInset())) {
         Text(
             "播放队列 · ${state.queueTracks.size}",
             fontSize = 18.sp,
@@ -3600,7 +3605,7 @@ private fun PlaylistScreen(
     ) {
         // The card this page grows out of. Zero radius here against the card's
         // 16dp is what makes the corners flatten as the container expands.
-    LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = pageContentPadding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 val coverBitmap = rememberCoverBitmap(
@@ -3677,7 +3682,7 @@ private fun AlbumScreen(
     ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
+        contentPadding = pageContentPadding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         item {
@@ -3749,7 +3754,7 @@ private fun SettingsScreen(settings: SettingsCore, controller: PlayerController)
     // dead until some unrelated recomposition landed. Bumping this counter on
     // every change forces the rows to re-read their values immediately.
     var revision by remember { mutableIntStateOf(0) }
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().padding(top = pageStatusBarInset())) {
         Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             settings.categories().forEach { item ->
                 // ⚠️ This used to be a hand-written list of the category names -- a stale copy of
@@ -3890,7 +3895,7 @@ private fun formatSettingValue(spec: SettingSpec, value: Int): String {
 private fun AccountScreen(state: PlayerUiState, controller: PlayerController) {
     var biliLoginOpen by remember { mutableStateOf(false) }
     Column(
-        Modifier.fillMaxSize().padding(24.dp),
+        Modifier.fillMaxSize().padding(pageContentPadding(24.dp)),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Icon(Icons.Default.Person, contentDescription = null, modifier = Modifier.size(88.dp), tint = MaterialTheme.colorScheme.primary)
@@ -5592,7 +5597,7 @@ private fun BiliFavFoldersScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        else -> LazyColumn(Modifier.fillMaxSize()) {
+        else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = pageContentPadding()) {
             itemsIndexed(state.biliFavFolders, key = { _, f -> f.mediaId }) { _, folder ->
                 Surface(
                     modifier = Modifier
@@ -5653,7 +5658,7 @@ private fun BiliFavItemsScreen(
         state.biliFavItems.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("这个收藏夹是空的", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        else -> LazyColumn(Modifier.fillMaxSize()) {
+        else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = pageContentPadding()) {
             itemsIndexed(state.biliFavItems, key = { i, item -> "fav_${item.avid}_$i" }) { index, item ->
                 val playing = state.queueIndex >= 0 &&
                     state.queueIndex < state.queueTracks.size &&
