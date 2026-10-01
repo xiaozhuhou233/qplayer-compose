@@ -36,7 +36,6 @@ import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.blur
 import com.kyant.backdrop.effects.colorControls
 import com.kyant.backdrop.effects.lens
-import com.kyant.backdrop.highlight.Highlight
 import com.kyant.backdrop.isRenderEffectSupported
 
 internal enum class IosDialogAction { CONFIRM, DISMISS }
@@ -83,7 +82,8 @@ internal fun IosAwareAlertDialog(
     // These are the reference dialog colours, NOT the album tint of navigation.
     val ink = if (light) Color.Black else Color.White
     val plate = if (light) Color(0xFFFAFAFA) else Color(0xFF121212)
-    val container = plate.copy(alpha = if (!isRenderEffectSupported()) 0.96f else if (light) 0.6f else 0.4f)
+    val glassPlate = if (light) Color.White else Color(0xFF1C1C1C)
+    val container = glassPlate.copy(alpha = if (!isRenderEffectSupported()) 0.96f else if (light) 0.63f else 0.4f)
     val dim = if (light) Color(0xFF29293A).copy(alpha = 0.23f) else Color(0xFF121212).copy(alpha = 0.56f)
     val dialogScheme = iosDesignColorScheme(!light).copy(
         background = plate, surface = plate, surfaceContainerHigh = plate,
@@ -124,8 +124,10 @@ internal fun IosAwareAlertDialog(
                             .drawBackdrop(backdrop = backdrop, shape = { shape }, effects = {
                                 colorControls(brightness = if (light) 0.2f else 0f, saturation = 1.5f)
                                 blur(if (light) 16.dp.toPx() else 8.dp.toPx())
-                                if (refraction) lens(24.dp.toPx(), 48.dp.toPx(), depthEffect = true)
-                            }, highlight = { Highlight.Plain }, shadow = { IosGlassShadow },
+                                if (refraction) lens(30.dp.toPx(), 62.dp.toPx(),
+                                    depthEffect = true, centerConvexity = 0.10f)
+                            }, highlight = { IosGlassDialogHighlight }, shadow = { IosGlassShadow },
+                                innerShadow = { iosGlassInnerShadow(dark = !light) },
                                 onDrawSurface = { drawRect(container) })
                             .clip(shape).clickable(interactionSource = remember { MutableInteractionSource() },
                                 indication = null, onClick = {})) {

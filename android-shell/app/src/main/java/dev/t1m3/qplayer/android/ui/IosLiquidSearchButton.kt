@@ -12,6 +12,8 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
@@ -31,6 +33,7 @@ internal fun IosLiquidSearchButton(
     icon: ImageVector = Icons.Default.Search,
     contentDescription: String = "搜索",
     diameter: Dp = 64.dp,
+    compactProgress: () -> Float = { 0f },
 ) {
     val scope = rememberCoroutineScope()
     val highlight = remember(scope) { InteractiveHighlight(scope) }
@@ -39,7 +42,13 @@ internal fun IosLiquidSearchButton(
         backdrop = backdrop,
         dark = dark,
         modifier = Modifier
-            .size(diameter)
+            .layout { measurable, constraints ->
+                val side = (diameter + (44.dp - diameter) * compactProgress().coerceIn(0f, 1f)).roundToPx()
+                val child = measurable.measure(Constraints.fixed(
+                    side.coerceIn(constraints.minWidth, constraints.maxWidth),
+                    side.coerceIn(constraints.minHeight, constraints.maxHeight)))
+                layout(child.width, child.height) { child.placeRelative(0, 0) }
+            }
             .semantics { this.selected = selected }
             .clickable(
                 interactionSource = null,

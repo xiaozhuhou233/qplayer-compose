@@ -1636,9 +1636,7 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                     val liquidBackdrop = if (iosDesign) rememberLayerBackdrop() else null
                     var iosHomeCollapsed by remember(screen) { mutableStateOf(false) }
                     var iosTopActionsVisible by remember(screen) { mutableStateOf(true) }
-                    // Ⓜ The row's title: hidden while the page sits at its top (the band is
-                    // left empty there), fading in once the page has scrolled about one
-                    // row's height — and with it the shadow over the top band.
+                    // The floating buttons retain a scrim once content scrolls beneath them.
                     var iosTopTitleVisible by remember(screen) { mutableStateOf(false) }
                     val collapseThreshold = with(LocalDensity.current) { 24.dp.toPx() }
                     val topActionThreshold = with(LocalDensity.current) { 10.dp.toPx() }
@@ -1648,19 +1646,11 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                             private var distance = 0f
                             private var topActionDistance = 0f
                             private var titleDistance = 0f
-                            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
-                                // Ⓜ The title tracks the page's absolute distance from its
-                                // top, so it must see every consumed delta — drag AND fling.
-                                // Edge bounce reports consumed 0, which moves nothing.
-                                if (consumed.y != 0f) {
-                                    titleDistance = (titleDistance + consumed.y).coerceAtLeast(0f)
-                                    val shown = titleDistance >= titleThreshold
-                                    if (shown != iosTopTitleVisible) iosTopTitleVisible = shown
-                                }
+                            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
                                 // React to real vertical page scrolling, not marquee,
                                 // fling bounce, programmatic scrolling or tiny jitter.
                                 if (source != NestedScrollSource.UserInput) return Offset.Zero
-                                val dy = consumed.y
+                                val dy = available.y
                                 if (dy == 0f) return Offset.Zero
                                 if (topActionDistance * dy < 0f) topActionDistance = 0f
                                 topActionDistance += dy
@@ -1679,6 +1669,12 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                     iosHomeCollapsed = distance < 0f
                                     distance = 0f
                                 }
+                                return Offset.Zero
+                            }
+                            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                                // Upward content motion increases the distance from the top.
+                                titleDistance = (titleDistance - consumed.y).coerceAtLeast(0f)
+                                iosTopTitleVisible = titleDistance >= titleThreshold
                                 return Offset.Zero
                             }
                         }
@@ -1758,9 +1754,6 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                     expanded = route.screen == ComposeScreen.HOME,
                                     routeKey = route,
                                     visible = iosTopActionsVisible,
-                                    // Ⓜ 「初始位置时那一行不能有文字」: the title rides its own
-                                    // scroll threshold, so the band is empty at the top.
-                                    title = pageTopTitle(route, state),
                                     titleVisible = iosTopTitleVisible,
                                     modifier = Modifier.align(Alignment.TopCenter).zIndex(4f)
                                 )
@@ -2218,6 +2211,24 @@ private fun WindowGlassBackdrop(
     Box(modifier.background(glassOverlay))
 }
 
+/** Only previous/next collapse; play/pause remains reachable in the compact dock. */
+@Composable
+private fun CompactMiniTransportSlot(
+    progress: () -> Float,
+    enabled: Boolean,
+    content: @Composable () -> Unit,
+) {
+    Box(Modifier.layout { measurable, constraints ->
+        val side = 40.dp.roundToPx()
+        val child = measurable.measure(androidx.compose.ui.unit.Constraints.fixed(side, side))
+        val width = (side * (1f - progress().coerceIn(0f, 1f))).roundToInt()
+        layout(width, child.height) { child.placeRelative(0, 0) }
+    }.graphicsLayer {
+        clip = true
+        alpha = (1f - progress() * 3f).coerceAtLeast(0f)
+    }.then(if (!enabled) Modifier.clearAndSetSemantics {} else Modifier)) { content() }
+}
+
 @Composable
 @OptIn(androidx.compose.animation.ExperimentalAnimationApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 private fun MiniPlayer(
@@ -2237,9 +2248,8 @@ private fun MiniPlayer(
     val hapticOpen = rememberHapticAction(onOpen)
     val openInteraction = remember { MutableInteractionSource() }
     val iosMini = glassBackdrop != null
-    // Ⓜ The miniplayer is on the bar's material now: the ink is the bar's fixed
-    // theme pair（「MiniPlayer 以及按钮组件都同步和导航栏一样」）, not a sampled one.
-    val miniInk = if (iosMini) glassPlateInk(state.dark) else MaterialTheme.colorScheme.onSurface
+    val adaptive = if (glassBackdrop != null) rememberIosAdaptiveGlass(glassBackdrop) else null
+    val miniInk = adaptive?.contentColor ?: MaterialTheme.colorScheme.onSurface
     val miniMuted = if (iosMini) miniInk.copy(alpha = .65f) else MaterialTheme.colorScheme.onSurfaceVariant
     val glassHighlight = if (iosMini) rememberIosGlassHighlight() else null
     val glassModifier = if (glassBackdrop != null) {
@@ -2247,6 +2257,7 @@ private fun MiniPlayer(
             backdrop = glassBackdrop,
             dark = state.dark,
             interaction = glassHighlight,
+            adaptive = requireNotNull(adaptive),
         )
     } else Modifier
     val controlsEnabled by remember(compactProgress) { derivedStateOf { compactProgress() < 0.01f } }
@@ -2304,7 +2315,7 @@ private fun MiniPlayer(
             Row(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(start = if (iosMini) 16.dp else 8.dp, end = 8.dp),
+                    .padding(start = if (iosMini) 12.dp else 8.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
             Box(
@@ -2395,17 +2406,9 @@ private fun MiniPlayer(
             }
             Spacer(Modifier.width(5.dp))
             if (iosMini) {
-                val controlsWidth = if (state.privateFmMode) 80.dp else 120.dp
-                Row(Modifier.layout { measurable, constraints ->
-                    val full = controlsWidth.roundToPx()
-                    val child = measurable.measure(constraints.copy(minWidth = full, maxWidth = full))
-                    val width = (full * (1f - compactProgress())).roundToInt()
-                    layout(width, child.height) { child.placeRelative(0, 0) }
-                }
-                    .then(if (!controlsEnabled) Modifier.clearAndSetSemantics {} else Modifier)
-                    .graphicsLayer { clip = true; alpha = (1f - compactProgress() * 3f).coerceAtLeast(0f) }) {
-                Row(Modifier.requiredWidth(controlsWidth)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                 if (!state.privateFmMode) {
+                    CompactMiniTransportSlot(compactProgress, controlsEnabled) {
                     androidx.compose.material3.IconButton(
                         enabled = controlsEnabled,
                         onClick = { miniHaptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); onPrevious() },
@@ -2413,15 +2416,16 @@ private fun MiniPlayer(
                     ) {
                         Icon(Icons.Default.SkipPrevious, "上一首", Modifier.size(24.dp), tint = miniInk)
                     }
+                    }
                 }
                 androidx.compose.material3.IconButton(
-                    enabled = controlsEnabled,
                     onClick = { miniHaptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); onToggle() },
                     modifier = Modifier.size(40.dp)
                 ) {
                     Icon(if (state.playing) Icons.Default.Pause else Icons.Default.PlayArrow,
                         if (state.playing) "暂停" else "播放", Modifier.size(26.dp), tint = miniInk)
                 }
+                CompactMiniTransportSlot(compactProgress, controlsEnabled) {
                 androidx.compose.material3.IconButton(
                     enabled = controlsEnabled,
                     onClick = { miniHaptic.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); onNext() },

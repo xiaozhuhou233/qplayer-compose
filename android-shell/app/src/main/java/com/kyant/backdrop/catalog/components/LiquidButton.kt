@@ -24,9 +24,13 @@ import androidx.compose.ui.util.lerp
 import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.catalog.utils.InteractiveHighlight
 import com.kyant.backdrop.drawBackdrop
-import com.kyant.backdrop.effects.blur
-import com.kyant.backdrop.effects.lens
-import com.kyant.backdrop.effects.vibrancy
+import dev.t1m3.qplayer.android.ui.IosGlassHighlight
+import dev.t1m3.qplayer.android.ui.apiGlassEffects
+import dev.t1m3.qplayer.android.ui.iosGlassInnerShadow
+import dev.t1m3.qplayer.android.ui.rememberIosAdaptiveGlass
+import dev.t1m3.qplayer.android.ui.LocalGlassContentColor
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.foundation.shape.CircleShape
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -46,11 +50,9 @@ fun LiquidButton(
     content: @Composable RowScope.() -> Unit
 ) {
     val refraction = dev.t1m3.qplayer.android.ui.LocalGlassRefraction.current
-    // Ⓜ 2026-10-01: the button is on the navigation bar's material
-    // （「MiniPlayer 以及按钮组件都同步和导航栏一样，折射率-30左右」）— the bar's
-    // static theme plate/ink, blur(1dp) and a lens 30dp below the bar's 40dp. No
-    // per-control sampler any more.
+    // Share the navigation material, adapting ink and optics to the local backdrop.
     val dark = dev.t1m3.qplayer.android.ui.LocalGlassDark.current
+    val adaptive = rememberIosAdaptiveGlass(backdrop)
     val animationScope = rememberCoroutineScope()
 
     val interactiveHighlight = remember(animationScope) {
@@ -62,13 +64,17 @@ fun LiquidButton(
     DisposableEffect(interactiveHighlight) { onDispose { interactiveHighlight.cancel() } }
     Row(
         modifier
+            .then(adaptive.modifier)
             .drawBackdrop(
                 backdrop = backdrop,
                 shape = { CircleShape },
                 effects = {
-                    vibrancy()
-                    blur(1f.dp.toPx())
-                    if (refraction) lens(24f.dp.toPx(), 10f.dp.toPx())
+                    apiGlassEffects(
+                        luminance = adaptive.luminance,
+                        refraction = refraction,
+                        refractionHeight = 30.dp.toPx(),
+                        refractionAmount = 30.dp.toPx(),
+                    )
                 },
                 layerBlock = if (isInteractive) {
                     {
@@ -104,6 +110,8 @@ fun LiquidButton(
                     drawBackdrop()
                 },
                 shadow = { dev.t1m3.qplayer.android.ui.IosGlassShadow },
+                innerShadow = { iosGlassInnerShadow(adaptive.luminance <= 0.5f) },
+                highlight = { IosGlassHighlight },
                 onDrawSurface = {
                     if (tint.isSpecified) {
                         drawRect(tint, blendMode = BlendMode.Hue)
@@ -114,7 +122,7 @@ fun LiquidButton(
                         drawRect(surfaceColor)
                     } else {
                         drawRect(dev.t1m3.qplayer.android.ui.iosGlassSurface(
-                            dark = dark, tint = tint))
+                            dark = dark, tint = tint, sampledLuminance = adaptive.luminance))
                     }
                 }
             )
@@ -138,6 +146,8 @@ fun LiquidButton(
             .padding(horizontal = 16f.dp),
         horizontalArrangement = Arrangement.spacedBy(8f.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
-        content = content
-    )
+    ) {
+        CompositionLocalProvider(LocalContentColor provides adaptive.contentColor,
+            LocalGlassContentColor provides adaptive.contentColor) { content() }
+    }
 }

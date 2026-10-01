@@ -57,6 +57,13 @@ class LayerBackdrop internal constructor(
 
     internal val recordsFullContent: Boolean get() = onDraw === DefaultOnDraw
 
+    // Read only by the throttled sampler on the main thread. Deliberately NOT
+    // Compose state: recording a background must never invalidate its consumers.
+    internal var samplingRevision: Long = 0L
+        private set
+
+    internal fun markRecordedForSampling() { samplingRevision++ }
+
     override val isCoordinatesDependent: Boolean = true
 
     internal var layerCoordinates: LayoutCoordinates? by mutableStateOf(null)

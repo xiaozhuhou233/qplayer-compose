@@ -128,23 +128,19 @@ internal fun IosPlayerDock(
         )
         if (homeVisible) Box(Modifier.align(Alignment.BottomStart).playerChromeExit(playerExpansion)
             .graphicsLayer {
-                val p = collapse.value
-                transformOrigin = TransformOrigin(0f, 1f)
-                scaleX = 1f - p * 20f / 64f; scaleY = scaleX; alpha = p
+                alpha = collapse.value
             }) {
             IosLiquidSearchButton(backdrop, dark, true, {
                 view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                 onHome()
-            }, icon = Icons.Default.Home, contentDescription = "展开主页导航", diameter = 64.dp)
+            }, icon = Icons.Default.Home, contentDescription = "展开主页导航",
+                diameter = 64.dp, compactProgress = progress)
         }
-        Box(Modifier.align(Alignment.BottomEnd).playerChromeExit(playerExpansion).graphicsLayer {
-            transformOrigin = TransformOrigin(1f, 1f)
-            scaleX = 1f - collapse.value * 20f / 64f; scaleY = scaleX
-        }) {
+        Box(Modifier.align(Alignment.BottomEnd).playerChromeExit(playerExpansion)) {
             IosLiquidSearchButton(backdrop, dark, destination == IosNavigationDestination.SEARCH, {
                 view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                 onSearch()
-            }, diameter = 64.dp)
+            }, diameter = 64.dp, compactProgress = progress)
         }
         if (hasTrack) {
             if (actionVisible) Box(Modifier.align(Alignment.TopEnd).playerChromeExit(playerExpansion)
@@ -177,8 +173,7 @@ internal fun IosPlayerDock(
                 val height = playerHeight.roundToInt()              // 48dp → 44dp
                 val child = measurables.single().measure(Constraints.fixed(width, height))
                 val expandedCenter = 72.dp.toPx()
-                // The 64dp circles scale to 44dp around their BOTTOM edge.
-                // Their visual centre is 22dp above the bottom, not 32dp.
+                // All three compact controls measure 44dp and share a baseline.
                 val collapsedCenter = constraints.maxHeight.toFloat() - collapsedHeight / 2f
                 val center = expandedCenter * (1f - p) + collapsedCenter * p
                 val y = (center - playerHeight / 2f).roundToInt()

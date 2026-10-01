@@ -29,6 +29,9 @@ import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.blur
 import com.kyant.backdrop.effects.lens
+import dev.t1m3.qplayer.android.ui.IosGlassHighlight
+import dev.t1m3.qplayer.android.ui.IosGlassThumbInnerShadow
+import dev.t1m3.qplayer.android.ui.IosGlassThumbShadow
 import dev.t1m3.qplayer.android.ui.LocalGlassRefraction
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -67,8 +70,13 @@ fun LiquidSlider(
                 effects = {
                     blur(8.dp.toPx() * (1f - press.value))
                     if (refraction && press.value > 0.001f)
-                        lens(10.dp.toPx() * press.value, 14.dp.toPx() * press.value, chromaticAberration = true)
+                        lens(13.dp.toPx() * press.value, 26.dp.toPx() * press.value,
+                            depthEffect = true, chromaticAberration = true,
+                            centerConvexity = 0.085f * press.value)
                 },
+                highlight = { IosGlassHighlight },
+                shadow = { IosGlassThumbShadow },
+                innerShadow = { IosGlassThumbInnerShadow.copy(alpha = press.value) },
                 layerBlock = {
                     val scale = if (refraction) 1f + 0.25f * press.value else 1f
                     scaleX = scale; scaleY = scale

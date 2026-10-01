@@ -64,6 +64,7 @@ private class LayerBackdropNode(
             drawContent()
             recordLayer(this@LayerBackdropNode, backdrop.graphicsLayer) { backdrop.onDraw(this@draw) }
         }
+        backdrop.markRecordedForSampling()
     }
 
     override fun onGloballyPositioned(coordinates: LayoutCoordinates) {

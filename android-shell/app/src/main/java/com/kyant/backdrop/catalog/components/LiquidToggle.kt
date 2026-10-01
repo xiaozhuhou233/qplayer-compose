@@ -44,9 +44,9 @@ import com.kyant.backdrop.catalog.utils.DampedDragAnimation
 import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.blur
 import com.kyant.backdrop.effects.lens
-import com.kyant.backdrop.highlight.Highlight
-import com.kyant.backdrop.shadow.InnerShadow
-import com.kyant.backdrop.shadow.Shadow
+import dev.t1m3.qplayer.android.ui.IosGlassThumbHighlight
+import dev.t1m3.qplayer.android.ui.IosGlassThumbInnerShadow
+import dev.t1m3.qplayer.android.ui.IosGlassThumbShadow
 import androidx.compose.foundation.shape.CircleShape
 import kotlinx.coroutines.flow.collectLatest
 
@@ -172,31 +172,23 @@ fun LiquidToggle(
                         val progress = dampedDragAnimation.pressProgress
                         blur(8f.dp.toPx() * (1f - progress))
                         if (refraction) lens(
-                            5f.dp.toPx() * progress,
-                            10f.dp.toPx() * progress,
-                            chromaticAberration = true
+                            7f.dp.toPx() * progress,
+                            20f.dp.toPx() * progress,
+                            depthEffect = true,
+                            chromaticAberration = true,
+                            centerConvexity = 0.085f * progress,
                         )
                     },
                     highlight = {
                         val progress = dampedDragAnimation.pressProgress
-                        Highlight.Ambient.copy(
-                            width = Highlight.Ambient.width / 1.5f,
-                            blurRadius = Highlight.Ambient.blurRadius / 1.5f,
-                            alpha = progress
+                        IosGlassThumbHighlight.copy(
+                            alpha = IosGlassThumbHighlight.alpha * progress
                         )
                     },
-                    shadow = {
-                        Shadow(
-                            radius = 4f.dp,
-                            color = Color.Black.copy(alpha = 0.05f)
-                        )
-                    },
+                    shadow = { IosGlassThumbShadow },
                     innerShadow = {
                         val progress = dampedDragAnimation.pressProgress
-                        InnerShadow(
-                            radius = 4f.dp * progress,
-                            alpha = progress
-                        )
+                        IosGlassThumbInnerShadow.copy(alpha = progress)
                     },
                     layerBlock = {
                         scaleX = dampedDragAnimation.scaleX

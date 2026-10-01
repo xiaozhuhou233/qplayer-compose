@@ -12,9 +12,8 @@
 //   4. `referenceForegroundTint` reproduces the reference's graphicsLayer(colorFilter = tint),
 //      which this Compose version does not offer; and the selection flow keeps the
 //      restart-safety the route recompositions need (see the two LaunchedEffects).
-// Everything else — the static theme plates, vibrancy + blur(8) + lens(24), the recorded
-// accent-tinted foreground, the pill's lens/Shadow/InnerShadow progress choreography — is the
-// reference's own numbers.
+// The reference's drag physics and recorded accent-tinted foreground are preserved.
+// Optical parameters use QPlayer's softer rim, downward shadow and lens depth effect.
 package com.kyant.backdrop.catalog.components
 
 import androidx.compose.animation.core.Animatable
@@ -66,9 +65,14 @@ import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.blur
 import com.kyant.backdrop.effects.lens
 import com.kyant.backdrop.effects.vibrancy
-import com.kyant.backdrop.highlight.Highlight
-import com.kyant.backdrop.shadow.InnerShadow
-import com.kyant.backdrop.shadow.Shadow
+import dev.t1m3.qplayer.android.ui.IosGlassHighlight
+import dev.t1m3.qplayer.android.ui.IosGlassShadow
+import dev.t1m3.qplayer.android.ui.IosGlassThumbShadow
+import dev.t1m3.qplayer.android.ui.LocalGlassRefraction
+import dev.t1m3.qplayer.android.ui.iosGlassInnerShadow
+import dev.t1m3.qplayer.android.ui.iosGlassSurface
+import dev.t1m3.qplayer.android.ui.rememberIosAdaptiveGlass
+import dev.t1m3.qplayer.android.ui.adaptiveGlassColorEffects
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.LocalContentColor
 import kotlinx.coroutines.launch
@@ -88,17 +92,13 @@ fun LiquidBottomTabs(
     content: @Composable RowScope.() -> Unit
 ) {
     require(tabsCount > 1)
+    val refraction = LocalGlassRefraction.current
     // The reference's own two colour pairs, keyed on the app's theme flag.
     val isLightTheme = !dark
     val accentColor =
         if (isLightTheme) Color(0xFF0088FF)
         else Color(0xFF0091FF)
-    val containerColor =
-        // Ⓜ 2026-10-01, the listener's field test: 「模糊改到1dp，增加玻璃折射，玻璃整体偏白一点」.
-        // The light plate goes pure white at half alpha; the dark plate keeps the
-        // reference's own pair.
-        if (isLightTheme) Color(0xFFFFFFFF).copy(0.5f)
-        else Color(0xFF121212).copy(0.4f)
+    val adaptive = rememberIosAdaptiveGlass(backdrop)
 
     val latestSelected by androidx.compose.runtime.rememberUpdatedState(selectedTabIndex)
     val latestOnSelected by androidx.compose.runtime.rememberUpdatedState(onTabSelected)
@@ -190,9 +190,9 @@ fun LiquidBottomTabs(
         }
         // The reference's content sits in the demo's Material theme; the app's tab content reads
         // LocalContentColor, so it is provided here with the ink that plate asks for.
-        CompositionLocalProvider(LocalContentColor provides if (isLightTheme) Color(0xFF1B1B1B) else Color.White) {
+        CompositionLocalProvider(LocalContentColor provides adaptive.contentColor) {
         Row(
-            Modifier
+            Modifier.then(adaptive.modifier)
                 .graphicsLayer {
                     translationX = panelOffset
                 }
@@ -200,17 +200,20 @@ fun LiquidBottomTabs(
                     backdrop = backdrop,
                     shape = { CircleShape },
                     effects = {
-                        vibrancy()
-                        blur(1f.dp.toPx())
-                        lens(24f.dp.toPx(), 40f.dp.toPx())
+                        adaptiveGlassColorEffects(adaptive.luminance)
+                        if (refraction) lens(32f.dp.toPx(), 46f.dp.toPx(),
+                            depthEffect = true, centerConvexity = 0.145f)
                     },
+                    highlight = { IosGlassHighlight },
+                    shadow = { IosGlassShadow },
+                    innerShadow = { iosGlassInnerShadow(adaptive.luminance <= 0.5f) },
                     layerBlock = {
                         val progress = dampedDragAnimation.pressProgress
                         val scale = lerp(1f, 1f + 16f.dp.toPx() / size.width, progress)
                         scaleX = scale
                         scaleY = scale
                     },
-                    onDrawSurface = { drawRect(containerColor) }
+                    onDrawSurface = { drawRect(iosGlassSurface(dark, Color.White, adaptive.luminance)) }
                 )
                 .then(interactiveHighlight.modifier)
                 .height(64f.dp)
@@ -239,18 +242,21 @@ fun LiquidBottomTabs(
                         shape = { CircleShape },
                         effects = {
                             val progress = dampedDragAnimation.pressProgress
-                            vibrancy()
-                            blur(1f.dp.toPx())
-                            lens(
+                            adaptiveGlassColorEffects(adaptive.luminance)
+                            if (refraction) lens(
                                 24f.dp.toPx() * progress,
-                                40f.dp.toPx() * progress
+                                30f.dp.toPx() * progress,
+                                depthEffect = true,
+                                centerConvexity = 0.095f * progress,
                             )
                         },
                         highlight = {
                             val progress = dampedDragAnimation.pressProgress
-                            Highlight.Default.copy(alpha = progress)
+                            IosGlassHighlight.copy(alpha = IosGlassHighlight.alpha * progress)
                         },
-                        onDrawSurface = { drawRect(containerColor) }
+                        // Only the visible plate casts a shadow; this is the lens's source.
+                        shadow = null,
+                        onDrawSurface = { drawRect(iosGlassSurface(dark, Color.White, adaptive.luminance)) }
                     )
                     .then(interactiveHighlight.modifier)
                     .height(56f.dp)
@@ -277,26 +283,25 @@ fun LiquidBottomTabs(
                     shape = { CircleShape },
                     effects = {
                         val progress = dampedDragAnimation.pressProgress
-                        lens(
-                            10f.dp.toPx() * progress,
-                            14f.dp.toPx() * progress,
-                            chromaticAberration = true
+                        if (refraction) lens(
+                            13f.dp.toPx() * progress,
+                            26f.dp.toPx() * progress,
+                            depthEffect = true,
+                            chromaticAberration = true,
+                            centerConvexity = 0.085f * progress,
                         )
                     },
                     highlight = {
                         val progress = dampedDragAnimation.pressProgress
-                        Highlight.Default.copy(alpha = progress)
+                        IosGlassHighlight.copy(alpha = IosGlassHighlight.alpha * progress)
                     },
                     shadow = {
                         val progress = dampedDragAnimation.pressProgress
-                        Shadow(alpha = progress)
+                        IosGlassThumbShadow.copy(alpha = progress)
                     },
                     innerShadow = {
                         val progress = dampedDragAnimation.pressProgress
-                        InnerShadow(
-                            radius = 8f.dp * progress,
-                            alpha = progress
-                        )
+                        iosGlassInnerShadow(dark).copy(alpha = progress)
                     },
                     layerBlock = {
                         scaleX = dampedDragAnimation.scaleX

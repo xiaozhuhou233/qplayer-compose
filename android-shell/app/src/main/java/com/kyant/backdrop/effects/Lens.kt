@@ -13,11 +13,17 @@ import com.kyant.backdrop.internal.RoundedRectRefractionWithDispersionShaderStri
 import com.kyant.backdrop.internal.RuntimeShaderEffect
 import com.kyant.backdrop.isRuntimeShaderSupported
 
+/**
+ * [centerConvexity] adds a shallow central dome to the existing edge refraction.
+ * Zero preserves the reference's edge-only lens. It deforms only the backdrop,
+ * not foreground content, and uses the same shader pass and texture samples.
+ */
 fun BackdropEffectScope.lens(
     @FloatRange(from = 0.0) refractionHeight: Float,
     @FloatRange(from = 0.0) refractionAmount: Float,
     depthEffect: Boolean = false,
-    chromaticAberration: Boolean = false
+    chromaticAberration: Boolean = false,
+    @FloatRange(from = 0.0, to = 0.15) centerConvexity: Float = 0f,
 ) {
     if (!isRuntimeShaderSupported()) return
     if (refractionHeight <= 0f || refractionAmount <= 0f) return
@@ -48,6 +54,8 @@ fun BackdropEffectScope.lens(
                 setFloatUniform("refractionHeight", refractionHeight)
                 setFloatUniform("refractionAmount", -refractionAmount)
                 setFloatUniform("depthEffect", if (depthEffect) 1f else 0f)
+                setFloatUniform("centerConvexity",
+                    if (centerConvexity.isFinite()) centerConvexity.coerceIn(0f, 0.15f) else 0f)
                 if (chromaticAberration) {
                     setFloatUniform("chromaticAberration", 1f)
                 }

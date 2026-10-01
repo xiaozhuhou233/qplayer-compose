@@ -48,6 +48,18 @@ float2 gradSdRoundedRect(float2 coord, float2 halfSize, float radius) {
     }
 }"""
 
+// QPlayer's optional convex centre. The squared dome has zero slope at its
+// boundary, so it joins the edge lens without a ring or a sampling discontinuity.
+// No normalisation at the centre and no additional content.eval() are needed.
+@Language("AGSL")
+private const val ConvexBackdropCoord = """
+float2 convexBackdropCoord(float2 coord, float2 centeredCoord, float2 halfSize, float strength) {
+    float2 normalizedCoord = centeredCoord / max(halfSize, float2(1.0));
+    float dome = max(1.0 - dot(normalizedCoord, normalizedCoord), 0.0);
+    return coord - centeredCoord * (strength * dome * dome);
+}
+"""
+
 @Language("AGSL")
 internal const val RoundedRectRefractionShaderString = """
 uniform shader content;
@@ -58,8 +70,10 @@ uniform float4 cornerRadii;
 uniform float refractionHeight;
 uniform float refractionAmount;
 uniform float depthEffect;
+uniform float centerConvexity;
 
 $RoundedRectSDF
+$ConvexBackdropCoord
 
 float circleMap(float x) {
     return 1.0 - sqrt(1.0 - x * x);
@@ -69,10 +83,11 @@ half4 main(float2 coord) {
     float2 halfSize = size * 0.5;
     float2 centeredCoord = (coord + offset) - halfSize;
     float radius = radiusAt(coord, cornerRadii);
+    float2 convexCoord = convexBackdropCoord(coord, centeredCoord, halfSize, centerConvexity);
     
     float sd = sdRoundedRect(centeredCoord, halfSize, radius);
     if (-sd >= refractionHeight) {
-        return content.eval(coord);
+        return content.eval(convexCoord);
     }
     sd = min(sd, 0.0);
     
@@ -80,7 +95,7 @@ half4 main(float2 coord) {
     float gradRadius = min(radius * 1.5, min(halfSize.x, halfSize.y));
     float2 grad = normalize(gradSdRoundedRect(centeredCoord, halfSize, gradRadius) + depthEffect * normalize(centeredCoord));
     
-    float2 refractedCoord = coord + d * grad;
+    float2 refractedCoord = convexCoord + d * grad;
     return content.eval(refractedCoord);
 }"""
 
@@ -95,8 +110,10 @@ uniform float refractionHeight;
 uniform float refractionAmount;
 uniform float depthEffect;
 uniform float chromaticAberration;
+uniform float centerConvexity;
 
 $RoundedRectSDF
+$ConvexBackdropCoord
 
 float circleMap(float x) {
     return 1.0 - sqrt(1.0 - x * x);
@@ -106,10 +123,11 @@ half4 main(float2 coord) {
     float2 halfSize = size * 0.5;
     float2 centeredCoord = (coord + offset) - halfSize;
     float radius = radiusAt(coord, cornerRadii);
+    float2 convexCoord = convexBackdropCoord(coord, centeredCoord, halfSize, centerConvexity);
     
     float sd = sdRoundedRect(centeredCoord, halfSize, radius);
     if (-sd >= refractionHeight) {
-        return content.eval(coord);
+        return content.eval(convexCoord);
     }
     sd = min(sd, 0.0);
     
@@ -117,7 +135,7 @@ half4 main(float2 coord) {
     float gradRadius = min(radius * 1.5, min(halfSize.x, halfSize.y));
     float2 grad = normalize(gradSdRoundedRect(centeredCoord, halfSize, gradRadius) + depthEffect * normalize(centeredCoord));
     
-    float2 refractedCoord = coord + d * grad;
+    float2 refractedCoord = convexCoord + d * grad;
     float dispersionIntensity = chromaticAberration * ((centeredCoord.x * centeredCoord.y) / (halfSize.x * halfSize.y));
     float2 dispersedCoord = d * grad * dispersionIntensity;
     

@@ -1,5 +1,5 @@
 // AndroidLiquidGlass-android colour/effect adaptation, Copyright 2025 Kyant,
-// Apache-2.0. QPlayer uses each control's sampled luminance in the Android demo formula.
+// Apache-2.0. Shared QPlayer glass material and theme colours.
 package dev.t1m3.qplayer.android.ui
 
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -9,57 +9,53 @@ import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.BackdropEffectScope
 import com.kyant.backdrop.effects.blur
 import com.kyant.backdrop.effects.lens
-import com.kyant.backdrop.effects.vibrancy
+import com.kyant.backdrop.effects.colorControls
+import com.kyant.backdrop.highlight.Highlight
+import com.kyant.backdrop.shadow.InnerShadow
 import com.kyant.backdrop.shadow.Shadow
 
-/**
- * Ⓜ The shadow every liquid glass in this app draws under itself, so a control stays legible
- * over a busy artwork instead of dissolving into it.
- *
- * The library's own default ({@code Shadow.Default}) is Black at 0.1 alpha with a 24dp radius,
- * which over a bright cover is barely there — the listener's report was exactly that:
- * 「给所有液态玻璃下面组件覆盖上阴影保持可视化」. This is the same shape, harder: three times the
- * alpha and a little more radius and drop. It is one value shared by every glass call site on
- * purpose — the plates, the buttons, the tabs and the dialogs have to read as ONE material.
- */
-/**
- * Ⓜ The shadow every glass in this app casts, and the listener's own instruction for it:
- * 「让下部分组件覆盖更深的阴影……其他按钮也这样，注意不只是在里面填充阴影」.
- *
- * <p>Three things that sentence fixes, and all three are properties of THIS value rather than of a
- * fill or a stroke:
- * <ul>
- *   <li><b>Deeper.</b> Black at 0.30 alpha, against the 0.04 the faint pair used — the point is a
- *       shadow you can see on a white page, not a hint of one;</li>
- *   <li><b>Below.</b> The offset is pushed DOWN (14dp on top of the radius), so what the page
- *       receives is a dark cast under the component's lower edge rather than an even halo around
- *       it;</li>
- *   <li><b>Outside, following the outline.</b> It is the library's own {@code Shadow}, drawn by
- *       {@code drawBackdrop} BEHIND the glass with the component's shape — so it is never painted
- *       inside the material, and because the shape is evaluated as the component draws, a bar that
- *       expands or collapses changes the shadow's own extent with it. That is the 「组件扩展收缩自动
- *       改外围范围」 half of the same instruction.</li>
- * </ul>
- *
- * <p>It is one value shared by every glass call site (the dock's two capsules, the round buttons,
- * the dialogs), which is what makes 「其他按钮也这样」 true without a per-site number to drift.
- */
-internal val IosGlassShadow = Shadow(
-    radius = 16.dp,
-    offset = DpOffset(0.dp, 3.dp),
-    color = Color.Black.copy(alpha = 0.14f),
+// Keep a fine reflective rim, but let refraction and the cast shadow describe depth.
+// Scaling layer alpha also preserves the highlight node's cached drawing.
+internal val IosGlassHighlight = Highlight.Default.copy(alpha = 0.42f)
+internal val IosGlassDialogHighlight = Highlight.Plain.copy(alpha = 0.42f)
+internal val IosGlassThumbHighlight = Highlight.Ambient.copy(
+    width = Highlight.Ambient.width / 1.5f,
+    blurRadius = Highlight.Ambient.blurRadius / 1.5f,
+    alpha = 0.45f,
 )
 
-/**
- * Ⓜ The contact half of that pair — a 6dp shadow at 6% alpha, drawn by the host where the glass
- * is placed (see {@link IosLiquidGlass}). Two very diffuse layers are what make the glass read as
- * floating a few millimetres above the page instead of lying on it; one shadow at any strength
- * reads as a hard edge on a white page. The listener's own diagnosis asked for exactly this pair.
- */
-internal val IosGlassContactShadow = Shadow(
-    radius = 6.dp,
-    offset = DpOffset(0.dp, 2.dp),
-    color = Color.Black.copy(alpha = 0.06f),
+/** One soft, downward cast shadow, not a second outline or duplicate glass layer. */
+internal val IosGlassShadow = Shadow(
+    radius = 12.dp,
+    offset = DpOffset(0.dp, 3.dp),
+    color = Color.Black.copy(alpha = 0.10f),
+)
+
+/** Small moving thumbs need a tighter shadow than the surrounding glass plate. */
+internal val IosGlassThumbShadow = Shadow(
+    radius = 4.dp,
+    offset = DpOffset(0.dp, 1.5f.dp),
+    color = Color.Black.copy(alpha = 0.08f),
+)
+
+// A short lower inner bevel, not a dark fill over the glass centre. The offset is
+// comparable to the blur radius so the bevel remains visible instead of washing out.
+// Fixed geometry lets Backdrop cache its mask; moving pills only animate opacity.
+private val IosGlassLightInnerShadow = InnerShadow(
+    radius = 3.5f.dp,
+    offset = DpOffset(0.dp, (-1.5f).dp),
+    color = Color.Black.copy(alpha = 0.13f),
+)
+private val IosGlassDarkInnerShadow = IosGlassLightInnerShadow.copy(
+    color = Color.Black.copy(alpha = 0.20f),
+)
+internal fun iosGlassInnerShadow(dark: Boolean): InnerShadow =
+    if (dark) IosGlassDarkInnerShadow else IosGlassLightInnerShadow
+
+internal val IosGlassThumbInnerShadow = InnerShadow(
+    radius = 2.dp,
+    offset = DpOffset(0.dp, (-1).dp),
+    color = Color.Black.copy(alpha = 0.08f),
 )
 
 /** Initial fallback only; each visible glass samples its own raw background. */
@@ -81,20 +77,13 @@ internal fun iosGlassSurface(
     tint: Color,
     sampledLuminance: Float = androidGlassLuminance(tint.red, tint.green, tint.blue)
 ): Color {
-    // Ⓜ 2026-10-01: the plate IS the navigation bar's pair now
-    // （「MiniPlayer 以及按钮组件都同步和导航栏一样」）— pure white at half alpha in the
-    // light theme, the reference's dark pair in the dark one. The sampled luminance and
-    // tint remain in the signature for the call sites but no longer move the plate; the
-    // bar's static readability is the point of the sync.
-    return if (dark) Color(0xFF121212).copy(alpha = 0.4f)
-    else Color(0xFFFFFFFF).copy(alpha = 0.5f)
+    // A restrained white veil; the sampled backdrop drives the optical filters.
+    val l = sampledLuminance.coerceIn(0f, 1f)
+    return Color.White.copy(alpha = 0.035f + 0.055f * l)
 }
 
 /**
- * The glass effect chain, synced to the navigation bar's
- * （vibrancy + blur(1dp) + lens）with the refraction amount the listener set
- * about 30 below the bar's 40dp. The luminance parameter is kept for the call
- * sites but no longer drives anything: the material is static like the bar's.
+ * Shared adaptive colour filters and restrained convex refraction in one lens pass.
  */
 internal fun BackdropEffectScope.apiGlassEffects(
     luminance: Float,
@@ -102,7 +91,19 @@ internal fun BackdropEffectScope.apiGlassEffects(
     refractionHeight: Float,
     refractionAmount: Float,
 ) {
-    vibrancy()
-    blur(1f * density)
-    if (refraction) lens(refractionHeight, refractionAmount)
+    adaptiveGlassColorEffects(luminance)
+    if (refraction) lens(
+        refractionHeight = refractionHeight.coerceAtMost(size.minDimension * 0.45f),
+        refractionAmount = refractionAmount,
+        depthEffect = true,
+        // The shader caps the dome at 0.15; this is as round as the material allows.
+        centerConvexity = 0.145f,
+    )
+}
+
+internal fun BackdropEffectScope.adaptiveGlassColorEffects(luminance: Float) {
+    val optics = androidGlassOptics(luminance)
+    colorControls(brightness = optics.brightness, contrast = optics.contrast,
+        saturation = optics.saturation)
+    blur(optics.blurDp * density)
 }
