@@ -94,7 +94,10 @@ fun LiquidBottomTabs(
         if (isLightTheme) Color(0xFF0088FF)
         else Color(0xFF0091FF)
     val containerColor =
-        if (isLightTheme) Color(0xFFFAFAFA).copy(0.4f)
+        // Ⓜ 2026-10-01, the listener's field test: 「模糊改到1dp，增加玻璃折射，玻璃整体偏白一点」.
+        // The light plate goes pure white at half alpha; the dark plate keeps the
+        // reference's own pair.
+        if (isLightTheme) Color(0xFFFFFFFF).copy(0.5f)
         else Color(0xFF121212).copy(0.4f)
 
     val latestSelected by androidx.compose.runtime.rememberUpdatedState(selectedTabIndex)
@@ -198,8 +201,8 @@ fun LiquidBottomTabs(
                     shape = { CircleShape },
                     effects = {
                         vibrancy()
-                        blur(8f.dp.toPx())
-                        lens(24f.dp.toPx(), 24f.dp.toPx())
+                        blur(1f.dp.toPx())
+                        lens(24f.dp.toPx(), 40f.dp.toPx())
                     },
                     layerBlock = {
                         val progress = dampedDragAnimation.pressProgress
@@ -237,10 +240,10 @@ fun LiquidBottomTabs(
                         effects = {
                             val progress = dampedDragAnimation.pressProgress
                             vibrancy()
-                            blur(8f.dp.toPx())
+                            blur(1f.dp.toPx())
                             lens(
                                 24f.dp.toPx() * progress,
-                                24f.dp.toPx() * progress
+                                40f.dp.toPx() * progress
                             )
                         },
                         highlight = {
