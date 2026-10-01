@@ -46,13 +46,22 @@ internal fun IosPlayerDock(
     val landing = remember { Animatable(0f) }
     val progress = remember(collapse) { { collapse.value } }
     val holdDock = playerExpansion.active
+    // Ⓜ Collapse is motion for the glass inside this dock: while the bar and the
+    // miniplayer reshape, the glass sampling pauses (LocalGlassMotionActive), so no
+    // GPU readback or effect rebuild lands in the middle of the animation.
+    var collapsing by remember { mutableStateOf(false) }
     LaunchedEffect(collapsed, hasTrack, holdDock) {
         if (holdDock) return@LaunchedEffect
-        landing.snapTo(0f)
-        collapse.animateTo(if (collapsed && hasTrack) 1f else 0f,
-            tween(420, easing = EmphasizeEasing))
-        if (collapsed && hasTrack) landing.animateTo(0f,
-            spring(dampingRatio = 0.65f, stiffness = 380f), initialVelocity = 35f)
+        collapsing = true
+        try {
+            landing.snapTo(0f)
+            collapse.animateTo(if (collapsed && hasTrack) 1f else 0f,
+                tween(420, easing = EmphasizeEasing))
+            if (collapsed && hasTrack) landing.animateTo(0f,
+                spring(dampingRatio = 0.65f, stiffness = 380f), initialVelocity = 35f)
+        } finally {
+            collapsing = false
+        }
     }
     // Threshold state changes once, instead of recomposing glass and all children
     // sixty times a second alongside a moving LazyColumn.
@@ -64,6 +73,7 @@ internal fun IosPlayerDock(
     // scaled with the collapsing controls: scaling this separate layer made its
     // edge move away from the actual glass plates and looked like a detached
     // block during scrolling and route transitions.
+    CompositionLocalProvider(LocalGlassMotionActive provides collapsing) {
     Box(modifier.fillMaxSize()) {
         Box(
             Modifier
@@ -180,5 +190,6 @@ internal fun IosPlayerDock(
         }
         }
         }
+    }
     }
 }

@@ -94,8 +94,11 @@ fun LiquidBottomTabs(
         if (isLightTheme) Color(0xFF0088FF)
         else Color(0xFF0091FF)
     val containerColor =
-        if (isLightTheme) Color(0xFFFAFAFA).copy(0.4f)
-        else Color(0xFF121212).copy(0.4f)
+        // Ⓜ 2026-10-01: thinned from 0.4 to 0.30 for the listener's
+        // 「减小磨砂感，增加通透」 — the plate keeps the reference's neutrality but
+        // lets the page show through.
+        if (isLightTheme) Color(0xFFFAFAFA).copy(0.30f)
+        else Color(0xFF121212).copy(0.30f)
 
     val latestSelected by androidx.compose.runtime.rememberUpdatedState(selectedTabIndex)
     val latestOnSelected by androidx.compose.runtime.rememberUpdatedState(onTabSelected)
@@ -198,7 +201,7 @@ fun LiquidBottomTabs(
                     shape = { CircleShape },
                     effects = {
                         vibrancy()
-                        blur(8f.dp.toPx())
+                        blur(5f.dp.toPx())
                         lens(24f.dp.toPx(), 24f.dp.toPx())
                     },
                     layerBlock = {
@@ -242,7 +245,7 @@ fun LiquidBottomTabs(
                         effects = {
                             val progress = dampedDragAnimation.pressProgress
                             vibrancy()
-                            blur(8f.dp.toPx())
+                            blur(5f.dp.toPx())
                             lens(
                                 24f.dp.toPx() * progress,
                                 24f.dp.toPx() * progress

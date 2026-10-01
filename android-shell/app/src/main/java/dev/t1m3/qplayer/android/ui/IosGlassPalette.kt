@@ -77,13 +77,14 @@ internal fun iosGlassSurface(
 ): Color {
     // A white-glass plate is intentionally neutral: the sampled artwork supplies the
     // changing colour through the blurred backdrop, while this layer supplies the milky
-    // body seen in the reference. It becomes slightly stronger over dark samples so the
-    // controls remain legible, but stays translucent over bright samples.
+    // body seen in the reference. Ⓜ 2026-10-01: thinned across the board
+    // （「减小磨砂感，增加通透」）— the legibility floor now comes from the shared
+    // shadow and the ink switch rather than from a thicker veil.
     val luminance = sampledLuminance.coerceIn(0f, 1f)
     val alpha = when {
-        luminance < 0.22f -> 0.22f
-        luminance < 0.55f -> 0.19f
-        else -> 0.16f
+        luminance < 0.22f -> 0.14f
+        luminance < 0.55f -> 0.12f
+        else -> 0.10f
     }
     val neutralWhite = if (luminance > 0.82f) Color(0xFFF5F5F7) else Color.White
     return neutralWhite.copy(alpha = alpha)
