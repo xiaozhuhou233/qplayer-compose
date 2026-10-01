@@ -8438,6 +8438,15 @@ public final class PlayerController {
                                 List<LyricLine> parsed = LyricParser.fromNeteaseStrings(
                                         fresh.yrc, fresh.lrc, fresh.tlyric, fresh.romalrc);
                                 if (!parsed.isEmpty()) {
+                                    // Ⓜ Diagnostic for 「部分歌的歌词只是平均速度划过」:
+                                    // if this fires with yrc absent, the server itself has
+                                    // no word-level data for the song; if yrc is present
+                                    // yet the lines still render plain, the merge is at fault.
+                                    if (LyricTiming.wordTimedLines(parsed) == 0) {
+                                        Logger.warn("lyric for {} has no word timing from the source"
+                                                        + " (yrc present: {}, lrc present: {})",
+                                                songId, fresh.yrc != null, fresh.lrc != null);
+                                    }
                                     NeteaseLyric retained = fresh;
                                     if (old != null) {
                                         if (LyricTiming.wordTimedLines(previous) > LyricTiming.wordTimedLines(parsed)) {

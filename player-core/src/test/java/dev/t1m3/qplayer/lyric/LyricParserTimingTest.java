@@ -57,4 +57,25 @@ public class LyricParserTimingTest {
         line.syllables.add(new Syllable("a", 1000L, 320L));
         assertTrue(LyricTiming.hasWordTiming(line));
     }
+
+    @Test public void driftedStampCannotDuplicateWordTiming() {
+        // LRC marks the line's musical entry 900ms before the first sung word.
+        String yrc = "[30900,2100](30900,900,0)Shape (31800,600,0)of (32400,600,0)You";
+        String lrc = "[00:30.00]Shape of You\n[00:52.00]oh I";
+        List<LyricLine> lines = LyricParser.fromNeteaseStrings(yrc, lrc, null, null);
+        assertEquals(1, LyricTiming.wordTimedLines(lines));
+        assertEquals(1, lines.stream().filter(l -> l.text().contains("Shape")).count());
+        assertEquals(2, lines.size());
+    }
+
+    @Test public void typographyOnlyDriftIsStillCovered() {
+        // Full-width glyphs, casing and punctuation differ; the stamp is 4.4s
+        // ahead of the first sung word. Normalized text still matches YRC.
+        String yrc = "[30900,2100](30900,900,0)Shape (31800,600,0)of (32400,600,0)You";
+        String lrc = "[00:26.50]Ｓｈａｐｅ ｏｆ ｙｏｕ！";
+        List<LyricLine> lines = LyricParser.fromNeteaseStrings(yrc, lrc, null, null);
+        assertEquals(1, lines.size());
+        assertEquals(1, LyricTiming.wordTimedLines(lines));
+        assertEquals(3, lines.get(0).syllables.size());
+    }
 }

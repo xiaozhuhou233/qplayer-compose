@@ -59,13 +59,33 @@ public final class LyricParser {
         return base;
     }
 
-    /** Keep every original word timestamp. LRC often has extra credits, blank
+    /**
+     * Keep every original word timestamp. LRC often has extra credits, blank
      * markers or different line breaks; a larger line count is not evidence
      * that its line-only timing is better than YRC.
-     * Supplement only text outside the time ranges already covered by YRC.
+     *
+     * <p>Ⓜ 2026-10-01: the old test accepted an LRC stamp only inside
+     * {@code [start-500, end)} with EXACTLY equal text. Real payloads drift
+     * further — LRC marks the line's musical entry seconds before the first
+     * sung word, and the two sources differ in punctuation, width and case —
+     * so the same line slipped through as a SECOND, plain copy that sorted
+     * ahead of its YRC twin. That plain copy is what the renderer then swept
+     * at uniform speed: 「部分歌的歌词无法遵循整个句子的进度」.
+     *
+     * <p>A candidate is now a duplicate when EITHER its stamp falls inside a
+     * YRC line's widened window ({@code [start-2500, end+1500)} — stamp drift
+     * and trailing instrumentation) OR its normalized text (punctuation,
+     * width, case stripped) matches a YRC line starting within 5s — typography
+     * drift. A genuine LRC-only line in a gap between YRC lines matches
+     * neither and still survives to fill the text. YRC is the superset of the
+     * song's sung lines, so biasing toward coverage is the safe direction: a
+     * dropped duplicate loses nothing, a kept one visibly breaks the timing.
      */
     static List<LyricLine> supplementTimedLines(List<LyricLine> yrc, List<LyricLine> lrc) {
         List<LyricLine> result = new java.util.ArrayList<>(yrc);
+        final long LEAD_MS = 2500L;
+        final long TAIL_MS = 1500L;
+        final long TEXT_MATCH_MS = 5000L;
         for (LyricLine candidate : lrc) {
             String text = candidate.text().trim();
             if (text.isEmpty()) continue;
@@ -73,11 +93,12 @@ public final class LyricParser {
             boolean covered = false;
             for (LyricLine timed : yrc) {
                 if (candidate.vocalChannel != timed.vocalChannel) continue;
-                // LRC stamps can be slightly earlier than the first sung word.
-                // Also recognize a repeated line within a modest timestamp drift.
-                if ((start >= timed.startMs() - 500L && start < timed.endMs())
-                        || (Math.abs(start - timed.startMs()) <= 2000L
-                            && text.equals(timed.text().trim()))) {
+                if (start >= timed.startMs() - LEAD_MS && start < timed.endMs() + TAIL_MS) {
+                    covered = true;
+                    break;
+                }
+                if (Math.abs(start - timed.startMs()) <= TEXT_MATCH_MS
+                        && normalizeForMatch(text).equals(normalizeForMatch(timed.text().trim()))) {
                     covered = true;
                     break;
                 }
@@ -86,6 +107,19 @@ public final class LyricParser {
         }
         result.sort((a, b) -> Long.compare(a.startMs(), b.startMs()));
         return result;
+    }
+
+    /** Letters and digits only, case-folded after NFKC width folding: 「我看见：」 vs
+     *  「我看见」, "Shape Of You" vs "Shape of You" and full-width variants all
+     *  normalize equal. */
+    private static String normalizeForMatch(String text) {
+        String folded = java.text.Normalizer.normalize(text, java.text.Normalizer.Form.NFKC);
+        StringBuilder sb = new StringBuilder(folded.length());
+        folded.codePoints()
+                .filter(Character::isLetterOrDigit)
+                .map(Character::toLowerCase)
+                .forEach(sb::appendCodePoint);
+        return sb.toString();
     }
 
     /** Same logic as {@link #attachSidecar} but from a raw content string. */
