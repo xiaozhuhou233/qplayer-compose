@@ -36,6 +36,8 @@ public class NeteaseApiTest {
                 "/api/song/like/get", NeteaseApi.Transport.EAPI);
         assertEndpoint(NeteaseApi.RECOMMEND_SONGS,
                 "/api/v3/discovery/recommend/songs", NeteaseApi.Transport.WEAPI);
+        assertEndpoint(NeteaseApi.HOMEPAGE_BLOCK_PAGE,
+                "/api/homepage/block/page", NeteaseApi.Transport.WEAPI);
         assertEndpoint(NeteaseApi.PERSONAL_FM,
                 "/api/v1/radio/get", NeteaseApi.Transport.WEAPI);
         assertEndpoint(NeteaseApi.PERSONAL_FM_TRASH,
