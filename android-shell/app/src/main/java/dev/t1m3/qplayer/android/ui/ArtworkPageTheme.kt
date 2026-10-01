@@ -58,6 +58,15 @@ internal fun ArtworkPageSurface(
     content: @Composable BoxScope.() -> Unit,
 ) {
     if (!enabled) { Box(modifier, content = content); return }
+    // Ⓜ The listener: 「歌单界面和歌手界面的动态专辑封面取色仅用于 ios 模式，md3 模式依然保持原本的
+    // 当前播放歌曲取色」. In MD3 the route keeps the app's own theme — which is already tinted from
+    // the currently playing song — so neither the artwork scheme nor the frost texture is applied
+    // here, and LocalArtworkPage is not raised (the Scaffold's transparent-container branch keys
+    // on it, and MD3 wants its normal background back).
+    val ios = LocalIosDesign.current
+    if (!ios) {
+        Box(modifier, content = content); return
+    }
     val sample = rememberArtworkSample(image, sourceKey)
     val base = MaterialTheme.colorScheme
     val target = remember(sample?.seed, base, dark) {
