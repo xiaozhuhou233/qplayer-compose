@@ -4690,3 +4690,29 @@ adb shell "CLASSPATH=/data/local/tmp/probe.jar app_process /system/bin dev.t1m3.
   **APK 只有仓库 build 目录那一份，没有多余副本；设备上的探针文件已删除。**
 - 真机 `player-core` 测试：197 跑 1 失败，唯一失败是既有的
   `SettingsCatalogTest.pageTransitionDefaultsToZoomAndOffersAccessibleFallback`（与本轮无关）。
+
+---
+
+## 2026-10-01（g/h 两版，iOS 玻璃性能 + 顶栏 + 歌词判重）
+
+**01g（`9fec172`）玻璃更透 + 采样管线停帧修复**：blur 带 2–16dp→1–10dp、提亮上限 0.5→0.35、对比不再压平、
+表面乳白 0.16–0.22→0.10–0.14、导航栏底板 0.4→0.30 / blur 8→5dp；lens/高光/阴影未动。
+掉帧根因（三处，都在 `IosAdaptiveGlass.kt`）：①采样层（只喂每拍一次的 5×5 均值）此前每帧重录整块背景
+→ 现在只在采样循环 `requestSample()` 后录一次；②回读从控制点大小纹理缩到 ≤64px 缩略图；③动画期
+（展开/关闭/dock 收缩，`LocalGlassMotionActive`，dock 自带 collapsing 状态）完全停采样；采样量化 1/24 档
+（滚动不再每帧重启 tween→每帧重建 RenderEffect 链），tween 1s→240ms。
+
+**01h（`c8a3b98` + `a685c69`）**：
+- 顶栏 iOS 大标题式：`pageStatusBarInset()` 在 iOS 模式 +60dp（所有 `pageContentPadding` 页面让出一行带）；
+  `IosFloatingPageActions` 新增 `title`/`titleVisible`（居中 17sp 半粗 + 顶部渐隐阴影 0.16→0）；滚动连接新增
+  `titleDistance`（绝对消耗距离，drag+fling，回顶归零），阈值 60dp；标题映射抽成 `pageTopTitle()`（MD3 共用）。
+- 歌词匀速划过根因：`LyricParser.supplementTimedLines` 旧判重（[start-500,end) 且文本全等）放过了
+  戳漂移/标点全半角差异的 LRC → 同句普通行重复加入且排在 YRC 前 → 渲染器选中普通行匀速扫。
+  新判重：戳在 `[start-2500, end+1500)` 内，或 NFKC 归一化文本与 5s 内 YRC 行相同；真间隙行仍补入
+  （`LyricParserTimingTest` 7 用例全绿）。`PlayerController` 刷新路径新增无逐字日志
+  `lyric for {} has no word timing from the source (yrc present: ...)`——若 yrc absent 则是服务器没数据。
+- 测试基线：351 用例 / 18 既有失败（15 StemFusion 旧期望 [测试停在 09-27、规划器 09-29] +
+  `LyricTimingTest.splittingPlainTextIsNotWordTiming`（等长切块判定，代码与测试意见相反）+
+  `SettingsCatalogTest.pageTransitionPreset`（设置目录缺该项）。均与上两轮改动无关。
+- ⚠️ tag 撞名再犯：`01f` 已被用户占用（指向他的 `108be23`），本轮用 `01g`/`01h`——**打 tag 前必须
+  `git ls-remote --tags origin` 查最新**，用户会并行发版。
