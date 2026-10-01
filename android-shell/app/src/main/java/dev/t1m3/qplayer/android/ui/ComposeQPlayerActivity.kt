@@ -1733,6 +1733,13 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                         if (state.loggedIn) navigateTo(ComposeRoute(ComposeScreen.ACCOUNT)) else loginOpen = true
                                     },
                                     loggedIn = state.loggedIn,
+                                    // Ⓜ The listener: 「顶部按钮组件平常只收缩成一个播放列表按钮，
+                                    // 在主页再展开或者在任何界面长按展开，要有动画」. Home keeps the
+                                    // full row; everywhere else only the queue button shows until a
+                                    // long-press on it opens the rest. routeKey is what resets that
+                                    // long-press when the user moves on.
+                                    expanded = route.screen == ComposeScreen.HOME,
+                                    routeKey = route,
                                     visible = iosTopActionsVisible,
                                     modifier = Modifier.align(Alignment.TopCenter).zIndex(4f)
                                 )
@@ -2208,8 +2215,14 @@ private fun MiniPlayer(
     val miniInk = adaptiveGlass?.contentColor ?: MaterialTheme.colorScheme.onSurface
     val miniMuted = if (iosMini) miniInk.copy(alpha = .65f) else MaterialTheme.colorScheme.onSurfaceVariant
     val glassHighlight = if (iosMini) rememberIosGlassHighlight() else null
-    val glassInteraction = if (glassHighlight != null)
-        rememberIosGlassInteraction(glassHighlight, drawHighlight = false) else Modifier
+    val glassModifier = if (glassBackdrop != null && adaptiveGlass != null) {
+        iosLiquidGlassModifier(
+            backdrop = glassBackdrop,
+            dark = state.dark,
+            adaptive = adaptiveGlass,
+            interaction = glassHighlight,
+        )
+    } else Modifier
     val controlsEnabled by remember(compactProgress) { derivedStateOf { compactProgress() < 0.01f } }
     val iosCoverSize = 32.dp
     Surface(
@@ -2221,7 +2234,7 @@ private fun MiniPlayer(
                 layout(child.width, child.height) { child.placeRelative(0, 0) }
             } else Modifier.height(64.dp))
             .then(if (playerExpansion != null) Modifier.playerExpansionSource(playerExpansion) else Modifier)
-            .then(glassInteraction)
+            .then(glassModifier)
             .clickable(interactionSource = openInteraction, indication = null) { hapticOpen() },
         shape = if (iosMini) CircleShape else RoundedCornerShape(32.dp),
         tonalElevation = if (glassBackdrop != null) 0.dp else 1.dp,
@@ -2231,14 +2244,7 @@ private fun MiniPlayer(
         color = ComposeColor.Transparent
     ) {
         Box(Modifier.fillMaxSize()) {
-            if (glassBackdrop != null) {
-                IosLiquidGlass(glassBackdrop, state.dark, Modifier.fillMaxSize(), requireNotNull(adaptiveGlass))
-                // The same pointer-tracking light as navigation, drawn above
-                // the glass and below artwork/buttons, never hidden by Surface.
-                if (glassHighlight != null) Box(
-                    Modifier.fillMaxSize().then(glassHighlight.modifier)
-                )
-            } else {
+            if (glassBackdrop == null) {
             // Safe Compose-only backdrop. The cover is intentionally subdued
             // and blurred as the colour source; the foreground controls stay
             // crisp and this path is safe during Activity route transitions.
@@ -7359,10 +7365,14 @@ private fun LyricLoadingRow(
     ) {
         repeat(3) { blobIndex ->
             Box(Modifier.size(blobSize)) {
+                // Ⓜ The listener: 「那三个前奏和间奏图标改成库里没有背景的纯几何变换样式的」 — the
+                // library's own indicator has a contained mode (a surface disc behind the three
+                // morphing shapes) and a bare one; the bare one is the pure geometry, so the
+                // background is off and only the shapes themselves transform.
                 ExpressiveLoadingIndicator(
                     size = blobSize,
                     color = if (blobIndex < beat) colors[blobIndex] else idle,
-                    withContainer = true,
+                    withContainer = false,
                     running = playing && beat in 0..2
                 )
             }
@@ -7728,10 +7738,11 @@ private fun QmlLyricColumnRestoredLegacySharedScroll(
                     // not been played is the faint grey, one that has been played
                     // through takes its own Monet colour.
                     Box(Modifier.size(blobSize)) {
+                        // Ⓜ The bare, container-free mode here too — pure geometry, no disc.
                         ExpressiveLoadingIndicator(
                             size = blobSize,
                             color = if (index < introBeat) introColors[index] else introIdleColor,
-                            withContainer = true,
+                            withContainer = false,
                             running = state.playing
                         )
                     }
