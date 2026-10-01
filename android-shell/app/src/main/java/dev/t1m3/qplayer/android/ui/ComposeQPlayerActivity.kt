@@ -2248,7 +2248,9 @@ private fun MiniPlayer(
     val hapticOpen = rememberHapticAction(onOpen)
     val openInteraction = remember { MutableInteractionSource() }
     val iosMini = glassBackdrop != null
-    val adaptive = if (glassBackdrop != null) rememberIosAdaptiveGlass(glassBackdrop) else null
+    // The dock publishes one region sample; the miniplayer reads it instead of
+    // sampling its own patch.
+    val adaptive = if (glassBackdrop != null) rememberRegionAdaptiveGlass(glassBackdrop) else null
     val miniInk = adaptive?.contentColor ?: MaterialTheme.colorScheme.onSurface
     val miniMuted = if (iosMini) miniInk.copy(alpha = .65f) else MaterialTheme.colorScheme.onSurfaceVariant
     val glassHighlight = if (iosMini) rememberIosGlassHighlight() else null
@@ -2669,6 +2671,20 @@ private fun rememberCoverBitmap(bytes: ByteArray?, path: String?): androidx.comp
     return bitmap
 }
 
+// Home shelf geometry: the head playlist shelf keeps only this many cards, every
+// long list is cut into shelves of this size, and the head shelf's remainder fills
+// the bottom of the page.
+private const val HOME_HEAD_SHELF = 6
+private const val HOME_SHELF_CHUNK = 12
+private const val HOME_SHELF_CHUNK_ALBUM = 12
+private const val HOME_SHELF_CHUNK_PLAYLIST = 10
+
+private fun homeAlbumShelfTitle(index: Int): String = when (index) {
+    0 -> "专辑推荐"
+    1 -> "更多新碟"
+    else -> "继续探索 · ${index + 1}"
+}
+
 @OptIn(
     androidx.compose.material3.ExperimentalMaterial3Api::class,)
 @Composable
@@ -2718,6 +2734,19 @@ private fun HomeScreen(
                     coverThumbPath = song.coverThumbPath
                 }
             }.toList()
+    }
+    // Every long list becomes several shelves instead of one compact pager, so the
+    // page keeps going deeper; the head playlist shelf's remainder is kept for the
+    // bottom of the page.
+    val songShelves = remember(state.homeSongSections) {
+        state.homeSongSections.flatMap { section ->
+            section.songs.chunked(HOME_SHELF_CHUNK)
+                .mapIndexed { index, chunk -> Triple(section, index, chunk) }
+        }
+    }
+    val playlistTails = remember(firstPlaylists) {
+        firstPlaylists.drop(HOME_HEAD_SHELF).chunked(HOME_SHELF_CHUNK_PLAYLIST)
+            .mapIndexed { index, chunk -> index to chunk }
     }
     LaunchedEffect(aiOpen, controller) {
         while (aiOpen && controller != null) {
@@ -2770,56 +2799,55 @@ private fun HomeScreen(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 SectionTitle("推荐歌单")
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
-                    items(firstPlaylists, key = { it.id }) { playlist ->
-                        PlaylistCard(
-                            playlist = playlist,
-
-                            onClick = {
-
-                                openPlaylist(playlist.id, playlist.coverThumbPath ?: playlist.coverUrl ?: "")
-                            }
-                        )
+                    items(firstPlaylists.take(HOME_HEAD_SHELF), key = { it.id }) { playlist ->
+                        PlaylistCard(playlist = playlist, onClick = {
+                            openPlaylist(playlist.id, playlist.coverThumbPath ?: playlist.coverUrl ?: "")
+                        })
                     }
                 }
             }
         }
         if (state.recommendations.isNotEmpty()) {
-            item(key = "home_daily_songs") {
-                HomeSongPages(
-                    title = "每日推荐",
-                    songs = state.recommendations,
-                    onPlay = playRecommendation,
-                    onEnqueue = { controller?.enqueueNeteaseSong(it) }
-                )
+            state.recommendations.chunked(HOME_SHELF_CHUNK).forEachIndexed { chunkIndex, chunk ->
+                item(key = "home_daily_songs_$chunkIndex") {
+                    HomeSongPages(
+                        title = if (chunkIndex == 0) "每日推荐" else "每日推荐 · ${chunkIndex + 1}",
+                        songs = chunk,
+                        onPlay = { index -> playRecommendation(chunkIndex * HOME_SHELF_CHUNK + index) },
+                        onEnqueue = { controller?.enqueueNeteaseSong(it) }
+                    )
+                }
             }
         }
-        if (suggestedAlbums.isNotEmpty()) item(key = "home_albums") {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                SectionTitle("专辑推荐")
-                if (state.homeAlbumRecommendations.isEmpty()) Text(
-                    "继续探索每日推荐中的专辑",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
-                    items(suggestedAlbums, key = { it.id }) { album ->
-                        HomeAlbumCard(album) {
-                            openAlbum(album.id, album.coverThumbPath ?: album.coverUrl ?: "")
+        suggestedAlbums.chunked(HOME_SHELF_CHUNK_ALBUM).forEachIndexed { chunkIndex, chunk ->
+            item(key = "home_albums_$chunkIndex") {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SectionTitle(homeAlbumShelfTitle(chunkIndex))
+                    if (chunkIndex == 0 && state.homeAlbumRecommendations.isEmpty()) Text(
+                        "继续探索每日推荐中的专辑",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
+                        items(chunk, key = { it.id }) { album ->
+                            HomeAlbumCard(album) {
+                                openAlbum(album.id, album.coverThumbPath ?: album.coverUrl ?: "")
+                            }
                         }
                     }
                 }
             }
         }
         items(
-            state.homeSongSections,
-            key = { "home_section_${it.id}" },
+            songShelves,
+            key = { "home_shelf_${it.first.id}_${it.second}" },
             contentType = { "home_song_pages" }
-        ) { section ->
+        ) { (section, shelfIndex, chunk) ->
             HomeSongPages(
-                title = section.title,
-                songs = section.songs,
+                title = if (shelfIndex == 0) section.title else "${section.title} · ${shelfIndex + 1}",
+                songs = chunk,
                 onPlay = { index ->
-                    section.songs.getOrNull(index)?.let { song ->
+                    chunk.getOrNull(index)?.let { song ->
                         controller?.playHomeRecommendation(section.id, song.id)
                     }
                 },
@@ -2832,6 +2860,20 @@ private fun HomeScreen(
                 SectionTitle(section.title)
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
                     items(playlists, key = { it.id }) { playlist ->
+                        PlaylistCard(playlist) {
+
+                            openPlaylist(playlist.id, playlist.coverThumbPath ?: playlist.coverUrl ?: "")
+                        }
+                    }
+                }
+            }
+        }
+        items(playlistTails, key = { "home_playlist_tail_${it.first}" },
+            contentType = { "home_playlist_shelf" }) { (shelfIndex, chunk) ->
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionTitle(if (shelfIndex == 0) "更多歌单" else "更多歌单 · ${shelfIndex + 1}")
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
+                    items(chunk, key = { it.id }) { playlist ->
                         PlaylistCard(playlist) {
 
                             openPlaylist(playlist.id, playlist.coverThumbPath ?: playlist.coverUrl ?: "")
