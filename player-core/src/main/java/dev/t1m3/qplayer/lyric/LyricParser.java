@@ -32,24 +32,60 @@ public final class LyricParser {
 
     /**
      * Compose lyrics from Netease's {@code /song/lyric/v1} text payloads.
-     * Picks YRC over LRC when available (YRC is syllable-level → enables
-     * AMLL-style per-syllable rendering), then attaches translation +
-     * romanisation as sidecars.
+     * Keeps YRC over the overlapping parts of LRC when available (YRC is
+     * syllable-level and enables AMLL-style per-syllable rendering), then uses
+     * non-overlapping LRC lines only to fill missing lyric text.
      */
     public static List<LyricLine> fromNeteaseStrings(String yrc, String lrc,
                                                        String tlyric, String romalrc) {
+        List<LyricLine> yrcLines = yrc != null && !yrc.isEmpty()
+                ? YrcParser.parse(yrc) : Collections.<LyricLine>emptyList();
+        List<LyricLine> lrcLines = lrc != null && !lrc.isEmpty()
+                ? LrcParser.parse(lrc) : Collections.<LyricLine>emptyList();
         List<LyricLine> base;
-        if (yrc != null && !yrc.isEmpty()) {
-            base = YrcParser.parse(yrc);
-        } else if (lrc != null && !lrc.isEmpty()) {
-            base = LrcParser.parse(lrc);
-        } else {
+        if (yrcLines.isEmpty() && lrcLines.isEmpty()) {
             return Collections.emptyList();
+        }
+        if (yrcLines.isEmpty()) {
+            base = lrcLines;
+        } else if (lrcLines.isEmpty()) {
+            base = yrcLines;
+        } else {
+            base = supplementTimedLines(yrcLines, lrcLines);
         }
         if (base.isEmpty()) return base;
         if (tlyric != null && !tlyric.isEmpty()) attachSidecarContent(base, tlyric, true);
         if (romalrc != null && !romalrc.isEmpty()) attachSidecarContent(base, romalrc, false);
         return base;
+    }
+
+    /** Keep every original word timestamp. LRC often has extra credits, blank
+     * markers or different line breaks; a larger line count is not evidence
+     * that its line-only timing is better than YRC.
+     * Supplement only text outside the time ranges already covered by YRC.
+     */
+    static List<LyricLine> supplementTimedLines(List<LyricLine> yrc, List<LyricLine> lrc) {
+        List<LyricLine> result = new java.util.ArrayList<>(yrc);
+        for (LyricLine candidate : lrc) {
+            String text = candidate.text().trim();
+            if (text.isEmpty()) continue;
+            long start = candidate.startMs();
+            boolean covered = false;
+            for (LyricLine timed : yrc) {
+                if (candidate.vocalChannel != timed.vocalChannel) continue;
+                // LRC stamps can be slightly earlier than the first sung word.
+                // Also recognize a repeated line within a modest timestamp drift.
+                if ((start >= timed.startMs() - 500L && start < timed.endMs())
+                        || (Math.abs(start - timed.startMs()) <= 2000L
+                            && text.equals(timed.text().trim()))) {
+                    covered = true;
+                    break;
+                }
+            }
+            if (!covered) result.add(candidate);
+        }
+        result.sort((a, b) -> Long.compare(a.startMs(), b.startMs()));
+        return result;
     }
 
     /** Same logic as {@link #attachSidecar} but from a raw content string. */

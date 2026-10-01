@@ -21,6 +21,8 @@ public class NeteaseLyric {
     public String yrc;
     public String tlyric;
     public String romalrc;
+    /** Local freshness marker; zero in older caches. Not a lyric timestamp. */
+    public long fetchedAtMs;
 
     public boolean isEmpty() {
         return (lrc == null || lrc.isEmpty())
