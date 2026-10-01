@@ -46,11 +46,12 @@ fun LiquidButton(
     content: @Composable RowScope.() -> Unit
 ) {
     val refraction = dev.t1m3.qplayer.android.ui.LocalGlassRefraction.current
+    // Ⓜ 2026-10-01: the button is on the navigation bar's material
+    // （「MiniPlayer 以及按钮组件都同步和导航栏一样，折射率-30左右」）— the bar's
+    // static theme plate/ink, blur(1dp) and a lens 30dp below the bar's 40dp. No
+    // per-control sampler any more.
+    val dark = dev.t1m3.qplayer.android.ui.LocalGlassDark.current
     val animationScope = rememberCoroutineScope()
-    // Ⓜ The same adaptive glass every other control uses: this button samples its own backdrop
-    // (see the record hook below) so its plate follows the page exactly as the navigation bar's
-    // does — the listener's 「miniplayer 以及其他组件的颜色以及自适应都与导航栏不同，请像导航栏看齐」.
-    val adaptive = dev.t1m3.qplayer.android.ui.rememberIosAdaptiveGlass(backdrop)
 
     val interactiveHighlight = remember(animationScope) {
         InteractiveHighlight(
@@ -61,14 +62,13 @@ fun LiquidButton(
     DisposableEffect(interactiveHighlight) { onDispose { interactiveHighlight.cancel() } }
     Row(
         modifier
-            .then(adaptive.modifier)
             .drawBackdrop(
                 backdrop = backdrop,
                 shape = { CircleShape },
                 effects = {
                     vibrancy()
-                    blur(2f.dp.toPx())
-                    if (refraction) lens(12f.dp.toPx(), 24f.dp.toPx())
+                    blur(1f.dp.toPx())
+                    if (refraction) lens(24f.dp.toPx(), 10f.dp.toPx())
                 },
                 layerBlock = if (isInteractive) {
                     {
@@ -98,12 +98,10 @@ fun LiquidButton(
                 } else {
                     null
                 },
-                // Ⓜ The sampler's half: record what this button's own backdrop draw produced
-                // (see IosAdaptiveGlassState.record) and cast the app's shared shadow, so this
-                // button reads as the same material as the bar and the round buttons.
+                // Ⓜ The app's shared shadow, so this button reads as the same material
+                // as the bar and the round buttons.
                 onDrawBackdrop = { drawBackdrop ->
                     drawBackdrop()
-                    adaptive.record(this, layoutDirection) { drawBackdrop() }
                 },
                 shadow = { dev.t1m3.qplayer.android.ui.IosGlassShadow },
                 onDrawSurface = {
@@ -111,15 +109,12 @@ fun LiquidButton(
                         drawRect(tint, blendMode = BlendMode.Hue)
                         drawRect(tint.copy(alpha = 0.75f))
                     }
-                    // Ⓜ The caller's own plate when it named one, else the app's — the same
-                    // function and the same alpha the navigation bar draws, so this button cannot
-                    // look like a different material from the bar it sits beside.
+                    // Ⓜ The caller's own plate when it named one, else the bar's theme pair.
                     if (surfaceColor.isSpecified) {
                         drawRect(surfaceColor)
                     } else {
                         drawRect(dev.t1m3.qplayer.android.ui.iosGlassSurface(
-                            dark = adaptive.luminance < 0.5f, tint = tint,
-                            sampledLuminance = adaptive.luminance))
+                            dark = dark, tint = tint))
                     }
                 }
             )

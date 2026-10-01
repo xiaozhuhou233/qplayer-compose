@@ -20,16 +20,19 @@ import kotlin.math.tanh
 /**
  * The app's single Backdrop glass surface.
  *
- * The material, its interaction transform, edge highlight, shadow and content
- * stay in one drawBackdrop node. Splitting these into sibling Boxes changes
- * the sampling coordinate space and breaks the reference effect.
+ * Ⓜ 2026-10-01: the material is the navigation bar's
+ * （「MiniPlayer 以及按钮组件都同步和导航栏一样」）— vibrancy + blur(1dp) + lens, the bar's
+ * theme plate pair and the bar's fixed theme ink. The per-control adaptive sampler is
+ * gone from this surface: no luminance sampling, no readbacks, no per-draw record.
+ * The interaction transform, edge highlight, shadow and content stay in one
+ * drawBackdrop node. Splitting these into sibling Boxes changes the coordinate
+ * space and breaks the effect.
  */
 @Composable
 internal fun IosLiquidGlass(
     backdrop: Backdrop,
     dark: Boolean,
     modifier: Modifier = Modifier,
-    adaptive: IosAdaptiveGlassState = rememberIosAdaptiveGlass(backdrop),
     shape: Shape = CircleShape,
     interaction: InteractiveHighlight? = null,
     content: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit = {},
@@ -39,7 +42,6 @@ internal fun IosLiquidGlass(
             iosLiquidGlassModifier(
                 backdrop = backdrop,
                 dark = dark,
-                adaptive = adaptive,
                 shape = shape,
                 interaction = interaction,
             )
@@ -48,9 +50,10 @@ internal fun IosLiquidGlass(
         // compact dock controls. Box's default TopStart displaces them.
         contentAlignment = Alignment.Center,
     ) {
+        val ink = glassPlateInk(dark)
         androidx.compose.runtime.CompositionLocalProvider(
-            LocalGlassContentColor provides adaptive.contentColor,
-            androidx.compose.material3.LocalContentColor provides adaptive.contentColor,
+            LocalGlassContentColor provides ink,
+            androidx.compose.material3.LocalContentColor provides ink,
         ) { content() }
     }
 }
@@ -60,23 +63,23 @@ internal fun IosLiquidGlass(
 internal fun iosLiquidGlassModifier(
     backdrop: Backdrop,
     dark: Boolean,
-    adaptive: IosAdaptiveGlassState = rememberIosAdaptiveGlass(backdrop),
     shape: Shape = CircleShape,
     interaction: InteractiveHighlight? = null,
 ): Modifier {
     val tint = LocalGlassTint.current
     val refraction = LocalGlassRefraction.current
     return Modifier
-        .then(adaptive.modifier)
         .drawBackdrop(
             backdrop = backdrop,
             shape = { shape },
             effects = {
                 apiGlassEffects(
-                    luminance = adaptive.luminance,
+                    luminance = 0.5f,
                     refraction = refraction,
+                    // The bar refracts at 40dp; the listener set the controls about
+                    // 30 below it（「折射率-30左右」）.
                     refractionHeight = 24.dp.toPx(),
-                    refractionAmount = 24.dp.toPx(),
+                    refractionAmount = 10.dp.toPx(),
                 )
             },
             layerBlock = interaction?.let { highlight ->
@@ -100,12 +103,11 @@ internal fun iosLiquidGlassModifier(
             },
             onDrawBackdrop = { drawBackdrop ->
                 drawBackdrop()
-                adaptive.record(this, layoutDirection) { drawBackdrop() }
             },
             shadow = { IosGlassShadow },
             highlight = { Highlight.Default },
             onDrawSurface = {
-                drawRect(iosGlassSurface(dark, tint, adaptive.luminance))
+                drawRect(iosGlassSurface(dark, tint))
             },
         )
         .then(interaction?.modifier ?: Modifier)

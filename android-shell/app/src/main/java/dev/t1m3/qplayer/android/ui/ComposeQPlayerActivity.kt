@@ -2237,15 +2237,15 @@ private fun MiniPlayer(
     val hapticOpen = rememberHapticAction(onOpen)
     val openInteraction = remember { MutableInteractionSource() }
     val iosMini = glassBackdrop != null
-    val adaptiveGlass = glassBackdrop?.let { rememberIosAdaptiveGlass(it) }
-    val miniInk = adaptiveGlass?.contentColor ?: MaterialTheme.colorScheme.onSurface
+    // Ⓜ The miniplayer is on the bar's material now: the ink is the bar's fixed
+    // theme pair（「MiniPlayer 以及按钮组件都同步和导航栏一样」）, not a sampled one.
+    val miniInk = if (iosMini) glassPlateInk(state.dark) else MaterialTheme.colorScheme.onSurface
     val miniMuted = if (iosMini) miniInk.copy(alpha = .65f) else MaterialTheme.colorScheme.onSurfaceVariant
     val glassHighlight = if (iosMini) rememberIosGlassHighlight() else null
-    val glassModifier = if (glassBackdrop != null && adaptiveGlass != null) {
+    val glassModifier = if (glassBackdrop != null) {
         iosLiquidGlassModifier(
             backdrop = glassBackdrop,
             dark = state.dark,
-            adaptive = adaptiveGlass,
             interaction = glassHighlight,
         )
     } else Modifier

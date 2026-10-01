@@ -35,7 +35,6 @@ internal fun IosLiquidSearchButton(
     val scope = rememberCoroutineScope()
     val highlight = remember(scope) { InteractiveHighlight(scope) }
     DisposableEffect(highlight) { onDispose { highlight.cancel() } }
-    val adaptive = rememberIosAdaptiveGlass(backdrop)
     IosLiquidGlass(
         backdrop = backdrop,
         dark = dark,
@@ -48,7 +47,6 @@ internal fun IosLiquidSearchButton(
                 role = Role.Button,
                 onClick = onClick,
             ),
-        adaptive = adaptive,
         interaction = highlight,
     ) {
         Icon(

@@ -44,14 +44,12 @@ internal val LocalIosTopBarBackdrop = staticCompositionLocalOf<Backdrop?> { null
 @Composable
 private fun PlayerGlass(modifier: Modifier, content: @Composable BoxScope.() -> Unit) {
     val backdrop = LocalPlayerGlassBackdrop.current ?: LocalIosTopBarBackdrop.current
-    val adaptive = backdrop?.let { rememberIosAdaptiveGlass(it) }
     val highlight = rememberIosGlassHighlight()
-    if (backdrop != null && adaptive != null) {
+    if (backdrop != null) {
         IosLiquidGlass(
             backdrop = backdrop,
             dark = LocalGlassDark.current,
             modifier = modifier,
-            adaptive = adaptive,
             interaction = highlight,
             content = content,
         )

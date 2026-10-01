@@ -104,7 +104,6 @@ internal fun IosAwareIconButton(onClick: () -> Unit, modifier: Modifier = Modifi
     enabled: Boolean = true, content: @Composable () -> Unit) {
     if (!useIosControls()) { IconButton(onClick, modifier, enabled, content = content); return }
     val backdrop = controlBackdrop()
-    val adaptive = rememberIosAdaptiveGlass(backdrop)
     val scope = rememberCoroutineScope()
     val highlight = remember(scope) { com.kyant.backdrop.catalog.utils.InteractiveHighlight(scope) }
     DisposableEffect(highlight) { onDispose { highlight.cancel() } }
@@ -112,7 +111,6 @@ internal fun IosAwareIconButton(onClick: () -> Unit, modifier: Modifier = Modifi
     IosLiquidGlass(
         backdrop = backdrop,
         dark = MaterialTheme.colorScheme.background.luminance() < 0.5f,
-        adaptive = adaptive,
         interaction = highlight,
         modifier = modifier.size(48.dp).clickable(
             enabled = enabled,

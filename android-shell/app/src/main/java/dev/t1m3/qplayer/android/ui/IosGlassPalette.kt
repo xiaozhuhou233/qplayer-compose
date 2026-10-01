@@ -8,8 +8,8 @@ import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.BackdropEffectScope
 import com.kyant.backdrop.effects.blur
-import com.kyant.backdrop.effects.colorControls
 import com.kyant.backdrop.effects.lens
+import com.kyant.backdrop.effects.vibrancy
 import com.kyant.backdrop.shadow.Shadow
 
 /**
@@ -70,31 +70,31 @@ internal val LocalGlassDark = staticCompositionLocalOf { true }
 internal fun glassContentColor(luminance: Float): Color =
     if (androidGlassUsesDarkInk(luminance)) Color.Black else Color.White
 
+/** Ⓜ 2026-10-01: the plate ink is the navigation bar's own pair, not a sampled one.
+ *  Every glass that syncs to the bar's material（「MiniPlayer 以及按钮组件都同步和导航栏一样」）
+ *  inks from the theme flag exactly as LiquidBottomTabs does. */
+internal fun glassPlateInk(dark: Boolean): Color =
+    if (dark) Color.White else Color(0xFF1B1B1B)
+
 internal fun iosGlassSurface(
     dark: Boolean,
     tint: Color,
     sampledLuminance: Float = androidGlassLuminance(tint.red, tint.green, tint.blue)
 ): Color {
-    // A white-glass plate is intentionally neutral: the sampled artwork supplies the
-    // changing colour through the blurred backdrop, while this layer supplies the milky
-    // body seen in the reference. Ⓜ 2026-10-01: thinned across the board
-    // （「减小磨砂感，增加通透」）— the legibility floor now comes from the shared
-    // shadow and the ink switch rather than from a thicker veil.
-    val luminance = sampledLuminance.coerceIn(0f, 1f)
-    val alpha = when {
-        luminance < 0.22f -> 0.14f
-        luminance < 0.55f -> 0.12f
-        else -> 0.10f
-    }
-    val neutralWhite = if (luminance > 0.82f) Color(0xFFF5F5F7) else Color.White
-    return neutralWhite.copy(alpha = alpha)
+    // Ⓜ 2026-10-01: the plate IS the navigation bar's pair now
+    // （「MiniPlayer 以及按钮组件都同步和导航栏一样」）— pure white at half alpha in the
+    // light theme, the reference's dark pair in the dark one. The sampled luminance and
+    // tint remain in the signature for the call sites but no longer move the plate; the
+    // bar's static readability is the point of the sync.
+    return if (dark) Color(0xFF121212).copy(alpha = 0.4f)
+    else Color(0xFFFFFFFF).copy(alpha = 0.5f)
 }
 
 /**
- * The luminance-adaptive part of AndroidLiquidGlass-android's material. It is
- * deliberately applied to the sampled backdrop, not to the app's content or
- * an extra surface veil. Consequently a new page/Monet colour changes the
- * material immediately without carrying the previous cover's hue forward.
+ * The glass effect chain, synced to the navigation bar's
+ * （vibrancy + blur(1dp) + lens）with the refraction amount the listener set
+ * about 30 below the bar's 40dp. The luminance parameter is kept for the call
+ * sites but no longer drives anything: the material is static like the bar's.
  */
 internal fun BackdropEffectScope.apiGlassEffects(
     luminance: Float,
@@ -102,12 +102,7 @@ internal fun BackdropEffectScope.apiGlassEffects(
     refractionHeight: Float,
     refractionAmount: Float,
 ) {
-    val optics = androidGlassOptics(luminance)
-    colorControls(
-        brightness = optics.brightness,
-        contrast = optics.contrast,
-        saturation = optics.saturation,
-    )
-    blur(optics.blurDp * density)
-    if (refraction) lens(refractionHeight, refractionAmount, depthEffect = true)
+    vibrancy()
+    blur(1f * density)
+    if (refraction) lens(refractionHeight, refractionAmount)
 }
