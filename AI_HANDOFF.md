@@ -4716,3 +4716,14 @@ adb shell "CLASSPATH=/data/local/tmp/probe.jar app_process /system/bin dev.t1m3.
   `SettingsCatalogTest.pageTransitionPreset`（设置目录缺该项）。均与上两轮改动无关。
 - ⚠️ tag 撞名再犯：`01f` 已被用户占用（指向他的 `108be23`），本轮用 `01g`/`01h`——**打 tag 前必须
   `git ls-remote --tags origin` 查最新**，用户会并行发版。
+
+### 2026-10-01 续（01i/01j，导航栏材质两连调）
+
+- **01i（`a73cbfa`）**：导航栏还原参考库材质——底板 0.4、blur 8dp、恢复两块底板的库默认投影
+  （Shadow.Default 黑 10%/24dp；当初关它是因为方块阴影裁剪，真修复是 dock `clip=false`，仍在）。
+  与参考文件 diff 只剩接线（dark 参数、CircleShape 代 Capsule、selectionActive、tint 等价、重启安全 flow）。
+- **01j（实测反馈）**：导航栏 blur 8→**1dp**、plate lens 折射 24→**40dp**（两块板）、浅色底板
+  #FAFAFA@0.4→**#FFFFFF@0.5**（深色底板保持库值）。选中胶囊动效未动。**按钮/miniplayer/对话框那套
+  IosLiquidGlass 维持 01g 参数**——两套材质现在刻意不同：导航栏跟库，其余跟 App 配方。
+- 教训：`git push | tail` 管道吞退出码，push 失败后 && 链照样走——**校验 push 结果要用
+  `git push ... && echo OK` 或 `set -o pipefail`**。
