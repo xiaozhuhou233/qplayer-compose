@@ -78,6 +78,8 @@ import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -715,6 +717,7 @@ private data class PlayerUiState(
     val lyricClockSampleNanos: Long = 0L,
     val lyricClockRunning: Boolean = false,
     val lyricPlaybackRevision: Long = 0L,
+    val lyricSeekRevision: Long = 0L,
     val durationMs: Long = 0,
     val liked: Boolean = false,
     val likeable: Boolean = false,
@@ -951,6 +954,7 @@ private fun controllerState(controller: PlayerController, settings: SettingsCore
         lyricClockSampleNanos = lyricClockSampleNanos,
         lyricClockRunning = lyricClockRunning,
         lyricPlaybackRevision = controller.playbackRevision(),
+        lyricSeekRevision = controller.seekRevision(),
         durationMs = controller.durationMs.peek() ?: 0L,
         liked = controller.currentLiked.peek() == true,
         likeable = controller.currentLikeable.peek() == true,
@@ -967,6 +971,9 @@ private fun controllerState(controller: PlayerController, settings: SettingsCore
         // cover transition. Netease tracks carry no filePath; title+artist
         // identifies them well enough for the crossfade trigger.
         trackKey = listOf(
+            currentTrack?.source?.name ?: "",
+            currentTrack?.neteaseId?.toString() ?: "",
+            currentTrack?.customId ?: "",
             controller.currentFilePath.peek() ?: "",
             controller.title.peek() ?: "",
             controller.artist.peek() ?: ""
@@ -1471,10 +1478,16 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
     val baseRoute = navigationStack.lastOrNull { it.screen != ComposeScreen.LYRICS }
         ?: ComposeRoute(ComposeScreen.HOME)
     val playerExpansion = rememberPlayerExpansionState()
-    val pageTransitionPreset = appearance.pageTransition.coerceIn(
-        SettingsCatalog.PAGE_TRANSITION_ZOOM,
-        SettingsCatalog.PAGE_TRANSITION_NONE
-    )
+    val pageTransitionPreset = appearance.pageTransition.let {
+        // Ⓜ The listener: 「补全点进入专辑和退出各种界面的动画，当时改动画系统这些动画缺失了」. The
+        // mechanism: the settings-catalog rework dropped the pageTransitionPreset entry, so a
+        // stored NONE (4) from before it can never be changed back — no UI offers it any more —
+        // and every page transition reads as "no animation at all". NONE is therefore not
+        // honoured until the setting returns: missing or legacy-4 falls back to the default seal
+        // transition, and the range below keeps unknown values inside the real presets.
+        if (it < SettingsCatalog.PAGE_TRANSITION_ZOOM || it >= SettingsCatalog.PAGE_TRANSITION_NONE)
+            SettingsCatalog.PAGE_TRANSITION_ZOOM else it
+    }
 
     var navigatingBack by remember { mutableStateOf(false) }
     fun navigateTo(target: ComposeRoute, asRoot: Boolean = false) {
@@ -1618,16 +1631,26 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                     val useIosNavigation = iosDesign && isMainTab
                     val liquidBackdrop = if (iosDesign) rememberLayerBackdrop() else null
                     var iosHomeCollapsed by remember(screen) { mutableStateOf(false) }
+                    var iosTopActionsVisible by remember(screen) { mutableStateOf(true) }
                     val collapseThreshold = with(LocalDensity.current) { 24.dp.toPx() }
-                    val iosScrollConnection = remember(screen, collapseThreshold) {
+                    val topActionThreshold = with(LocalDensity.current) { 10.dp.toPx() }
+                    val iosScrollConnection = remember(screen, collapseThreshold, topActionThreshold) {
                         object : NestedScrollConnection {
                             private var distance = 0f
+                            private var topActionDistance = 0f
                             override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
                                 // React to real vertical page scrolling, not marquee,
                                 // fling bounce, programmatic scrolling or tiny jitter.
-                                if (screen != ComposeScreen.HOME || source != NestedScrollSource.UserInput) return Offset.Zero
+                                if (source != NestedScrollSource.UserInput) return Offset.Zero
                                 val dy = consumed.y
                                 if (dy == 0f) return Offset.Zero
+                                if (topActionDistance * dy < 0f) topActionDistance = 0f
+                                topActionDistance += dy
+                                if (kotlin.math.abs(topActionDistance) >= topActionThreshold) {
+                                    iosTopActionsVisible = topActionDistance > 0f
+                                    topActionDistance = 0f
+                                }
+                                if (screen != ComposeScreen.HOME) return Offset.Zero
                                 // The page is the source sampled by the iOS
                                 // glass.  Force a draw-only recapture while it
                                 // moves; this does not recompose the page.
@@ -1657,7 +1680,9 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                     Scaffold(
                         modifier = Modifier
                             .fillMaxSize()
-                            .statusBarsPadding(),
+                            .then(if (iosDesign) Modifier else Modifier.statusBarsPadding()),
+                        contentWindowInsets = if (iosDesign) WindowInsets(0, 0, 0, 0)
+                            else ScaffoldDefaults.contentWindowInsets,
                         containerColor = ComposeColor.Transparent,
                         topBar = {
                             // iOS controls are overlaid in the content layer below.
@@ -1692,27 +1717,13 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                         }
                     ) { padding ->
                     Box(Modifier.fillMaxSize().padding(padding)) {
-                        if (iosDesign) {
-                            // iOS controls float above the page instead of occupying
-                            // Scaffold's top-bar slot. The page keeps a matching
-                            // content inset in the inner box below.
+                        if (iosDesign && screen != ComposeScreen.SETTINGS) {
+                            // Only the floating controls handle status-bar insets.
+                            // Page/backdrop and bottom shadow reach the window edges.
                             androidx.compose.runtime.CompositionLocalProvider(
                                 LocalIosTopBarBackdrop provides liquidBackdrop
                             ) {
-                                IosTopBar(
-                                    title = when (route.screen) {
-                                        ComposeScreen.HOME -> "推荐"
-                                        ComposeScreen.SEARCH -> "搜索"
-                                        ComposeScreen.LIBRARY -> "我的"
-                                        ComposeScreen.LOCAL -> "本地"
-                                        ComposeScreen.QUEUE -> "播放队列"
-                                        ComposeScreen.SETTINGS -> "设置"
-                                        ComposeScreen.ACCOUNT -> "账户"
-                                        ComposeScreen.PLAYLIST -> state.playlistTitle.ifBlank { "歌单" }
-                                        ComposeScreen.ALBUM -> state.albumTitle.ifBlank { "专辑" }
-                                        ComposeScreen.ARTIST -> state.artistName.ifBlank { "歌手" }
-                                        else -> "QPlayer"
-                                    },
+                                IosFloatingPageActions(
                                     canGoBack = navigationStack.size > 1,
                                     onBack = ::goBack,
                                     onRecognize = { recognizeOpen = true },
@@ -1722,6 +1733,7 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                         if (state.loggedIn) navigateTo(ComposeRoute(ComposeScreen.ACCOUNT)) else loginOpen = true
                                     },
                                     loggedIn = state.loggedIn,
+                                    visible = iosTopActionsVisible,
                                     modifier = Modifier.align(Alignment.TopCenter).zIndex(4f)
                                 )
                             }
@@ -1729,8 +1741,9 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                         Box(
                             Modifier
                                 .fillMaxSize()
-                                .then(if (iosDesign) Modifier.padding(top = 56.dp) else Modifier)
-                                .nestedScroll(if (useIosNavigation) iosScrollConnection else miniScrollConnection)
+                                .then(if (iosDesign) Modifier.statusBarsPadding() else Modifier)
+                                .then(if (iosDesign) Modifier.nestedScroll(iosScrollConnection) else Modifier)
+                                .then(if (!useIosNavigation) Modifier.nestedScroll(miniScrollConnection) else Modifier)
                         ) {
                         // Seal shared-axis transitions keep list geometry stable.
                         AnimatedContent(
@@ -2135,6 +2148,12 @@ private fun PrivateFmFab(
         modifier = modifier,
         containerColor = MaterialTheme.colorScheme.primaryContainer,
         contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        // Ⓜ The listener: the square shadow around the Personal FM button is gone — the FAB's
+        // default elevation shadow is what rendered as a hard box over the glass beneath it.
+        elevation = androidx.compose.material3.FloatingActionButtonDefaults.elevation(
+            defaultElevation = 0.dp, pressedElevation = 0.dp,
+            focusedElevation = 0.dp, hoveredElevation = 0.dp,
+        ),
         shape = CircleShape
     ) {
         Icon(Icons.Default.AutoAwesome, contentDescription = "私人漫游")
@@ -7050,11 +7069,12 @@ private fun QmlLyricColumnRestored(
             }
             val clock = LyricPlaybackClock()
             while (true) {
-                val frameNs = withFrameNanos { it }
+                withFrameNanos { }
                 val latest = latestSnapshot
                 smoothPositionMs = clock.positionAt(
                     latest.lyricPositionMs, latest.lyricClockSampleNanos,
-                    latest.lyricClockRunning, latest.lyricPlaybackRevision, frameNs
+                    latest.lyricClockRunning, latest.lyricPlaybackRevision, System.nanoTime(),
+                    latest.lyricSeekRevision
                 )
             }
         }

@@ -207,6 +207,11 @@ fun LiquidBottomTabs(
                         scaleX = scale
                         scaleY = scale
                     },
+                    // Ⓜ The listener: the square shadow around the bar is gone. The library's
+                    // default plate shadow is what clipped into a hard box over the page while the
+                    // dock collapsed the bar; the pill's own progress shadow below is the
+                    // reference's and stays.
+                    shadow = { null },
                     onDrawSurface = { drawRect(containerColor) }
                 )
                 .then(interactiveHighlight.modifier)
@@ -247,6 +252,7 @@ fun LiquidBottomTabs(
                             val progress = dampedDragAnimation.pressProgress
                             Highlight.Default.copy(alpha = progress)
                         },
+                        shadow = { null },
                         onDrawSurface = { drawRect(containerColor) }
                     )
                     .then(interactiveHighlight.modifier)
