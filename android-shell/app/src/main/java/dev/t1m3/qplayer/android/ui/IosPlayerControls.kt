@@ -2,6 +2,8 @@ package dev.t1m3.qplayer.android.ui
 
 import android.view.HapticFeedbackConstants
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -22,10 +24,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -86,6 +92,11 @@ internal fun IosFloatingPageActions(
     expanded: Boolean = false,
     /** What resets a long-press expansion — the route, so moving on re-collapses the row. */
     routeKey: Any? = null,
+    /** Ⓜ 2026-10-01: the page title the row shows once its page has scrolled
+     *  （「初始位置时那一行不能有文字……滑动也能显示文字」）. While the page sits at
+     *  its top the band is left to the page content, which starts below it. */
+    title: String? = null,
+    titleVisible: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     var longPressed by remember(routeKey) { androidx.compose.runtime.mutableStateOf(false) }
@@ -98,6 +109,47 @@ internal fun IosFloatingPageActions(
             modifier = Modifier.fillMaxSize()
         ) {
             Box(Modifier.fillMaxSize()) {
+                // Ⓜ 「往下滑动时那一层覆盖上阴影」: while the title shows, the whole top
+                // band carries the same fading shadow the bottom dock has, so the page
+                // scrolling underneath stays separated from the controls.
+                val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+                val scrimAlpha by animateFloatAsState(
+                    if (titleVisible) 1f else 0f, tween(220), label = "ios_top_scrim")
+                Box(
+                    Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .height(topInset + 64.dp)
+                        .drawWithCache {
+                            val gradient = Brush.verticalGradient(
+                                0f to Color.Black.copy(alpha = 0.16f),
+                                0.7f to Color.Black.copy(alpha = 0.05f),
+                                1f to Color.Transparent
+                            )
+                            onDrawBehind { drawRect(gradient, alpha = scrimAlpha) }
+                        }
+                )
+                AnimatedVisibility(
+                    visible = titleVisible && title != null,
+                    enter = fadeIn(tween(200)) + slideInVertically(tween(200)) { -it / 3 },
+                    exit = fadeOut(tween(180)) + slideOutVertically(tween(180)) { -it / 3 },
+                    modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding()
+                ) {
+                    Box(
+                        Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 120.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            title.orEmpty(),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Center,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = adaptiveGlassInk()
+                        )
+                    }
+                }
                 Row(
                     Modifier.align(Alignment.TopCenter).fillMaxWidth().statusBarsPadding()
                         .padding(horizontal = 8.dp, vertical = 6.dp),

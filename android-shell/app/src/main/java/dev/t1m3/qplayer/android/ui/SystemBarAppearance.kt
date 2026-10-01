@@ -86,10 +86,13 @@ internal fun StatusBarShadow(dark: Boolean, modifier: Modifier = Modifier) {
     })
 }
 
-/** Insets belong to page content, so a scrolling list can pass behind the status bar. */
+/** Insets belong to page content, so a scrolling list can pass behind the status bar.
+ *  Ⓜ In iOS design the floating top row (status bar + 44dp glass buttons + its padding)
+ *  overlays every page: pages start BELOW that band — 「整个页面往下空出那一格」 — and
+ *  only the page title, fading in once the page scrolls, ever occupies it. */
 @Composable
 internal fun pageStatusBarInset(): Dp = if (LocalIosDesign.current)
-    WindowInsets.statusBars.asPaddingValues().calculateTopPadding() else 0.dp
+    WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 60.dp else 0.dp
 
 @Composable
 internal fun pageContentPadding(

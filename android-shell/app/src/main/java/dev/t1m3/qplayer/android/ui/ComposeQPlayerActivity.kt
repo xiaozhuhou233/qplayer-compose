@@ -1636,13 +1636,27 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                     val liquidBackdrop = if (iosDesign) rememberLayerBackdrop() else null
                     var iosHomeCollapsed by remember(screen) { mutableStateOf(false) }
                     var iosTopActionsVisible by remember(screen) { mutableStateOf(true) }
+                    // Ⓜ The row's title: hidden while the page sits at its top (the band is
+                    // left empty there), fading in once the page has scrolled about one
+                    // row's height — and with it the shadow over the top band.
+                    var iosTopTitleVisible by remember(screen) { mutableStateOf(false) }
                     val collapseThreshold = with(LocalDensity.current) { 24.dp.toPx() }
                     val topActionThreshold = with(LocalDensity.current) { 10.dp.toPx() }
-                    val iosScrollConnection = remember(screen, collapseThreshold, topActionThreshold) {
+                    val titleThreshold = with(LocalDensity.current) { 60.dp.toPx() }
+                    val iosScrollConnection = remember(screen, collapseThreshold, topActionThreshold, titleThreshold) {
                         object : NestedScrollConnection {
                             private var distance = 0f
                             private var topActionDistance = 0f
+                            private var titleDistance = 0f
                             override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                                // Ⓜ The title tracks the page's absolute distance from its
+                                // top, so it must see every consumed delta — drag AND fling.
+                                // Edge bounce reports consumed 0, which moves nothing.
+                                if (consumed.y != 0f) {
+                                    titleDistance = (titleDistance + consumed.y).coerceAtLeast(0f)
+                                    val shown = titleDistance >= titleThreshold
+                                    if (shown != iosTopTitleVisible) iosTopTitleVisible = shown
+                                }
                                 // React to real vertical page scrolling, not marquee,
                                 // fling bounce, programmatic scrolling or tiny jitter.
                                 if (source != NestedScrollSource.UserInput) return Offset.Zero
@@ -1744,6 +1758,10 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                     expanded = route.screen == ComposeScreen.HOME,
                                     routeKey = route,
                                     visible = iosTopActionsVisible,
+                                    // Ⓜ 「初始位置时那一行不能有文字」: the title rides its own
+                                    // scroll threshold, so the band is empty at the top.
+                                    title = pageTopTitle(route, state),
+                                    titleVisible = iosTopTitleVisible,
                                     modifier = Modifier.align(Alignment.TopCenter).zIndex(4f)
                                 )
                             }
@@ -2038,6 +2056,21 @@ private fun RouteArtworkSurface(
         modifier = Modifier.fillMaxSize(), enabled = enabled) { content() }
 }
 
+/** The page title both top bars show; the iOS floating row keeps it for the scrolled state. */
+private fun pageTopTitle(route: ComposeRoute, state: PlayerUiState): String? = when (route.screen) {
+    ComposeScreen.HOME -> "推荐"
+    ComposeScreen.SEARCH -> "搜索"
+    ComposeScreen.LIBRARY -> "我的"
+    ComposeScreen.LOCAL -> "本地"
+    ComposeScreen.QUEUE -> "播放队列"
+    ComposeScreen.SETTINGS -> "设置"
+    ComposeScreen.ACCOUNT -> "账户"
+    ComposeScreen.PLAYLIST -> state.playlistTitle.ifBlank { "歌单" }
+    ComposeScreen.ALBUM -> state.albumTitle.ifBlank { "专辑" }
+    ComposeScreen.ARTIST -> state.artistName.ifBlank { "歌手" }
+    else -> null
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ComposeTopBar(
@@ -2053,19 +2086,7 @@ private fun ComposeTopBar(
     onRecognize: () -> Unit = {}
 ) {
     val haptic = LocalView.current
-    val title = when (route.screen) {
-        ComposeScreen.HOME -> "推荐"
-        ComposeScreen.SEARCH -> "搜索"
-        ComposeScreen.LIBRARY -> "我的"
-        ComposeScreen.LOCAL -> "本地"
-        ComposeScreen.QUEUE -> "播放队列"
-        ComposeScreen.SETTINGS -> "设置"
-        ComposeScreen.ACCOUNT -> "账户"
-        ComposeScreen.PLAYLIST -> state.playlistTitle.ifBlank { "歌单" }
-        ComposeScreen.ALBUM -> state.albumTitle.ifBlank { "专辑" }
-        ComposeScreen.ARTIST -> state.artistName.ifBlank { "歌手" }
-        else -> "QPlayer"
-    }
+    val title = pageTopTitle(route, state) ?: "QPlayer"
     TopAppBar(
         colors = TopAppBarDefaults.topAppBarColors(
             containerColor = ComposeColor.Transparent,
