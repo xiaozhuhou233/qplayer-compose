@@ -730,6 +730,218 @@ public final class NeteaseClient {
         return out;
     }
 
+    /** A real discovery block, retaining its server title and playlist identity. */
+    public static final class HomeSongSection {
+        public final String id;
+        public final String title;
+        public final long playlistId;
+        public final List<NeteaseSong> songs = new ArrayList<>();
+
+        public HomeSongSection(String id, String title, long playlistId) {
+            this.id = id;
+            this.title = title;
+            this.playlistId = playlistId;
+        }
+    }
+
+    public static final class HomePlaylistSection {
+        public final String id;
+        public final String title;
+        public final List<NeteasePlaylist> playlists = new ArrayList<>();
+
+        public HomePlaylistSection(String id, String title) {
+            this.id = id;
+            this.title = title;
+        }
+    }
+
+    public static final class HomeFeed {
+        public final List<HomeSongSection> sections = new ArrayList<>();
+        public final List<HomePlaylistSection> playlistSections = new ArrayList<>();
+        public final List<NeteaseAlbum> albums = new ArrayList<>();
+    }
+
+    public HomeFeed homepageFeed() throws IOException {
+        Map<String, Object> body = new HashMap<>();
+        body.put("refresh", false);
+        body.put("cursor", "");
+        JsonObject root = apiJson(NeteaseApi.HOMEPAGE_BLOCK_PAGE, body);
+        ensureOk(root, "获取首页推荐失败");
+        return parseHomeFeed(root);
+    }
+
+    /** Parser kept separate from I/O so malformed or reordered blocks can be tested. */
+    static HomeFeed parseHomeFeed(JsonObject root) {
+        HomeFeed out = new HomeFeed();
+        Map<Long, NeteaseAlbum> albums = new LinkedHashMap<>();
+        java.util.Set<Long> radarPlaylists = new java.util.HashSet<>();
+        java.util.Set<String> sectionIds = new java.util.HashSet<>();
+        java.util.Set<String> playlistSectionIds = new java.util.HashSet<>();
+        int inspectedBlocks = 0;
+        for (JsonElement blockElement : homeArray(homeObject(root, "data"), "blocks")) {
+            if (++inspectedBlocks > 40) break;
+            if (!blockElement.isJsonObject()) continue;
+            JsonObject block = blockElement.getAsJsonObject();
+            String code = stringValue(block, "blockCode");
+            String title = homeTitle(block, true);
+            boolean radar = (code + title).toUpperCase(java.util.Locale.ROOT).contains("RADAR")
+                    || title.contains("雷达");
+            Map<Long, NeteaseSong> songs = new LinkedHashMap<>();
+            Map<Long, NeteasePlaylist> playlists = new LinkedHashMap<>();
+            for (JsonElement creativeElement : homeArray(block, "creatives")) {
+                if (!creativeElement.isJsonObject()) continue;
+                JsonObject creative = creativeElement.getAsJsonObject();
+                for (JsonElement resourceElement : homeArray(creative, "resources")) {
+                    if (!resourceElement.isJsonObject()) continue;
+                    JsonObject resource = resourceElement.getAsJsonObject();
+                    String type = stringValue(resource, "resourceType").toUpperCase(java.util.Locale.ROOT);
+                    JsonObject ext = homeObject(resource, "resourceExtInfo");
+                    try {
+                        if (resource.has("valid") && !resource.get("valid").isJsonNull()
+                                && !resource.get("valid").getAsBoolean()) continue;
+                        if ((type.equals("SONG") || type.isEmpty()) && songs.size() < 30) {
+                            NeteaseSong song = parseSong(homeObject(ext, "songData"));
+                            if (song.id > 0L && song.name != null && !song.name.trim().isEmpty()) {
+                                if (song.coverUrl == null || song.coverUrl.isEmpty())
+                                    song.coverUrl = stringValue(homeObject(homeObject(resource, "uiElement"), "image"), "imageUrl");
+                                song.coverThumbPath = thumbUrl(song.coverUrl);
+                                songs.putIfAbsent(song.id, song);
+                            }
+                        }
+                        if (type.equals("ALBUM") && albums.size() < 12) {
+                            JsonObject albumJson = homeObject(ext, "album");
+                            if (albumJson.size() == 0) albumJson = homeObject(ext, "albumData");
+                            if (albumJson.size() == 0) albumJson = ext;
+                            NeteaseAlbum album = parseAlbum(albumJson);
+                            if (album.id <= 0L) album.id = homeResourceId(resource);
+                            if (album.name == null || album.name.isEmpty()) album.name = homeTitle(resource, false);
+                            if (album.coverUrl == null || album.coverUrl.isEmpty())
+                                album.coverUrl = stringValue(homeObject(homeObject(resource, "uiElement"), "image"), "imageUrl");
+                            if (album.artistName == null || album.artistName.isEmpty()) {
+                                JsonArray artists = homeArray(ext, "artists");
+                                if (artists.size() > 0 && artists.get(0).isJsonObject())
+                                    album.artistName = stringValue(artists.get(0).getAsJsonObject(), "name");
+                            }
+                            album.coverThumbPath = thumbUrl(album.coverUrl);
+                            if (album.id > 0L && !album.name.trim().isEmpty()) albums.putIfAbsent(album.id, album);
+                        }
+                        // Keep ALL real playlist shelves (genre, mood, curated,
+                        // Radar, etc.), using the server's own names and IDs.
+                        if (type.equals("PLAYLIST") && playlists.size() < 12) {
+                            JsonObject playlistJson = homeObject(ext, "playlist");
+                            if (playlistJson.size() == 0) playlistJson = homeObject(ext, "playlistData");
+                            NeteasePlaylist playlist = parsePlaylist(playlistJson);
+                            if (playlist.id <= 0L) playlist.id = homeResourceId(resource);
+                            if (playlist.name == null || playlist.name.trim().isEmpty())
+                                playlist.name = homeTitle(resource, false);
+                            if (playlist.name.isEmpty()) playlist.name = homeTitle(creative, false);
+                            if (playlist.coverUrl == null || playlist.coverUrl.isEmpty())
+                                playlist.coverUrl = stringValue(homeObject(homeObject(resource, "uiElement"), "image"), "imageUrl");
+                            playlist.coverThumbPath = thumbUrl(playlist.coverUrl);
+                            if (playlist.id > 0L && !playlist.name.trim().isEmpty())
+                                playlists.putIfAbsent(playlist.id, playlist);
+                        }
+                        // Radar often arrives as playlist resources, not songData.
+                        // Keep only real server-provided playlist IDs; fetch a bounded preview later.
+                        String name = homeTitle(resource, false);
+                        if (type.equals("PLAYLIST") && (radar || name.contains("雷达"))
+                                && radarPlaylists.size() < 3 && out.sections.size() < 12) {
+                            long id = homeResourceId(resource);
+                            if (id > 0L && radarPlaylists.add(id)) {
+                                if (name.isEmpty()) name = homeTitle(creative, false);
+                                if (name.isEmpty()) name = title;
+                                out.sections.add(new HomeSongSection("radar_playlist_" + id,
+                                        name.isEmpty() ? "雷达推荐" : name, id));
+                            }
+                        }
+                    } catch (RuntimeException malformedResource) {
+                        // One ad/unsupported resource must not discard the rest of the homepage.
+                    }
+                }
+            }
+            if (!playlists.isEmpty() && out.playlistSections.size() < 12) {
+                String id = (code.isEmpty() ? "playlists" : code) + "_" + playlists.keySet().iterator().next();
+                if (playlistSectionIds.add(id)) {
+                    HomePlaylistSection section = new HomePlaylistSection(id,
+                            title.isEmpty() ? "发现歌单" : title);
+                    section.playlists.addAll(playlists.values());
+                    out.playlistSections.add(section);
+                }
+            }
+            if (!songs.isEmpty() && out.sections.size() < 12) {
+                String id = code.isEmpty() ? "songs_" + songs.keySet().iterator().next() : code;
+                if (sectionIds.add(id)) {
+                    HomeSongSection section = new HomeSongSection(id, title.isEmpty() ? "为你推荐" : title, 0L);
+                    section.songs.addAll(songs.values());
+                    out.sections.add(section);
+                }
+            }
+        }
+        out.albums.addAll(albums.values());
+        return out;
+    }
+
+    /** Only the first 12 songs, never the expensive full playlist used by its detail page. */
+    public List<NeteaseSong> homepagePlaylistPreview(long playlistId) throws IOException {
+        Map<String, Object> body = new HashMap<>();
+        body.put("id", playlistId);
+        body.put("n", 12);
+        body.put("s", 0);
+        JsonObject response = apiJson(NeteaseApi.PLAYLIST_DETAIL, body);
+        ensureOk(response, "获取雷达歌曲失败");
+        JsonObject playlist = homeObject(response, "playlist");
+        List<NeteaseSong> songs = new ArrayList<>();
+        for (JsonElement element : homeArray(playlist, "tracks")) {
+            if (songs.size() >= 12) break;
+            if (!element.isJsonObject()) continue;
+            try {
+                NeteaseSong song = parseSong(element.getAsJsonObject());
+                if (song.id > 0L && song.name != null) songs.add(song);
+            } catch (RuntimeException ignored) { }
+        }
+        if (!songs.isEmpty()) return songs;
+        List<Long> ids = new ArrayList<>();
+        for (JsonElement element : homeArray(playlist, "trackIds")) {
+            if (ids.size() >= 12) break;
+            if (!element.isJsonObject()) continue;
+            try {
+                long id = Long.parseLong(stringValue(element.getAsJsonObject(), "id"));
+                if (id > 0L && !ids.contains(id)) ids.add(id);
+            } catch (NumberFormatException ignored) { }
+        }
+        // Preserve the playlist's order even if song/detail returns a different order.
+        Map<Long, NeteaseSong> details = new HashMap<>();
+        for (NeteaseSong song : songDetails(ids)) details.put(song.id, song);
+        for (long id : ids) if (details.containsKey(id)) songs.add(details.get(id));
+        return songs;
+    }
+
+    private static JsonObject homeObject(JsonObject object, String key) {
+        return object != null && object.has(key) && object.get(key).isJsonObject()
+                ? object.getAsJsonObject(key) : new JsonObject();
+    }
+
+    private static JsonArray homeArray(JsonObject object, String key) {
+        return object != null && object.has(key) && object.get(key).isJsonArray()
+                ? object.getAsJsonArray(key) : new JsonArray();
+    }
+
+    private static long homeResourceId(JsonObject resource) {
+        try { return Long.parseLong(stringValue(resource, "resourceId")); }
+        catch (NumberFormatException ignored) { return 0L; }
+    }
+
+    private static String homeTitle(JsonObject object, boolean section) {
+        JsonObject ui = homeObject(object, "uiElement");
+        String title = stringValue(homeObject(ui, section ? "subTitle" : "mainTitle"), "title");
+        return title.isEmpty() ? stringValue(homeObject(ui, section ? "mainTitle" : "subTitle"), "title") : title;
+    }
+
+    private static String stringValue(JsonObject object, String key) {
+        return object != null && object.has(key) && object.get(key).isJsonPrimitive()
+                ? object.get(key).getAsString() : "";
+    }
+
     /**
      * Search songs by keyword (type=1). Pagination via offset/limit. Uses the
      * current enhanced API definition ({@code /api/cloudsearch/pc} over eapi)
@@ -799,6 +1011,24 @@ public final class NeteaseClient {
                 for (JsonElement el : result.getAsJsonArray("albums")) {
                     if (el.isJsonObject()) out.add(parseAlbum(el.getAsJsonObject()));
                 }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Ⓜ The freshest releases across all artists ({@code /album/newest}) — the home page's extra
+     * album shelf. The response's {@code data} array carries the same album objects every other
+     * album list here parses, so {@link #parseAlbum} handles it unchanged.
+     */
+    public List<NeteaseAlbum> newAlbums(int limit) throws IOException {
+        Map<String, Object> body = new HashMap<>();
+        body.put("limit", limit);
+        JsonObject obj = apiJson(NeteaseApi.albumNewest(), body);
+        List<NeteaseAlbum> out = new ArrayList<>();
+        if (obj.has("data") && obj.get("data").isJsonArray()) {
+            for (JsonElement el : obj.getAsJsonArray("data")) {
+                if (el.isJsonObject()) out.add(parseAlbum(el.getAsJsonObject()));
             }
         }
         return out;

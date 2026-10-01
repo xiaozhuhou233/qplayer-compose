@@ -104,6 +104,9 @@ final class NeteaseApi {
             "/api/song/like/get", Transport.EAPI);
     static final Endpoint RECOMMEND_SONGS = endpoint(
             "/api/v3/discovery/recommend/songs", Transport.WEAPI);
+    /** Mobile discovery homepage blocks (Radar/album/song recommendation rows). */
+    static final Endpoint HOMEPAGE_BLOCK_PAGE = endpoint(
+            "/api/homepage/block/page", Transport.WEAPI);
     /** The logged-in user's Personal FM (shown by NetEase as "私人漫游"). */
     static final Endpoint PERSONAL_FM = endpoint(
             "/api/v1/radio/get", Transport.WEAPI);
@@ -152,6 +155,12 @@ final class NeteaseApi {
 
     static Endpoint albumDetail(long albumId) {
         return endpoint("/api/v1/album/" + albumId, Transport.WEAPI);
+    }
+
+    /** Ⓜ The freshest releases across all artists — the home page's extra album shelf
+     *  (「主页再往下扩内容……内容从 api 找」). */
+    static Endpoint albumNewest() {
+        return endpoint("/api/album/newest", Transport.WEAPI);
     }
 
     private NeteaseApi() {}

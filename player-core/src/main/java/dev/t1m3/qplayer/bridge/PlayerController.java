@@ -8418,7 +8418,19 @@ public final class PlayerController {
                                     java.nio.charset.StandardCharsets.UTF_8), NeteaseLyric.class);
                         } catch (RuntimeException ignored) { }
                     }
-                    if (old == null || LyricTiming.shouldRefreshPlainCache(
+                    // A cached line-level response is provisional. It must be
+                    // upgraded immediately after the first install that used
+                    // the old lyric request parameters, otherwise a song can
+                    // stay stuck on plain LRC until the ten-minute freshness
+                    // window expires. Only a cache that already parses to real
+                    // word timing can use the normal freshness window.
+                    List<LyricLine> previous = old == null
+                            ? Collections.<LyricLine>emptyList()
+                            : LyricParser.fromNeteaseStrings(
+                                    old.yrc, old.lrc, old.tlyric, old.romalrc);
+                    boolean cachedHasWordTiming =
+                            LyricTiming.wordTimedLines(previous) > 0;
+                    if (old == null || !cachedHasWordTiming || LyricTiming.shouldRefreshPlainCache(
                             old.fetchedAtMs, System.currentTimeMillis())) {
                         try {
                             NeteaseLyric fresh = netease.lyric(songId);
@@ -8428,8 +8440,6 @@ public final class PlayerController {
                                 if (!parsed.isEmpty()) {
                                     NeteaseLyric retained = fresh;
                                     if (old != null) {
-                                        List<LyricLine> previous = LyricParser.fromNeteaseStrings(
-                                                old.yrc, old.lrc, old.tlyric, old.romalrc);
                                         if (LyricTiming.wordTimedLines(previous) > LyricTiming.wordTimedLines(parsed)) {
                                             retained = old; // A temporary LRC-only answer cannot erase cached YRC.
                                         }
@@ -10563,6 +10573,51 @@ public final class PlayerController {
                     }
                 } catch (Throwable e) {
                     Logger.warn("home daily recommendation failed: {}", e.toString());
+                }
+                // Ⓜ 「继续添加更多……不与上面已出现的重复」: the Personal FM stream is the other
+                // server-side recommendation source this client already speaks, and it is filtered
+                // against EVERY song id the shelves above (the feed's own blocks and the daily
+                // shelf) have already shown, so the listener never meets the same track twice on
+                // one page. Same section shape, same pipeline, playlistId 0 like the daily shelf.
+                try {
+                    java.util.Set<Long> shown = new java.util.HashSet<>();
+                    for (NeteaseClient.HomeSongSection section : ready)
+                        for (NeteaseSong s : section.songs) shown.add(s.id);
+                    List<NeteaseSong> fresh = new ArrayList<>();
+                    for (NeteaseSong s : netease.personalFm(30)) {
+                        if (s.id != 0L && shown.add(s.id)) fresh.add(s);
+                    }
+                    if (!fresh.isEmpty()) {
+                        fillMissingCovers(fresh);
+                        buildSongThumbs(fresh, "128");
+                        NeteaseClient.HomeSongSection extra =
+                                new NeteaseClient.HomeSongSection("fm", "私人漫游推荐", 0L);
+                        extra.songs.addAll(fresh);
+                        ready.add(extra);
+                        List<NeteaseClient.HomeSongSection> snapshot = new ArrayList<>(ready);
+                        postHome(generation, () -> homeSongSections.set(snapshot));
+                    }
+                } catch (Throwable e) {
+                    Logger.warn("home fm shelf failed: {}", e.toString());
+                }
+                // Ⓜ And the album side of the same instruction: the feed's own discovery albums
+                // stay first, and the freshest releases (/album/newest) are merged in behind them,
+                // deduped by id so no record appears twice on the page. The album shelf's UI reads
+                // this one property, so more content arrives in the exact same layout.
+                try {
+                    List<NeteaseAlbum> merged = new ArrayList<>(feed.albums);
+                    java.util.Set<Long> shownAlbums = new java.util.HashSet<>();
+                    for (NeteaseAlbum a : merged) shownAlbums.add(a.id);
+                    for (NeteaseAlbum a : netease.newAlbums(24)) {
+                        if (a.id != 0L && shownAlbums.add(a.id)) merged.add(a);
+                    }
+                    if (merged.size() > feed.albums.size()) {
+                        applyAlbumCoverSize(merged);
+                        List<NeteaseAlbum> snapshot = new ArrayList<>(merged);
+                        postHome(generation, () -> homeAlbumRecommendations.set(snapshot));
+                    }
+                } catch (Throwable e) {
+                    Logger.warn("home new albums failed: {}", e.toString());
                 }
             } catch (Throwable e) {
                 Logger.warn("homepage discovery blocks failed: {}", e.toString());
