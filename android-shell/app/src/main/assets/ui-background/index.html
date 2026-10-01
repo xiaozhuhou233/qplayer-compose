@@ -1,0 +1,39 @@
+<!doctype html>
+<html><head><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src blob: data:; connect-src 'none'">
+<style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#202534}#frost{position:absolute;inset:-48px;filter:blur(28px);pointer-events:none}canvas{display:block;width:100%;height:100%;pointer-events:none}#lyrics{display:none}</style>
+</head><body><div id="frost"><canvas id="background"></canvas></div><div id="lyrics"></div>
+<script src="source_algorithms.js"></script><script src="background_mesh_data.js"></script><script src="dynamic_background.js"></script>
+<script>
+// QPlayer host adapter. The three imported source files are unchanged ui.zip files.
+let background;
+let active = true;
+let revision = 0;
+try { background = new LyricsBlossomDynamicBackground.DynamicBackground(document.querySelector('canvas')); }
+catch (error) {
+  // Some Android WebViews lack WebGL2: start the source's own 2D fallback.
+  const canvas = document.querySelector('canvas');
+  const replacement = canvas.cloneNode(); canvas.replaceWith(replacement);
+  const getContext = replacement.getContext.bind(replacement);
+  replacement.getContext = (kind, options) => kind === 'webgl2' ? null : getContext(kind, options);
+  background = new LyricsBlossomDynamicBackground.DynamicBackground(replacement);
+}
+window.qplayerArtwork = async function(base64) {
+  const token = ++revision;
+  const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+  const blob = new Blob([bytes], {type:'image/jpeg'});
+  // Decode before applying, so a slower old song cannot replace a newer one.
+  const image = new Image();
+  const url = URL.createObjectURL(blob);
+  try {
+    await new Promise((resolve,reject) => { image.onload=resolve; image.onerror=reject; image.src=url; });
+    if (token !== revision) return;
+    background.artwork = image;
+    if (background.gl) for (const texture of background.textures) background.uploadSource(texture, image);
+    background.render();
+    if (active) background.start();
+  } finally { URL.revokeObjectURL(url); }
+};
+window.qplayerActive = function(value) { active=value; if(value) background.start(); else background.stop(); };
+window.qplayerLyrics = function(value) { document.querySelector('#lyrics').innerHTML = value ? '<span class="lyric-line"></span>' : ''; };
+</script></body></html>
