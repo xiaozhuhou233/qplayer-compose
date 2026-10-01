@@ -135,6 +135,14 @@ public final class SettingsCatalog {
         List<SettingSpec> out = new ArrayList<>();
 
         // ---- 外观 -----------------------------------------------------------
+        out.add(SettingSpec.toggle("iosDesign", APPEARANCE, "ios design", false)
+                .desc("iOS 26 液态玻璃导航栏；关闭恢复 MD3。Android 13+ 支持完整折射光效")
+                .onlyOn(ANDROID)
+                .build());
+        out.add(SettingSpec.toggle("iosGlassRefraction", APPEARANCE, "玻璃折射", true)
+                .desc("iOS design：开启保留折射、色散与拖动弹性椭圆；关闭为低配模式，保留模糊玻璃和普通选中状态")
+                .onlyOn(ANDROID)
+                .build());
         out.add(SettingSpec.segmented("darkMode", APPEARANCE, "深色模式", MODE_SYSTEM,
                         "跟随系统", "浅色", "深色")
                 .build());
@@ -311,7 +319,7 @@ public final class SettingsCatalog {
                 .scale(100).unit("×").dots()
                 .build());
         out.add(SettingSpec.toggle("lyricSpring", LYRIC, "弹簧动效", true)
-                .desc("滚动与逐字上抬使用弹簧物理")
+                .desc("控制歌词滚动与上抬；没有逐字时间时整行上抬")
                 .build());
         out.add(SettingSpec.toggle("lyricScale", LYRIC, "放大缩放", true)
                 .desc("当前行放大、其余行略缩")

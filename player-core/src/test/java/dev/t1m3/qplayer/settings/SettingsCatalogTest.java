@@ -9,6 +9,28 @@ import static org.junit.Assert.assertTrue;
 public class SettingsCatalogTest {
 
     @Test
+    public void glassRefractionDefaultsOnAndIsAndroidOnly() {
+        SettingSpec spec = setting("iosGlassRefraction");
+        assertEquals(Boolean.TRUE, spec.def);
+        assertEquals(SettingSpec.SWITCH, spec.type);
+        assertEquals(SettingsCatalog.APPEARANCE, spec.category);
+        assertTrue(spec.appliesTo(SettingsCatalog.ANDROID));
+        assertFalse(spec.appliesTo(SettingsCatalog.DESKTOP));
+        assertEquals(1L, SettingsCatalog.specs().stream()
+                .filter(candidate -> "iosGlassRefraction".equals(candidate.key)).count());
+    }
+
+    @Test
+    public void iosDesignIsAndroidOnlyAndOptIn() {
+        SettingSpec spec = setting("iosDesign");
+        assertEquals(Boolean.FALSE, spec.def);
+        assertEquals(SettingSpec.SWITCH, spec.type);
+        assertEquals("ios design", spec.title);
+        assertTrue(spec.appliesTo(SettingsCatalog.ANDROID));
+        assertFalse(spec.appliesTo(SettingsCatalog.DESKTOP));
+    }
+
+    @Test
     public void systemTitleBarIsDesktopOnlyAndDefaultsOff() {
         SettingSpec spec = setting("windowDecorated");
 
