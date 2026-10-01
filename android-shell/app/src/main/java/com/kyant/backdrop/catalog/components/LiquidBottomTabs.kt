@@ -71,7 +71,7 @@ import dev.t1m3.qplayer.android.ui.IosGlassThumbShadow
 import dev.t1m3.qplayer.android.ui.LocalGlassRefraction
 import dev.t1m3.qplayer.android.ui.iosGlassInnerShadow
 import dev.t1m3.qplayer.android.ui.iosGlassSurface
-import dev.t1m3.qplayer.android.ui.rememberIosAdaptiveGlass
+import dev.t1m3.qplayer.android.ui.rememberRegionAdaptiveGlass
 import dev.t1m3.qplayer.android.ui.adaptiveGlassColorEffects
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.LocalContentColor
@@ -98,7 +98,9 @@ fun LiquidBottomTabs(
     val accentColor =
         if (isLightTheme) Color(0xFF0088FF)
         else Color(0xFF0091FF)
-    val adaptive = rememberIosAdaptiveGlass(backdrop)
+    // Inside the dock this resolves to the dock's ONE region sample, so the bar
+    // adapts together with the miniplayer and the round buttons, not on its own.
+    val adaptive = rememberRegionAdaptiveGlass(backdrop)
 
     val latestSelected by androidx.compose.runtime.rememberUpdatedState(selectedTabIndex)
     val latestOnSelected by androidx.compose.runtime.rememberUpdatedState(onTabSelected)
@@ -206,7 +208,7 @@ fun LiquidBottomTabs(
                     },
                     highlight = { IosGlassHighlight },
                     shadow = { IosGlassShadow },
-                    innerShadow = { iosGlassInnerShadow(adaptive.luminance <= 0.5f) },
+                    innerShadow = { iosGlassInnerShadow(adaptive.luminance) },
                     layerBlock = {
                         val progress = dampedDragAnimation.pressProgress
                         val scale = lerp(1f, 1f + 16f.dp.toPx() / size.width, progress)

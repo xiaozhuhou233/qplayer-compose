@@ -9,9 +9,12 @@ internal const val GLASS_SAMPLE_SIDE = 5
 // side, so the GPU readback touches a thumbnail instead of a control-sized
 // texture. A 5x5 average does not gain resolution beyond this.
 internal const val GLASS_SAMPLE_MAX_SIDE = 24
-// Short enough that an adaptation never overlaps the next sample beat, long
-// enough to read as a fade rather than a pop.
-internal const val GLASS_COLOR_DURATION_MS = 80
+// Ⓜ 2026-10-01: 「加入过渡颜色的动画，不要慢但是要有过渡」 — the optical response and the
+// plate fade in 160ms (a fade, never a pop, and still faster than the sample
+// beat), and the ink colour — black to white across the 0.5 threshold — takes
+// 240ms, which is what makes the change read as a colour transition.
+internal const val GLASS_COLOR_DURATION_MS = 160
+internal const val GLASS_INK_DURATION_MS = 240
 
 /** Five-by-five centre samples without allocating a second resized bitmap. */
 internal fun sampledGlassLuminance(pixels: IntArray, width: Int, height: Int): Float? {

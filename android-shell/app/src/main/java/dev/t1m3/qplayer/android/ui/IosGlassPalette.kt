@@ -42,15 +42,28 @@ internal val IosGlassThumbShadow = Shadow(
 // comparable to the blur radius so the bevel remains visible instead of washing out.
 // Fixed geometry lets Backdrop cache its mask; moving pills only animate opacity.
 private val IosGlassLightInnerShadow = InnerShadow(
-    radius = 3.5f.dp,
-    offset = DpOffset(0.dp, (-1.5f).dp),
-    color = Color.Black.copy(alpha = 0.13f),
-)
-private val IosGlassDarkInnerShadow = IosGlassLightInnerShadow.copy(
+    radius = 5.dp,
+    offset = DpOffset(0.dp, (-2.5f).dp),
     color = Color.Black.copy(alpha = 0.20f),
 )
+private val IosGlassDarkInnerShadow = IosGlassLightInnerShadow.copy(
+    color = Color.Black.copy(alpha = 0.28f),
+)
+
+/** The theme-keyed bevel (dialogs, and any control outside a sampled region). */
 internal fun iosGlassInnerShadow(dark: Boolean): InnerShadow =
     if (dark) IosGlassDarkInnerShadow else IosGlassLightInnerShadow
+
+/** Ⓜ 2026-10-01: 「增强玻璃立体感，可以利用玻璃内部阴影参数」 and 「加入过渡颜色的动画」.
+ *  The bevel now deepens continuously with the SAMPLED luminance instead of flipping on a
+ *  boolean, so a backdrop crossing mid-grey animates the inner edge in and out — a visible
+ *  transition, no pop. The band is deliberately wide (0.35–0.65) so the change is gradual. */
+internal fun iosGlassInnerShadow(luminance: Float): InnerShadow {
+    val t = ((luminance.coerceIn(0f, 1f) - 0.35f) / 0.30f).coerceIn(0f, 1f)
+    val light = IosGlassLightInnerShadow.color.alpha
+    val dark = IosGlassDarkInnerShadow.color.alpha
+    return IosGlassLightInnerShadow.copy(color = Color.Black.copy(alpha = light + (dark - light) * t))
+}
 
 internal val IosGlassThumbInnerShadow = InnerShadow(
     radius = 2.dp,

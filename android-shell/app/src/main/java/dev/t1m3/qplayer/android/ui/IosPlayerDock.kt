@@ -106,6 +106,12 @@ internal fun IosPlayerDock(
                 .fillMaxWidth()
                 .height(if (hasTrack) 168.dp else 64.dp)
         ) {
+        // This invisible node spans the navigation bar, both round buttons and the
+        // miniplayer: every glass inside the provider below reads ITS luminance
+        // (one piece of material) instead of sampling its own patch of page.
+        val dockSample = rememberIosAdaptiveGlass(backdrop)
+        Box(Modifier.matchParentSize().then(dockSample.modifier))
+        CompositionLocalProvider(LocalSharedGlassSample provides dockSample) {
         val navWidth = (maxWidth - 72.dp).coerceAtLeast(64.dp)
         if (navVisible) IosDesignNavigation(
             destination, showLocal, dark, backdrop,
@@ -182,6 +188,7 @@ internal fun IosPlayerDock(
                     child.placeRelative(x, y)
                 }
             }
+        }
         }
         }
         }

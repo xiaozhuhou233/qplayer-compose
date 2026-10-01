@@ -34,7 +34,7 @@ internal fun IosLiquidGlass(
     interaction: InteractiveHighlight? = null,
     content: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit = {},
 ) {
-    val adaptive = rememberIosAdaptiveGlass(backdrop)
+    val adaptive = rememberRegionAdaptiveGlass(backdrop)
     Box(
         modifier.then(
             iosLiquidGlassModifier(
@@ -64,7 +64,7 @@ internal fun iosLiquidGlassModifier(
     dark: Boolean,
     shape: Shape = CircleShape,
     interaction: InteractiveHighlight? = null,
-    adaptive: IosAdaptiveGlassState = rememberIosAdaptiveGlass(backdrop),
+    adaptive: IosAdaptiveGlassState = rememberRegionAdaptiveGlass(backdrop),
 ): Modifier {
     val tint = LocalGlassTint.current
     val refraction = LocalGlassRefraction.current
@@ -105,7 +105,7 @@ internal fun iosLiquidGlassModifier(
                 drawBackdrop()
             },
             shadow = { IosGlassShadow },
-            innerShadow = { iosGlassInnerShadow(adaptive.luminance <= 0.5f) },
+            innerShadow = { iosGlassInnerShadow(adaptive.luminance) },
             highlight = { IosGlassHighlight },
             onDrawSurface = {
                 drawRect(iosGlassSurface(dark, tint, adaptive.luminance))

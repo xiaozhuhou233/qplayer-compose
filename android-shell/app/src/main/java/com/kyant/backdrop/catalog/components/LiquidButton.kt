@@ -110,7 +110,7 @@ fun LiquidButton(
                     drawBackdrop()
                 },
                 shadow = { dev.t1m3.qplayer.android.ui.IosGlassShadow },
-                innerShadow = { iosGlassInnerShadow(adaptive.luminance <= 0.5f) },
+                innerShadow = { iosGlassInnerShadow(adaptive.luminance) },
                 highlight = { IosGlassHighlight },
                 onDrawSurface = {
                     if (tint.isSpecified) {

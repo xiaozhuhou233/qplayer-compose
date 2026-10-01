@@ -44,6 +44,19 @@ import kotlin.math.roundToInt
 
 internal val LocalGlassContentColor = compositionLocalOf<Color?> { null }
 internal val LocalGlassSamplingEnabled = compositionLocalOf { true }
+
+/** Ⓜ 2026-10-01: 「导航栏、miniplayer 以及搜索组件这一块整体根据此区域整体背景采样，要不然
+ *  各个组件自适应各个的有点割裂」. A chrome region publishes ONE sample here; every glass
+ *  inside it reads that luminance instead of sampling its own patch of page, so the whole
+ *  block adapts as a single piece of material. */
+internal val LocalSharedGlassSample = staticCompositionLocalOf<IosAdaptiveGlassState?> { null }
+
+/** The region's shared sample when there is one, else this control's own. */
+@Composable
+internal fun rememberRegionAdaptiveGlass(backdrop: Backdrop): IosAdaptiveGlassState {
+    val shared = LocalSharedGlassSample.current
+    return shared ?: rememberIosAdaptiveGlass(backdrop)
+}
 private val glassReadbackLock = Mutex()
 private var lastGlassReadbackMs = 0L
 private var smoothedGlassReadbackCostMs = 0f
@@ -133,7 +146,7 @@ internal class IosAdaptiveGlassState(
     }
 
     suspend fun animateLuminance(value: Float) = luminanceAnimation.animateTo(value, tween(GLASS_COLOR_DURATION_MS))
-    suspend fun animateInk(value: Color) = inkAnimation.animateTo(value, tween(GLASS_COLOR_DURATION_MS))
+    suspend fun animateInk(value: Color) = inkAnimation.animateTo(value, tween(GLASS_INK_DURATION_MS))
 }
 
 @Composable
