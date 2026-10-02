@@ -6980,6 +6980,7 @@ private const val INTRO_LAST_BEAT_MS = 2_000L
 /** Slight lift of the line that is currently being sung (弹簧动效). */
 private const val LYRIC_WORD_LIFT_DP = -2.5f
 
+
 /**
  * Type-size candidates for the strict lyric fit, largest first. The first one
  * whose line count fits the measured width in two lines wins; the last one is
@@ -8518,6 +8519,7 @@ private fun QmlLyricColumn(
     }
     val lines = prepared.lines
     val listState = rememberLazyListState()
+
     val livePosition by rememberUpdatedState(state.lyricPositionMs)
     var smoothPositionMs by remember(state.trackKey) {
         mutableLongStateOf(state.lyricPositionMs)
@@ -8712,7 +8714,8 @@ private fun QmlLyricColumn(
                     positionMs = smoothPositionMs,
                     focusIndex = activeLineIndex,
                     springEnabled = state.lyricSpring,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
                 )
             }
         }
@@ -8749,11 +8752,16 @@ private fun QmlLyricRow(
     // animateFloatAsState restarted on every clock sample and made the column
     // twitch during word playback.
     val distance = kotlin.math.abs(index - focusIndex)
-    // The source renderer scales the active line as one stable layer. Keep the
-    // Compose text size stable during a syllable sweep; deriving it from
-    // activeK remeasures the row every frame and is the main cause of the
-    // visible second-video jitter.
+    // 他的尖端把活动行的字号固定成 1.12f，注释写明是为了避免每帧重排 —— 这和我们选择
+    // graphicsLayer 而不是 baselineShift 是同一个结论（别让动画参与布局）。保留他的做法，
+    // 只补回 lift 需要的 activeK 与弹簧。
     val textScale = if (!isBackground && state.lyricScale) 1.12f else 1f
+    val activeK = lyricActiveK(positionMs, groupStartMs, groupEndMs)
+    val lyricLineLift by animateFloatAsState(
+        targetValue = activeK.coerceIn(0f, 1f),
+        animationSpec = spring(dampingRatio = 0.9f, stiffness = 100f),
+        label = "lyric_line_lift"
+    )
     val baseSize = state.lyricFontSize.coerceIn(14, 40).toFloat() *
         if (isBackground) 0.70f else 1f
     val requestedLineHeight = baseSize * state.lyricLineSpacing.coerceIn(100, 250) / 100f
@@ -8836,6 +8844,10 @@ private fun QmlLyricRow(
                 indication = null,
                 onClick = { onLineClick(line.startMs()) }
             )
+            // 整行 lift：绘制期变换，不参与布局测量，所以不会引起重排或抖动。
+            .graphicsLayer {
+                translationY = lyricLineLift * LYRIC_WORD_LIFT_DP.dp.toPx()
+            }
             .graphicsLayer {
                 val framePosition = if (displayMotion == null) positionState?.value ?: positionMs else positionMs
                 val activeK = lyricActiveK(framePosition, groupStartMs, groupEndMs)
@@ -8860,7 +8872,7 @@ private fun QmlLyricRow(
                     0.5f
                 )
             }
-            .then(if (edgeBlur > 0.dp) Modifier.blur(edgeBlur) else Modifier)
+            .then(Modifier)
             // Keep LazyColumn's item measurement independent from the live
             // syllable BaselineShift and the active font-size emphasis.
             .height(rowHeight)
@@ -9107,22 +9119,22 @@ private fun LyricGlyphText(
     // Colour still follows each glyph's measured timing. Lift is different:
     // it belongs to the source word/syllable, so every glyph in one timing
     // group shares one motion clock and rises as a single word.
+    // 每个字*自己*一个运动时钟（原来是一整个 source word 共用一个）——
+    // 这是「上抬一块一块」的根因：同一词里的字同相位上升，看不到逐字依次浮起。
+    // 用 unit 自己的 startMs/endMs（expandLyricUnits 已经把词拆成逐字符了），
+    // 相邻字因此相位错开，形成连续的飘带。
     val motions = remember(units, lineSweep) {
-        val groupMotions = units
-            .groupBy { it.groupIndex }
-            .mapValues { (_, group) ->
-                val first = group.first()
-                LyricWordLift(
-                    timing = LyricGlyphTiming(
-                        first.groupStartMs,
-                        first.groupDurationMs,
-                        0f,
-                        1f
-                    ),
-                    enabled = group.any { it.text.any { ch -> !ch.isWhitespace() } }
-                )
-            }
-        units.map { unit -> requireNotNull(groupMotions[unit.groupIndex]) }
+        units.map { unit ->
+            LyricWordLift(
+                timing = LyricGlyphTiming(
+                    unit.startMs,
+                    (unit.endMs - unit.startMs).coerceAtLeast(1L),
+                    0f,
+                    1f
+                ),
+                enabled = unit.text.any { ch -> !ch.isWhitespace() }
+            )
+        }
     }
     val fallbackPosition = rememberUpdatedState(positionMs)
     val playbackPosition = positionState ?: fallbackPosition
