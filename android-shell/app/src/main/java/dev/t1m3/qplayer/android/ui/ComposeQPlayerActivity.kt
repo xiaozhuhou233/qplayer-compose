@@ -1780,7 +1780,12 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                         // and the detail pages runs through THIS navigation outlet, so the
                         // shared cover, the graphicsLayer scale and the exit blur all ride
                         // one AnimatedContent clock.
-                        androidx.compose.animation.SharedTransitionScope {
+                        // SharedTransitionLayout, NOT the SharedTransitionScope{} wrapper: the wrapper's
+                        // root coordinates are uninitialized until some shared element attaches,
+                        // and a sharedBounds node measuring during the first layout pass crashes
+                        // with Uninitialized LayoutCoordinates (the launch crash loop). The layout
+                        // form owns its layout node and is initialized before any child measures.
+                        androidx.compose.animation.SharedTransitionLayout {
                         androidx.compose.runtime.CompositionLocalProvider(
                             LocalPageSharedTransitionScope provides this) {
                         AnimatedContent(
