@@ -198,7 +198,12 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
                     // rename that makes it that name. `renameTo` replaces a refused file, which
                     // is what makes this the repair for a bad one and not just the first-run
                     // path.
-                    if (!extractFromAssets(candidate)) continue;
+                    // Ⓜ 2026-10-02: the APK no longer bundles the model (the build only
+                    // stages it with -PqplayerBundleStemModel=true). When neither private
+                    // storage nor the APK carries the bytes, the cloud source does: the
+                    // manifest-pinned file is fetched to the same private folder, hashed
+                    // and verified by the same gate as every other path.
+                    if (!extractFromAssets(candidate) && !downloadFromCloud(candidate)) continue;
                     accepted = verified(file, candidate);
                 }
                 if (accepted != null) {
@@ -260,6 +265,116 @@ public final class AndroidStemEditRenderer implements StemEditRenderer {
      * as inert as it was before this method existed. The failure is loud in the log because the
      * only other thing a missing model could do is make the transition quietly less good.
      */
+    /**
+     * Ⓜ 2026-10-02: the cloud delivery path. The APK carries no model any more — the
+     * listener asked for the 98 MB to stop riding in every download（「当时撞进来让 60mb
+     * 变成了 190，现在让这个模型云下载到指定文件夹」）— so the first render that needs a
+     * candidate fetches the manifest-pinned file into the SAME private folder the
+     * other paths feed, writes it atomically (.part then rename) and hands it to the
+     * byte-count + sha256 gate the manifest already runs.
+     *
+     * <p>Contract mirrors {@link #extractFromAssets}: never throws, never blocks a
+     * playback path (the caller is the preload worker), one line per stage in the
+     * log, and any failure deletes what it wrote and leaves the stem path exactly as
+     * inert as before. The URL is a GitHub release asset of this project, pinned by
+     * the manifest digest — a compromised or re-uploaded file cannot pass.
+     */
+    private boolean downloadFromCloud(StemModel.Candidate candidate) {
+        final String url = cloudUrl(candidate);
+        if (url == null) {
+            Logger.warn("transition: no cloud source is published for {} — the stem path"
+                            + " stays inert until the file is sideloaded into {}",
+                    candidate.fileName, modelsDir.getAbsolutePath());
+            return false;
+        }
+        if (!modelsDir.isDirectory() && !modelsDir.mkdirs()) {
+            Logger.warn("transition: the stem model cannot be downloaded — {} is not a"
+                            + " directory and cannot be created", modelsDir.getAbsolutePath());
+            return false;
+        }
+        final File part = new File(modelsDir, candidate.fileName + PART_SUFFIX);
+        final File dest = new File(modelsDir, candidate.fileName);
+        Logger.warn("transition: downloading the stem model {} from {} ({} bytes,"
+                        + " sha256 {}) — one-time, runs on the preload lane",
+                candidate.fileName, url, candidate.bytes, candidate.sha256);
+        final long startedAt = System.currentTimeMillis();
+        try {
+            java.net.HttpURLConnection connection =
+                    (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+            connection.setInstanceFollowRedirects(true);
+            connection.setConnectTimeout(15_000);
+            connection.setReadTimeout(30_000);
+            connection.setRequestProperty("Accept", "application/octet-stream");
+            final int status = connection.getResponseCode();
+            if (status != java.net.HttpURLConnection.HTTP_OK) {
+                Logger.warn("transition: the stem model download failed — HTTP {} for {}",
+                        status, url);
+                connection.disconnect();
+                return false;
+            }
+            long received = 0L;
+            long quarter = Math.max(1L, candidate.bytes / 4L);
+            int nextMark = 25;
+            try (java.io.InputStream in = new java.io.BufferedInputStream(
+                    connection.getInputStream(), 1 << 16);
+                 java.io.OutputStream out = new java.io.BufferedOutputStream(
+                         new java.io.FileOutputStream(part), 1 << 16)) {
+                byte[] buffer = new byte[1 << 20];
+                int read;
+                while ((read = in.read(buffer)) > 0) {
+                    out.write(buffer, 0, read);
+                    received += read;
+                    if (received / quarter >= nextMark && nextMark <= 100) {
+                        Logger.warn("transition: stem model download {}% ({} bytes)",
+                                nextMark, received);
+                        nextMark += 25;
+                    }
+                }
+            } finally {
+                connection.disconnect();
+            }
+            long bytes = part.length();
+            String digest = StemModel.sha256(part);
+            if (bytes != candidate.bytes || !digest.equals(candidate.sha256)) {
+                Logger.warn("transition: the downloaded stem model does not match the"
+                                + " manifest ({} bytes, sha256 {}) — deleted; the stem path"
+                                + " stays inert", bytes, digest);
+                //noinspection ResultOfMethodCallIgnored
+                part.delete();
+                return false;
+            }
+            if (!part.renameTo(dest)) {
+                Logger.warn("transition: the downloaded stem model could not be moved into"
+                        + " place; deleted");
+                //noinspection ResultOfMethodCallIgnored
+                part.delete();
+                return false;
+            }
+            Logger.warn("transition: the stem model was downloaded from the cloud into {}"
+                            + " ({} bytes, sha256 {}, {} ms) — stem DJ edits are ON from the"
+                            + " next render",
+                    dest.getAbsolutePath(), bytes, digest,
+                    System.currentTimeMillis() - startedAt);
+            return true;
+        } catch (Throwable failure) {
+            Logger.warn("transition: the stem model download failed ({}) — any partial file"
+                            + " is deleted and the stem path stays inert",
+                    failure.toString());
+            //noinspection ResultOfMethodCallIgnored
+            part.delete();
+            return false;
+        }
+    }
+
+    /** The published cloud source per candidate; null where none is pinned. */
+    private static String cloudUrl(StemModel.Candidate candidate) {
+        if (candidate == StemModel.QUARTER) {
+            return "https://github.com/xiaozhuhou233/qplayer-compose/releases/download/"
+                    + "stem-model-htdemucs-quarter/htdemucs-quarter.onnx";
+        }
+        return null;
+    }
+
     private boolean extractFromAssets(StemModel.Candidate candidate) {
         final String assetPath = MODELS_DIR + "/" + candidate.fileName;
         final File part = new File(modelsDir, candidate.fileName + PART_SUFFIX);

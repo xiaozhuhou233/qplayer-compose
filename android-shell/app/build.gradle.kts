@@ -274,11 +274,16 @@ val stageStemModel = tasks.register<StageStemModel>("stageStemModel") {
     expectedSha256.set(stemModelSha256)
 }
 
-// Every variant (debug and release alike) carries the model, and its packaging waits for the
-// staging task. This is the AGP-supported way to feed assets from a task's output directory.
+// Ⓜ 2026-10-02: the model no longer rides in the APK by default — the listener asked
+// for the cloud-delivery build（「当时撞进来让 60mb 变成了 190，现在让这个模型云下载到指定
+// 文件夹」）. The renderer fetches the manifest-pinned file from the published release on
+// first need. Bundling is opt-in for a fully-offline build:
+//   -PqplayerBundleStemModel=true :packageDebug
 androidComponents {
     onVariants(selector().all()) { variant ->
-        variant.sources.assets?.addGeneratedSourceDirectory(stageStemModel) { it.outputDir }
+        if (providers.gradleProperty("qplayerBundleStemModel").orElse("false").get() == "true") {
+            variant.sources.assets?.addGeneratedSourceDirectory(stageStemModel) { it.outputDir }
+        }
     }
 }
 
