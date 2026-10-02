@@ -15,13 +15,6 @@ providers.gradleProperty("qplayerBuildDir").orNull?.let { requestedBuildDir ->
     layout.buildDirectory.set(file(requestedBuildDir))
 }
 
-composeCompiler {
-    // android-shell/stability.conf: the core's published DTO snapshots are
-    // immutable in practice, so every list item becomes skippable and the
-    // 10 Hz state pump stops re-executing visible cards.
-    stabilityConfigurationFile = rootProject.file("stability.conf")
-}
-
 android {
     namespace = "io.github.timer_err.qml4j.android"
     compileSdk = 35

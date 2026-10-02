@@ -2706,38 +2706,15 @@ private fun rememberCoverBitmap(bytes: ByteArray?, path: String?): androidx.comp
     LaunchedEffect(key) {
         if (bitmap == null) {
             val decoded = withContext(Dispatchers.IO) {
-                // Ⓜ First-run smoothness: a full-size decode of every cover (cards
-                // need 132-164dp, the lyric background a screen) burst memory, GC
-                // and texture uploads exactly on first entry. Decode BOUNDS first
-                // and sample so the longest side stays within the largest consumer
-                // (~1080px); everything downstream crops/scales anyway.
-                val maxSide = 1080
-                fun decodeWithSampling(decodeBounds: () -> Any?, decode: (android.graphics.BitmapFactory.Options) -> android.graphics.Bitmap?): android.graphics.Bitmap? {
-                    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    decodeBounds()
-                    var sample = 1
-                    var w = bounds.outWidth.coerceAtLeast(1)
-                    var h = bounds.outHeight.coerceAtLeast(1)
-                    while (w / 2 >= maxSide || h / 2 >= maxSide) { sample *= 2; w /= 2; h /= 2 }
-                    val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
-                    return decode(opts)
-                }
                 val decoded = bytes?.let { b ->
                     try {
-                        decodeWithSampling(
-                            { BitmapFactory.decodeByteArray(b, 0, b.size, android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }) },
-                            { BitmapFactory.decodeByteArray(b, 0, b.size, it) }
-                        )?.asImageBitmap()
+                        BitmapFactory.decodeByteArray(b, 0, b.size)?.asImageBitmap()
                     } catch (_: Exception) { null }
-                } ?: path?.let { pp ->
+                } ?: remoteSource?.let(::decodeRemoteCover) ?: path?.let { p ->
                     try {
-                        if (!File(pp).exists()) return@let null
-                        decodeWithSampling(
-                            { BitmapFactory.decodeFile(pp, android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }) },
-                            { BitmapFactory.decodeFile(pp, it) }
-                        )?.asImageBitmap()
+                        if (File(p).exists()) BitmapFactory.decodeFile(p)?.asImageBitmap() else null
                     } catch (_: Exception) { null }
-                } ?: remoteSource?.let(::decodeRemoteCover)
+                }
                 decoded
             }
             if (decoded != null) {
