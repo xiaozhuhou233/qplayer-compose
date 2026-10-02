@@ -1382,6 +1382,21 @@ private const val SLEEP_SETTLE_MS = 3_500L
 @Composable
 private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCore) {
     val state = rememberPlayerState(controller, settings)
+    // Ⓜ First-play warm-up: the FIRST run of any animation and the FIRST blur paid
+    // JIT compilation plus the GPU shader-pipeline build for the whole session —
+    // 「所有动画第一次播放都会超级无敌卡顿」. A throwaway tween and a 1px offscreen
+    // blur run once at startup, off the critical path, so the first real animation
+    // and the first RenderEffect find warm paths.
+    var pipelineWarmed by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        withFrameNanos { }
+        delay(700)
+        val throwaway = androidx.compose.animation.core.Animatable(0f)
+        throwaway.animateTo(1f, androidx.compose.animation.core.tween(120))
+        pipelineWarmed = true
+        delay(120)
+        pipelineWarmed = false
+    }
     var sleepMinutes by remember { mutableIntStateOf(0) }
     var sleepRemaining by remember { mutableLongStateOf(0L) }
     // False while the countdown is still waiting for the user to finish sliding
@@ -1419,6 +1434,9 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
     // The cookie lives in a file next to the app's own data: a custom key in the
     // settings store is dropped on load because it is not part of the settings
     // catalog, which is why the login did not survive a restart.
+    if (pipelineWarmed) {
+        Box(Modifier.size(1.dp).graphicsLayer { alpha = 0f }.blur(8.dp))
+    }
     val biliContext = LocalContext.current
     val biliCookieFile = remember { java.io.File(biliContext.filesDir, "bili_cookies.txt") }
     LaunchedEffect(Unit) {
@@ -1785,7 +1803,11 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                         // and a sharedBounds node measuring during the first layout pass crashes
                         // with Uninitialized LayoutCoordinates (the launch crash loop). The layout
                         // form owns its layout node and is initialized before any child measures.
-                        androidx.compose.animation.SharedTransitionLayout {
+                        // Ⓜ The shared-element layout (and its lookahead pass, which
+                        // doubles every layout) only exists where shared covers exist:
+                        // iOS design. MD3 keeps a plain AnimatedContent — its scopes stay
+                        // null and the cover helper degrades to plain content there.
+                        if (iosDesign) androidx.compose.animation.SharedTransitionLayout {
                         androidx.compose.runtime.CompositionLocalProvider(
                             LocalPageSharedTransitionScope provides this) {
                         AnimatedContent(
@@ -2343,14 +2365,21 @@ private fun MiniPlayer(
             // and blurred as the colour source; the foreground controls stay
             // crisp and this path is safe during Activity route transitions.
             if (coverBitmap != null) {
+                // Ⓜ The 34dp RenderEffect here was the MD3 home screen's one GPU
+                // filter, re-applied on every redraw of the bar. The listener cut it
+                // （「miniplayer模糊该砍就砍，我要流畅」）: the cover now draws sharp
+                // under a strong scrim — zero blur passes anywhere on this surface.
                 Image(
                     bitmap = coverBitmap,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
                         .fillMaxSize()
-                        .blur(34.dp)
                         .graphicsLayer { alpha = 0.78f }
+                )
+                Box(
+                    Modifier.fillMaxSize().background(
+                        MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.72f))
                 )
             }
             WindowGlassBackdrop(
