@@ -1809,7 +1809,34 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                         // doubles every layout) only exists where shared covers exist:
                         // iOS design. MD3 keeps a plain AnimatedContent — its scopes stay
                         // null and the cover helper degrades to plain content there.
-                        val pageContent: @Composable (ComposeRoute) -> Unit = { visibleRoute ->
+                        androidx.compose.animation.SharedTransitionLayout {
+                        androidx.compose.runtime.CompositionLocalProvider(
+                            LocalPageSharedTransitionScope provides this) {
+                        AnimatedContent(
+                            modifier = Modifier.fillMaxSize().then(
+                                // Record only page content, never the glass itself.
+                                if (liquidBackdrop != null) Modifier.layerBackdrop(liquidBackdrop)
+                                    .background(MaterialTheme.colorScheme.background) else Modifier
+                            ),
+                            targetState = route,
+                            transitionSpec = {
+                                // Detail-stack entries (any album/playlist/artist push or
+                                // pop) use the container-open language; tab-level routes
+                                // keep the configured preset.
+                                val detailInvolved = initialState.screen in
+                                    setOf(
+                                        ComposeScreen.PLAYLIST, ComposeScreen.ALBUM,
+                                        ComposeScreen.ARTIST, ComposeScreen.BILI_FAV_DETAIL
+                                    )
+                                if (detailInvolved)
+                                    dev.t1m3.qplayer.android.ui.motion.SealMotion.sharedPage(!navigatingBack)
+                                else pageTransitionTransform(pageTransitionPreset, !navigatingBack)
+                            },
+                            label = "page_transition"
+                        ) { visibleRoute ->
+                            androidx.compose.runtime.CompositionLocalProvider(
+                                LocalPageAnimatedScope provides this) {
+
                             // The page leaving the stack blurs at a FIXED radius while it
                             // scales and fades: the RenderEffect is built once at transition
                             // start, and the motion itself is pure graphicsLayer
@@ -1926,65 +1953,10 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                 else -> Unit
                             }
                             }
-                        }
-                        if (iosDesign) {
-                            androidx.compose.animation.SharedTransitionLayout {
-                            androidx.compose.runtime.CompositionLocalProvider(
-                                LocalPageSharedTransitionScope provides this) {
-                                AnimatedContent(
-                            modifier = Modifier.fillMaxSize().then(
-                                // Record only page content, never the glass itself.
-                                if (liquidBackdrop != null) Modifier.layerBackdrop(liquidBackdrop)
-                                    .background(MaterialTheme.colorScheme.background) else Modifier
-                            ),
-                            targetState = route,
-                            transitionSpec = {
-                                // Detail-stack entries (any album/playlist/artist push or
-                                // pop) use the container-open language; tab-level routes
-                                // keep the configured preset.
-                                val detailInvolved = initialState.screen in
-                                    setOf(
-                                        ComposeScreen.PLAYLIST, ComposeScreen.ALBUM,
-                                        ComposeScreen.ARTIST, ComposeScreen.BILI_FAV_DETAIL
-                                    )
-                                if (detailInvolved)
-                                    dev.t1m3.qplayer.android.ui.motion.SealMotion.sharedPage(!navigatingBack)
-                                else pageTransitionTransform(pageTransitionPreset, !navigatingBack)
-                            },
-                            label = "page_transition"
-                        ) { visibleRoute ->
-                                androidx.compose.runtime.CompositionLocalProvider(
-                                    LocalPageAnimatedScope provides this) { pageContent(visibleRoute) }
-                                }
                             }
                             }
-                        } else {
-                            AnimatedContent(
-                            modifier = Modifier.fillMaxSize().then(
-                                // Record only page content, never the glass itself.
-                                if (liquidBackdrop != null) Modifier.layerBackdrop(liquidBackdrop)
-                                    .background(MaterialTheme.colorScheme.background) else Modifier
-                            ),
-                            targetState = route,
-                            transitionSpec = {
-                                // Detail-stack entries (any album/playlist/artist push or
-                                // pop) use the container-open language; tab-level routes
-                                // keep the configured preset.
-                                val detailInvolved = initialState.screen in
-                                    setOf(
-                                        ComposeScreen.PLAYLIST, ComposeScreen.ALBUM,
-                                        ComposeScreen.ARTIST, ComposeScreen.BILI_FAV_DETAIL
-                                    )
-                                if (detailInvolved)
-                                    dev.t1m3.qplayer.android.ui.motion.SealMotion.sharedPage(!navigatingBack)
-                                else pageTransitionTransform(pageTransitionPreset, !navigatingBack)
-                            },
-                            label = "page_transition"
-                        ) { visibleRoute ->
-                            androidx.compose.runtime.CompositionLocalProvider(
-                                LocalPageAnimatedScope provides this) { pageContent(visibleRoute) }
                             }
-                        }
+                            }
                         if (useIosNavigation && liquidBackdrop != null) {
                             IosPlayerDock(
                                 collapsed = iosHomeCollapsed,
