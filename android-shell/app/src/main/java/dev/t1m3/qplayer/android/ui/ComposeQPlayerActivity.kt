@@ -1795,6 +1795,12 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                             },
                             label = "page_transition"
                         ) { visibleRoute ->
+                            // The AnimatedVisibilityScope of THIS page's enter/exit: the
+                            // shared cover needs it on both sides of the transition. Without
+                            // it the sharedBounds claim degrades to plain content and the
+                            // cover never flies.
+                            androidx.compose.runtime.CompositionLocalProvider(
+                                LocalPageAnimatedScope provides this) {
                             // The page leaving the stack blurs at a FIXED radius while it
                             // scales and fades: the RenderEffect is built once at transition
                             // start, and the motion itself is pure graphicsLayer
@@ -1909,6 +1915,7 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                     }
                                 )
                                 else -> Unit
+                            }
                             }
                             }
                         }
