@@ -1367,6 +1367,7 @@ private const val SLEEP_SETTLE_MS = 3_500L
 
 @OptIn(
     androidx.compose.animation.ExperimentalAnimationApi::class,ExperimentalMaterial3ExpressiveApi::class,
+    androidx.compose.animation.ExperimentalSharedTransitionApi::class,
 )
 @Composable
 private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCore) {
@@ -1765,7 +1766,13 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                 .then(if (iosDesign) Modifier.nestedScroll(iosScrollConnection) else Modifier)
                                 .then(if (!useIosNavigation) Modifier.nestedScroll(miniScrollConnection) else Modifier)
                         ) {
-                        // Seal shared-axis transitions keep list geometry stable.
+                        // Container-open motion: every push/pop between the list roots
+                        // and the detail pages runs through THIS navigation outlet, so the
+                        // shared cover, the graphicsLayer scale and the exit blur all ride
+                        // one AnimatedContent clock.
+                        androidx.compose.animation.SharedTransitionScope {
+                        androidx.compose.runtime.CompositionLocalProvider(
+                            LocalPageSharedTransitionScope provides this) {
                         AnimatedContent(
                             modifier = Modifier.fillMaxSize().then(
                                 // Record only page content, never the glass itself.
@@ -1774,13 +1781,37 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                             ),
                             targetState = route,
                             transitionSpec = {
-                                pageTransitionTransform(pageTransitionPreset, !navigatingBack)
+                                // Detail-stack entries (any album/playlist/artist push or
+                                // pop) use the container-open language; tab-level routes
+                                // keep the configured preset.
+                                val detailInvolved = initialState.screen in
+                                    setOf(
+                                        ComposeScreen.PLAYLIST, ComposeScreen.ALBUM,
+                                        ComposeScreen.ARTIST, ComposeScreen.BILI_FAV_DETAIL
+                                    )
+                                if (detailInvolved)
+                                    dev.t1m3.qplayer.android.ui.motion.SealMotion.sharedPage(!navigatingBack)
+                                else pageTransitionTransform(pageTransitionPreset, !navigatingBack)
                             },
                             label = "page_transition"
                         ) { visibleRoute ->
+                            // The page leaving the stack blurs at a FIXED radius while it
+                            // scales and fades: the RenderEffect is built once at transition
+                            // start, and the motion itself is pure graphicsLayer
+                            // (scaleIn/scaleOut) — nothing rebuilds per frame, which is what
+                            // keeps the entry at a steady frame rate.
+                            val pageLeaving = route != visibleRoute
+                            Box(Modifier.fillMaxSize().then(
+                                if (pageLeaving) Modifier.blur(12.dp) else Modifier)) {
+                            // Keep the outgoing page's insets until its exit finishes.
+                            // The target route may already be an album/playlist without a dock.
+                            val visibleIosNavigation = iosDesign && visibleRoute.screen in listOf(
+                                ComposeScreen.HOME, ComposeScreen.SEARCH,
+                                ComposeScreen.LIBRARY, ComposeScreen.LOCAL
+                            )
                             when (visibleRoute.screen) {
                                 ComposeScreen.HOME -> HomeScreen(
-                                    iosNavigation = useIosNavigation,
+                                    iosNavigation = visibleIosNavigation,
                                     state = state,
 
                                     openPlaylist = { id, cover ->
@@ -1801,7 +1832,7 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                     settings = settings
                                 )
                                 ComposeScreen.SEARCH -> SearchScreen(
-                                    iosNavigation = useIosNavigation,
+                                    iosNavigation = visibleIosNavigation,
                                     state = state,
                                     controller = controller,
 
@@ -1812,7 +1843,7 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                     }
                                 }
                                 ComposeScreen.LIBRARY -> LibraryScreen(
-                                    iosNavigation = useIosNavigation,
+                                    iosNavigation = visibleIosNavigation,
                                     state = state,
 
                                     openLogin = { loginOpen = true },
@@ -1826,7 +1857,7 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                     },
                                     controller = controller
                                 )
-                                ComposeScreen.LOCAL -> LocalScreen(state, controller, iosNavigation = useIosNavigation)
+                                ComposeScreen.LOCAL -> LocalScreen(state, controller, iosNavigation = visibleIosNavigation)
                                 ComposeScreen.QUEUE -> QueueScreen(state, controller, sleepMinutes, sleepRemaining, sleepArmed) { sleepMinutes = it }
                                 ComposeScreen.SETTINGS -> SettingsScreen(settings, controller)
                                 ComposeScreen.ACCOUNT -> AccountScreen(state, controller)
@@ -1879,6 +1910,9 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                 )
                                 else -> Unit
                             }
+                            }
+                        }
+                        }
                         }
                         if (useIosNavigation && liquidBackdrop != null) {
                             IosPlayerDock(
@@ -2260,6 +2294,7 @@ private fun MiniPlayer(
             dark = state.dark,
             interaction = glassHighlight,
             adaptive = requireNotNull(adaptive),
+            dockDepth = true,
         )
     } else Modifier
     val controlsEnabled by remember(compactProgress) { derivedStateOf { compactProgress() < 0.01f } }
@@ -3682,7 +3717,7 @@ private fun PlaylistScreen(
                 Surface(
                     modifier = Modifier
                         .size(112.dp)
-                        ,
+                        .sharedCover("cover:playlist:$playlistId"),
                     shape = ShapeLarge,
                     color = MaterialTheme.colorScheme.secondaryContainer
                 ) {
@@ -3761,7 +3796,7 @@ private fun AlbumScreen(
                 Surface(
                     modifier = Modifier
                         .size(168.dp)
-                        ,
+                        .sharedCover("cover:album:$albumId"),
                     shape = ShapeLarge,
                     color = MaterialTheme.colorScheme.secondaryContainer
                 ) {
@@ -9526,7 +9561,7 @@ private fun PlaylistCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(164.dp)
-                    ,
+                    .sharedCover("cover:playlist:${playlist.id}"),
                 color = MaterialTheme.colorScheme.secondaryContainer
             ) {
                 if (coverBitmap != null) {
@@ -9722,7 +9757,8 @@ private fun HomeAlbumCard(album: NeteaseAlbum, onClick: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         Surface(
-            modifier = Modifier.fillMaxWidth().aspectRatio(1f),
+            modifier = Modifier.fillMaxWidth().aspectRatio(1f)
+                .sharedCover("cover:album:${album.id}"),
             shape = RoundedCornerShape(14.dp),
             color = MaterialTheme.colorScheme.surfaceContainerHighest
         ) {

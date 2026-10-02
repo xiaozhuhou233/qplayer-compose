@@ -51,6 +51,29 @@ internal object SealMotion {
         else incoming togetherWith outgoing
     }
 
+    /**
+     * Ⓜ 2026-10-01: the container-open language for the detail stack（「点击任何专辑歌单
+     * 进入的新动画」）. The incoming page grows from 92% (back: from 106%) while fading in;
+     * the outgoing one grows past the camera to 106% (back: shrinks to 92%) while fading
+     * out. The scale runs through scaleIn/scaleOut, which land in ONE graphicsLayer per
+     * page — never Modifier.scale chains — so every frame is a layer-property update.
+     * The blur of the leaving page is applied by the call site at a FIXED radius, so no
+     * RenderEffect is rebuilt during the motion.
+     */
+    fun sharedPage(forward: Boolean): ContentTransform {
+        val duration = DURATION_AXIS + 80
+        return if (forward)
+            (scaleIn(tween(duration, easing = EmphasizedDecelerate), initialScale = 0.92f) +
+                    fadeIn(tween(240))) togetherWith
+                    (scaleOut(tween(duration, easing = EmphasizedAccelerate), targetScale = 1.06f) +
+                            fadeOut(tween(240)))
+        else
+            (scaleIn(tween(duration, easing = EmphasizedDecelerate), initialScale = 1.06f) +
+                    fadeIn(tween(240))) togetherWith
+                    (scaleOut(tween(duration, easing = EmphasizedAccelerate), targetScale = 0.92f) +
+                            fadeOut(tween(240)))
+    }
+
     fun tab(forward: Boolean): ContentTransform {
         val direction = if (forward) 1 else -1
         return materialSharedAxisX({ direction * it / 4 }, { -direction * it / 4 })
