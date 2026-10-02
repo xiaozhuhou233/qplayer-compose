@@ -828,7 +828,9 @@ private data class PlayerUiState(
  * than translating the entire column in lockstep. */
 private data class LyricScrollSample(val timeNs: Long, val offsetPx: Float)
 
-private val snapshotCache = HashMap<String, List<*>>()
+// Built from the initial composition (main) and the off-main pump loop: a
+// synchronized view, since the pump moved off the main thread.
+private val snapshotCache = java.util.Collections.synchronizedMap(HashMap<String, List<*>>())
 
 /** Same main-line selection rule as PlayerController, but evaluated from the
  * live backend clock so Compose does not wait for the controller's 5 Hz UI pump. */
@@ -1334,7 +1336,15 @@ private fun rememberPlayerState(controller: PlayerController, settings: Settings
     LaunchedEffect(controller) {
         while (true) {
             controller.pump()
-            state = controllerState(controller, settings)
+            // Ⓜ The snapshot build (string joins, list caching, a large data class)
+            // ran on the MAIN thread ten times a second for the app's whole life —
+            // one core permanently busy while the others idled, which is exactly
+            // 「不怎么占资源但是就是非常卡」. Building now happens off-main; only the
+            // state WRITE comes back. While playback is paused the cadence also
+            // drops to 400ms: nothing on screen is moving the clock then.
+            state = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                controllerState(controller, settings)
+            }
             // Compose reads the live lyric clock in controllerState, so word fill
             // and auto-follow remain smooth without changing the shared core's
             // observable 5 Hz position cadence.
@@ -1342,7 +1352,7 @@ private fun rememberPlayerState(controller: PlayerController, settings: Settings
             // state 20 times a second. 10 Hz is enough for the progress/lyric
             // interpolators while leaving the render thread time to animate
             // and scroll large lists smoothly.
-            delay(100)
+            delay(if (controller.isLyricClockRunning()) 100L else 400L)
         }
     }
     return state
@@ -2289,8 +2299,7 @@ private fun MiniPlayer(
     val hapticOpen = rememberHapticAction(onOpen)
     val openInteraction = remember { MutableInteractionSource() }
     val iosMini = glassBackdrop != null
-    // The dock publishes one region sample; the miniplayer reads it instead of
-    // sampling its own patch.
+    // The APK adaptive material samples this MiniPlayer's own raw background.
     val adaptive = if (glassBackdrop != null) rememberRegionAdaptiveGlass(glassBackdrop) else null
     val miniInk = adaptive?.contentColor ?: MaterialTheme.colorScheme.onSurface
     val miniMuted = if (iosMini) miniInk.copy(alpha = .65f) else MaterialTheme.colorScheme.onSurfaceVariant
@@ -2301,7 +2310,6 @@ private fun MiniPlayer(
             dark = state.dark,
             interaction = glassHighlight,
             adaptive = requireNotNull(adaptive),
-            dockDepth = true,
         )
     } else Modifier
     val controlsEnabled by remember(compactProgress) { derivedStateOf { compactProgress() < 0.01f } }
@@ -6462,13 +6470,16 @@ private fun QmlLyricBackdrop(
             // independently from the three broad Monet colour fields. This is
             // intentionally much slower than lyric motion.
             if (coverBitmap != null) {
-                Image(
-                    bitmap = coverBitmap,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
+                // Ⓜ The breathing transform used to live on the SAME node as the
+                // 118dp blur, so every frame changed the layer and re-ran a
+                // full-screen Gaussian — GPU-bound jank with an idle CPU on old
+                // phones（「不怎么占资源但是就是非常卡」）. The animated transform now
+                // sits on a parent graphicsLayer; the blurred child's display list
+                // never changes, so its filtered output is rendered once and then
+                // only transformed.
+                Box(
+                    Modifier
                         .fillMaxSize()
-                        .blur(118.dp)
                         .graphicsLayer {
                             alpha = 0.34f
                             scaleX = 1.14f + 0.025f * sin(phase * 0.53f)
@@ -6477,7 +6488,16 @@ private fun QmlLyricBackdrop(
                             translationY = size.height * 0.035f * cos(phase * 0.37f)
                             rotationZ = 0.7f * sin(phase * 0.29f)
                         }
-                )
+                ) {
+                    Image(
+                        bitmap = coverBitmap,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .blur(118.dp)
+                    )
+                }
             }
             Canvas(Modifier.fillMaxSize()) {
                 val radius = maxOf(size.width, size.height) * 0.78f
