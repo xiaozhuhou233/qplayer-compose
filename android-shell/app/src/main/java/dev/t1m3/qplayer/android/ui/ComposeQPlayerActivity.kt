@@ -2557,18 +2557,24 @@ private fun CircularCoverProgress(
         label = "cover_ring_progress"
     )
     val infinite = rememberInfiniteTransition(label = "cover_ring_loading")
-    val wavePhase by infinite.animateFloat(
+    // Ⓜ These two drove the whole app's idle frame cost: the infinite transition
+    // ran unconditionally (30-60Hz), and each tick re-drew the progress ring —
+    // whose parent display list carries the 34dp-blurred background — so the
+    // GPU re-filtered that layer for every frame of EVERY session, entry after
+    // entry（「每次一进应用都会卡一会」）. The transition only ticks while someone
+    // reads it: subscribe conditionally, so an idle/paused player costs zero.
+    val wavePhase by if (state.loading) infinite.animateFloat(
         initialValue = 0f,
         targetValue = (2f * PI).toFloat(),
         animationSpec = infiniteRepeatable(tween(1300, easing = LinearEasing)),
         label = "cover_ring_wave_phase"
-    )
-    val loadingRotation by infinite.animateFloat(
+    ) else remember(state.loading) { androidx.compose.runtime.mutableStateOf(0f) }
+    val loadingRotation by if (state.loading) infinite.animateFloat(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing)),
         label = "cover_ring_loading_rotation"
-    )
+    ) else remember(state.loading) { androidx.compose.runtime.mutableStateOf(0f) }
     Canvas(modifier = modifier) {
         val strokeWidth = with(density) { 3.dp.toPx() }
         val stroke = Stroke(width = strokeWidth, cap = StrokeCap.Round)
