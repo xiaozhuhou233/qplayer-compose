@@ -15,16 +15,16 @@ internal fun lyricRenderPolicy(
     springEnabled: Boolean
 ): LyricRenderPolicy = LyricRenderPolicy(hasWordTiming || linearFallback, springEnabled)
 
-/** One measured glyph's interval in the same sweep used to paint its colour. */
+/** A glyph interval, either measured from the colour sweep or supplied by a unit. */
 internal class LyricGlyphTiming(
     groupStartMs: Long,
     groupDurationMs: Long,
     startFraction: Float,
     endFraction: Float
 ) {
-    // Painting needs the glyph interval, but the spring response belongs to
-    // the complete source syllable. Dividing both by glyph width makes narrow
-    // letters snap independently instead of travelling in an overlapping wave.
+    // Keep the supplied response duration separate from the reveal fraction.
+    // Colour timing uses measured fractions; main's independent glyph lift
+    // supplies each expanded unit's whole interval instead.
     val sourceDurationMs = groupDurationMs.coerceAtLeast(1L).toDouble()
     private val span = sourceDurationMs
     private val from = startFraction.coerceIn(0f, 1f).toDouble()
@@ -36,10 +36,10 @@ internal class LyricGlyphTiming(
         ((positionMs - startMs) / durationMs).coerceIn(0.0, 1.0).toFloat()
 }
 
-/** ui.zip WordGlyphMotion's word-wide, critically damped auxiliary lift.
+/** ui.zip WordGlyphMotion's critically damped auxiliary lift.
  * The optional long-note pulse is intentionally omitted: it rises past the
  * resting height and then falls back, making already-sung letters move again.
- * The trigger follows the actual measured colour edge, not an index-based lead.
+ * The trigger follows the caller's timing interval without an early lead.
  * Sampling is history-free: no frame integration, retargeting or layout work.
  */
 internal class LyricWordLift(
@@ -74,6 +74,13 @@ internal class LyricWordLift(
         return 1.0 - (1.0 + phase) * exp(-phase)
     }
 }
+
+/** main's glyph lift uses the expanded unit, not its whole source word. */
+internal fun lyricUnitLift(text: String, startMs: Long, endMs: Long): LyricWordLift =
+    LyricWordLift(
+        timing = LyricGlyphTiming(startMs, (endMs - startMs).coerceAtLeast(1L), 0f, 1f),
+        enabled = text.any { !it.isWhitespace() }
+    )
 
 internal fun lyricCascadeDelayMs(springEnabled: Boolean, manual: Boolean, distance: Int): Long =
     if (!springEnabled || manual) 0L else (distance - 1).coerceAtLeast(0) * 50L

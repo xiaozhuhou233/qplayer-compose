@@ -42,11 +42,11 @@ import com.kyant.backdrop.backdrops.rememberCombinedBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import com.kyant.backdrop.catalog.utils.DampedDragAnimation
 import com.kyant.backdrop.drawBackdrop
-import com.kyant.backdrop.effects.blur
-import com.kyant.backdrop.effects.lens
-import dev.t1m3.qplayer.android.ui.IosGlassThumbHighlight
-import dev.t1m3.qplayer.android.ui.IosGlassThumbInnerShadow
-import dev.t1m3.qplayer.android.ui.IosGlassThumbShadow
+import dev.t1m3.qplayer.android.ui.controlGlassEffects
+import dev.t1m3.qplayer.android.ui.rememberIosAdaptiveGlass
+import dev.t1m3.qplayer.android.ui.rememberIosControlGlassHighlight
+import dev.t1m3.qplayer.android.ui.controlGlassShadow
+import dev.t1m3.qplayer.android.ui.drawControlGlassSurface
 import androidx.compose.foundation.shape.CircleShape
 import kotlinx.coroutines.flow.collectLatest
 
@@ -124,6 +124,18 @@ fun LiquidToggle(
     }
 
     val trackBackdrop = rememberLayerBackdrop()
+    // The sampler must see exactly the same raw page/track combination as the lens.
+    val thumbBackdrop = rememberCombinedBackdrop(
+        backdrop,
+        rememberBackdrop(trackBackdrop) { drawBackdrop ->
+            val progress = dampedDragAnimation.pressProgress
+            val scaleX = lerp(2f / 3f, 0.75f, progress)
+            val scaleY = lerp(0f, 0.75f, progress)
+            scale(scaleX, scaleY) { drawBackdrop() }
+        }
+    )
+    val adaptive = rememberIosAdaptiveGlass(thumbBackdrop)
+    val glassHighlight = rememberIosControlGlassHighlight()
 
     Box(
         modifier,
@@ -155,41 +167,17 @@ fun LiquidToggle(
                     onClick { latestSelect(!latestSelected()); true }
                 }
                 .then(dampedDragAnimation.modifier)
+                .then(adaptive.modifier)
                 .drawBackdrop(
-                    backdrop = rememberCombinedBackdrop(
-                        backdrop,
-                        rememberBackdrop(trackBackdrop) { drawBackdrop ->
-                            val progress = dampedDragAnimation.pressProgress
-                            val scaleX = lerp(2f / 3f, 0.75f, progress)
-                            val scaleY = lerp(0f, 0.75f, progress)
-                            scale(scaleX, scaleY) {
-                                drawBackdrop()
-                            }
-                        }
-                    ),
+                    backdrop = thumbBackdrop,
                     shape = { CircleShape },
                     effects = {
-                        val progress = dampedDragAnimation.pressProgress
-                        blur(8f.dp.toPx() * (1f - progress))
-                        if (refraction) lens(
-                            7f.dp.toPx() * progress,
-                            20f.dp.toPx() * progress,
-                            depthEffect = true,
-                            chromaticAberration = true,
-                            centerConvexity = 0.085f * progress,
-                        )
+                        controlGlassEffects(adaptive, refraction)
                     },
-                    highlight = {
-                        val progress = dampedDragAnimation.pressProgress
-                        IosGlassThumbHighlight.copy(
-                            alpha = IosGlassThumbHighlight.alpha * progress
-                        )
-                    },
-                    shadow = { IosGlassThumbShadow },
-                    innerShadow = {
-                        val progress = dampedDragAnimation.pressProgress
-                        IosGlassThumbInnerShadow.copy(alpha = progress)
-                    },
+                    highlight = { glassHighlight.value },
+                    shadow = { controlGlassShadow(dark, adaptive) },
+                    onDrawSurface = { drawControlGlassSurface(dark, adaptive) },
+                    innerShadow = null,
                     layerBlock = {
                         scaleX = dampedDragAnimation.scaleX
                         scaleY = dampedDragAnimation.scaleY
@@ -197,10 +185,6 @@ fun LiquidToggle(
                         scaleX /= 1f - (velocity * 0.75f).fastCoerceIn(-0.2f, 0.2f)
                         scaleY *= 1f - (velocity * 0.25f).fastCoerceIn(-0.2f, 0.2f)
                     },
-                    onDrawSurface = {
-                        val progress = dampedDragAnimation.pressProgress
-                        drawRect(Color.White.copy(alpha = 1f - progress))
-                    }
                 )
                 .size(40f.dp, 24f.dp)
         )

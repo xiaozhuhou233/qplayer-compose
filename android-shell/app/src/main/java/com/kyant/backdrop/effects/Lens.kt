@@ -9,14 +9,42 @@ import androidx.compose.ui.util.fastCoerceAtLeast
 import androidx.compose.ui.util.fastCoerceAtMost
 import com.kyant.backdrop.BackdropEffectScope
 import com.kyant.backdrop.internal.RoundedRectRefractionShaderString
+import com.kyant.backdrop.internal.ApkAdaptiveRefractionShaderString
 import com.kyant.backdrop.internal.RoundedRectRefractionWithDispersionShaderString
 import com.kyant.backdrop.internal.RuntimeShaderEffect
 import com.kyant.backdrop.isRuntimeShaderSupported
+
+/** Catalog APK adaptive material: 24dp bevel, half-short-side displacement,
+ * depth enabled, no chromatic dispersion and no additional central dome.
+ * Progress only preserves QPlayer's existing press/release transitions.
+ */
+internal fun BackdropEffectScope.apkAdaptiveLens(progress: Float = 1f) {
+    if (!isRuntimeShaderSupported()) return
+    if (!progress.isFinite() || !size.minDimension.isFinite() || size.minDimension <= 0f) return
+    val p = progress.coerceIn(0f, 1f)
+    if (p <= 0f) return
+    val height = APK_ADAPTIVE_REFRACTION_HEIGHT_DP * density * p
+    val amount = size.minDimension * APK_ADAPTIVE_REFRACTION_SIZE_FRACTION * p
+    if (padding > 0f) padding = (padding - height).fastCoerceAtLeast(0f)
+    val radii = cornerRadii ?: throwUnsupportedSDFException()
+    val shader = obtainRuntimeShader("ApkAdaptiveRefraction", ApkAdaptiveRefractionShaderString)
+    shader.apply {
+        setFloatUniform("size", size.width, size.height)
+        setFloatUniform("offset", -padding, -padding)
+        setFloatUniform("cornerRadii", radii)
+        setFloatUniform("refractionHeight", height)
+        setFloatUniform("refractionAmount", -amount)
+        setFloatUniform("depthEffect", 1f)
+    }
+    effect(RuntimeShaderEffect(shader, "content"))
+}
 
 /**
  * [centerConvexity] adds a shallow central dome to the existing edge refraction.
  * Zero preserves the reference's edge-only lens. It deforms only the backdrop,
  * not foreground content, and uses the same shader pass and texture samples.
+ * Edge width/displacement are size-bounded to avoid turning small controls into
+ * an inverted mirror. The cap's finite slope keeps the inner/outer joins stable.
  */
 fun BackdropEffectScope.lens(
     @FloatRange(from = 0.0) refractionHeight: Float,
@@ -26,10 +54,12 @@ fun BackdropEffectScope.lens(
     @FloatRange(from = 0.0, to = 0.15) centerConvexity: Float = 0f,
 ) {
     if (!isRuntimeShaderSupported()) return
-    if (refractionHeight <= 0f || refractionAmount <= 0f) return
+    val bevelHeight = glassBevelHeight(refractionHeight, size.minDimension)
+    val bevelDisplacement = glassBevelDisplacement(refractionAmount, bevelHeight)
+    if (bevelHeight <= 0f || bevelDisplacement <= 0f) return
 
     if (padding > 0f) {
-        padding = (padding - refractionHeight).fastCoerceAtLeast(0f)
+        padding = (padding - bevelHeight).fastCoerceAtLeast(0f)
     }
 
     val cornerRadii = cornerRadii
@@ -51,11 +81,11 @@ fun BackdropEffectScope.lens(
                 setFloatUniform("size", size.width, size.height)
                 setFloatUniform("offset", -padding, -padding)
                 setFloatUniform("cornerRadii", cornerRadii)
-                setFloatUniform("refractionHeight", refractionHeight)
-                setFloatUniform("refractionAmount", -refractionAmount)
+                setFloatUniform("refractionHeight", bevelHeight)
+                setFloatUniform("refractionAmount", -bevelDisplacement)
                 setFloatUniform("depthEffect", if (depthEffect) 1f else 0f)
                 setFloatUniform("centerConvexity",
-                    if (centerConvexity.isFinite()) centerConvexity.coerceIn(0f, 0.15f) else 0f)
+                    if (centerConvexity.isFinite()) centerConvexity.coerceIn(0f, GLASS_MAX_CENTER_CONVEXITY) else 0f)
                 if (chromaticAberration) {
                     setFloatUniform("chromaticAberration", 1f)
                 }

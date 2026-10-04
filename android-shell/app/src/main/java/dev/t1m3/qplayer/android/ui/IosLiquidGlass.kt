@@ -19,8 +19,8 @@ import kotlin.math.tanh
 /**
  * The app's single Backdrop glass surface.
  *
- * Shared adaptive material, using bounded background thumbnails rather than
- * full-resolution readback. Sampling pauses during dock/expansion motion.
+ * Shared BiliPai BALANCED material with its default STABLE readability mode.
+ * The backdrop remains live; foreground contrast uses the theme, without readback.
  * The interaction transform, edge highlight, shadow and content stay in one
  * drawBackdrop node. Splitting these into sibling Boxes changes the coordinate
  * space and breaks the effect.
@@ -32,6 +32,7 @@ internal fun IosLiquidGlass(
     modifier: Modifier = Modifier,
     shape: Shape = CircleShape,
     interaction: InteractiveHighlight? = null,
+    lite: Boolean = false,
     content: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit = {},
 ) {
     val adaptive = rememberRegionAdaptiveGlass(backdrop)
@@ -43,6 +44,7 @@ internal fun IosLiquidGlass(
                 shape = shape,
                 interaction = interaction,
                 adaptive = adaptive,
+                lite = lite,
             )
         ),
         // Icons share the glass's measured center at every size, including
@@ -65,21 +67,20 @@ internal fun iosLiquidGlassModifier(
     shape: Shape = CircleShape,
     interaction: InteractiveHighlight? = null,
     adaptive: IosAdaptiveGlassState = rememberRegionAdaptiveGlass(backdrop),
+    lite: Boolean = false,
 ): Modifier {
-    val tint = LocalGlassTint.current
     val refraction = LocalGlassRefraction.current
+    val glassHighlight = if (lite) null else rememberIosControlGlassHighlight()
     return Modifier
         .then(adaptive.modifier)
         .drawBackdrop(
             backdrop = backdrop,
             shape = { shape },
             effects = {
-                apiGlassEffects(
-                    luminance = adaptive.luminance,
-                    refraction = refraction,
-                    // Deeper edge displacement on top of the lens pass's centre dome.
-                    refractionHeight = 30.dp.toPx(),
-                    refractionAmount = 30.dp.toPx(),
+                    controlGlassEffects(
+                        adaptive = adaptive,
+                        refraction = refraction && !lite,
+                        blurDp = if (lite) 1.5f else BiliPaiGlassParameters.blurDp,
                 )
             },
             layerBlock = interaction?.let { highlight ->
@@ -104,11 +105,11 @@ internal fun iosLiquidGlassModifier(
             onDrawBackdrop = { drawBackdrop ->
                 drawBackdrop()
             },
-            shadow = { IosGlassShadow },
-            innerShadow = { iosGlassInnerShadow(adaptive.luminance) },
-            highlight = { IosGlassHighlight },
+            shadow = if (lite) null else ({ controlGlassShadow(dark, adaptive) }),
+            innerShadow = null,
+            highlight = if (lite) null else ({ glassHighlight?.value }),
             onDrawSurface = {
-                drawRect(iosGlassSurface(dark, tint, adaptive.luminance))
+                drawControlGlassSurface(dark, adaptive)
             },
         )
         .then(interaction?.modifier ?: Modifier)

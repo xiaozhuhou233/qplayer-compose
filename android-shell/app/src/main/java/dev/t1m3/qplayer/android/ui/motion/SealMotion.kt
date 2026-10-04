@@ -13,6 +13,14 @@ internal object SealMotion {
     const val DURATION_EXIT = 200
     const val DURATION_AXIS = 300
 
+    fun lowSpecPage(forward: Boolean): ContentTransform {
+        val direction = if (forward) 1 else -1
+        return (slideInHorizontally(tween(220), initialOffsetX = { direction * it / 12 }) +
+            fadeIn(tween(180))) togetherWith
+            (slideOutHorizontally(tween(180), targetOffsetX = { -direction * it / 12 }) +
+                fadeOut(tween(140)))
+    }
+
     fun page(forward: Boolean, preset: Int): ContentTransform {
         if (preset == SettingsCatalog.PAGE_TRANSITION_NONE)
             return EnterTransition.None togetherWith ExitTransition.None
@@ -57,8 +65,6 @@ internal object SealMotion {
      * the outgoing one grows past the camera to 106% (back: shrinks to 92%) while fading
      * out. The scale runs through scaleIn/scaleOut, which land in ONE graphicsLayer per
      * page — never Modifier.scale chains — so every frame is a layer-property update.
-     * The blur of the leaving page is applied by the call site at a FIXED radius, so no
-     * RenderEffect is rebuilt during the motion.
      */
     fun sharedPage(forward: Boolean): ContentTransform {
         val duration = DURATION_AXIS + 80

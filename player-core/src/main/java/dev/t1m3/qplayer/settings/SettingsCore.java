@@ -455,6 +455,8 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         } else if (controller != null) {
             switch (spec.key) {
                 case "monet": controller.setMonetEnabled(bool("monet")); break;
+                case SettingsCatalog.LOW_SPEC_MODE_KEY:
+                    controller.setLowSpecMode(bool(SettingsCatalog.LOW_SPEC_MODE_KEY)); break;
                 case "unblock": controller.setUnblockEnabled(bool("unblock")); break;
                 case "mirror": controller.setUpdateMirror(bool("mirror")); break;
                 case "fade": controller.setFadeEnabled(bool("fade")); break;
@@ -510,6 +512,7 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
     private void pushToController() {
         if (controller == null) return;
         controller.setMonetEnabled(bool("monet"));
+        controller.setLowSpecMode(bool(SettingsCatalog.LOW_SPEC_MODE_KEY));
         controller.setUnblockEnabled(bool("unblock"));
         controller.setUpdateMirror(bool("mirror"));
         controller.setFadeEnabled(bool("fade"));

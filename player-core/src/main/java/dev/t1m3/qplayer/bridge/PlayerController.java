@@ -129,6 +129,8 @@ public final class PlayerController {
                 return t;
             }, new ThreadPoolExecutor.DiscardOldestPolicy());
     private final AtomicLong homeLoadGeneration = new AtomicLong();
+    private boolean homePreloadStarted;
+    private boolean homePreloadLoggedIn;
 
     // Interactive searches must not queue behind cover/home/playlist requests on
     // worker, and rapid typing must not leave an unbounded list of obsolete searches
@@ -276,6 +278,7 @@ public final class PlayerController {
     // that was queued for a track that is no longer the next one returns without
     // fetching anything (see precacheNextAudio).
     private final AtomicLong precacheGeneration = new AtomicLong();
+    private volatile boolean lowSpecMode;
     // The one delayed job in this class: asking for the PLAYING track's own
     // measurements a few seconds after it starts. Every other probe is fired the
     // moment its source becomes known; this one must NOT be early, because the first
@@ -452,6 +455,7 @@ public final class PlayerController {
 
     private final List<Track> library = new CopyOnWriteArrayList<>();
     private final List<Track> queue = new CopyOnWriteArrayList<>();
+    private final Object queueMoveLock = new Object();
     /** User-curated "play later" list — unlike {@link #queue}, never auto-changes when
      *  you tap a song elsewhere; only explicit add/remove (song long-press menu) and
      *  the queue-page toggle touch it. Local-only, no netease sync. */
@@ -2240,6 +2244,13 @@ public final class PlayerController {
      */
     public void setStemEditRenderer(StemEditRenderer renderer) {
         this.stemEditRenderer = renderer;
+    }
+
+    /** Avoid speculative full-track downloads and stem renders on constrained devices. */
+    public void setLowSpecMode(boolean enabled) {
+        if (lowSpecMode == enabled) return;
+        lowSpecMode = enabled;
+        if (enabled) precacheGeneration.incrementAndGet();
     }
 
     /**
@@ -4609,7 +4620,7 @@ public final class PlayerController {
      *  does not trim instead of waiting for one. */
     private void requestSilenceProfile(Track t, String src) {
         SilenceProfiler profiler = silenceProfiler;
-        if (profiler == null || t == null || src == null || src.isEmpty()) return;
+        if (!transitionEnabled || profiler == null || t == null || src == null || src.isEmpty()) return;
         final String key = silenceKey(t);
         if (key == null) return;
         if (silenceProfiles.containsKey(key) || !probingSilence.add(key)) return;
@@ -4617,7 +4628,15 @@ public final class PlayerController {
         probeWorker.submit(() -> {
             SilenceProfile p = null;
             try {
+                // Cached tracks were decoded again on every process start. Read
+                // the persistent answer on this worker before opening a decoder.
+                // Also honor a setting change while this job waited in the queue.
+                if (!transitionEnabled || silenceProfileOf(t) != null) return;
                 p = profiler.probe(src, durationMs);
+                if (p != null) {
+                    silenceProfiles.put(key, p);
+                    diskCache.cacheSilence(key, p.toBytes());
+                }
             } catch (Throwable e) {
                 Logger.warn("silence probe failed for {}: {}", key, e.toString());
             } finally {
@@ -4627,8 +4646,6 @@ public final class PlayerController {
                 Logger.info("silence probe gave up for {}", key);
                 return;
             }
-            silenceProfiles.put(key, p);
-            diskCache.cacheSilence(key, p.toBytes());
             Logger.info("silence profile for {}: {}", key, p);
         });
     }
@@ -4756,7 +4773,7 @@ public final class PlayerController {
      * </ul>
      */
     private void precacheNextAudio(Track t) {
-        if (!transitionEnabled || t == null) return;
+        if (!transitionEnabled || lowSpecMode || t == null) return;
         // The three ways the ordinary case can be missed, each one line. The boundary
         // itself also prints where its source came from ("served from the audio cache,
         // nothing to resolve" / "not cached: resolved inside the boundary's window"), so
@@ -5270,7 +5287,7 @@ public final class PlayerController {
      */
     private void requestStemEdit(final Track t, final String sourcePath) {
         final StemEditRenderer renderer = stemEditRenderer;
-        if (renderer == null || !transitionEnabled || t == null
+        if (renderer == null || !transitionEnabled || lowSpecMode || t == null
                 || sourcePath == null || sourcePath.isEmpty()) {
             return;
         }
@@ -5405,7 +5422,7 @@ public final class PlayerController {
         if (outBase == null) return;
         final long generation = precacheGeneration.get();
         precacheWorker.submit(() -> {
-            if (generation != precacheGeneration.get()) return;      // the queue moved on
+            if (generation != precacheGeneration.get() || lowSpecMode) return;
             // The two numbers a FUSION needs are this boundary's own, and they are known here as
             // well as they ever will be: the blend length the pair will be given, and the
             // position the incoming deck would start at without a fusion (which is the reference
@@ -5422,7 +5439,7 @@ public final class PlayerController {
                     outgoingGrid != null ? outgoingGrid.firstBeatMs() : 0d,
                     speed,
                     blendMs, contentStart, vocalOutMs,
-                    () -> generation == precacheGeneration.get(),
+                    () -> generation == precacheGeneration.get() && !lowSpecMode,
                     aceStepBed);
             StemEditRenderer.Result result = renderer.render(request);
             if (result == null) {
@@ -5524,7 +5541,7 @@ public final class PlayerController {
      *  be resolved first does not do that resolve anywhere near the main thread. */
     private void probeBeatProfile(Track t, java.util.function.Supplier<String> source) {
         BeatProfiler profiler = beatProfiler;
-        if (profiler == null || t == null) return;
+        if (!transitionEnabled || profiler == null || t == null) return;
         final String key = silenceKey(t);
         if (key == null) return;
         if (beatProfiles.containsKey(key) || !probingBeats.add(key)) return;
@@ -5532,7 +5549,7 @@ public final class PlayerController {
         beatWorker.submit(() -> {
             BeatProfile p = null;
             try {
-                if (beatProfileOf(t) != null) return;    // the disk cache already answered
+                if (!transitionEnabled || beatProfileOf(t) != null) return;
                 String src = source.get();
                 if (src == null || src.isEmpty()) {
                     Logger.info("beat probe: no source for {} yet", key);
@@ -6266,20 +6283,27 @@ public final class PlayerController {
 
     /** Move a slot in the live queue from 'from' to 'to'. */
     public void moveInQueue(int from, int to) {
-        if (from < 0 || from >= queue.size() || to < 0 || to >= queue.size() || from == to) return;
-        Track t = queue.remove(from);
-        queue.add(to, t);
-        if (playIndex == from) {
-            playIndex = to;
-            index.set(to);
-        } else if (from < playIndex && to >= playIndex) {
-            playIndex--;
-            index.set(playIndex);
-        } else if (from > playIndex && to <= playIndex) {
-            playIndex++;
-            index.set(playIndex);
+        synchronized (queueMoveLock) {
+            if (from < 0 || from >= queue.size() || to < 0 || to >= queue.size() || from == to) return;
+            Track t = queue.remove(from);
+            queue.add(to, t);
+            if (playIndex == from) {
+                playIndex = to;
+                index.set(to);
+            } else if (from < playIndex && to >= playIndex) {
+                playIndex--;
+                index.set(playIndex);
+            } else if (from > playIndex && to <= playIndex) {
+                playIndex++;
+                index.set(playIndex);
+            }
+            // A restored session has not opened its backend yet. Its one-shot
+            // resume position belongs to the occurrence, not the old queue slot.
+            if (pendingResumeIndex == from) pendingResumeIndex = to;
+            else if (from < pendingResumeIndex && to >= pendingResumeIndex) pendingResumeIndex--;
+            else if (from > pendingResumeIndex && to <= pendingResumeIndex) pendingResumeIndex++;
+            queueTracks.set(new ArrayList<>(queue));
         }
-        queueTracks.set(new ArrayList<>(queue));
     }
 
     /** Drop a slot from the queue; keep playing the right track. */
@@ -7112,6 +7136,7 @@ public final class PlayerController {
         scrobbleOutgoingTrack(pendingNaturalEnd);
         pendingNaturalEnd = false;
         playIndex = i;
+        final Track t = queue.get(i);
         final long currentCoverRevision = coverRevision.incrementAndGet();
         // Consumed unconditionally on every call (see field comment), so a saved
         // session position only ever gets one shot at applying, and only to the
@@ -7224,8 +7249,9 @@ public final class PlayerController {
         // on every part change. This also keeps a video track on its surface
         // (loading) from the outset instead of showing artwork first and swapping to
         // the picture mid-load.
-        final boolean incomingIsBili = queue.get(i).source == Track.Source.BILI;
+        final boolean incomingIsBili = t.source == Track.Source.BILI;
         post(() -> {
+            if (!isCurrentTrackRequest(t, currentCoverRevision)) return;
             loading.set(true);
             biliPlaying.set(incomingIsBili);
             // Belongs to the outgoing part; the incoming one's own fetch republishes.
@@ -7238,8 +7264,6 @@ public final class PlayerController {
         // Round 34: the AI DJ's own continuation is decided here, where a track has just started —
         // see maybeContinueAiPlaylist().
         maybeContinueAiPlaylist();
-        final int idx = i;
-        final Track t = queue.get(i);
         // Start lyric loading at selection time, in parallel with audio URL
         // resolution. Previously a normal NetEase track waited for songUrlInfo()
         // and any unblock fallback to finish, so playback could already be audible
@@ -7256,8 +7280,9 @@ public final class PlayerController {
             loadCustomLyrics(t, i);
         }
         post(() -> {
+            if (!isCurrentTrackRequest(t, currentCoverRevision)) return;
             applyTrackLyricOffset(t);
-            index.set(idx);
+            index.set(playIndex);
             currentFilePath.set(t.source == Track.Source.LOCAL && t.filePath != null ? t.filePath : "");
             title.set(orEmpty(t.title));
             artist.set(orEmpty(t.artist));
@@ -7286,9 +7311,9 @@ public final class PlayerController {
             consecutivePlaybackFailures = 0;
             stoppedLyricPositionMs = Math.max(0L, backend.position());
             playbackStarted = true;
-            post(() -> loading.set(false));
+            post(() -> { if (isCurrentTrackRequest(t, currentCoverRevision)) loading.set(false); });
             playingIntent = true;
-            post(() -> playing.set(true));
+            post(() -> { if (isCurrentTrackRequest(t, currentCoverRevision)) playing.set(true); });
             notifyPlayback();
         } else if (t.source == Track.Source.LOCAL) {
             String src = t.playable();
@@ -7297,7 +7322,7 @@ public final class PlayerController {
             Logger.info("play local: {}", t.title);
             playBackend(src, resumeMs);
             playingIntent = true;
-            post(() -> playing.set(true));
+            post(() -> { if (isCurrentTrackRequest(t, currentCoverRevision)) playing.set(true); });
             notifyPlayback();
         } else if (t.source == Track.Source.NETEASE) {
             // Always prefer a cached local file over (re-)streaming, regardless of
@@ -7307,7 +7332,7 @@ public final class PlayerController {
                 Logger.info("play netease (audio cache): {}", t.title);
                 playBackend(cached, resumeMs);
                 playingIntent = true;
-                post(() -> playing.set(true));
+                post(() -> { if (isCurrentTrackRequest(t, currentCoverRevision)) playing.set(true); });
                 notifyPlayback();
                 // The audio fast-path skips resolveAndPlayNetease, so load the lyrics
                 // (cache-first inside) here too — else a cached song plays wordless.
@@ -7321,7 +7346,7 @@ public final class PlayerController {
                 Logger.info("play netease (cached url): {}", t.title);
                 playBackend(t.playable(), resumeMs);
                 playingIntent = true;
-                post(() -> playing.set(true));
+                post(() -> { if (isCurrentTrackRequest(t, currentCoverRevision)) playing.set(true); });
                 notifyPlayback();
                 // Populate the disk cache so the next play is local (skip trial clips).
                 cacheAudioAsync(t);
@@ -7339,7 +7364,7 @@ public final class PlayerController {
                 Logger.info("play custom-api (cached url): {}", t.title);
                 playBackend(t.playable(), resumeMs);
                 playingIntent = true;
-                post(() -> playing.set(true));
+                post(() -> { if (isCurrentTrackRequest(t, currentCoverRevision)) playing.set(true); });
                 notifyPlayback();
                 // The cached-url fast path skips resolveAndPlayCustom, so load lyrics
                 // here too — mirrors loadNeteaseLyrics's cached-audio fast path above.
@@ -7354,13 +7379,13 @@ public final class PlayerController {
     }
 
     /** Feed coverBytes for the fluid backdrop: local tracks carry embedded
-     *  bytes; NETEASE tracks download lazily off-thread, keyed by queue index
-     *  so a stale fetch for a skipped-past track is dropped. */
+     *  bytes; network tracks download off-thread. Identity follows queue moves,
+     *  while the selection revision rejects a stale fetch after a track switch. */
     private void updateCover(Track t, int expectedIndex, long revision) {
         if (t.coverBytes != null) {   // present (embedded, or preloaded by preloadTrack)
             final byte[] cb = t.coverBytes;
             final String path = coverDiskPath(t);   // local file for the QML cover image
-            post(() -> { if (playIndex == expectedIndex) { applyCover(cb, revision); coverPath.set(path); } });
+            post(() -> { if (isCurrentTrackRequest(t, revision)) { applyCover(cb, revision); coverPath.set(path); } });
             notifyPlayback();
             return;
         }
@@ -7386,7 +7411,7 @@ public final class PlayerController {
                 t.coverBytes = data;
                 final String path = localCover;
                 post(() -> {
-                    if (playIndex == expectedIndex) {
+                    if (isCurrentTrackRequest(t, revision)) {
                         applyCover(data, revision);
                         coverPath.set(path);
                     }
@@ -7400,7 +7425,7 @@ public final class PlayerController {
         // Its lower-quality seed is replaced (never overwritten) by the full one.
         scheduleFastMonet(t, revision);
         post(() -> {
-            if (playIndex == expectedIndex) {
+            if (isCurrentTrackRequest(t, revision)) {
                 applyCover(null, revision);
                 coverPath.set("");
             }
@@ -7422,7 +7447,7 @@ public final class PlayerController {
             if (data != null && data.length > 0) {
                 t.coverBytes = data;
                 final String path = cachedImg;
-                post(() -> { if (playIndex == expectedIndex) { applyCover(data, revision); coverPath.set(path); } });
+                post(() -> { if (isCurrentTrackRequest(t, revision)) { applyCover(data, revision); coverPath.set(path); } });
                 notifyPlayback();
                 return;
             }
@@ -7437,7 +7462,7 @@ public final class PlayerController {
             if (imgPath != null) writeBytesToFile(data, imgPath);
             final String path = imgPath;
             post(() -> {
-                if (playIndex == expectedIndex) {
+                if (isCurrentTrackRequest(t, revision)) {
                     applyCover(data, revision);
                     if (path != null) coverPath.set(path);
                 }
@@ -7724,7 +7749,7 @@ public final class PlayerController {
         // boundary is decided, instead of measuring inside the nine-second lead.
         // A streamed track has no url yet at this point, so it is measured later (or
         // not at all) — see armSilenceTrim.
-        if (t.source == Track.Source.NETEASE && t.neteaseId != 0L) {
+        if (transitionEnabled && t.source == Track.Source.NETEASE && t.neteaseId != 0L) {
             String cached = diskCache.getAudio(t.neteaseId);
             if (cached != null) {
                 requestSilenceProfile(t, cached);
@@ -7732,7 +7757,7 @@ public final class PlayerController {
                 // that wants to align the two grids needs the incoming track's as
                 // well, and a track whose audio is already on disk costs nothing to
                 // measure now rather than inside a boundary's lead window.
-                requestBeatProfile(t, cached);
+                if (beatAlignmentEnabled) requestBeatProfile(t, cached);
             }
         }
     }
@@ -8251,17 +8276,17 @@ public final class PlayerController {
      *  audio-cache fast path, which bypasses the URL resolve that used to fetch them. */
     private void loadNeteaseLyrics(Track t, int expectedIndex) {
         final long songId = t.neteaseId;
+        final long requestGeneration = lyricLoadGeneration.get();
         // Nothing to fetch: end the wait immediately instead of leaving the host
         // page in its loading state forever.
         if (songId == 0) {
-            post(() -> lyricsLoading.set(false));
+            post(() -> { if (isCurrentLyricRequest(t, requestGeneration)) lyricsLoading.set(false); });
             return;
         }
-        final long requestGeneration = lyricLoadGeneration.get();
         List<LyricLine> mem = lyricMem.get(songId);
         if (mem != null) {   // preloaded / recently played -> apply instantly
             post(() -> {
-                if (isCurrentLyricRequest(songId, expectedIndex, requestGeneration)) {
+                if (isCurrentLyricRequest(t, requestGeneration)) {
                     applyLyrics(cacheBestLyrics(songId, mem));
                 }
             });
@@ -8302,24 +8327,33 @@ public final class PlayerController {
             }
             final List<LyricLine> fetched = ly;
             post(() -> {
-                if (isCurrentLyricRequest(songId, expectedIndex, requestGeneration)) {
+                if (isCurrentLyricRequest(t, requestGeneration)) {
                     applyLyrics(cacheBestLyrics(songId, fetched));
                 }
             });
-            if (isCurrentLyricRequest(songId, expectedIndex, requestGeneration)) {
+            if (isCurrentLyricRequest(t, requestGeneration)) {
                 refreshIncompleteLyricCache(songId, fetched);
             }
         });
     }
 
-    /** True only for the request belonging to the currently audible track. The
-     * index check protects ordinary queue movement; the generation + song-id checks
-     * protect queue replacement/reordering where the same index is reused. */
-    private boolean isCurrentLyricRequest(long songId, int expectedIndex, long requestGeneration) {
-        if (lyricLoadGeneration.get() != requestGeneration || playIndex != expectedIndex) return false;
-        Track current = currentTrack();
-        return current != null && current.source == Track.Source.NETEASE
-                && current.neteaseId == songId;
+    /** Queue slots move while a request is in flight. Identity follows that
+     * occurrence; the generation still rejects a late answer after A -> B -> A. */
+    private boolean isCurrentLyricRequest(Track track, long requestGeneration) {
+        synchronized (queueMoveLock) {
+            return lyricLoadGeneration.get() == requestGeneration && currentTrack() == track;
+        }
+    }
+
+    /** The cover revision advances on each selection, but not on a queue edit. */
+    private boolean isCurrentTrackRequest(Track track, long requestRevision) {
+        synchronized (queueMoveLock) {
+            return coverRevision.get() == requestRevision && currentTrack() == track;
+        }
+    }
+
+    private void skipUnplayableRequest(Track track, long requestRevision, String reason) {
+        if (isCurrentTrackRequest(track, requestRevision)) skipUnplayable(playIndex, reason);
     }
 
     /** CUSTOM_API counterpart to {@link #loadNeteaseLyrics}: only fetches when the
@@ -8328,15 +8362,16 @@ public final class PlayerController {
      *  head-of-line-blocking reason resolveAndPlayCustom does. */
     private void loadCustomLyrics(Track t, int expectedIndex) {
         final String id = t.customId;
+        final long requestGeneration = lyricLoadGeneration.get();
         // No lyric endpoint configured for this source: end the wait at once
         // rather than leaving the host page loading indefinitely.
         if (id == null || id.isEmpty()) {
-            post(() -> lyricsLoading.set(false));
+            post(() -> { if (isCurrentLyricRequest(t, requestGeneration)) lyricsLoading.set(false); });
             return;
         }
         List<LyricLine> mem = customLyricMem.get(id);
         if (mem != null) {
-            post(() -> { if (playIndex == expectedIndex) applyLyrics(mem); });
+            post(() -> { if (isCurrentLyricRequest(t, requestGeneration)) applyLyrics(mem); });
             return;
         }
         final CustomApiConfig cfg = customApiConfig;
@@ -8358,7 +8393,7 @@ public final class PlayerController {
                 Logger.warn("custom-api lyric fetch failed for {}: {}", id, e.getMessage());
             }
             final List<LyricLine> lines = ly;
-            post(() -> { if (playIndex == expectedIndex) applyLyrics(lines); });
+            post(() -> { if (isCurrentLyricRequest(t, requestGeneration)) applyLyrics(lines); });
         });
     }
 
@@ -8773,7 +8808,7 @@ public final class PlayerController {
             try {
                 // Rapid taps: skip the round trip entirely once another track has
                 // taken over, so the newest resolve is not stuck behind this one.
-                if (playIndex != expectedIndex) return;
+                if (!isCurrentTrackRequest(t, expectedCoverRevision)) return;
                 Logger.info("netease: resolve song {} (loggedIn={}, level={})",
                         songId, netease.isLoggedIn(), playLevel);
                 // Legacy /search/get returns no album picUrl, so search-sourced
@@ -8799,7 +8834,6 @@ public final class PlayerController {
                 if (url == null && info != null && info.trial && info.url != null) {
                     url = info.url; // nothing better available — play the preview clip
                 }
-                final boolean isUnblocked = unblocked;
                 final boolean isTrialOnly = !unblocked && info != null && info.trial && url != null;
                 Logger.info("netease: url={} (unblocked={}, trial={})", url, unblocked, isTrialOnly);
                 Logger.info("netease: timing resolve total +{}ms (click-to-resolve-start {}ms)",
@@ -8808,18 +8842,18 @@ public final class PlayerController {
                 // Hop to the main thread for the backend control (works backgrounded);
                 // UI Property writes still marshal to the render thread via post().
                 onMain(() -> {
-                    if (playIndex != expectedIndex) return; // user moved on
+                    if (!isCurrentTrackRequest(t, expectedCoverRevision)) return; // user moved on
                     if (playUrl == null) {
                         Logger.warn("netease song {} has no url (blocked/VIP/login required)", songId);
-                        skipUnplayable(expectedIndex, netease.isLoggedIn()
+                        skipUnplayableRequest(t, expectedCoverRevision, netease.isLoggedIn()
                                 ? "VIP/灰色歌曲" : "请先登录");
                         return;
                     }
                     t.streamUrl = playUrl;
                     t.trial = isTrialOnly;
                     post(() -> {
-                        if (isUnblocked) showToast("已为该歌曲自动换源");
-                        else if (isTrialOnly) showToast("当前歌曲仅可试听");
+                        if (!isCurrentTrackRequest(t, expectedCoverRevision)) return;
+                        if (isTrialOnly) showToast("当前歌曲仅可试听");
                         title.set(orEmpty(t.title));
                         artist.set(orEmpty(t.artist));
                         playingArtistIdsCsv.set(orEmpty(t.artistIdsCsv));
@@ -8834,18 +8868,18 @@ public final class PlayerController {
                     Logger.info("play netease: {} — {}", t.title, playUrl);
                     playBackend(playUrl, resumeMs);
                     playingIntent = true;
-                    post(() -> playing.set(true));
+                    post(() -> { if (isCurrentTrackRequest(t, expectedCoverRevision)) playing.set(true); });
                     notifyPlayback();
                     // Sound is already starting: fill in the fields the search row
                     // did not carry (album id, cover) on the general queue, where an
                     // extra round trip cannot delay anything the user is waiting on.
-                    enrichTrackMetadataAsync(t, expectedIndex);
+                    enrichTrackMetadataAsync(t, expectedCoverRevision);
                     // Populate the disk cache so later plays are served locally.
                     cacheAudioAsync(t);
                 });
             } catch (Throwable e) {
                 Logger.warn("netease resolve failed for {}: {}", songId, e.getMessage());
-                onMain(() -> skipUnplayable(expectedIndex, "解析失败"));
+                onMain(() -> skipUnplayableRequest(t, expectedCoverRevision, "解析失败"));
             }
         });
     }
@@ -8863,7 +8897,7 @@ public final class PlayerController {
      *  properties and the cover. Running this before the resolve — as it used to —
      *  cost every tapped search result a whole extra round trip before its audio
      *  URL was even requested. */
-    private void enrichTrackMetadataAsync(Track t, int expectedIndex) {
+    private void enrichTrackMetadataAsync(Track t, long requestRevision) {
         if (t.neteaseId == 0L || !needsSongDetail(t)) return;
         worker.submit(() -> {
             NeteaseSong sd;
@@ -8878,7 +8912,7 @@ public final class PlayerController {
                     System.currentTimeMillis() - t0);
             if (sd == null) return;
             onMain(() -> {
-                if (playIndex != expectedIndex) return;   // user moved on
+                if (!isCurrentTrackRequest(t, requestRevision)) return;   // user moved on
                 if (t.title == null || t.title.isEmpty()) t.title = sd.name;
                 if (t.artist == null || t.artist.isEmpty()) t.artist = sd.artist;
                 // Ⓜ The listener: 「在源头补 Track.albumId / artistId，这个功能你早就写过了……你只要把它
@@ -8901,7 +8935,7 @@ public final class PlayerController {
                 if (t.coverUrl == null || t.coverUrl.isEmpty()) t.coverUrl = sd.coverUrl;
                 if (t.durationMs <= 0) t.durationMs = sd.durationMs;
                 post(() -> {
-                    if (playIndex != expectedIndex) return;
+                    if (!isCurrentTrackRequest(t, requestRevision)) return;
                     title.set(orEmpty(t.title));
                     artist.set(orEmpty(t.artist));
                     playingArtistIdsCsv.set(orEmpty(t.artistIdsCsv));
@@ -8914,7 +8948,7 @@ public final class PlayerController {
                 });
                 // The switch that started this track owns the current revision;
                 // updateCover ignores anything stale.
-                updateCover(t, expectedIndex, coverRevision.get());
+                updateCover(t, playIndex, requestRevision);
             });
         });
     }
@@ -8932,14 +8966,15 @@ public final class PlayerController {
             try {
                 String url = CustomApiClient.resolveUrl(cfg, id);
                 onMain(() -> {
-                    if (playIndex != expectedIndex) return; // user moved on
+                    if (!isCurrentTrackRequest(t, expectedCoverRevision)) return; // user moved on
                     if (url == null) {
                         Logger.warn("custom-api song {} has no url", id);
-                        skipUnplayable(expectedIndex, "自定义源解析失败");
+                        skipUnplayableRequest(t, expectedCoverRevision, "自定义源解析失败");
                         return;
                     }
                     t.streamUrl = url;
                     post(() -> {
+                        if (!isCurrentTrackRequest(t, expectedCoverRevision)) return;
                         title.set(orEmpty(t.title));
                         artist.set(orEmpty(t.artist));
                         playingArtistIdsCsv.set(orEmpty(t.artistIdsCsv));
@@ -8953,12 +8988,12 @@ public final class PlayerController {
                     Logger.info("play custom-api: {} — {}", t.title, url);
                     playBackend(url, resumeMs);
                     playingIntent = true;
-                    post(() -> playing.set(true));
+                    post(() -> { if (isCurrentTrackRequest(t, expectedCoverRevision)) playing.set(true); });
                     notifyPlayback();
                 });
             } catch (Throwable e) {
                 Logger.warn("custom-api resolve failed for {}: {}", id, e.getMessage());
-                onMain(() -> skipUnplayable(expectedIndex, "自定义源解析失败"));
+                onMain(() -> skipUnplayableRequest(t, expectedCoverRevision, "自定义源解析失败"));
             }
         });
     }
@@ -9170,6 +9205,7 @@ public final class PlayerController {
      *  list all treat it as an ordinary track instead of a detour. */
     public void playBiliCollection(BiliClient.BiliVideo video) {
         if (video == null || video.bvid == null || video.bvid.isEmpty()) return;
+        post(() -> { loading.set(true); biliError.set(""); });
         worker.submit(() -> {
             try {
                 java.util.List<BiliClient.BiliPart> parts = bili.parts(video.bvid);
@@ -9193,7 +9229,12 @@ public final class PlayerController {
                 onMain(() -> playQueue(q, 0));
             } catch (Throwable e) {
                 Logger.warn("bili collection failed for {}: {}", video.bvid, e.getMessage());
-                post(() -> showToast("B 站视频加载失败：" + e.getMessage()));
+                post(() -> {
+                    loading.set(false);
+                    String error = e.getMessage() == null ? "B 站视频加载失败" : e.getMessage();
+                    biliError.set(error);
+                    showToast("B 站视频加载失败：" + error);
+                });
             }
         });
     }
@@ -9206,10 +9247,10 @@ public final class PlayerController {
                                     long expectedCoverRevision) {
         resolveWorker.submit(() -> {
             try {
-                if (playIndex != expectedIndex) return;
+                if (!isCurrentTrackRequest(t, expectedCoverRevision)) return;
                 final String url = bili.progressiveUrl(t.biliBvid, t.biliCid, 64);
                 if (url == null) {
-                    onMain(() -> skipUnplayable(expectedIndex, "B站取流失败"));
+                    onMain(() -> skipUnplayableRequest(t, expectedCoverRevision, "B站取流失败"));
                     return;
                 }
                 // onMain defers this body to the main looper, which puts it OUTSIDE
@@ -9222,12 +9263,12 @@ public final class PlayerController {
                         startBiliStream(t, url, expectedIndex, resumeMs, expectedCoverRevision);
                     } catch (Throwable e) {
                         Logger.warn("bili start failed for {}: {}", t.biliBvid, e.toString());
-                        skipUnplayable(expectedIndex, "B站播放失败");
+                        skipUnplayableRequest(t, expectedCoverRevision, "B站播放失败");
                     }
                 });
             } catch (Throwable e) {
                 Logger.warn("bili resolve failed for {}: {}", t.biliBvid, e.getMessage());
-                onMain(() -> skipUnplayable(expectedIndex, "B站解析失败"));
+                onMain(() -> skipUnplayableRequest(t, expectedCoverRevision, "B站解析失败"));
             }
         });
     }
@@ -9236,9 +9277,10 @@ public final class PlayerController {
      *  Main thread only — see {@link #resolveAndPlayBili}. */
     private void startBiliStream(Track t, String url, int expectedIndex, long resumeMs,
                                  long expectedCoverRevision) {
-        if (playIndex != expectedIndex) return;
+        if (!isCurrentTrackRequest(t, expectedCoverRevision)) return;
         t.streamUrl = url;
         post(() -> {
+            if (!isCurrentTrackRequest(t, expectedCoverRevision)) return;
             title.set(orEmpty(t.title));
             artist.set(orEmpty(t.artist));
             album.set("哔哩哔哩");
@@ -9256,7 +9298,7 @@ public final class PlayerController {
         updateCover(t, expectedIndex, expectedCoverRevision);
         playBackend(url, resumeMs);
         playingIntent = true;
-        post(() -> playing.set(true));
+        post(() -> { if (isCurrentTrackRequest(t, expectedCoverRevision)) playing.set(true); });
         notifyPlayback();
         // The UP's chapters, for the marks on the full-screen progress bar. Fetched
         // behind the stream (the picture is already coming up) and never awaited:
@@ -9273,7 +9315,7 @@ public final class PlayerController {
                 marks = Collections.emptyList();
             }
             final List<Float> out = marks;
-            post(() -> { if (playIndex == expectedIndex) biliChapterMarks.set(out); });
+            post(() -> { if (isCurrentTrackRequest(t, expectedCoverRevision)) biliChapterMarks.set(out); });
         });
     }
 
@@ -9407,14 +9449,16 @@ public final class PlayerController {
             synchronized (historyList) {
                 historyList.clear();
                 historyList.addAll(loaded);
+                // Publish only after conversion is committed and the legacy
+                // file is removed: visible state marks the migration complete.
+                if (convertedLegacy) {
+                    saveSearchHistory();
+                    if (java.nio.file.Files.isRegularFile(file)) {
+                        java.nio.file.Files.deleteIfExists(legacy);
+                    }
+                }
                 List<String> snap = new ArrayList<>(historyList);
                 post(() -> searchHistory.set(snap));
-            }
-            if (convertedLegacy) {
-                saveSearchHistory();
-                if (java.nio.file.Files.isRegularFile(file)) {
-                    java.nio.file.Files.deleteIfExists(legacy);
-                }
             }
         } catch (Throwable e) {
             Logger.warn("loadSearchHistory failed: {}", e.getMessage());
@@ -10185,6 +10229,7 @@ public final class PlayerController {
         post(() -> { biliQrStatus.set(0); biliQrUrl.set(""); biliError.set(""); });
         worker.submit(() -> {
             BiliClient.QrCode qr;
+            if (biliLoginGeneration.get() != generation) return;
             try {
                 qr = bili.requestLoginQr();
             } catch (Throwable e) {
@@ -10209,6 +10254,7 @@ public final class PlayerController {
                     Thread.currentThread().interrupt();
                     return;
                 }
+                if (biliLoginGeneration.get() != generation) return;
                 int status;
                 try {
                     status = bili.pollLoginQr(qr.authCode);
@@ -10254,6 +10300,7 @@ public final class PlayerController {
     }
 
     public void logoutBili() {
+        cancelBiliLogin();
         bili.logout();
         post(() -> biliLoggedIn.set(false));
     }
@@ -10493,20 +10540,32 @@ public final class PlayerController {
         playAt((playIndex + 1) % queue.size());
     }
 
+    /** Start the home feed once per login state during startup or credential refresh. */
+    public synchronized void preloadHome() {
+        boolean loggedInNow = netease.isLoggedIn();
+        if (homePreloadStarted && homePreloadLoggedIn == loggedInNow) return;
+        loadHome();
+    }
+
     /** Publish sections as they arrive; a failed optional block never blanks the daily feed. */
-    public void loadHome() {
+    public synchronized void loadHome() {
+        homePreloadStarted = true;
+        homePreloadLoggedIn = netease.isLoggedIn();
         final long generation = homeLoadGeneration.incrementAndGet();
         postHome(generation, () -> { homeLoading.set(true); homeFeedError.set(""); });
-        homeWorker.submit(() -> {
+        homeWorker.submit(() -> netease.withoutErrorNotices(() -> {
             if (homeLoadGeneration.get() != generation) return;
+            List<NeteaseSong> dailyRecommendations = Collections.emptyList();
             if (netease.isLoggedIn()) {
                 try {
                     List<NeteaseSong> daily = netease.recommendSongs();
                     fillMissingCovers(daily);
                     buildSongThumbs(daily, "128");
+                    dailyRecommendations = daily;
                     postHome(generation, () -> recommendations.set(daily));
                 } catch (Throwable e) {
                     Logger.warn("daily recommend failed: {}", e.toString());
+                    postHome(generation, () -> homeFeedError.set("每日推荐暂未加载，点击重试"));
                 }
             }
             if (homeLoadGeneration.get() != generation) return;
@@ -10517,6 +10576,7 @@ public final class PlayerController {
                 postHome(generation, () -> recommendPlaylists.set(picks));
             } catch (Throwable e) {
                 Logger.warn("personalized playlists failed: {}", e.toString());
+                postHome(generation, () -> homeFeedError.set("推荐歌单暂未加载，点击重试"));
             }
             if (homeLoadGeneration.get() != generation) return;
             try {
@@ -10569,7 +10629,7 @@ public final class PlayerController {
                 // unique among the sections ("daily"), which is what playHomeRecommendation looks a
                 // shelf up by; playlistId 0 means "play the list it was handed" (see playSongList).
                 try {
-                    List<NeteaseSong> daily = netease.recommendSongs();
+                    List<NeteaseSong> daily = dailyRecommendations;
                     if (!daily.isEmpty()) {
                         fillMissingCovers(daily);
                         buildSongThumbs(daily, "128");
@@ -10633,15 +10693,16 @@ public final class PlayerController {
                 postHome(generation, () -> homeFeedError.set("更多推荐暂未加载，点击重试"));
             }
             postHome(generation, () -> homeLoading.set(false));
-        });
+        }));
     }
 
     private void postHome(long generation, Runnable update) {
         post(() -> { if (homeLoadGeneration.get() == generation) update.run(); });
     }
 
-    private void resetHomeFeed() {
+    private synchronized void resetHomeFeed() {
         homeLoadGeneration.incrementAndGet();
+        homePreloadStarted = false;
         homeSongSections.set(Collections.<NeteaseClient.HomeSongSection>emptyList());
         homePlaylistSections.set(Collections.<NeteaseClient.HomePlaylistSection>emptyList());
         homeAlbumRecommendations.set(Collections.<NeteaseAlbum>emptyList());
@@ -11250,6 +11311,7 @@ public final class PlayerController {
             if (append) aiContinuationInFlight = false;
             return;
         }
+        final AiContinuation continuationForAppend = append ? aiContinuation : null;
         aiLoading.set(true); aiError.set(""); aiProgress.set("正在准备 AI 推荐…"); aiSummary.set(""); aiDetails.set("");
         worker.execute(() -> {
             try {
@@ -11380,7 +11442,7 @@ public final class PlayerController {
                 if (append) {
                     // The continuation: behind the list that is playing, never in front of it.
                     final String appendedName = name;
-                    post(() -> appendAiBatch(ordered, appendedName));
+                    post(() -> appendAiBatchIfCurrent(ordered, appendedName, continuationForAppend));
                 } else if (!replaceQueue) {
                     long playlistId = netease.createPlaylist(name, false);
                     int added = 0;
@@ -11407,8 +11469,12 @@ public final class PlayerController {
                     });
                 }
             } catch (Throwable e) {
-                post(() -> aiError.set(e.getMessage() == null ? "AI 推荐失败" : e.getMessage()));
-                aiContinuationInFlight = false;
+                post(() -> {
+                    if (!append || aiContinuation == continuationForAppend) {
+                        aiError.set(e.getMessage() == null ? "AI 推荐失败" : e.getMessage());
+                        aiContinuationInFlight = false;
+                    }
+                });
             }
                 finally { post(() -> { aiLoading.set(false); aiProgress.set("处理完成"); }); }
         });
@@ -11420,7 +11486,10 @@ public final class PlayerController {
      *  stops being {@link QueueOrigin#AI} — a user-started queue must never be continued by the AI. */
     private void setQueueOrigin(QueueOrigin origin) {
         queueOriginKind = origin;
-        if (origin != QueueOrigin.AI) aiContinuation = null;
+        if (origin != QueueOrigin.AI) {
+            aiContinuation = null;
+            aiContinuationInFlight = false;
+        }
         if (queueOrigin.peek() != origin) post(() -> queueOrigin.set(origin));
     }
 
@@ -11464,6 +11533,12 @@ public final class PlayerController {
      * behind the listener would double it right at the seam. A row the listener has already heard is
      * allowed back — that is what 「老歌」 means.
      */
+    private void appendAiBatchIfCurrent(List<NeteaseSong> batch, String name,
+            AiContinuation requestedContinuation) {
+        if (queueOriginKind != QueueOrigin.AI || aiContinuation != requestedContinuation) return;
+        appendAiBatch(batch, name);
+    }
+
     private void appendAiBatch(List<NeteaseSong> batch, String name) {
         List<Track> added = new ArrayList<>();
         for (NeteaseSong s : batch) {
@@ -12626,11 +12701,15 @@ public final class PlayerController {
     //     never run on the render thread the QML handlers call from) ----------
 
     private volatile String pendingUnikey;
+    private final AtomicLong qrLoginGeneration = new AtomicLong();
+    private final Object qrLoginLock = new Object();
+    private boolean qrPollInFlight;
     /** QR module matrix (true=dark) as nested Lists so QML can index [y][x]. */
     public final Property<List<List<Boolean>>> qrImage =
             new Property<>(Collections.<List<Boolean>>emptyList());
     /** 0 loading / 800 expired / 801 waiting / 802 scanned / 803 success. */
     public final Property<Integer> qrStatus = new Property<>(0);
+    public final Property<String> qrLoginError = new Property<>("");
     /** Whether this shell can embed the official website in a system WebView. */
     public final Property<Boolean> webLoginAvailable = new Property<>(false);
     /** True while the browser is open or a pasted/browser Cookie is being checked. */
@@ -12720,35 +12799,98 @@ public final class PlayerController {
 
     /** Mint a login key + matrix off-thread; publishes to {@link #qrImage}/{@link #qrStatus}. */
     public void startQrLogin() {
-        post(() -> qrStatus.set(0));
+        final long generation;
+        synchronized (qrLoginLock) {
+            generation = qrLoginGeneration.incrementAndGet();
+            pendingUnikey = null;
+            qrPollInFlight = false;
+        }
+        post(() -> {
+            if (qrLoginGeneration.get() != generation) return;
+            qrImage.set(Collections.<List<Boolean>>emptyList());
+            qrStatus.set(0);
+            qrLoginError.set("");
+        });
         worker.submit(() -> {
+            if (qrLoginGeneration.get() != generation) return;
             try {
                 String key = netease.qrLoginKey();
-                pendingUnikey = key;
                 List<List<Boolean>> m = toMatrix(netease.qrMatrix(key));
+                if (m.isEmpty()) throw new IOException("无法生成登录二维码，请重试");
+                synchronized (qrLoginLock) {
+                    if (qrLoginGeneration.get() != generation) return;
+                    pendingUnikey = key;
+                }
                 post(() -> {
+                    if (qrLoginGeneration.get() != generation) return;
                     qrImage.set(m);
                     qrStatus.set(801);
                 });
             } catch (Throwable e) {
-                Logger.warn("startQrLogin failed: {}", e.getMessage());
-                post(() -> qrStatus.set(800));
+                Logger.warn("startQrLogin failed");
+                post(() -> {
+                    if (qrLoginGeneration.get() != generation) return;
+                    qrStatus.set(800);
+                    qrLoginError.set("获取二维码失败，请检查网络后刷新");
+                });
             }
+        });
+    }
+
+    /** Closing or refreshing a dialog invalidates pending network/UI answers. */
+    public void cancelQrLogin() {
+        final long generation;
+        synchronized (qrLoginLock) {
+            generation = qrLoginGeneration.incrementAndGet();
+            pendingUnikey = null;
+            qrPollInFlight = false;
+        }
+        post(() -> {
+            if (qrLoginGeneration.get() != generation) return;
+            qrImage.set(Collections.<List<Boolean>>emptyList());
+            qrStatus.set(0);
+            qrLoginError.set("");
         });
     }
 
     /** Poll the scan status off-thread; updates {@link #qrStatus}. */
     public void pollQrLogin() {
-        String key = pendingUnikey;
-        if (key == null) return;
+        final String key;
+        final long generation;
+        synchronized (qrLoginLock) {
+            key = pendingUnikey;
+            generation = qrLoginGeneration.get();
+            if (key == null || qrPollInFlight) return;
+            qrPollInFlight = true;
+        }
         worker.submit(() -> {
             try {
+                if (qrLoginGeneration.get() != generation) return;
                 int code = netease.qrLoginCheck(key);
-                post(() -> qrStatus.set(code));
-                if (code == 803) refreshLogin();
-                else if (code == 800) startQrLogin();
+                if (qrLoginGeneration.get() != generation) return;
+                if (code == 803) {
+                    if (!netease.isLoggedIn()) throw new IOException("登录凭证缺失");
+                    synchronized (qrLoginLock) {
+                        if (qrLoginGeneration.get() != generation) return;
+                        pendingUnikey = null;
+                    }
+                    refreshLogin();
+                }
+                post(() -> {
+                    if (qrLoginGeneration.get() != generation) return;
+                    qrStatus.set(code);
+                    qrLoginError.set("");
+                    if (code == 800) startQrLogin();
+                });
             } catch (Throwable e) {
-                // transient network blip — keep waiting
+                post(() -> {
+                    if (qrLoginGeneration.get() != generation) return;
+                    qrLoginError.set("登录状态暂未获取，请检查网络，正在重试");
+                });
+            } finally {
+                synchronized (qrLoginLock) {
+                    if (qrLoginGeneration.get() == generation) qrPollInFlight = false;
+                }
             }
         });
     }
@@ -12796,7 +12938,7 @@ public final class PlayerController {
                     if (id > 0 && netease.consumeCredentialUnlock()) {
                         showToast("已从系统密钥库安全恢复登录凭据");
                     }
-                    loadHome();
+                    preloadHome();
                     loadMyPlaylists();
                     refreshLiked();
                     restoreListenTogetherRoom();
@@ -12811,7 +12953,7 @@ public final class PlayerController {
                 // requires it to at least try the offline path).
                 if (cookieLoggedIn) {
                     post(() -> loggedIn.set(true));
-                    loadHome();
+                    preloadHome();
                     loadMyPlaylists();
                 }
             }
@@ -12819,6 +12961,7 @@ public final class PlayerController {
     }
 
     public void logout() {
+        cancelQrLogin();
         clearTogetherRoom(false);
         netease.logout();
         uid = 0;
@@ -12851,6 +12994,8 @@ public final class PlayerController {
     }
 
     public void shutdown() {
+        cancelQrLogin();
+        cancelBiliLogin();
         // Capture the final position before release() tears down the backend (a
         // released MediaPlayer's position() is undefined/0).
         saveSessionState();

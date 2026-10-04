@@ -2,23 +2,45 @@ package dev.t1m3.qplayer.android.ui
 
 import androidx.compose.animation.animateColor
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.SeekableTransitionState
 import androidx.compose.animation.core.Transition
+import androidx.compose.animation.core.rememberTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.core.updateTransition
 import androidx.compose.material3.ColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
+
+/** Overlapping hosts release only their own hold on the page's colour clock. */
+@Stable
+internal class ArtworkPageMotionState {
+    private val sources = mutableStateMapOf<Any, Unit>()
+    val active: Boolean get() = sources.isNotEmpty()
+
+    fun update(source: Any, active: Boolean) {
+        if (active) sources[source] = Unit else sources.remove(source)
+    }
+}
 
 /** One application-wide transition of the finished Monet palette. All roles
  * share a clock, so navigation, dialogs, lyrics and player surfaces change
  * together. A new cover arriving mid-transition retargets the currently
  * displayed colours rather than restarting from the previous song's palette.
- * Initial composition already has its target: no startup colour flash.
+ * Initial composition already has its target: no startup colour flash. Pausing
+ * cancels only the frame driver, retaining the displayed colour/fraction. The
+ * original per-role timing resumes once navigation no longer owns the frames.
  */
 @Composable
-internal fun rememberAnimatedQPlayerColorScheme(target: ColorScheme): ColorScheme {
-    val transition = updateTransition(target, label = "qplayer_theme")
+internal fun rememberAnimatedQPlayerColorScheme(target: ColorScheme, paused: Boolean = false): ColorScheme {
+    val state = remember { SeekableTransitionState(target) }
+    val transition = rememberTransition(state, label = "qplayer_theme")
+    LaunchedEffect(target, paused) {
+        if (!paused) state.animateTo(target)
+    }
     return target.copy(
         primary = transition.themeColor("primary") { it.primary },
         onPrimary = transition.themeColor("onPrimary") { it.onPrimary },

@@ -34,6 +34,58 @@ public class PlayerControllerPlaybackTest {
     public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
     @Test
+    public void lateAiContinuationCannotAppendToAReplacedQueue() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        PlayerController controller = null;
+        try {
+            Path base = temporaryFolder.newFolder("ai-continuation").toPath();
+            AppDirs.setBase(base.toString());
+            AppDirs.setCacheBase(base.resolve("cache").toString());
+            controller = new PlayerController(new FakeAudioBackend(), track -> { }, NeteaseClient.INSTANCE);
+
+            Class<?> continuationType = Class.forName(PlayerController.class.getName() + "$AiContinuation");
+            java.lang.reflect.Constructor<?> constructor = continuationType.getDeclaredConstructor(
+                    String.class, String.class, String.class, String.class, int.class, boolean.class);
+            constructor.setAccessible(true);
+            Object oldRequest = constructor.newInstance("url", "key", "model", "request", 10, false);
+            Object newRequest = constructor.newInstance("url", "key", "model", "request", 10, false);
+            java.lang.reflect.Field continuation = PlayerController.class.getDeclaredField("aiContinuation");
+            java.lang.reflect.Field origin = PlayerController.class.getDeclaredField("queueOriginKind");
+            java.lang.reflect.Field inFlight = PlayerController.class.getDeclaredField("aiContinuationInFlight");
+            continuation.setAccessible(true);
+            origin.setAccessible(true);
+            inFlight.setAccessible(true);
+            java.lang.reflect.Method setOrigin = PlayerController.class.getDeclaredMethod(
+                    "setQueueOrigin", PlayerController.QueueOrigin.class);
+            setOrigin.setAccessible(true);
+            java.lang.reflect.Method append = PlayerController.class.getDeclaredMethod(
+                    "appendAiBatchIfCurrent", java.util.List.class, String.class, continuationType);
+            append.setAccessible(true);
+
+            continuation.set(controller, oldRequest);
+            origin.set(controller, PlayerController.QueueOrigin.AI);
+            inFlight.setBoolean(controller, true);
+            setOrigin.invoke(controller, PlayerController.QueueOrigin.USER);
+            assertFalse(inFlight.getBoolean(controller));
+
+            NeteaseSong song = new NeteaseSong();
+            song.id = 456L;
+            song.name = "new batch";
+            continuation.set(controller, newRequest);
+            origin.set(controller, PlayerController.QueueOrigin.AI);
+            append.invoke(controller, Arrays.asList(song), "old", oldRequest);
+            assertTrue(controller.queueTracks.peek().isEmpty());
+            append.invoke(controller, Arrays.asList(song), "new", newRequest);
+            assertEquals(456L, controller.queueTracks.peek().get(0).neteaseId);
+        } finally {
+            if (controller != null) controller.shutdown();
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
+    @Test
     public void togetherQueueReplacementNeverFallsBackToTheOldNumericIndex() {
         // A reordered queue keeps the currently audible song by id, even though it
         // moved from index 1 to index 0.

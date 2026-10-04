@@ -31,6 +31,16 @@ public class SettingsCatalogTest {
     }
 
     @Test
+    public void lowSpecModeIsAndroidOnlyAndOptIn() {
+        SettingSpec spec = setting(SettingsCatalog.LOW_SPEC_MODE_KEY);
+        assertEquals(Boolean.FALSE, spec.def);
+        assertEquals(SettingSpec.SWITCH, spec.type);
+        assertEquals(SettingsCatalog.APPEARANCE, spec.category);
+        assertTrue(spec.appliesTo(SettingsCatalog.ANDROID));
+        assertFalse(spec.appliesTo(SettingsCatalog.DESKTOP));
+    }
+
+    @Test
     public void systemTitleBarIsDesktopOnlyAndDefaultsOff() {
         SettingSpec spec = setting("windowDecorated");
 

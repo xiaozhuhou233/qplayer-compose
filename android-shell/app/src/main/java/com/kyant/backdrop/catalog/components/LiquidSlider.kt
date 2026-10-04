@@ -27,11 +27,11 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.drawBackdrop
-import com.kyant.backdrop.effects.blur
-import com.kyant.backdrop.effects.lens
-import dev.t1m3.qplayer.android.ui.IosGlassHighlight
-import dev.t1m3.qplayer.android.ui.IosGlassThumbInnerShadow
-import dev.t1m3.qplayer.android.ui.IosGlassThumbShadow
+import dev.t1m3.qplayer.android.ui.controlGlassEffects
+import dev.t1m3.qplayer.android.ui.rememberIosAdaptiveGlass
+import dev.t1m3.qplayer.android.ui.rememberIosControlGlassHighlight
+import dev.t1m3.qplayer.android.ui.controlGlassShadow
+import dev.t1m3.qplayer.android.ui.drawControlGlassSurface
 import dev.t1m3.qplayer.android.ui.LocalGlassRefraction
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -65,23 +65,21 @@ fun LiquidSlider(
         valueRange = valueRange, steps = steps, interactionSource = interactions,
         onValueChangeFinished = onValueChangeFinished,
         thumb = {
-            Box(Modifier.size(40.dp, 24.dp).drawBackdrop(
+            val adaptive = rememberIosAdaptiveGlass(backdrop)
+            val glassHighlight = rememberIosControlGlassHighlight()
+            Box(Modifier.size(40.dp, 24.dp).then(adaptive.modifier).drawBackdrop(
                 backdrop = backdrop, shape = { CircleShape },
                 effects = {
-                    blur(8.dp.toPx() * (1f - press.value))
-                    if (refraction && press.value > 0.001f)
-                        lens(13.dp.toPx() * press.value, 26.dp.toPx() * press.value,
-                            depthEffect = true, chromaticAberration = true,
-                            centerConvexity = 0.085f * press.value)
+                    controlGlassEffects(adaptive, refraction)
                 },
-                highlight = { IosGlassHighlight },
-                shadow = { IosGlassThumbShadow },
-                innerShadow = { IosGlassThumbInnerShadow.copy(alpha = press.value) },
+                highlight = { glassHighlight.value },
+                shadow = { controlGlassShadow(dark, adaptive) },
+                onDrawSurface = { drawControlGlassSurface(dark, adaptive) },
                 layerBlock = {
                     val scale = if (refraction) 1f + 0.25f * press.value else 1f
                     scaleX = scale; scaleY = scale
                 },
-                onDrawSurface = { drawRect(Color.White.copy(alpha = if (refraction) 1f - press.value * 0.65f else 0.95f)) }
+                innerShadow = null,
             ))
         },
         track = { state ->

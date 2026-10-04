@@ -38,6 +38,7 @@ public final class SettingsCatalog {
      *  name. Sharing a key between them would be wrong. */
     public static final String ACE_STEP = "ACE-Step";
     public static final String PALETTE = "调色板";
+    public static final String LOW_SPEC_MODE_KEY = "lowSpecMode";
 
     /** The ACE-Step group's rows, by key: the switch, the address, the key (the user's own, never
      *  this app's), the model, and how far under the passage the generated bed sits. Named here
@@ -139,12 +140,19 @@ public final class SettingsCatalog {
                 .desc("iOS 26 液态玻璃导航栏；关闭恢复 MD3。Android 13+ 支持完整折射光效")
                 .onlyOn(ANDROID)
                 .build());
+        out.add(SettingSpec.toggle(LOW_SPEC_MODE_KEY, APPEARANCE, "最低配模式", false)
+                .desc("切换到 MD3，关闭动态主题、封面模糊背景、共享元素动画及后台音频预处理，保留轻量页面转场")
+                .onlyOn(ANDROID)
+                .build());
         out.add(SettingSpec.toggle("iosGlassRefraction", APPEARANCE, "玻璃折射", true)
                 .desc("iOS design：开启保留折射、色散与拖动弹性椭圆；关闭为低配模式，保留模糊玻璃和普通选中状态")
                 .onlyOn(ANDROID)
                 .build());
         out.add(SettingSpec.segmented("darkMode", APPEARANCE, "深色模式", MODE_SYSTEM,
                         "跟随系统", "浅色", "深色")
+                .build());
+        out.add(SettingSpec.dropdown(PAGE_TRANSITION_KEY, APPEARANCE, "页面切换动画",
+                        PAGE_TRANSITION_ZOOM, "Zoom In / Out", "淡入淡出", "水平滑动", "垂直滑动", "无动画")
                 .build());
         out.add(SettingSpec.toggle("monet", APPEARANCE, "莫奈取色", true)
                 .desc("随封面动态生成主题配色")

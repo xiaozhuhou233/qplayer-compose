@@ -111,18 +111,49 @@ public final class NeteaseClient {
         void onCredentialEvent(CredentialEvent event);
     }
 
-    private volatile ErrorListener errorListener;
+    private final ErrorNotices errorNotices = new ErrorNotices();
     private final Object credentialEventLock = new Object();
     private final List<CredentialEvent> pendingCredentialEvents = new ArrayList<>();
     private volatile CredentialListener credentialListener;
     private boolean credentialUnlockPending;
     private boolean persistedLoginCredential;
     private boolean fallbackNoticeSent;
-    private volatile String lastErrorMsg;
-    private volatile long lastErrorAt;
-
     public void setErrorListener(ErrorListener l) {
-        this.errorListener = l;
+        errorNotices.listener = l;
+    }
+
+    /** Background shelves use their own error state, not the foreground toast. */
+    public void withoutErrorNotices(Runnable work) {
+        errorNotices.withoutNotices(work);
+    }
+
+    static final class ErrorNotices {
+        volatile ErrorListener listener;
+        private final ThreadLocal<Boolean> background = new ThreadLocal<>();
+        private String lastMessage;
+        private long lastAt;
+
+        void withoutNotices(Runnable work) {
+            Boolean previous = background.get();
+            background.set(Boolean.TRUE);
+            try {
+                work.run();
+            } finally {
+                if (previous == null) background.remove();
+                else background.set(previous);
+            }
+        }
+
+        synchronized void report(String message) {
+            if (Boolean.TRUE.equals(background.get()) || message == null || message.isEmpty()) return;
+            ErrorListener sink = listener;
+            if (sink == null) return;
+            long now = System.currentTimeMillis();
+            if (message.equals(lastMessage) && now - lastAt < 2500) return;
+            lastMessage = message;
+            lastAt = now;
+            sink.onError(message);
+        }
     }
 
     /**
@@ -172,14 +203,7 @@ public final class NeteaseClient {
     // (one user action often hits playlist/detail twice, so a private playlist would
     // otherwise toast the same line twice).
     private void reportError(String message) {
-        if (message == null || message.isEmpty()) return;
-        ErrorListener l = errorListener;
-        if (l == null) return;
-        long now = System.currentTimeMillis();
-        if (message.equals(lastErrorMsg) && now - lastErrorAt < 2500) return;
-        lastErrorMsg = message;
-        lastErrorAt = now;
-        l.onError(message);
+        errorNotices.report(message);
     }
 
     private static String neteaseMessage(JsonObject obj) {
@@ -477,6 +501,11 @@ public final class NeteaseClient {
         JsonObject object = element.getAsJsonObject();
         int code = object.has("code") && !object.get("code").isJsonNull()
                 ? object.get("code").getAsInt() : 200;
+        if (code != 200 && !endpoint.loginFlow) {
+            // Include endpoint identity so an optional failure can be diagnosed
+            // without exposing request bodies, account cookies or credentials.
+            Logger.warn("Netease API {} code {}: {}", endpoint.path, code, neteaseMessage(object));
+        }
         if (code == 301 && isLoggedIn() && !endpoint.loginFlow) {
             Logger.warn("Netease: session expired (code 301) on {} — clearing cookies",
                     endpoint.path);
@@ -659,12 +688,15 @@ public final class NeteaseClient {
     /** Like {@link #songUrl} but also reports whether the returned url is a
      *  trial-only preview ({@code freeTrialInfo != null}). */
     public UrlInfo songUrlInfo(long songId, String level) throws IOException {
+        if (songId <= 0L) return null;
         Map<String, Object> body = new HashMap<>();
         body.put("ids", "[" + songId + "]");
         body.put("level", level == null ? "standard" : level);
         body.put("encodeType", "flac");
         if ("sky".equals(level)) body.put("immerseType", "c51");
-        JsonObject obj = apiJson(NeteaseApi.SONG_URL_V1, body);
+        // The playback caller owns recovery through another source and reports
+        // an error only if the complete playback attempt actually fails.
+        JsonObject obj = apiJson(NeteaseApi.SONG_URL_V1, body, false);
         if (!obj.has("data") || !obj.get("data").isJsonArray()) return null;
         if (obj.get("data").getAsJsonArray().size() == 0) return null;
         JsonElement first = obj.get("data").getAsJsonArray().get(0);
@@ -715,6 +747,7 @@ public final class NeteaseClient {
         body.put("total", true);
         body.put("n", 1000);
         JsonObject obj = apiJson(NeteaseApi.PERSONALIZED_PLAYLIST, body);
+        ensureOk(obj, "获取推荐歌单失败");
         List<NeteasePlaylist> out = new ArrayList<>();
         if (obj.has("result") && obj.get("result").isJsonArray()) {
             // Cap to the requested limit: without a logged-in cookie the endpoint
@@ -1737,11 +1770,12 @@ public final class NeteaseClient {
     /**
      * Fetch lyric payloads for a song. Calls Netease's {@code /song/lyric/v1}
      * (the same endpoint SPlayer uses) requesting LRC + YRC + translation +
-     * romanisation in one round trip. Returns {@code null} if the API call
-     * fails outright; an empty {@link dev.t1m3.qplayer.netease.dto.NeteaseLyric}
+     * romanisation in one round trip. Throws if the API call fails;
+     * an empty {@link dev.t1m3.qplayer.netease.dto.NeteaseLyric}
      * means "the song has no Netease-side lyrics".
      */
     public dev.t1m3.qplayer.netease.dto.NeteaseLyric lyric(long songId) throws IOException {
+        if (songId <= 0L) throw new IOException("无效的歌词歌曲 ID");
         Map<String, Object> body = new HashMap<>();
         body.put("id", songId);
         body.put("cp", false);
@@ -1752,7 +1786,10 @@ public final class NeteaseClient {
         body.put("yv", 0);
         body.put("ytv", 0);
         body.put("yrv", 0);
-        JsonObject obj = apiJson(NeteaseApi.LYRIC_NEW, body);
+        // Lyrics are loaded for the current, adjacent and queued songs. A failed
+        // response must remain retryable, never become a cached 'no lyrics'.
+        JsonObject obj = apiJson(NeteaseApi.LYRIC_NEW, body, false);
+        ensureOk(obj, "获取歌词失败");
         dev.t1m3.qplayer.netease.dto.NeteaseLyric out =
                 new dev.t1m3.qplayer.netease.dto.NeteaseLyric();
         out.lrc     = extractLyricField(obj, "lrc");
@@ -1977,6 +2014,7 @@ public final class NeteaseClient {
         if (!isLoggedIn()) return java.util.Collections.emptyList();
         JsonObject obj = apiJson(NeteaseApi.RECOMMEND_SONGS,
                 new HashMap<String, Object>());
+        ensureOk(obj, "获取每日推荐失败");
         List<NeteaseSong> out = new ArrayList<>();
         // Newer schema: data.dailySongs[]. Legacy: recommend[].
         JsonArray arr = null;

@@ -1,0 +1,886 @@
+package dev.t1m3.qplayer.android.md3eui
+
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.BitmapShader
+import android.graphics.Canvas as AndroidCanvas
+import android.graphics.Paint
+import android.graphics.Rect
+import android.graphics.RenderEffect
+import android.graphics.RuntimeShader
+import android.graphics.Shader
+import android.os.Build
+import android.os.SystemClock
+import android.view.View
+import androidx.annotation.RequiresApi
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.LoadingIndicator
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import dev.t1m3.qplayer.lyric.LyricLine
+import dev.t1m3.qplayer.lyric.LyricTiming
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.exp
+import kotlin.math.sin
+import kotlin.math.sqrt
+
+private const val LYRIC_ANCHOR = .35f
+private val GoogleSansFlexBold = FontFamily(Font(R.font.google_sans_flex_bold, FontWeight.Bold))
+private val lyricOpacityEasing = CubicBezierEasing(.33f, 0f, .20f, .10f)
+
+private sealed interface DisplayLyricRow {
+    val start: Long
+    val end: Long
+    data class Intro(override val end: Long) : DisplayLyricRow { override val start = 0L }
+    data class Line(val lyric: LyricLine, override val start: Long, override val end: Long) : DisplayLyricRow
+    data class Break(override val start: Long, override val end: Long) : DisplayLyricRow
+}
+
+private class LyricRowMotion(active: Boolean) {
+    val offset = Animatable(0f)
+    val scale = Animatable(if (active) 1f else .98f)
+    val alpha = Animatable(if (active) .85f else .175f)
+}
+
+@Composable
+internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier) {
+    val state = runtime.playback
+    val lyrics = runtime.lyricState
+    val rows = remember(state.songId, lyrics.revision, lyrics.lines) { displayLyricRows(lyrics.lines) }
+    val latest by rememberUpdatedState(state)
+    val latestOffset by rememberUpdatedState(lyrics.offsetMs)
+    val smooth = remember(state.songId) { mutableLongStateOf(state.position - lyrics.offsetMs) }
+    val clock = remember(state.songId) { Md3eLyricClock() }
+    val listState = rememberLazyListState()
+    val lowSpec = runtime.settings.bool("lowSpecMode")
+    val springEnabled = runtime.settings.bool("lyricSpring") && !lowSpec
+    LaunchedEffect(state.position, state.playing, lyrics.offsetMs) {
+        if (!state.playing) smooth.longValue = state.position - lyrics.offsetMs
+    }
+    LaunchedEffect(state.songId, state.playing, lyrics.offsetMs) {
+        if (state.playing) {
+            while (true) {
+                withFrameNanos { frameNanos ->
+                    val current = latest
+                    smooth.longValue = clock.positionAt(
+                        current.position - latestOffset, current.sampledAtNanos,
+                        current.playing, current.playbackRevision, frameNanos,
+                        current.seekRevision)
+                }
+            }
+        }
+    }
+    val active by remember(rows, smooth) {
+        derivedStateOf { displayLyricIndex(rows, smooth.longValue) }
+    }
+    val initial = active.takeIf { it in rows.indices } ?: rows.indices.firstOrNull() ?: -1
+    val motions = remember(state.songId, lyrics.revision, rows.size) {
+        List(rows.size) { LyricRowMotion(it == initial) }
+    }
+    var previous by remember(state.songId, lyrics.revision) { mutableIntStateOf(initial) }
+
+    BoxWithConstraints(modifier) {
+        val centerPadding = (maxHeight * .42f).coerceAtLeast(32.dp)
+        val fontSize = runtime.settings.intOf("lyricFontSize").coerceIn(14, 40)
+        val spacing = (runtime.settings.intOf("lyricLineSpacing").coerceIn(100, 250) * 24f / 200f)
+            .dp.coerceAtLeast(10.dp)
+        LaunchedEffect(state.songId, lyrics.revision, rows.size) {
+            if (initial !in rows.indices) return@LaunchedEffect
+            listState.scrollToItem(initial)
+            withFrameNanos { }
+            listState.centerLyricRow(initial)
+        }
+        LaunchedEffect(state.songId, lyrics.revision, active, springEnabled) {
+            val index = active
+            if (index !in rows.indices || index == previous) return@LaunchedEffect
+            val old = previous
+            previous = index
+            val visible = listState.layoutInfo.visibleItemsInfo
+            val target = visible.firstOrNull { it.index == index }
+            if (target == null || abs(index - old) > 4 || lowSpec) {
+                listState.scrollToItem(index)
+                withFrameNanos { }
+                listState.centerLyricRow(index)
+                coroutineScope {
+                    motions.forEachIndexed { rowIndex, motion ->
+                        launch {
+                            motion.offset.snapTo(0f)
+                            motion.scale.snapTo(if (rowIndex == index) 1f else .98f)
+                            motion.alpha.snapTo(if (rowIndex == index) .85f else .175f)
+                        }
+                    }
+                }
+                return@LaunchedEffect
+            }
+            val anchor = listState.layoutInfo.let { info ->
+                info.viewportStartOffset + (info.viewportEndOffset - info.viewportStartOffset) * LYRIC_ANCHOR
+            }
+            val delta = target.offset + target.size / 2f - anchor
+            val first = visible.firstOrNull()?.index ?: old
+            val affected = (minOf(first, index) - 2).coerceAtLeast(0)..
+                (maxOf(visible.lastOrNull()?.index ?: index, index) + 2).coerceAtMost(rows.lastIndex)
+            motions.forEachIndexed { rowIndex, motion ->
+                motion.offset.snapTo(if (rowIndex in affected) motion.offset.value + delta else 0f)
+            }
+            val consumed = listState.scrollBy(delta)
+            if (abs(consumed - delta) > .01f) {
+                affected.forEach { rowIndex ->
+                    motions[rowIndex].offset.snapTo(motions[rowIndex].offset.value + consumed - delta)
+                }
+            }
+            val row = rows[index]
+            val prior = rows.getOrNull((index - 1).coerceAtLeast(0))
+            val gap = ((row.start - (prior?.end ?: row.start)).coerceAtLeast(0L)) / 1000f
+            val timed = lyrics.lines.any { line -> line.syllables.any { it.durationMs > 0 } }
+            val gapAmount = ((gap - .20f) / .55f).coerceIn(0f, 1f)
+            var damping = if (timed) .90f - .12f * gapAmount else .90f
+            var stiffness = if (timed) {
+                val response = .48f + .27f * gapAmount
+                (2f * PI.toFloat() / response).let { it * it }
+            } else 100f
+            val remaining = (row.end - smooth.longValue) / 1000f - .50f
+            if (remaining < .60f) {
+                damping = 1f
+                stiffness = (4.60517f / .30f).let { it * it }
+            } else {
+                val envelope = 4.60517f / (sqrt(stiffness) * damping.coerceIn(.10f, 1f))
+                if (remaining < .80f && envelope - remaining < -.05f) {
+                    damping = 1f
+                    stiffness = (4.60517f / maxOf(remaining - .40f, .30f)).let { it * it }
+                }
+            }
+            val rowSpring = spring<Float>(dampingRatio = damping, stiffness = stiffness)
+            coroutineScope {
+                motions.forEachIndexed { rowIndex, motion ->
+                    val alpha = if (rowIndex == index) .85f else .175f
+                    val scale = if (rowIndex == index) 1f else .98f
+                    if (rowIndex !in affected) {
+                        motion.alpha.snapTo(alpha)
+                        motion.scale.snapTo(scale)
+                        return@forEachIndexed
+                    }
+                    val delayMs = if (springEnabled && !listState.isScrollInProgress)
+                        (abs(rowIndex - first) - 1).coerceAtLeast(0) * 50L else 0L
+                    launch { motion.alpha.animateTo(alpha, tween(120, easing = lyricOpacityEasing)) }
+                    launch {
+                        if (delayMs > 0) delay(delayMs)
+                        motion.offset.animateTo(0f,
+                            if (springEnabled) rowSpring else tween(320, easing = FastOutSlowInEasing))
+                    }
+                    launch {
+                        if (delayMs > 0) delay(delayMs)
+                        motion.scale.animateTo(scale,
+                            if (springEnabled) rowSpring else tween(320, easing = FastOutSlowInEasing))
+                    }
+                }
+            }
+        }
+        LazyColumn(Modifier.fillMaxSize(), state = listState,
+            contentPadding = PaddingValues(vertical = centerPadding),
+            verticalArrangement = Arrangement.spacedBy(spacing)) {
+            itemsIndexed(rows, key = { index, row -> "lyric_${row.start}_${row.end}_$index" }) { index, row ->
+                val motion = motions[index]
+                when (row) {
+                    is DisplayLyricRow.Intro -> Md3eLyricIndicator(row, smooth, state.playing,
+                        index == active, fontSize, motion, false, null)
+                    is DisplayLyricRow.Break -> Md3eLyricIndicator(row, smooth, state.playing,
+                        index == active, fontSize, motion, true) {
+                        runtime.play { seek(row.start) }
+                    }
+                    is DisplayLyricRow.Line -> Md3eLyricText(row, smooth, index, active, motion,
+                        fontSize, runtime) { runtime.play { seek(row.start) } }
+                }
+            }
+            if (rows.isEmpty()) item {
+                Text("暂无歌词", Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+private suspend fun LazyListState.centerLyricRow(index: Int) {
+    val item = layoutInfo.visibleItemsInfo.firstOrNull { it.index == index } ?: return
+    val anchor = layoutInfo.viewportStartOffset +
+        (layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset) * LYRIC_ANCHOR
+    scrollBy(item.offset + item.size / 2f - anchor)
+}
+
+private fun displayLyricRows(lines: List<LyricLine>): List<DisplayLyricRow> {
+    if (lines.isEmpty()) return emptyList()
+    val result = ArrayList<DisplayLyricRow>(lines.size + 4)
+    if (lines.first().startMs() >= 2000L) result += DisplayLyricRow.Intro(lines.first().startMs())
+    var previousEnd = 0L
+    lines.forEachIndexed { index, line ->
+        val start = line.startMs().coerceAtLeast(0L)
+        if (index > 0 && start - previousEnd > 7000L) {
+            val breakStart = previousEnd + 500L
+            val previous = result.lastOrNull() as? DisplayLyricRow.Line
+            if (previous != null && previous.end > breakStart)
+                result[result.lastIndex] = previous.copy(end = breakStart)
+            result += DisplayLyricRow.Break(breakStart, start)
+        }
+        val explicitEnd = line.endMs().takeIf { it > start }
+        val end = explicitEnd ?: lines.getOrNull(index + 1)?.startMs() ?: (start + 960L)
+        result += DisplayLyricRow.Line(line, start, end.coerceAtLeast(start + 1L))
+        previousEnd = explicitEnd ?: (start + 960L)
+    }
+    return result
+}
+
+private fun displayLyricIndex(rows: List<DisplayLyricRow>, position: Long): Int {
+    var latest = -1
+    for (index in rows.indices) {
+        if (position < rows[index].start) break
+        latest = index
+        if (position < rows[index].end) return index
+    }
+    return latest
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun Md3eLyricIndicator(row: DisplayLyricRow, position: State<Long>, playing: Boolean,
+    active: Boolean, fontSize: Int, motion: LyricRowMotion, compact: Boolean, onClick: (() -> Unit)?) {
+    val colors = listOf(MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.tertiary,
+        MaterialTheme.colorScheme.secondary)
+    val duration = (row.end - row.start).coerceAtLeast(1L)
+    val elapsed = position.value - row.start
+    val thirdWindow = maxOf(duration / 3, 2000L)
+    val thirdStart = (duration - thirdWindow).coerceAtLeast(0L)
+    val beat = when {
+        elapsed < 0 -> -1
+        elapsed >= duration -> 3
+        elapsed >= thirdStart -> 2
+        elapsed >= thirdStart / 2 -> 1
+        else -> 0
+    }
+    val size = with(LocalDensity.current) { (fontSize * if (compact) 1.04f else 1.6f).sp.toDp() }
+    Row(Modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+        .graphicsLayer {
+            translationY = motion.offset.value
+            scaleX = motion.scale.value; scaleY = motion.scale.value; alpha = motion.alpha.value
+            transformOrigin = TransformOrigin(0f, .5f)
+        }.padding(horizontal = 8.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(size * .25f),
+        verticalAlignment = Alignment.CenterVertically) {
+        repeat(3) { index ->
+            if (active && playing && beat in 0..2)
+                LoadingIndicator(Modifier.size(size), color = if (index < beat) colors[index]
+                    else MaterialTheme.colorScheme.onSurface.copy(alpha = .12f))
+            else Box(Modifier.size(size), contentAlignment = Alignment.Center) {
+                Box(Modifier.size(size * .52f).background(
+                    if (index < beat) colors[index] else MaterialTheme.colorScheme.onSurface.copy(alpha = .12f),
+                    CircleShape))
+            }
+        }
+        if (compact) Text("间奏", fontSize = (fontSize * .7f).sp,
+            fontWeight = FontWeight.Bold, fontFamily = GoogleSansFlexBold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+private data class TimedGlyph(val text: String, val start: Long, val end: Long,
+    val group: Int, val groupStart: Long, val groupEnd: Long)
+
+private fun lyricGlyphs(line: LyricLine, lineEnd: Long): List<TimedGlyph> {
+    val result = ArrayList<TimedGlyph>()
+    data class TimedGroup(var text: String, val start: Long, val end: Long)
+    val groups = ArrayList<TimedGroup>()
+    line.syllables.forEachIndexed { index, syllable ->
+        val text = syllable.text.orEmpty()
+        if (text.isEmpty()) return@forEachIndexed
+        val start = syllable.startMs
+        val end = if (syllable.durationMs > 0) syllable.endMs() else
+            line.syllables.getOrNull(index + 1)?.startMs?.takeIf { it > start } ?: lineEnd
+        if (syllable.durationMs <= 0 && text.isTrailingLyricPunctuation() && groups.isNotEmpty()) {
+            groups.last().text += text
+        } else groups += TimedGroup(text, start, end.coerceAtLeast(start + 1L))
+    }
+    groups.forEachIndexed { index, group ->
+        val text = group.text
+        val start = group.start
+        val end = group.end
+        var cursor = 0
+        val pieces = ArrayList<String>()
+        while (cursor < text.length) {
+            val length = if (cursor + 1 < text.length && text[cursor].isHighSurrogate() &&
+                text[cursor + 1].isLowSurrogate()) 2 else 1
+            pieces += text.substring(cursor, cursor + length)
+            cursor += length
+        }
+        val span = (end - start).coerceAtLeast(1L)
+        pieces.forEachIndexed { pieceIndex, piece ->
+            result += TimedGlyph(piece, start + span * pieceIndex / pieces.size,
+                start + span * (pieceIndex + 1) / pieces.size, index, start, end)
+        }
+    }
+    return result
+}
+
+private fun String.isTrailingLyricPunctuation(): Boolean = isNotEmpty() && all {
+    it.isWhitespace() || it in "，。！？、；：,.!?;:…—~～）】》」』〕〉］}”’\"'"
+}
+
+// Source lyric fade and background-vocal pop curves.
+private fun lyricActiveK(position: Long, start: Long, end: Long): Float {
+    fun smooth(value: Float): Float = value.coerceIn(0f, 1f).let { it * it * (3f - 2f * it) }
+    if (position < start - 450L) return 0f
+    if (position < start + 150L) return smooth((position - start + 450L) / 600f)
+    if (position < end + 100L) return 1f
+    return 1f - smooth((position - end - 100L) / 350f)
+}
+
+private fun lyricBackgroundScale(position: Long, start: Long, end: Long): Float {
+    val popStart = start + 150L
+    if (position < popStart) return 0f
+    if (position < popStart + 460L) {
+        val shifted = ((position - popStart) / 460f).coerceIn(0f, 1f) - 1f
+        return 1f + 2.7f * shifted * shifted * shifted + 1.7f * shifted * shifted
+    }
+    if (position < end) return 1f
+    val out = ((position - end) / 280f).coerceIn(0f, 1f)
+    return 1f - out * out * (3f - 2f * out)
+}
+
+@Composable
+private fun Md3eLyricText(row: DisplayLyricRow.Line, position: State<Long>, index: Int,
+    active: Int, motion: LyricRowMotion, fontSize: Int, runtime: Md3eRuntime, onClick: () -> Unit) {
+    val line = row.lyric
+    val background = line.vocalChannel == LyricLine.VocalChannel.BACKGROUND ||
+        line.vocalChannel == LyricLine.VocalChannel.BACKGROUND_LEFT ||
+        line.vocalChannel == LyricLine.VocalChannel.BACKGROUND_RIGHT
+    val right = line.vocalChannel == LyricLine.VocalChannel.DUET_RIGHT ||
+        line.vocalChannel == LyricLine.VocalChannel.BACKGROUND_RIGHT
+    val size = fontSize * if (background) .7f else 1f
+    val fontWeight = when (runtime.settings.intOf("lyricFontWeight").coerceIn(0, 3)) {
+        0 -> FontWeight.Thin; 1 -> FontWeight.Light; 2 -> FontWeight.Normal; else -> FontWeight.Medium
+    }
+    val mainColor = if (runtime.settings.bool("lyricMd3Color")) MaterialTheme.colorScheme.primary
+        else MaterialTheme.colorScheme.onSurface
+    val idleColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val glyphs = remember(line, row.end) { lyricGlyphs(line, row.end) }
+    val focused = index == active
+    val played = active >= 0 && index < active
+    val lowSpec = runtime.settings.bool("lowSpecMode")
+    val useSweep = !lowSpec && (LyricTiming.hasWordTiming(line) || runtime.settings.bool("lyricLinearAnim"))
+    val textScale = if (runtime.settings.bool("lyricScale") && !background) 1.12f else 1f
+    val springEnabled = runtime.settings.bool("lyricSpring") && !lowSpec
+    val lineLift = remember(line, row.start, row.end) { Animatable(0f) }
+    LaunchedEffect(springEnabled, position, row.start, row.end) {
+        if (!springEnabled) { lineLift.snapTo(0f); return@LaunchedEffect }
+        coroutineScope {
+            snapshotFlow { lyricActiveK(position.value, row.start, row.end) }.collect { target ->
+                launch {
+                    if (target != lineLift.targetValue || (!lineLift.isRunning && lineLift.value != target))
+                        lineLift.animateTo(target, spring(dampingRatio = .9f, stiffness = 100f))
+                }
+            }
+        }
+    }
+    Column(Modifier.fillMaxWidth().clickable(onClick = onClick)
+        .graphicsLayer {
+            translationY = motion.offset.value - lineLift.value * 2.5.dp.toPx()
+            val scale = if (background) lyricBackgroundScale(position.value, row.start, row.end) else 1f
+            scaleX = motion.scale.value * scale
+            scaleY = motion.scale.value * scale
+            alpha = if (background) .18f + .52f * lyricActiveK(position.value, row.start, row.end)
+                else motion.alpha.value
+            transformOrigin = TransformOrigin(if (right) 1f else 0f, .5f)
+        }.padding(horizontal = 8.dp, vertical = 6.dp),
+        horizontalAlignment = if (right) Alignment.End else Alignment.Start) {
+        BoxWithConstraints {
+            val textWidth = maxWidth / textScale
+            Box(Modifier.width(textWidth)) {
+            Md3eLyricGlyphs(glyphs, position, played || (focused && !useSweep),
+                useSweep, springEnabled, size * textScale,
+                maxOf(size * runtime.settings.intOf("lyricLineSpacing").coerceIn(100, 250) / 100f,
+                    size * 1.2f), fontWeight, idleColor, mainColor, right)
+            if (focused && runtime.settings.bool("lyricParticles")) {
+                val progress = ((position.value - row.start).toFloat() /
+                    (row.end - row.start).coerceAtLeast(1L)).coerceIn(0f, 1f)
+                Md3eLyricParticles(progress, MaterialTheme.colorScheme.primary,
+                    Modifier.matchParentSize())
+            }
+            }
+        }
+        line.romaji?.takeIf { it.isNotBlank() }?.let {
+            Text(it.trim(), fontSize = (size * .5f).sp, lineHeight = (size * .55f).sp,
+                fontWeight = fontWeight, fontFamily = GoogleSansFlexBold, color = idleColor.copy(alpha = .75f),
+                textAlign = if (right) TextAlign.Right else TextAlign.Left,
+                modifier = Modifier.fillMaxWidth())
+        }
+        line.translation?.takeIf { it.isNotBlank() }?.let {
+            Text(it.trim(), fontSize = (size * .5f).sp, lineHeight = (size * .55f).sp,
+                fontWeight = fontWeight, fontFamily = GoogleSansFlexBold, color = idleColor.copy(alpha = .75f),
+                textAlign = if (right) TextAlign.Right else TextAlign.Left,
+                modifier = Modifier.fillMaxWidth())
+        }
+    }
+}
+
+private data class Md3eGlyphPlacement(val x: Float, val y: Float, val width: Float,
+    val offsetInGroup: Float)
+
+@Composable
+private fun Md3eLyricGlyphs(glyphs: List<TimedGlyph>, position: State<Long>,
+    filled: Boolean, sweep: Boolean, lift: Boolean, fontSize: Float, lineHeight: Float,
+    weight: FontWeight, idle: Color, active: Color, right: Boolean) {
+    if (glyphs.isEmpty()) return
+    val textMeasurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val widthPx = with(density) { maxWidth.roundToPx() }.coerceAtLeast(1)
+        val fullText = remember(glyphs) { glyphs.joinToString("") { it.text } }
+        val style = remember(fontSize, lineHeight, weight, right) {
+            TextStyle(fontSize = fontSize.sp, lineHeight = lineHeight.sp, fontWeight = weight, fontFamily = GoogleSansFlexBold,
+                textAlign = if (right) TextAlign.Right else TextAlign.Left)
+        }
+        val textLayout = remember(fullText, style, widthPx, textMeasurer) {
+            textMeasurer.measure(fullText, style, constraints = Constraints(maxWidth = widthPx))
+        }
+        if (!sweep) {
+            Canvas(Modifier.fillMaxWidth().height(with(density) { textLayout.size.height.toDp() })) {
+                val start = glyphs.minOf { it.groupStart }
+                val end = glyphs.maxOf { it.groupEnd }
+                val raised = if (lift) md3eGlyphLift(position.value, start, end) else 0f
+                val canvas = drawContext.canvas
+                canvas.save()
+                canvas.translate(0f, -raised * density.density)
+                drawText(textLayout, color = if (filled) active else idle)
+                canvas.restore()
+            }
+            return@BoxWithConstraints
+        }
+        val glyphStyle = remember(fontSize, lineHeight, weight) {
+            TextStyle(fontSize = fontSize.sp, lineHeight = lineHeight.sp, fontWeight = weight, fontFamily = GoogleSansFlexBold)
+        }
+        val glyphLayouts = remember(glyphs, glyphStyle, textMeasurer) {
+            glyphs.map { textMeasurer.measure(it.text, glyphStyle, softWrap = false) }
+        }
+        val placements = remember(glyphs, textLayout, glyphLayouts) {
+            var offset = 0
+            val textLength = textLayout.layoutInput.text.length
+            val groupCursor = FloatArray((glyphs.maxOfOrNull { it.group } ?: -1) + 1)
+            glyphs.mapIndexed { index, glyph ->
+                val start = offset.coerceIn(0, textLength)
+                val end = (offset + glyph.text.length).coerceIn(start, textLength)
+                val probe = start.coerceAtMost((textLength - 1).coerceAtLeast(0))
+                val lineIndex = textLayout.getLineForOffset(probe)
+                val startX = textLayout.getHorizontalPosition(start, true)
+                val endLine = textLayout.getLineForOffset(
+                    end.coerceAtMost((textLength - 1).coerceAtLeast(0)))
+                val whole = if (start < textLength) textLayout.getBoundingBox(start) else null
+                val isolated = glyphLayouts[index].getBoundingBox(0)
+                val fallbackWidth = glyphLayouts[index].size.width.toFloat()
+                val endX = if (endLine != lineIndex) textLayout.getLineRight(lineIndex)
+                    else textLayout.getHorizontalPosition(end, true)
+                val advance = abs(endX - startX).takeIf { it > .01f }
+                    ?: fallbackWidth.coerceAtLeast(.001f)
+                val groupOffset = groupCursor[glyph.group]
+                if (glyph.text.any { !it.isWhitespace() }) groupCursor[glyph.group] += advance
+                offset = end
+                Md3eGlyphPlacement(
+                    if (whole != null) whole.left - isolated.left else startX,
+                    if (whole != null) whole.top - isolated.top else textLayout.getLineTop(lineIndex),
+                    if (glyph.text.all { it.isWhitespace() }) 0f else advance,
+                    groupOffset)
+            }
+        }
+        val groupWidths = remember(glyphs, placements) {
+            FloatArray((glyphs.maxOfOrNull { it.group } ?: -1) + 1).also { widths ->
+                glyphs.forEachIndexed { index, glyph -> widths[glyph.group] += placements[index].width }
+            }
+        }
+        val groupStarts = remember(groupWidths) {
+            FloatArray(groupWidths.size).also { starts ->
+                for (index in 1 until starts.size) starts[index] = starts[index - 1] + groupWidths[index - 1]
+            }
+        }
+        Canvas(Modifier.fillMaxWidth().height(with(density) { textLayout.size.height.toDp() })) {
+            val now = position.value
+            val currentGroup = glyphs.lastOrNull { now >= it.groupStart }
+            val sungWidth = if (currentGroup == null) 0f else {
+                val progress = ((now - currentGroup.groupStart).toFloat() /
+                    (currentGroup.groupEnd - currentGroup.groupStart).coerceAtLeast(1L)).coerceIn(0f, 1f)
+                groupStarts[currentGroup.group] + groupWidths[currentGroup.group] * progress
+            }
+            glyphs.forEachIndexed { index, glyph ->
+                if (glyph.text.all { it.isWhitespace() }) return@forEachIndexed
+                val placement = placements[index]
+                val progress = if (filled) 1f else if (sweep)
+                    ((sungWidth - groupStarts[glyph.group] - placement.offsetInGroup) /
+                        placement.width.coerceAtLeast(.001f)).coerceIn(0f, 1f) else 0f
+                val liftStart = if (sweep) glyph.start else glyph.groupStart
+                val liftEnd = if (sweep) glyph.end else glyph.groupEnd
+                val raised = if (lift) md3eGlyphLift(now, liftStart, liftEnd) else 0f
+                val canvas = drawContext.canvas
+                canvas.save()
+                canvas.translate(placement.x, placement.y - raised * density.density)
+                val glyphLayout = glyphLayouts[index]
+                when {
+                    progress <= .001f -> drawText(glyphLayout, color = idle)
+                    progress >= .999f -> drawText(glyphLayout, color = active)
+                    else -> {
+                        drawText(glyphLayout, color = idle)
+                        canvas.save()
+                        canvas.clipRect(0f, 0f,
+                            (placement.width * progress).coerceAtLeast(0f),
+                            glyphLayout.size.height.toFloat())
+                        drawText(glyphLayout, color = active)
+                        canvas.restore()
+                    }
+                }
+                canvas.restore()
+            }
+        }
+    }
+}
+
+private fun md3eGlyphLift(position: Long, start: Long, end: Long): Float {
+    if (position <= start) return 0f
+    val response = ((end - start) / 1000.0).coerceIn(.45, 3.0) * 1.25
+    val elapsed = ((position - start) / 1000.0).coerceAtMost(response * 3.0)
+    val phase = 2.0 * PI * elapsed / response
+    return (2.0 * (1.0 - (1.0 + phase) * exp(-phase))).toFloat()
+}
+
+@Composable
+private fun Md3eLyricParticles(progress: Float, color: Color, modifier: Modifier = Modifier) {
+    val phase by androidx.compose.animation.core.rememberInfiniteTransition(label = "lyric_particles")
+        .animateFloat(0f, (2f * PI).toFloat(),
+            androidx.compose.animation.core.infiniteRepeatable(tween(1800,
+                easing = androidx.compose.animation.core.LinearEasing)), label = "particle_phase")
+    Canvas(modifier) {
+        val edge = 12f * density
+        val center = (size.width * progress).coerceIn(edge, (size.width - edge).coerceAtLeast(edge))
+        repeat(24) { index ->
+            val orbit = phase + index * 37f
+            val spread = (5f + (index % 4) * 2f) * density
+            val convergence = .25f + .75f * progress
+            val x = center + sin(orbit) * spread * (1f - convergence)
+            val y = size.height / 2f + cos(orbit * 1.31f) * spread * .32f * (1f - convergence)
+            val point = Offset(x, y)
+            val alpha = (.32f + .58f * progress).coerceIn(0f, .92f)
+            drawCircle(color.copy(alpha = alpha * .20f), (3.8f + index % 3 * .8f) * density,
+                point)
+            drawCircle(color.copy(alpha = alpha), (1.35f + index % 3 * .45f) * density,
+                point)
+        }
+    }
+}
+
+private class Md3eLyricClock {
+    private var initialized = false
+    private var lastSampleNanos = 0L
+    private var lastSamplePosition = 0L
+    private var lastAdvanceNanos = 0L
+    private var lastFrameNanos = 0L
+    private var revision = 0L
+    private var seekRevision = 0L
+    private var rateBaseNanos = 0L
+    private var rateBasePosition = 0L
+    private var rate = 1.0
+    private var rendered = 0.0
+
+    fun positionAt(positionMs: Long, sampleNanos: Long, running: Boolean,
+        playbackRevision: Long, frameNanos: Long, seekRevision: Long): Long {
+        if (sampleNanos <= 0L) return positionMs
+        val age = ((frameNanos - sampleNanos) / 1_000_000.0).coerceAtLeast(0.0)
+        val newSample = sampleNanos != lastSampleNanos
+        val sampleDelta = (sampleNanos - lastSampleNanos) / 1_000_000.0
+        val discontinuity = initialized && newSample && (
+            positionMs < lastSamplePosition - 60L ||
+                abs(positionMs - lastSamplePosition - sampleDelta * rate) > 300.0)
+        if (!initialized || !running || playbackRevision != revision || this.seekRevision != seekRevision ||
+            (newSample && sampleDelta > 500.0) || sampleNanos < lastSampleNanos || discontinuity) {
+            initialized = true
+            lastSampleNanos = sampleNanos
+            lastSamplePosition = positionMs
+            lastAdvanceNanos = sampleNanos
+            lastFrameNanos = frameNanos
+            revision = playbackRevision
+            this.seekRevision = seekRevision
+            rateBaseNanos = sampleNanos
+            rateBasePosition = positionMs
+            rate = 1.0
+            rendered = positionMs + if (running) age.coerceAtMost(150.0) else 0.0
+            return rendered.toLong()
+        }
+        if (newSample) {
+            val advanced = positionMs > lastSamplePosition
+            val advanceGap = (sampleNanos - lastAdvanceNanos) / 1_000_000.0
+            val rateWindow = (sampleNanos - rateBaseNanos) / 1_000_000.0
+            if (advanced && advanceGap <= 350.0 && rateWindow in 200.0..500.0) {
+                val measured = ((positionMs - rateBasePosition) / rateWindow).coerceIn(0.0, 4.0)
+                rate += (measured - rate) * .35
+            }
+            if (rateWindow >= 200.0) {
+                rateBaseNanos = sampleNanos
+                rateBasePosition = positionMs
+            }
+            if (advanced) lastAdvanceNanos = sampleNanos
+            lastSampleNanos = sampleNanos
+            lastSamplePosition = positionMs
+        }
+        val frameMs = ((frameNanos - lastFrameNanos) / 1_000_000.0).coerceIn(0.0, 100.0)
+        lastFrameNanos = frameNanos
+        val stalled = age > 180.0 || frameNanos - lastAdvanceNanos > 180_000_000L
+        val effectiveRate = if (stalled) 0.0 else rate
+        val target = positionMs + age.coerceAtMost(150.0) * effectiveRate
+        val predicted = rendered + frameMs * effectiveRate
+        val error = target - predicted
+        val corrected = if (abs(error) > 300.0) target else predicted + error * (1.0 - exp(-frameMs / 70.0))
+        rendered = maxOf(rendered, minOf(corrected, positionMs + 150.0 * rate))
+        return rendered.toLong()
+    }
+}
+
+private const val MD3E_LYRIC_BACKDROP_SHADER = """
+uniform shader artwork;
+uniform float2 resolution;
+uniform float2 artworkSize;
+uniform float time;
+uniform float darkOverlay;
+
+half3 sampleArtwork(float2 coordinate) {
+    return artwork.eval(coordinate * artworkSize).rgb;
+}
+
+half4 layer(float2 uv, float2 center, float size, float angle, float scrim) {
+    float2 position = uv - center;
+    float c = cos(angle);
+    float s = sin(angle);
+    float2 rotated = float2(position.x * c - position.y * s,
+                            position.x * s + position.y * c);
+    if (abs(rotated.x) > size * 0.5 || abs(rotated.y) > size * 0.5) {
+        return half4(0.0);
+    }
+    half3 color = sampleArtwork(rotated / size - 0.5);
+    color = mix(color, half3(0.0), half(scrim));
+    color = mix(half3(0.5), color, half(1.08));
+    return half4(color, 1.0);
+}
+
+half4 main(float2 position) {
+    float2 coordinate = position / resolution;
+    float2 centered = (coordinate - 0.5) * 2.0;
+    centered += float2(sin(centered.y * 2.0 + time * 0.19),
+                       cos(centered.x * 2.0 - time * 0.16)) * 0.026;
+    if (resolution.x >= resolution.y) {
+        centered.y *= resolution.y / resolution.x;
+    } else {
+        centered.x *= resolution.x / resolution.y;
+    }
+    float angle0 = time * 6.2831853 / 120.0;
+    float angle1 = time * 6.2831853 / 70.0;
+    float angle2 = time * 6.2831853 / 90.0 + 3.1415926;
+    half4 first = layer(centered, float2(0.0), 2.8, angle0, 0.35);
+    half4 second = layer(centered, float2(-0.25, 0.15), 1.4, angle2, 0.3652);
+    half4 third = layer(centered,
+        float2(0.1 + cos(-angle1 * 0.5), sin(-angle1 * 0.5)),
+        1.4, angle1, 0.3576);
+    half3 color = first.rgb;
+    color = mix(color, second.rgb, second.a);
+    color = mix(color, third.rgb, third.a);
+    color = mix(color, half3(1.0), half(0.095));
+    return half4(color * half(1.0 - darkOverlay), 1.0);
+}
+"""
+
+@Composable
+internal fun Md3eLyricDynamicBackdrop(runtime: Md3eRuntime, cover: String,
+    modifier: Modifier = Modifier) {
+    val systemDark = isSystemInDarkTheme()
+    val dark = when (runtime.settings.intOf("darkMode")) {
+        1 -> false; 2 -> true; else -> systemDark
+    }
+    val fallback = if (dark) MaterialTheme.colorScheme.surfaceContainerHighest
+        else MaterialTheme.colorScheme.primaryContainer
+    if (runtime.settings.bool("lowSpecMode") || cover.isBlank()) {
+        Box(modifier.background(fallback))
+        return
+    }
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+        Box(modifier.background(fallback)) {
+            Artwork(cover, Modifier.fillMaxSize().blur(100.dp))
+            Box(Modifier.fillMaxSize().background(fallback.copy(alpha = if (dark) .39f else .10f)))
+        }
+        return
+    }
+    val artwork by produceState<Bitmap?>(null, cover) {
+        value = withContext(Dispatchers.IO) { loadMd3eLyricArtwork(cover) }
+    }
+    Box(modifier.background(fallback)) {
+        AndroidView(factory = { Md3eLyricBackdropView(it) },
+            modifier = Modifier.fillMaxSize(), update = { it.update(artwork, dark) })
+    }
+}
+
+private fun loadMd3eLyricArtwork(source: String): Bitmap? {
+    if (!source.startsWith("https://") && !source.startsWith("http://")) {
+        val file = File(source.removePrefix("file://"))
+        if (!file.isFile) return null
+        return runCatching {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.path, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+            val options = BitmapFactory.Options().apply {
+                inSampleSize = 1
+                while (maxOf(bounds.outWidth, bounds.outHeight) / inSampleSize > 256) inSampleSize *= 2
+            }
+            BitmapFactory.decodeFile(file.path, options)
+        }.getOrNull()
+    }
+    val url = source.substringBefore('?').replace("http://", "https://") + "?param=256y256"
+    val connection = try { URL(url).openConnection() as HttpURLConnection } catch (_: Exception) {
+        return null
+    }
+    return try {
+        connection.connectTimeout = 8000
+        connection.readTimeout = 8000
+        connection.inputStream.use { BitmapFactory.decodeStream(it) }
+    } catch (_: Exception) { null } finally { connection.disconnect() }
+}
+
+@RequiresApi(Build.VERSION_CODES.TIRAMISU)
+private class Md3eLyricBackdropView(context: android.content.Context) : View(context) {
+    private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val shader = runCatching { RuntimeShader(MD3E_LYRIC_BACKDROP_SHADER) }.getOrNull()
+    private var artwork: Bitmap? = null
+    private var reducedArtwork: Bitmap? = null
+    private var darkOverlay = -1f
+    private var running = false
+    private var framePending = false
+    private val startedAt = SystemClock.uptimeMillis()
+    private val nextFrame = Runnable {
+        framePending = false
+        if (canAnimate()) invalidate()
+    }
+
+    init {
+        setRenderEffect(RenderEffect.createBlurEffect(150f, 150f, Shader.TileMode.MIRROR))
+    }
+
+    fun update(image: Bitmap?, dark: Boolean) {
+        var changed = false
+        if (artwork !== image) {
+            artwork = image
+            reducedArtwork?.recycle()
+            reducedArtwork = image?.let { source ->
+                Bitmap.createBitmap(48, 48, Bitmap.Config.ARGB_8888).also { target ->
+                    AndroidCanvas(target).drawBitmap(source, null,
+                        Rect(0, 0, target.width, target.height), Paint(Paint.FILTER_BITMAP_FLAG))
+                }
+            }
+            reducedArtwork?.let { bitmap ->
+                shader?.setInputShader("artwork",
+                    BitmapShader(bitmap, Shader.TileMode.MIRROR, Shader.TileMode.MIRROR))
+                shader?.setFloatUniform("artworkSize", bitmap.width.toFloat(), bitmap.height.toFloat())
+            }
+            changed = true
+        }
+        val overlay = if (dark) .39f else .10f
+        if (overlay != darkOverlay) {
+            darkOverlay = overlay
+            shader?.setFloatUniform("darkOverlay", overlay)
+            changed = true
+        }
+        running = image != null
+        if (changed) invalidate()
+        scheduleFrame()
+    }
+
+    private fun canAnimate() = running && isAttachedToWindow && isShown &&
+        windowVisibility == VISIBLE && shader != null && reducedArtwork != null
+
+    private fun scheduleFrame() {
+        if (canAnimate() && !framePending) {
+            framePending = true
+            postOnAnimationDelayed(nextFrame, 50L)
+        }
+    }
+
+    override fun onDraw(canvas: AndroidCanvas) {
+        super.onDraw(canvas)
+        if (shader != null && reducedArtwork != null && width > 0 && height > 0) {
+            shader.setFloatUniform("resolution", width.toFloat(), height.toFloat())
+            shader.setFloatUniform("time", (SystemClock.uptimeMillis() - startedAt) * (.13f / 60f))
+            paint.shader = shader
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+            scheduleFrame()
+        }
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        scheduleFrame()
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        if (visibility == VISIBLE) scheduleFrame() else {
+            removeCallbacks(nextFrame)
+            framePending = false
+        }
+    }
+
+    override fun onDetachedFromWindow() {
+        removeCallbacks(nextFrame)
+        framePending = false
+        running = false
+        reducedArtwork?.recycle()
+        reducedArtwork = null
+        artwork = null
+        super.onDetachedFromWindow()
+    }
+}

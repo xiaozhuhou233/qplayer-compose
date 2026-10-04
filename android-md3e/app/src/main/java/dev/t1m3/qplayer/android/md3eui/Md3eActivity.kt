@@ -1,0 +1,65 @@
+package dev.t1m3.qplayer.android.md3eui
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.view.WindowCompat
+
+class Md3eActivity : ComponentActivity() {
+    private lateinit var runtime: Md3eRuntime
+    private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    private val audioPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        runtime.setLocalPermission(granted)
+        if (granted) runtime.scanLocal()
+    }
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        runtime = Md3eRuntime.get(applicationContext)
+        runtime.setLocalPermission(checkSelfPermission(audioPermissionName()) == PackageManager.PERMISSION_GRANTED)
+        setContent {
+            Md3eApp(runtime, onDarkAppearance = { dark ->
+                WindowCompat.getInsetsController(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = !dark
+                    isAppearanceLightNavigationBars = !dark
+                }
+            }, onPlay = { action ->
+                if (Build.VERSION.SDK_INT >= 33 &&
+                    checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                    notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+                runtime.play(action)
+            }, onRequestAudioPermission = {
+                if (checkSelfPermission(audioPermissionName()) == PackageManager.PERMISSION_GRANTED) {
+                    runtime.setLocalPermission(true)
+                    runtime.scanLocal()
+                } else {
+                    audioPermission.launch(audioPermissionName())
+                }
+            })
+        }
+        window.decorView.post { runtime.controller.notifyUiInteractive() }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        runtime.onVisible()
+    }
+
+    override fun onStop() {
+        runtime.onHidden()
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+    }
+
+    private fun audioPermissionName(): String = if (Build.VERSION.SDK_INT >= 33)
+        Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
+}
