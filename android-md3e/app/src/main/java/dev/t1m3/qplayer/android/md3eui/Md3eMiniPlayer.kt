@@ -205,7 +205,12 @@ internal fun Md3eMiniPlayer(
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = ink,
-                        modifier = if (lowSpec) Modifier else Modifier.basicMarquee(initialDelayMillis = 600),
+                        overflow = TextOverflow.Clip,
+                        // A B站 P title can be much longer than the dock. Keep the
+                        // complete string available on low-spec devices too; the
+                        // marquee is a single lightweight text layer and avoids
+                        // measuring/recomposing the whole dock to fit it.
+                        modifier = Modifier.basicMarquee(initialDelayMillis = 600),
                     )
                     Text(
                         state.artist,

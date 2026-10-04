@@ -48,7 +48,8 @@ private const val HOME_PLAYLIST_CHUNK = 10
 
 @Composable
 internal fun Md3eMainTopBar(tab: String, detail: String, title: String, loggedIn: Boolean,
-    onBack: () -> Unit, onQueue: () -> Unit, onSettings: () -> Unit, onAccount: () -> Unit) {
+    biliLoggedIn: Boolean, onBack: () -> Unit, onQueue: () -> Unit, onSettings: () -> Unit,
+    onAccount: () -> Unit, onBiliAccount: () -> Unit) {
     val displayTitle = when (detail) {
         "playlist" -> title.ifBlank { "歌单" }
         "album" -> title.ifBlank { "专辑" }
@@ -77,6 +78,9 @@ internal fun Md3eMainTopBar(tab: String, detail: String, title: String, loggedIn
             IconButton(onClick = onSettings) { Icon(Md3eIcons.Settings, "设置") }
             IconButton(onClick = onAccount) {
                 Icon(Md3eIcons.Person, if (loggedIn) "账户" else "登录")
+            }
+            IconButton(onClick = onBiliAccount) {
+                Icon(Md3eIcons.Video, if (biliLoggedIn) "B站账户" else "登录 B站")
             }
         })
 }

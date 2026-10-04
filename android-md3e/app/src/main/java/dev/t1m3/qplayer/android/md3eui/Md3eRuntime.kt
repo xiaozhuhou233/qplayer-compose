@@ -9,7 +9,9 @@ import android.os.Handler
 import android.os.Looper
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.Stable
 import androidx.core.content.ContextCompat
 import dev.t1m3.qplayer.android.library.AndroidMetadataReader
 import dev.t1m3.qplayer.android.library.AndroidLibraryScanner
@@ -62,6 +64,12 @@ internal data class LyricState(
     val index: Int = -1,
 )
 
+@Stable
+internal class PlaybackClock {
+    var position by mutableLongStateOf(0L)
+    var sampledAtNanos by mutableLongStateOf(0L)
+}
+
 internal data class PlaybackState(
     val title: String = "还没有播放歌曲",
     val artist: String = "从推荐中选一首，开始听歌",
@@ -71,7 +79,6 @@ internal data class PlaybackState(
     val loading: Boolean = false,
     val hasTrack: Boolean = false,
     val queueSize: Int = 0,
-    val position: Long = 0,
     val duration: Long = 0,
     val songId: Long = 0,
     val liked: Boolean = false,
@@ -79,10 +86,13 @@ internal data class PlaybackState(
     val playMode: Int = 0,
     val queueIndex: Int = -1,
     val privateFmMode: Boolean = false,
-    val sampledAtNanos: Long = 0,
     val playbackRevision: Long = 0,
     val seekRevision: Long = 0,
-)
+    val clock: PlaybackClock = PlaybackClock(),
+) {
+    val position: Long get() = clock.position
+    val sampledAtNanos: Long get() = clock.sampledAtNanos
+}
 
 internal data class SearchState(
     val query: String = "",
@@ -143,6 +153,7 @@ internal class Md3eRuntime private constructor(context: Context) {
     val settings = SettingsCore()
     private val scanner = AndroidLibraryScanner(app.contentResolver, AndroidMetadataReader(app))
     private val scanWorker = Executors.newSingleThreadExecutor()
+    private val playbackClock = PlaybackClock()
     var home by mutableStateOf(HomeState())
         private set
     var neteaseLogin by mutableStateOf(NeteaseLoginState())
@@ -234,19 +245,26 @@ internal class Md3eRuntime private constructor(context: Context) {
             lastLoggedIn = loggedIn
             val hasTrack = controller.currentTrack() != null
             val songId = controller.currentTrack()?.neteaseId ?: 0L
-            playback = PlaybackState(
+            playbackClock.position = controller.mediaSessionPosition().coerceAtLeast(0)
+            playbackClock.sampledAtNanos = System.nanoTime()
+            val nextPlayback = PlaybackState(
                 controller.title.peek().ifBlank { "还没有播放歌曲" },
                 controller.artist.peek().ifBlank { if (hasTrack) "未知歌手" else "从推荐中选一首，开始听歌" },
                 controller.coverPath.peek().ifBlank { controller.coverUrl.peek() },
                 controller.coverSeed.peek(),
                 controller.isPlaying(), controller.loading.peek(),
                 hasTrack, controller.queueTracks.peek().size,
-                controller.mediaSessionPosition().coerceAtLeast(0), controller.durationMs.peek().coerceAtLeast(0),
+                controller.durationMs.peek().coerceAtLeast(0),
                 songId, controller.currentLiked.peek(), songId != 0L && loggedIn,
                 controller.playMode.peek(), controller.index.peek(),
                 controller.privateFmActive.peek() == true,
-                System.nanoTime(), controller.playbackRevision(), controller.seekRevision(),
+                controller.playbackRevision(), controller.seekRevision(), playbackClock,
             )
+            // The clock is observable on its own. Avoid invalidating every
+            // playback consumer at the sampling cadence when no metadata or
+            // control state changed; this keeps the 100 ms pump off the main
+            // composition path while lyric/progress draw code still sees time.
+            if (nextPlayback != playback) playback = nextPlayback
             lyricState = LyricState(
                 lines = controller.lyrics.peek(),
                 revision = controller.lyricsRevision.peek(),

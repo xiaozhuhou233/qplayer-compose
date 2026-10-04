@@ -15,6 +15,7 @@ internal object Md3eIcons {
     val MusicNote = icon("Music", "M12,3v10.55A4,4 0,1 0,14,17V7h4V3z")
     val AutoAwesome = icon("AutoAwesome", "M19,11l1.25,-2.75L23,7l-2.75,-1.25L19,3l-1.25,2.75L15,7l2.75,1.25zM9,14l1.8,-3.8L14.5,8.5l-3.7,-1.7L9,3L7.2,6.8L3.5,8.5l3.7,1.7zM19,15l-1.25,2.75L15,19l2.75,1.25L19,23l1.25,-2.75L23,19l-2.75,-1.25z")
     val Person = icon("Person", "M12,12a4,4 0,1 0,0,-8a4,4 0,0 0,0,8zM4,20v-2c0,-2.67 5.33,-4 8,-4s8,1.33 8,4v2z")
+    val Video = icon("Video", "M4,5h11a2,2 0,0 1,2 2v2.5l4,-2.5v10l-4,-2.5V17a2,2 0,0 1,-2 2H4a2,2 0,0 1,-2,-2V7a2,2 0,0 1,2,-2z")
     val Headphones = icon("Headphones", "M12,3a9,9 0,0 0,-9,9v7a2,2 0,0 0,2,2h3v-8H5v-1a7,7 0,0 1,14,0v1h-3v8h3a2,2 0,0 0,2,-2v-7a9,9 0,0 0,-9,-9z")
     val Refresh = icon("Refresh", "M17.65,6.35A7.95,7.95 0,0 0,12,4a8,8 0,1 0,7.75,10h-2.09A6,6 0,1 1,16.24,7.76L13,11h7V4z")
     val CheckCircle = icon("Check", "M12,2a10,10 0,1 0,0,20a10,10 0,0 0,0,-20zM10,17l-5,-5l1.41,-1.41L10,14.17l7.59,-7.59L19,8z")

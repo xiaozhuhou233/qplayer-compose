@@ -17,7 +17,6 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -61,7 +60,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.HttpURLConnection
@@ -103,7 +101,10 @@ internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier
     val listState = rememberLazyListState()
     val lowSpec = runtime.settings.bool("lowSpecMode")
     val springEnabled = runtime.settings.bool("lyricSpring") && !lowSpec
-    LaunchedEffect(state.position, state.playing, lyrics.offsetMs) {
+    // Playback samples are frame-rate data. Keying this effect by position
+    // restarts the coroutine on every sample while paused/playing metadata is
+    // unchanged, which is particularly expensive on low-end devices.
+    LaunchedEffect(state.songId, state.playing, state.seekRevision, state.playbackRevision, lyrics.offsetMs) {
         if (!state.playing) smooth.longValue = state.position - lyrics.offsetMs
     }
     LaunchedEffect(state.songId, state.playing, lyrics.offsetMs) {
@@ -294,15 +295,22 @@ private fun Md3eLyricIndicator(row: DisplayLyricRow, position: State<Long>, play
     val colors = listOf(MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.tertiary,
         MaterialTheme.colorScheme.secondary)
     val duration = (row.end - row.start).coerceAtLeast(1L)
-    val elapsed = position.value - row.start
     val thirdWindow = maxOf(duration / 3, 2000L)
     val thirdStart = (duration - thirdWindow).coerceAtLeast(0L)
-    val beat = when {
-        elapsed < 0 -> -1
-        elapsed >= duration -> 3
-        elapsed >= thirdStart -> 2
-        elapsed >= thirdStart / 2 -> 1
-        else -> 0
+    // Quantize the state read.  The playback clock ticks at frame rate, while
+    // this indicator only changes at three boundaries.  A derived state keeps
+    // the whole row from recomposing on every tick.
+    val beat by remember(row.start, row.end, thirdStart) {
+        derivedStateOf {
+            val elapsed = position.value - row.start
+            when {
+                elapsed < 0 -> -1
+                elapsed >= duration -> 3
+                elapsed >= thirdStart -> 2
+                elapsed >= thirdStart / 2 -> 1
+                else -> 0
+            }
+        }
     }
     val size = with(LocalDensity.current) { (fontSize * if (compact) 1.04f else 1.6f).sp.toDp() }
     Row(Modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
@@ -415,21 +423,13 @@ private fun Md3eLyricText(row: DisplayLyricRow.Line, position: State<Long>, inde
     val useSweep = !lowSpec && (LyricTiming.hasWordTiming(line) || runtime.settings.bool("lyricLinearAnim"))
     val textScale = if (runtime.settings.bool("lyricScale") && !background) 1.12f else 1f
     val springEnabled = runtime.settings.bool("lyricSpring") && !lowSpec
-    val lineLift = remember(line, row.start, row.end) { Animatable(0f) }
-    LaunchedEffect(springEnabled, position, row.start, row.end) {
-        if (!springEnabled) { lineLift.snapTo(0f); return@LaunchedEffect }
-        coroutineScope {
-            snapshotFlow { lyricActiveK(position.value, row.start, row.end) }.collect { target ->
-                launch {
-                    if (target != lineLift.targetValue || (!lineLift.isRunning && lineLift.value != target))
-                        lineLift.animateTo(target, spring(dampingRatio = .9f, stiffness = 100f))
-                }
-            }
-        }
-    }
     Column(Modifier.fillMaxWidth().clickable(onClick = onClick)
         .graphicsLayer {
-            translationY = motion.offset.value - lineLift.value * 2.5.dp.toPx()
+            // This is the same source curve as the old spring target, evaluated
+            // in the layer phase. It avoids one coroutine and an Animatable per
+            // visible lyric row, while retaining the lift envelope.
+            val lift = if (springEnabled) lyricActiveK(position.value, row.start, row.end) else 0f
+            translationY = motion.offset.value - lift * 2.5.dp.toPx()
             val scale = if (background) lyricBackgroundScale(position.value, row.start, row.end) else 1f
             scaleX = motion.scale.value * scale
             scaleY = motion.scale.value * scale
@@ -446,9 +446,7 @@ private fun Md3eLyricText(row: DisplayLyricRow.Line, position: State<Long>, inde
                 maxOf(size * runtime.settings.intOf("lyricLineSpacing").coerceIn(100, 250) / 100f,
                     size * 1.2f), fontWeight, idleColor, mainColor, right)
             if (focused && runtime.settings.bool("lyricParticles")) {
-                val progress = ((position.value - row.start).toFloat() /
-                    (row.end - row.start).coerceAtLeast(1L)).coerceIn(0f, 1f)
-                Md3eLyricParticles(progress, MaterialTheme.colorScheme.primary,
+                Md3eLyricParticles(position, row.start, row.end, MaterialTheme.colorScheme.primary,
                     Modifier.matchParentSize())
             }
             }
@@ -589,22 +587,33 @@ private fun Md3eLyricGlyphs(glyphs: List<TimedGlyph>, position: State<Long>,
 private fun md3eGlyphLift(position: Long, start: Long, end: Long): Float {
     if (position <= start) return 0f
     val response = ((end - start) / 1000.0).coerceIn(.45, 3.0) * 1.25
-    val elapsed = ((position - start) / 1000.0).coerceAtMost(response * 3.0)
+    val elapsedMs = position - start
+    // Once the response has settled, avoid exp() for every glyph on every
+    // frame. Long lyric lines otherwise spend a surprising amount of CPU in
+    // this curve even though their lift is already at its final value.
+    if (elapsedMs.toDouble() >= response * 3000.0) return 2f
+    val elapsed = (elapsedMs / 1000.0).coerceAtMost(response * 3.0)
     val phase = 2.0 * PI * elapsed / response
     return (2.0 * (1.0 - (1.0 + phase) * exp(-phase))).toFloat()
 }
 
 @Composable
-private fun Md3eLyricParticles(progress: Float, color: Color, modifier: Modifier = Modifier) {
-    val phase by androidx.compose.animation.core.rememberInfiniteTransition(label = "lyric_particles")
+private fun Md3eLyricParticles(position: State<Long>, start: Long, end: Long,
+    color: Color, modifier: Modifier = Modifier) {
+    val phase = androidx.compose.animation.core.rememberInfiniteTransition(label = "lyric_particles")
         .animateFloat(0f, (2f * PI).toFloat(),
             androidx.compose.animation.core.infiniteRepeatable(tween(1800,
                 easing = androidx.compose.animation.core.LinearEasing)), label = "particle_phase")
     Canvas(modifier) {
+        // Read the animated values inside draw. This invalidates only the draw
+        // pass; the lyric row composition is not rebuilt at 60 Hz.
+        val progress = ((position.value - start).toFloat() /
+            (end - start).coerceAtLeast(1L)).coerceIn(0f, 1f)
+        val phaseValue = phase.value
         val edge = 12f * density
         val center = (size.width * progress).coerceIn(edge, (size.width - edge).coerceAtLeast(edge))
         repeat(24) { index ->
-            val orbit = phase + index * 37f
+            val orbit = phaseValue + index * 37f
             val spread = (5f + (index % 4) * 2f) * density
             val convergence = .25f + .75f * progress
             val x = center + sin(orbit) * spread * (1f - convergence)
@@ -752,7 +761,10 @@ internal fun Md3eLyricDynamicBackdrop(runtime: Md3eRuntime, cover: String,
     }
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
         Box(modifier.background(fallback)) {
-            Artwork(cover, Modifier.fillMaxSize().blur(100.dp))
+            // Keep the old soft backdrop while halving the large blur kernel on
+            // pre-T devices. The full-screen blur is otherwise one of the
+            // steadiest GPU costs on older Adreno hardware.
+            Artwork(cover, Modifier.fillMaxSize().blur(64.dp))
             Box(Modifier.fillMaxSize().background(fallback.copy(alpha = if (dark) .39f else .10f)))
         }
         return
@@ -808,7 +820,9 @@ private class Md3eLyricBackdropView(context: android.content.Context) : View(con
     }
 
     init {
-        setRenderEffect(RenderEffect.createBlurEffect(150f, 150f, Shader.TileMode.MIRROR))
+        // A 150 px full-screen kernel saturates K20-class GPUs. 72 px keeps the
+        // artwork diffuse while materially reducing the off-screen blur work.
+        setRenderEffect(RenderEffect.createBlurEffect(72f, 72f, Shader.TileMode.MIRROR))
     }
 
     fun update(image: Bitmap?, dark: Boolean) {
@@ -846,7 +860,10 @@ private class Md3eLyricBackdropView(context: android.content.Context) : View(con
     private fun scheduleFrame() {
         if (canAnimate() && !framePending) {
             framePending = true
-            postOnAnimationDelayed(nextFrame, 50L)
+            // Keep shader motion on the display's vsync. The previous 50 ms
+            // timer made the backdrop visibly judder at 20 Hz and still paid
+            // the same invalidation cost when a frame was actually rendered.
+            postOnAnimation(nextFrame)
         }
     }
 

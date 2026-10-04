@@ -157,10 +157,11 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                         "biliFolders" -> "B站收藏夹"
                         "biliFolder" -> biliFolderTitle
                         else -> ""
-                    }, runtime.home.loggedIn, onBack = closeTop,
+                    }, runtime.home.loggedIn, runtime.bili.loggedIn, onBack = closeTop,
                         onQueue = { queueFromPlayer = false; overlay = "queue" },
                         onSettings = { openDetail("settings", 0L) },
-                        onAccount = { neteaseLoginOpen = true })
+                        onAccount = { neteaseLoginOpen = true },
+                        onBiliAccount = { biliAccountOpen = true })
                 },
                 bottomBar = {
                     if (detail != "settings") {

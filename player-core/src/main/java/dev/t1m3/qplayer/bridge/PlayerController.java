@@ -9193,7 +9193,13 @@ public final class PlayerController {
         t.source = Track.Source.BILI;
         t.biliBvid = v.bvid;
         t.biliCid = cid;
-        t.title = partTitle != null && !partTitle.isEmpty() ? partTitle : v.title;
+        String part = partTitle == null ? "" : partTitle.trim();
+        String video = v.title == null ? "" : v.title.trim();
+        // Keep the parent video title in every P-track. The mini player is the
+        // only always-visible title surface, and a part-only label made a B站
+        // search result look unrelated after it entered the queue.
+        t.title = part.isEmpty() || part.equals(video) ? video
+                : (video.isEmpty() ? part : video + " · " + part);
         t.artist = v.author;
         t.coverUrl = v.coverUrl;
         t.durationMs = v.durationSeconds > 0 ? v.durationSeconds * 1000L : 0L;
