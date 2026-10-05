@@ -13,7 +13,7 @@
 //      which this Compose version does not offer; and the selection flow keeps the
 //      restart-safety the route recompositions need (see the two LaunchedEffects).
 // The reference's drag physics and recorded accent-tinted foreground are preserved.
-// Optical parameters use QPlayer's softer rim, downward shadow and lens depth effect.
+// Material now uses BiliPai's default BALANCED shell and separate indicator optics.
 package com.kyant.backdrop.catalog.components
 
 import androidx.compose.animation.core.Animatable
@@ -62,19 +62,18 @@ import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import com.kyant.backdrop.catalog.utils.DampedDragAnimation
 import com.kyant.backdrop.catalog.utils.InteractiveHighlight
 import com.kyant.backdrop.drawBackdrop
-import com.kyant.backdrop.effects.blur
-import com.kyant.backdrop.effects.lens
-import com.kyant.backdrop.effects.vibrancy
-import dev.t1m3.qplayer.android.ui.IosGlassHighlight
-import dev.t1m3.qplayer.android.ui.IosGlassShadow
-import dev.t1m3.qplayer.android.ui.IosGlassThumbShadow
+import dev.t1m3.qplayer.android.ui.rememberBiliPaiGlassHighlight
+import dev.t1m3.qplayer.android.ui.iosGlassShadow
+import dev.t1m3.qplayer.android.ui.BiliPaiGlassParameters
+import dev.t1m3.qplayer.android.ui.drawBiliPaiGlassSurface
+import dev.t1m3.qplayer.android.ui.biliPaiIndicatorEffects
+import com.kyant.backdrop.shadow.InnerShadow
 import dev.t1m3.qplayer.android.ui.LocalGlassRefraction
-import dev.t1m3.qplayer.android.ui.iosGlassInnerShadow
-import dev.t1m3.qplayer.android.ui.iosGlassSurface
 import dev.t1m3.qplayer.android.ui.rememberRegionAdaptiveGlass
-import dev.t1m3.qplayer.android.ui.adaptiveGlassColorEffects
+import dev.t1m3.qplayer.android.ui.apiGlassEffects
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.MaterialTheme
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.collectLatest
 import kotlin.math.abs
@@ -95,11 +94,10 @@ fun LiquidBottomTabs(
     val refraction = LocalGlassRefraction.current
     // The reference's own two colour pairs, keyed on the app's theme flag.
     val isLightTheme = !dark
-    val accentColor =
-        if (isLightTheme) Color(0xFF0088FF)
-        else Color(0xFF0091FF)
-    // Inside the dock this resolves to the dock's ONE region sample, so the bar
-    // adapts together with the miniplayer and the round buttons, not on its own.
+    val accentColor = androidx.compose.ui.graphics.lerp(
+        MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.onSurface,
+        BiliPaiGlassParameters.contentReadabilityBoost * 0.65f)
+    // Sample the raw background under this plate, not the entire dock.
     val adaptive = rememberRegionAdaptiveGlass(backdrop)
 
     val latestSelected by androidx.compose.runtime.rememberUpdatedState(selectedTabIndex)
@@ -114,6 +112,10 @@ fun LiquidBottomTabs(
         val tabWidth = with(density) {
             (constraints.maxWidth.toFloat() - 8f.dp.toPx()) / tabsCount
         }
+        val baseHighlight = rememberBiliPaiGlassHighlight()
+        val pillHighlight = rememberBiliPaiGlassHighlight(indicator = true,
+            width = BiliPaiGlassParameters.indicatorHighlightWidthDp(
+                with(density) { tabWidth.toDp().value }, 56f).dp)
 
         val offsetAnimation = remember { Animatable(0f) }
         val panelOffset by remember(density, constraints.maxWidth) {
@@ -202,20 +204,18 @@ fun LiquidBottomTabs(
                     backdrop = backdrop,
                     shape = { CircleShape },
                     effects = {
-                        adaptiveGlassColorEffects(adaptive.luminance)
-                        if (refraction) lens(32f.dp.toPx(), 46f.dp.toPx(),
-                            depthEffect = true, centerConvexity = 0.145f)
+                        apiGlassEffects(adaptive.luminance, refraction)
                     },
-                    highlight = { IosGlassHighlight },
-                    shadow = { IosGlassShadow },
-                    innerShadow = { iosGlassInnerShadow(adaptive.luminance) },
+                    highlight = { baseHighlight.value },
+                    shadow = { iosGlassShadow(dark) },
+                    innerShadow = null,
                     layerBlock = {
                         val progress = dampedDragAnimation.pressProgress
                         val scale = lerp(1f, 1f + 16f.dp.toPx() / size.width, progress)
                         scaleX = scale
                         scaleY = scale
                     },
-                    onDrawSurface = { drawRect(iosGlassSurface(dark, Color.White, adaptive.luminance)) }
+                    onDrawSurface = { drawBiliPaiGlassSurface(dark) }
                 )
                 .then(interactiveHighlight.modifier)
                 .height(64f.dp)
@@ -243,22 +243,12 @@ fun LiquidBottomTabs(
                         backdrop = backdrop,
                         shape = { CircleShape },
                         effects = {
-                            val progress = dampedDragAnimation.pressProgress
-                            adaptiveGlassColorEffects(adaptive.luminance)
-                            if (refraction) lens(
-                                24f.dp.toPx() * progress,
-                                30f.dp.toPx() * progress,
-                                depthEffect = true,
-                                centerConvexity = 0.095f * progress,
-                            )
+                            apiGlassEffects(adaptive.luminance, refraction, shellHeightDp = 64f)
                         },
-                        highlight = {
-                            val progress = dampedDragAnimation.pressProgress
-                            IosGlassHighlight.copy(alpha = IosGlassHighlight.alpha * progress)
-                        },
+                        highlight = null,
                         // Only the visible plate casts a shadow; this is the lens's source.
                         shadow = null,
-                        onDrawSurface = { drawRect(iosGlassSurface(dark, Color.White, adaptive.luminance)) }
+                        onDrawSurface = { drawBiliPaiGlassSurface(dark) }
                     )
                     .then(interactiveHighlight.modifier)
                     .height(56f.dp)
@@ -285,25 +275,20 @@ fun LiquidBottomTabs(
                     shape = { CircleShape },
                     effects = {
                         val progress = dampedDragAnimation.pressProgress
-                        if (refraction) lens(
-                            13f.dp.toPx() * progress,
-                            26f.dp.toPx() * progress,
-                            depthEffect = true,
-                            chromaticAberration = true,
-                            centerConvexity = 0.085f * progress,
-                        )
+                        biliPaiIndicatorEffects(refraction, progress)
                     },
                     highlight = {
                         val progress = dampedDragAnimation.pressProgress
-                        IosGlassHighlight.copy(alpha = IosGlassHighlight.alpha * progress)
+                        pillHighlight.value.copy(alpha = progress)
                     },
-                    shadow = {
-                        val progress = dampedDragAnimation.pressProgress
-                        IosGlassThumbShadow.copy(alpha = progress)
-                    },
+                    shadow = null,
                     innerShadow = {
                         val progress = dampedDragAnimation.pressProgress
-                        iosGlassInnerShadow(dark).copy(alpha = progress)
+                        if (refraction) InnerShadow(
+                            radius = BiliPaiGlassParameters.innerShadowRadiusDp.dp * progress,
+                            color = Color.Black.copy(alpha = BiliPaiGlassParameters.innerShadowAlpha),
+                            alpha = progress,
+                        ) else null
                     },
                     layerBlock = {
                         scaleX = dampedDragAnimation.scaleX

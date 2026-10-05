@@ -75,14 +75,22 @@ internal fun SystemBarAppearance(dark: Boolean) {
 
 /** The page continues behind the system icons; only a faint fading shadow overlays it. */
 @Composable
-internal fun StatusBarShadow(dark: Boolean, modifier: Modifier = Modifier) {
+internal fun StatusBarShadow(
+    dark: Boolean,
+    modifier: Modifier = Modifier,
+    opacity: (() -> Float)? = null,
+) {
     val inset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     if (inset <= 0.dp) return
     Box(modifier.fillMaxWidth().height(inset + 12.dp).drawWithCache {
         val gradient = Brush.verticalGradient(
-            listOf(Color.Black.copy(alpha = if (dark) 0.16f else 0.07f), Color.Transparent)
+            listOf(Color.Black, Color.Transparent)
         )
-        onDrawBehind { drawRect(gradient) }
+        onDrawBehind {
+            // Read the player clock in drawing, not composition. No final-frame
+            // dark-to-light scrim switch when the retained detail is removed.
+            drawRect(gradient, alpha = opacity?.invoke() ?: if (dark) 0.16f else 0.07f)
+        }
     })
 }
 

@@ -24,9 +24,11 @@ import androidx.compose.ui.util.lerp
 import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.catalog.utils.InteractiveHighlight
 import com.kyant.backdrop.drawBackdrop
-import dev.t1m3.qplayer.android.ui.IosGlassHighlight
-import dev.t1m3.qplayer.android.ui.apiGlassEffects
-import dev.t1m3.qplayer.android.ui.iosGlassInnerShadow
+import dev.t1m3.qplayer.android.ui.rememberIosControlGlassHighlight
+import dev.t1m3.qplayer.android.ui.drawControlGlassSurface
+import dev.t1m3.qplayer.android.ui.drawBiliPaiReadabilityScrim
+import dev.t1m3.qplayer.android.ui.controlGlassShadow
+import dev.t1m3.qplayer.android.ui.controlGlassEffects
 import dev.t1m3.qplayer.android.ui.rememberIosAdaptiveGlass
 import dev.t1m3.qplayer.android.ui.LocalGlassContentColor
 import androidx.compose.runtime.CompositionLocalProvider
@@ -53,6 +55,7 @@ fun LiquidButton(
     // Share the navigation material, adapting ink and optics to the local backdrop.
     val dark = dev.t1m3.qplayer.android.ui.LocalGlassDark.current
     val adaptive = rememberIosAdaptiveGlass(backdrop)
+    val glassHighlight = rememberIosControlGlassHighlight()
     val animationScope = rememberCoroutineScope()
 
     val interactiveHighlight = remember(animationScope) {
@@ -69,11 +72,9 @@ fun LiquidButton(
                 backdrop = backdrop,
                 shape = { CircleShape },
                 effects = {
-                    apiGlassEffects(
-                        luminance = adaptive.luminance,
+                    controlGlassEffects(
+                        adaptive = adaptive,
                         refraction = refraction,
-                        refractionHeight = 30.dp.toPx(),
-                        refractionAmount = 30.dp.toPx(),
                     )
                 },
                 layerBlock = if (isInteractive) {
@@ -109,9 +110,8 @@ fun LiquidButton(
                 onDrawBackdrop = { drawBackdrop ->
                     drawBackdrop()
                 },
-                shadow = { dev.t1m3.qplayer.android.ui.IosGlassShadow },
-                innerShadow = { iosGlassInnerShadow(adaptive.luminance) },
-                highlight = { IosGlassHighlight },
+                shadow = { controlGlassShadow(dark, adaptive) },
+                highlight = { glassHighlight.value },
                 onDrawSurface = {
                     if (tint.isSpecified) {
                         drawRect(tint, blendMode = BlendMode.Hue)
@@ -120,9 +120,9 @@ fun LiquidButton(
                     // Ⓜ The caller's own plate when it named one, else the bar's theme pair.
                     if (surfaceColor.isSpecified) {
                         drawRect(surfaceColor)
+                        if (!adaptive.restoredDialog) drawBiliPaiReadabilityScrim(dark)
                     } else {
-                        drawRect(dev.t1m3.qplayer.android.ui.iosGlassSurface(
-                            dark = dark, tint = tint, sampledLuminance = adaptive.luminance))
+                        drawControlGlassSurface(dark, adaptive)
                     }
                 }
             )

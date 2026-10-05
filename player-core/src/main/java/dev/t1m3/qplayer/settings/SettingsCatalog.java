@@ -38,6 +38,7 @@ public final class SettingsCatalog {
      *  name. Sharing a key between them would be wrong. */
     public static final String ACE_STEP = "ACE-Step";
     public static final String PALETTE = "调色板";
+    public static final String LOW_SPEC_MODE_KEY = "lowSpecMode";
 
     /** The ACE-Step group's rows, by key: the switch, the address, the key (the user's own, never
      *  this app's), the model, and how far under the passage the generated bed sits. Named here
@@ -137,6 +138,14 @@ public final class SettingsCatalog {
         // ---- 外观 -----------------------------------------------------------
         out.add(SettingSpec.toggle("iosDesign", APPEARANCE, "ios design", false)
                 .desc("iOS 26 液态玻璃导航栏；关闭恢复 MD3。Android 13+ 支持完整折射光效")
+                .onlyOn(ANDROID)
+                .build());
+        out.add(SettingSpec.toggle("claudeDesign", APPEARANCE, "Claude 设计风格", false)
+                .desc("暖纸色、陶土橙、衬线标题与杂志式音乐界面；开启后应用重绘为回响音乐风格")
+                .onlyOn(ANDROID)
+                .build());
+        out.add(SettingSpec.toggle(LOW_SPEC_MODE_KEY, APPEARANCE, "最低配模式", false)
+                .desc("切换到 MD3，关闭动态主题、封面模糊背景、共享元素动画及后台音频预处理，保留轻量页面转场")
                 .onlyOn(ANDROID)
                 .build());
         out.add(SettingSpec.toggle("iosGlassRefraction", APPEARANCE, "玻璃折射", true)

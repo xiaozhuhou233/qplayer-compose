@@ -3,6 +3,8 @@ package com.kyant.backdrop.highlight
 
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.PaintingStyle
 import androidx.compose.ui.graphics.Path
@@ -94,6 +96,29 @@ internal class HighlightNode(
         }
 
         drawContent()
+
+        // BiliPai/Miuix BloomStroke shades a full rect with its own SDF/halo.
+        // Drawing it through the old clipped stroke would remove the inner glow.
+        val bloom = highlight.style as? BiliPaiBloomStroke
+        if (bloom != null) {
+            if (size.width <= 0f || size.height <= 0f) return
+            val shader = with(bloom) {
+                createBloomShader(shapeProvider.innerShape,
+                    highlight.width.toPx().fastCoerceAtMost(size.minDimension / 2f),
+                    highlight.alpha, runtimeShaderCache)
+            } ?: return
+            paint.style = PaintingStyle.Fill
+            paint.color = Color.White
+            paint.alpha = 1f
+            paint.blendMode = bloom.blendMode
+            paint.asFrameworkPaint().maskFilter = null
+            paint.setRuntimeShader(shader)
+            drawContext.canvas.drawRect(0f, 0f, size.width, size.height, paint)
+            paint.setRuntimeShader(null)
+            paint.blendMode = BlendMode.SrcOver
+            paint.style = PaintingStyle.Stroke
+            return
+        }
 
         val highlightLayer = highlightLayer
         if (highlightLayer != null) {

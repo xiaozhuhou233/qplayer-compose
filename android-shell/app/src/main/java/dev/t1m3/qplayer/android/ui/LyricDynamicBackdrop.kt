@@ -82,7 +82,28 @@ private class LyricDynamicBackdropView(context: android.content.Context) : View(
     private var artwork: ImageBitmap? = null
     private var reducedArtwork: Bitmap? = null
     private val startedAt = SystemClock.uptimeMillis()
-    private var running = true
+    private var running = false
+    private var darkOverlay: Float? = null
+    private var framePending = false
+    private val nextFrame = Runnable {
+        framePending = false
+        if (canAnimate()) invalidate()
+    }
+
+    private fun canAnimate(): Boolean = running && isAttachedToWindow &&
+        windowVisibility == VISIBLE && isShown && shader != null && reducedArtwork != null
+
+    private fun scheduleFrame() {
+        if (canAnimate() && !framePending) {
+            framePending = true
+            postOnAnimationDelayed(nextFrame, 50L)
+        }
+    }
+
+    private fun cancelFrame() {
+        removeCallbacks(nextFrame)
+        framePending = false
+    }
 
     init {
         // ui.zip performs a broad two-pass blur after the animated mesh. A
@@ -100,8 +121,10 @@ private class LyricDynamicBackdropView(context: android.content.Context) : View(
         }
     }
 
-    fun update(image: ImageBitmap?, dark: Boolean) {
+    fun update(image: ImageBitmap?, dark: Boolean, active: Boolean) {
+        var changed = false
         if (artwork !== image) {
+            changed = true
             artwork = image
             reducedArtwork?.recycle()
             reducedArtwork = image?.asAndroidBitmap()?.let { source ->
@@ -122,8 +145,19 @@ private class LyricDynamicBackdropView(context: android.content.Context) : View(
                 shader?.setFloatUniform("artworkSize", bitmap.width.toFloat(), bitmap.height.toFloat())
             }
         }
-        shader?.setFloatUniform("darkOverlay", if (dark) 0.39f else 0.10f)
-        invalidate()
+        val overlay = if (dark) 0.39f else 0.10f
+        if (darkOverlay != overlay) {
+            darkOverlay = overlay
+            shader?.setFloatUniform("darkOverlay", overlay)
+            changed = true
+        }
+        if (running != active) {
+            running = active
+            changed = true
+        }
+        if (!active) cancelFrame()
+        if (changed) invalidate()
+        scheduleFrame()
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -133,17 +167,27 @@ private class LyricDynamicBackdropView(context: android.content.Context) : View(
             shader.setFloatUniform("time", (SystemClock.uptimeMillis() - startedAt) * (0.13f / 60f))
             paint.shader = shader
             canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
-            if (running && isShown) postInvalidateDelayed(50L)
+            scheduleFrame()
         }
     }
 
     override fun onVisibilityChanged(changedView: View, visibility: Int) {
         super.onVisibilityChanged(changedView, visibility)
-        running = visibility == VISIBLE
-        if (running) invalidate()
+        if (visibility == VISIBLE) scheduleFrame() else cancelFrame()
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        if (visibility == VISIBLE) scheduleFrame() else cancelFrame()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        scheduleFrame()
     }
 
     override fun onDetachedFromWindow() {
+        cancelFrame()
         super.onDetachedFromWindow()
         reducedArtwork?.recycle()
         reducedArtwork = null
@@ -153,9 +197,10 @@ private class LyricDynamicBackdropView(context: android.content.Context) : View(
 
 @Composable
 internal fun LyricDynamicBackdrop(image: ImageBitmap?, dark: Boolean, modifier: Modifier = Modifier) {
+    val active = rememberUiRenderingActive()
     AndroidView(
         factory = { LyricDynamicBackdropView(it) },
-        update = { it.update(image, dark) },
+        update = { it.update(image, dark, active) },
         modifier = modifier
     )
 }

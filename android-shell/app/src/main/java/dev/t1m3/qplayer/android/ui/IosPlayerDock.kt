@@ -106,12 +106,7 @@ internal fun IosPlayerDock(
                 .fillMaxWidth()
                 .height(if (hasTrack) 168.dp else 64.dp)
         ) {
-        // This invisible node spans the navigation bar, both round buttons and the
-        // miniplayer: every glass inside the provider below reads ITS luminance
-        // (one piece of material) instead of sampling its own patch of page.
-        val dockSample = rememberIosAdaptiveGlass(backdrop)
-        Box(Modifier.matchParentSize().then(dockSample.modifier))
-        CompositionLocalProvider(LocalSharedGlassSample provides dockSample) {
+        // Each component samples its own bounds, as in the adaptive APK demo.
         val navWidth = (maxWidth - 72.dp).coerceAtLeast(64.dp)
         if (navVisible) IosDesignNavigation(
             destination, showLocal, dark, backdrop,
@@ -135,6 +130,10 @@ internal fun IosPlayerDock(
         if (homeVisible) Box(Modifier.align(Alignment.BottomStart).playerChromeExit(playerExpansion)
             .graphicsLayer {
                 alpha = collapse.value
+                // Match the compact MiniPlayer baseline. The player is lifted
+                // by 6dp to clear the navigation inset, so both side controls
+                // must travel with the same visual row.
+                translationY = -6.dp.toPx() * collapse.value
             }) {
             IosLiquidSearchButton(backdrop, dark, true, {
                 view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
@@ -142,7 +141,12 @@ internal fun IosPlayerDock(
             }, icon = Icons.Default.Home, contentDescription = "展开主页导航",
                 diameter = 64.dp, compactProgress = progress)
         }
-        Box(Modifier.align(Alignment.BottomEnd).playerChromeExit(playerExpansion)) {
+        Box(Modifier.align(Alignment.BottomEnd).playerChromeExit(playerExpansion)
+            .graphicsLayer {
+                val p = collapse.value
+                translationX = -4.dp.toPx() * p
+                translationY = -6.dp.toPx() * p
+            }) {
             IosLiquidSearchButton(backdrop, dark, destination == IosNavigationDestination.SEARCH, {
                 view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                 onSearch()
@@ -162,14 +166,16 @@ internal fun IosPlayerDock(
                 }, progress)
             }) { measurables, constraints ->
                 val p = collapse.value.coerceIn(0f, 1f)
-                // The iOS MiniPlayer is supplied without outer padding. Keep the
-                // collapsed capsule strictly between the visual 44dp home/search circles
-                // with an 8dp gap.
+                // At 393dp wide, the compact dock matches the reference: 44dp
+                // circles, a 233dp capsule, and 16dp / 12dp side gaps.
                 val expandedWidth = constraints.maxWidth.toFloat()
                 val buttonSlot = 44.dp.toPx()
-                val gap = 8.dp.toPx()
+                val leftGap = 16.dp.toPx()
+                val rightGap = 12.dp.toPx()
+                val searchInset = 4.dp.toPx()
                 val collapsedVisualWidth =
-                    (constraints.maxWidth.toFloat() - 2f * (buttonSlot + gap)).coerceAtLeast(1f)
+                    (constraints.maxWidth.toFloat() - 2f * buttonSlot -
+                        leftGap - rightGap - searchInset).coerceAtLeast(1f)
                 val collapsedWidth = collapsedVisualWidth.coerceAtMost(expandedWidth)
                 val width = (expandedWidth * (1f - p) + collapsedWidth * p).roundToInt()
                     .coerceAtLeast(1)
@@ -179,8 +185,13 @@ internal fun IosPlayerDock(
                 val height = playerHeight.roundToInt()              // 48dp → 44dp
                 val child = measurables.single().measure(Constraints.fixed(width, height))
                 val expandedCenter = 72.dp.toPx()
-                // All three compact controls measure 44dp and share a baseline.
-                val collapsedCenter = constraints.maxHeight.toFloat() - collapsedHeight / 2f
+                // All compact controls share this bottom edge inside the dock.
+                // The outer box already owns the navigation inset and 12dp gap;
+                // moving below this edge cancels that gap and escapes its bounds.
+                // Keep the collapsed row a little higher inside the navigation
+                // safe area while preserving the expanded dock geometry.
+                val collapsedCenter = constraints.maxHeight.toFloat() -
+                    collapsedHeight / 2f - 6.dp.toPx()
                 val center = expandedCenter * (1f - p) + collapsedCenter * p
                 val y = (center - playerHeight / 2f).roundToInt()
                 val x = ((constraints.maxWidth - width) * 0.5f).roundToInt()
@@ -188,7 +199,6 @@ internal fun IosPlayerDock(
                     child.placeRelative(x, y)
                 }
             }
-        }
         }
         }
         }

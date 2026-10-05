@@ -33,13 +33,11 @@ import com.kyant.backdrop.backdrops.layerBackdrop
 import com.kyant.backdrop.backdrops.rememberCanvasBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import com.kyant.backdrop.drawBackdrop
-import com.kyant.backdrop.effects.blur
-import com.kyant.backdrop.effects.colorControls
-import com.kyant.backdrop.effects.lens
 import com.kyant.backdrop.isRenderEffectSupported
 
 internal enum class IosDialogAction { CONFIRM, DISMISS }
 internal val LocalIosDialogAction = staticCompositionLocalOf<IosDialogAction?> { null }
+internal val LocalIosDialogGlassBackdrop = staticCompositionLocalOf<Backdrop?> { null }
 
 @Stable
 internal class DialogBackdropState(val backdrop: LayerBackdrop) {
@@ -52,7 +50,8 @@ private val LocalDialogBackdrop = staticCompositionLocalOf<DialogBackdropState?>
 internal fun QPlayerDialogBackdropHost(enabled: Boolean, content: @Composable () -> Unit) {
     val layer = rememberLayerBackdrop()
     val state = remember(layer) { DialogBackdropState(layer) }
-    CompositionLocalProvider(LocalDialogBackdrop provides state) {
+    val tilt = if (enabled) rememberBiliPaiDeviceTilt() else null
+    CompositionLocalProvider(LocalDialogBackdrop provides state, LocalBiliPaiDeviceTilt provides tilt) {
         Box(Modifier.fillMaxSize().then(
             if (enabled && state.clients > 0) Modifier.layerBackdrop(layer) else Modifier
         )) { content() }
@@ -79,16 +78,11 @@ internal fun IosAwareAlertDialog(
     }
     val inherited = MaterialTheme.colorScheme
     val light = inherited.onBackground.luminance() < 0.5f
-    // These are the reference dialog colours, NOT the album tint of navigation.
-    val ink = if (light) Color.Black else Color.White
+    // Layout/scrim remain the dialog's; its glass and ink use the adaptive APK.
     val plate = if (light) Color(0xFFFAFAFA) else Color(0xFF121212)
     val glassPlate = if (light) Color.White else Color(0xFF1C1C1C)
-    val container = glassPlate.copy(alpha = if (!isRenderEffectSupported()) 0.96f else if (light) 0.63f else 0.4f)
+    val renderEffects = isRenderEffectSupported()
     val dim = if (light) Color(0xFF29293A).copy(alpha = 0.23f) else Color(0xFF121212).copy(alpha = 0.56f)
-    val dialogScheme = iosDesignColorScheme(!light).copy(
-        background = plate, surface = plate, surfaceContainerHigh = plate,
-        onBackground = ink, onSurface = ink, onSurfaceVariant = ink,
-    ).withReadableContent()
     val source = LocalDialogBackdrop.current
     val fallback = rememberCanvasBackdrop { drawRect(inherited.background) }
     val backdrop: Backdrop = source?.backdrop ?: fallback
@@ -101,6 +95,13 @@ internal fun IosAwareAlertDialog(
         usePlatformDefaultWidth = false, decorFitsSystemWindows = false
     )) {
         SystemBarAppearance(dark = !light)
+        // Create the sampler in the dialog's own window, not its Activity parent.
+        val adaptive = rememberRestoredIosDialogGlass(backdrop)
+        val ink = if (renderEffects) adaptive.contentColor else if (light) Color.Black else Color.White
+        val dialogScheme = iosDesignColorScheme(!light).copy(
+            background = plate, surface = plate, surfaceContainerHigh = plate,
+            onBackground = ink, onSurface = ink, onSurfaceVariant = ink,
+        )
         val view = LocalView.current
         SideEffect {
             (view.parent as? DialogWindowProvider)?.window?.let { window ->
@@ -110,6 +111,9 @@ internal fun IosAwareAlertDialog(
         }
         MaterialTheme(colorScheme = dialogScheme) {
             CompositionLocalProvider(LocalContentColor provides ink, LocalIosControls provides true,
+                LocalGlassContentColor provides ink, LocalGlassDark provides !light,
+                LocalIosDialogGlassBackdrop provides backdrop,
+                LocalRestoredIosDialogGlass provides true,
                 LocalGlassTint provides plate, LocalGlassLuminance provides plate.luminance()) {
                 Box(Modifier.fillMaxSize().background(dim).clickable(
                     interactionSource = remember { MutableInteractionSource() }, indication = null,
@@ -121,14 +125,15 @@ internal fun IosAwareAlertDialog(
                         val bodyMaxHeight = (maxHeight - 176.dp).coerceAtLeast(48.dp)
                         val shape = remember { RoundedCornerShape(48.dp) }
                         Column(modifier.widthIn(max = 400.dp).fillMaxWidth().heightIn(max = maxHeight)
+                            .then(adaptive.modifier)
                             .drawBackdrop(backdrop = backdrop, shape = { shape }, effects = {
-                                colorControls(brightness = if (light) 0.2f else 0f, saturation = 1.5f)
-                                blur(if (light) 16.dp.toPx() else 8.dp.toPx())
-                                if (refraction) lens(30.dp.toPx(), 62.dp.toPx(),
-                                    depthEffect = true, centerConvexity = 0.10f)
-                            }, highlight = { IosGlassDialogHighlight }, shadow = { IosGlassShadow },
-                                innerShadow = { iosGlassInnerShadow(dark = !light) },
-                                onDrawSurface = { drawRect(container) })
+                                restoredDialogGlassEffects(adaptive.luminance, refraction)
+                            }, highlight = { RestoredIosDialogHighlight }, shadow = { RestoredIosDialogShadow },
+                                innerShadow = null,
+                                onDrawSurface = {
+                                    // Retain a legible fallback on pre-RenderEffect devices only.
+                                    if (!renderEffects) drawRect(glassPlate.copy(alpha = 0.96f))
+                                })
                             .clip(shape).clickable(interactionSource = remember { MutableInteractionSource() },
                                 indication = null, onClick = {})) {
                             if (icon != null) Box(Modifier.fillMaxWidth().padding(top = 20.dp),

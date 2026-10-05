@@ -1,5 +1,10 @@
 package dev.t1m3.qplayer.android.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.spring
 import dev.t1m3.qplayer.android.ui.motion.EmphasizeEasing
@@ -9,6 +14,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
@@ -17,14 +23,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.TransformOrigin
@@ -57,12 +61,12 @@ internal class PlayerExpansionState(val miniLayer: GraphicsLayer) {
     var hostOrigin by mutableStateOf(Offset.Zero)
     var hostSize by mutableStateOf(IntSize.Zero)
     var refreshSnapshot by mutableStateOf(false)
-    var hasSnapshot = false
+    var hasSnapshot by mutableStateOf(false)
     val active: Boolean by derivedStateOf { expanded || progress.value > 0f }
 
     fun prepareOpen() {
         if (!active) flightBounds = miniBounds
-        refreshSnapshot = false
+        refreshSnapshot = true
         expanded = true
     }
 
@@ -94,17 +98,17 @@ internal fun rememberPlayerExpansionState(): PlayerExpansionState {
     return remember(layer) { PlayerExpansionState(layer) }
 }
 
-/** Record a RenderNode, never read pixels back from the GPU. Freeze it in flight. */
+/** Record the MiniPlayer only when a transition needs its snapshot. */
 internal fun Modifier.playerExpansionSource(state: PlayerExpansionState): Modifier =
     onGloballyPositioned { coordinates ->
         if (!state.active) state.miniBounds = coordinates.boundsInRoot()
     }.drawWithContent {
-        if (!state.active || state.refreshSnapshot) {
+        if (state.refreshSnapshot) {
             state.miniLayer.record { this@drawWithContent.drawContent() }
             state.hasSnapshot = true
             state.refreshSnapshot = false
-            if (!state.active) drawLayer(state.miniLayer)
         }
+        if (!state.active) drawContent()
     }
 
 /** Slides dock chrome offscreen while keeping its layout/source anchor alive. */
@@ -126,33 +130,64 @@ private data class PlayerRevealShape(val bounds: Rect, val radius: Float) : Shap
 internal fun PlayerExpansionHost(
     expanded: Boolean,
     state: PlayerExpansionState,
-    background: Color,
     durationMillis: Int,
+    simpleSlide: Boolean = false,
     content: @Composable (isDetail: Boolean) -> Unit,
 ) {
+    if (simpleSlide) {
+        LaunchedEffect(state) {
+            state.expanded = false
+            state.progress.snapTo(0f)
+            state.settle.snapTo(0f)
+        }
+        Box(Modifier.fillMaxSize()) {
+            CompositionLocalProvider(LocalUiRenderingActive provides !expanded) {
+                content(false)
+            }
+            AnimatedVisibility(
+                visible = expanded,
+                enter = slideInVertically(tween(250), initialOffsetY = { it }) + fadeIn(tween(180)),
+                exit = slideOutVertically(tween(250), targetOffsetY = { it }) + fadeOut(tween(180)),
+            ) {
+                content(true)
+            }
+        }
+        return
+    }
     val density = LocalDensity.current
-    LaunchedEffect(expanded) {
+    LaunchedEffect(expanded, durationMillis) {
         state.settle.snapTo(0f)
-        if (expanded) state.prepareOpen() else {
+        if (expanded) {
+            if (!state.expanded) state.prepareOpen()
+        } else {
             // Refresh the source before closing: playback may have advanced
             // while detail was open, so never fly back into an old song cover.
             if (state.active) state.refreshSnapshot = true
             state.expanded = false
         }
         // A fast reversal continues at the current bounds; never reset to 0/1.
-        state.progress.animateTo(if (expanded) 1f else 0f,
-            tween(durationMillis, easing = EmphasizeEasing))
-        if (expanded) state.settle.animateTo(0f,
-            spring(dampingRatio = 0.68f, stiffness = 500f), initialVelocity = 38f)
+        if (durationMillis == 0) {
+            state.progress.snapTo(if (expanded) 1f else 0f)
+        } else {
+            state.progress.animateTo(if (expanded) 1f else 0f,
+                tween(durationMillis, easing = EmphasizeEasing))
+            if (expanded) state.settle.animateTo(0f,
+                spring(dampingRatio = 0.68f, stiffness = 500f), initialVelocity = 38f)
+        }
     }
     Box(Modifier.fillMaxSize().onSizeChanged { state.hostSize = it }
         .onGloballyPositioned { state.hostOrigin = it.positionInRoot() }) {
         // Keep the base composition/scroll state. It must not become the LYRICS
         // route, which used to unmount the dock in the first animation frame.
         Box(Modifier.fillMaxSize()
-            .then(if (expanded || state.active) Modifier.clearAndSetSemantics {} else Modifier)
-            .graphicsLayer { alpha = if (state.progress.value >= 1f && !state.refreshSnapshot) 0f else 1f }) {
-            content(false)
+            .then(if (expanded || state.active) Modifier.clearAndSetSemantics {} else Modifier)) {
+            val baseVisible by remember(state) {
+                // The outer progress ring must be present in the exit snapshot.
+                derivedStateOf { state.refreshSnapshot || !state.active }
+            }
+            CompositionLocalProvider(LocalUiRenderingActive provides baseVisible) {
+                content(false)
+            }
         }
         if (expanded || state.active) {
             Box(Modifier.fillMaxSize()
@@ -171,10 +206,6 @@ internal fun PlayerExpansionHost(
                     transformOrigin = TransformOrigin(0.5f, 1f)
                     scaleX = 1f + settlePx / size.width.coerceAtLeast(1f)
                     scaleY = 1f + settlePx / size.height.coerceAtLeast(1f)
-                }
-                .drawBehind {
-                    val bounds = state.bounds(size, density.density)
-                    drawRect(background, bounds.topLeft, bounds.size)
                 }
                 .pointerInput(Unit) {
                     // Stop touches reaching the underlying dock, without
@@ -195,8 +226,8 @@ internal fun PlayerExpansionHost(
                     scaleX = if (size.width > 0f) bounds.width / size.width else 1f
                     // Reveal within the growing container without vertically
                     // squashing its artwork, text or controls. Layout stays fixed.
-                    scaleY = scaleX
-                    alpha = ((state.progress.value - 0.12f) / 0.64f).coerceIn(0f, 1f)
+                    scaleY = if (size.height > 0f) bounds.height / size.height else 1f
+                    alpha = ((state.progress.value - 0.06f) / 0.48f).coerceIn(0f, 1f)
                 }) { content(true) }
                 val sourceWidth = state.flightBounds.width
                 val sourceHeight = state.flightBounds.height
@@ -211,8 +242,8 @@ internal fun PlayerExpansionHost(
                             scaleX = bounds.width / sourceWidth
                             scaleY = scaleX
                             translationY = bounds.center.y - sourceHeight * scaleY * 0.5f
-                            alpha = (1f - state.progress.value / 0.40f).coerceIn(0f, 1f)
-                        }.drawBehind { drawLayer(state.miniLayer) })
+                            alpha = (1f - (state.progress.value - 0.06f) / 0.48f).coerceIn(0f, 1f)
+                        }.drawWithContent { drawLayer(state.miniLayer) })
                 }
             }
         }

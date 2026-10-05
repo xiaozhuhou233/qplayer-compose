@@ -21,6 +21,11 @@ internal val LocalPageSharedTransitionScope =
 internal val LocalPageAnimatedScope =
     staticCompositionLocalOf<AnimatedVisibilityScope?> { null }
 
+internal val LocalLowSpecMode = staticCompositionLocalOf { false }
+
+// Only the cover participating in the current navigation needs lookahead bounds.
+internal val LocalActiveSharedCoverKey = staticCompositionLocalOf<String?> { null }
+
 /**
  * Ⓜ 2026-10-01: 「点击任何专辑歌单进入的新动画…….sharedBounds 实现容器共享」.
  *
@@ -39,6 +44,8 @@ internal val LocalPageAnimatedScope =
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 internal fun Modifier.sharedCover(key: String): Modifier {
+    if (LocalLowSpecMode.current) return this
+    if (LocalActiveSharedCoverKey.current != key) return this
     val shared = LocalPageSharedTransitionScope.current ?: return this
     val animated = LocalPageAnimatedScope.current ?: return this
     return with(shared) {

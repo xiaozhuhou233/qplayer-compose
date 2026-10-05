@@ -5,20 +5,15 @@ package dev.t1m3.qplayer.android.ui
 import kotlin.math.sign
 
 internal const val GLASS_SAMPLE_SIDE = 5
-// The sampling layer is recorded at no more than this many pixels on its long
-// side, so the GPU readback touches a thumbnail instead of a control-sized
-// texture. A 5x5 average does not gain resolution beyond this.
-internal const val GLASS_SAMPLE_MAX_SIDE = 24
-// Ⓜ 2026-10-01: 「加入过渡颜色的动画，不要慢但是要有过渡」 — the optical response and the
-// plate fade in 160ms (a fade, never a pop, and still faster than the sample
-// beat), and the ink colour — black to white across the 0.5 threshold — takes
-// 240ms, which is what makes the change read as a colour transition.
-internal const val GLASS_COLOR_DURATION_MS = 160
-internal const val GLASS_INK_DURATION_MS = 240
+// Match the APK's 25-pixel grid while bounding GPU readback to a thumbnail.
+internal const val GLASS_SAMPLE_MAX_SIDE = 5
+// APK: finish the luminance tween before sampling again; ink animates alongside it.
+internal const val GLASS_COLOR_DURATION_MS = 1000
+internal const val GLASS_INK_DURATION_MS = 1000
 
 /** Five-by-five centre samples without allocating a second resized bitmap. */
 internal fun sampledGlassLuminance(pixels: IntArray, width: Int, height: Int): Float? {
-    if (width < 1 || height < 1 || pixels.size < width * height) return null
+    if (width < 1 || height < 1 || width > pixels.size / height) return null
     var total = 0.0
     var count = 0
     for (y in 0 until GLASS_SAMPLE_SIDE) {
@@ -26,7 +21,6 @@ internal fun sampledGlassLuminance(pixels: IntArray, width: Int, height: Int): F
         for (x in 0 until GLASS_SAMPLE_SIDE) {
             val px = ((x + 0.5f) * width / GLASS_SAMPLE_SIDE).toInt().coerceAtMost(width - 1)
             val pixel = pixels[py * width + px]
-            if ((pixel ushr 24) == 0) continue
             total += androidGlassLuminance((pixel shr 16 and 255) / 255f,
                 (pixel shr 8 and 255) / 255f, (pixel and 255) / 255f)
             count++
@@ -42,6 +36,17 @@ internal fun androidGlassLuminance(red: Float, green: Float, blue: Float): Float
 
 internal fun androidGlassUsesDarkInk(luminance: Float): Boolean = luminance > 0.5f
 
+/** The APK adaptive demo has no additional white surface fill. */
+@Suppress("UNUSED_PARAMETER")
+internal fun androidGlassWhiteVeil(luminance: Float): Float = 0f
+
+// The original adaptive material has neither an inner ring nor extra fill light.
+@Suppress("UNUSED_PARAMETER")
+internal fun androidGlassInnerRingAlpha(luminance: Float): Float = 0f
+
+@Suppress("UNUSED_PARAMETER")
+internal fun androidGlassInnerLightAlpha(luminance: Float): Float = 0f
+
 internal data class AndroidGlassOptics(
     val brightness: Float,
     val contrast: Float,
@@ -50,13 +55,16 @@ internal data class AndroidGlassOptics(
 )
 
 internal fun androidGlassOptics(luminance: Float): AndroidGlassOptics {
-    val l = (luminance.coerceIn(0f, 1f) * 2f - 1f).let { sign(it) * it * it }
+    val measured = if (luminance.isFinite()) luminance.coerceIn(0f, 1f) else 0.5f
+    val l = (measured * 2f - 1f).let { sign(it) * it * it }
     fun lerp(start: Float, end: Float, amount: Float) = (1f - amount) * start + amount * end
-    // Original luminance response, with the requested lighter 1–2dp blur band.
+    // Verified against base(1).apk u3.c case 0 and w3.a.b, SHA256 75560a09...:
+    // intentionally restore the APK's white endpoint (contrast 0, brightness .5).
+    // The user explicitly chose this over QPlayer's former white-texture guard.
     return AndroidGlassOptics(
         brightness = if (l > 0f) lerp(0.1f, 0.5f, l) else lerp(0.1f, -0.2f, -l),
         contrast = if (l > 0f) lerp(1f, 0f, l) else 1f,
         saturation = 1.5f,
-        blurDp = if (l > 0f) lerp(1.5f, 2f, l) else lerp(1.5f, 1f, -l),
+        blurDp = if (l > 0f) lerp(8f, 16f, l) else lerp(8f, 2f, -l),
     )
 }

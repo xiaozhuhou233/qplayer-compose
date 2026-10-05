@@ -129,6 +129,8 @@ public final class PlayerController {
                 return t;
             }, new ThreadPoolExecutor.DiscardOldestPolicy());
     private final AtomicLong homeLoadGeneration = new AtomicLong();
+    private boolean homePreloadStarted;
+    private boolean homePreloadLoggedIn;
 
     // Interactive searches must not queue behind cover/home/playlist requests on
     // worker, and rapid typing must not leave an unbounded list of obsolete searches
@@ -276,6 +278,7 @@ public final class PlayerController {
     // that was queued for a track that is no longer the next one returns without
     // fetching anything (see precacheNextAudio).
     private final AtomicLong precacheGeneration = new AtomicLong();
+    private volatile boolean lowSpecMode;
     // The one delayed job in this class: asking for the PLAYING track's own
     // measurements a few seconds after it starts. Every other probe is fired the
     // moment its source becomes known; this one must NOT be early, because the first
@@ -2240,6 +2243,13 @@ public final class PlayerController {
      */
     public void setStemEditRenderer(StemEditRenderer renderer) {
         this.stemEditRenderer = renderer;
+    }
+
+    /** Avoid speculative full-track downloads and stem renders on constrained devices. */
+    public void setLowSpecMode(boolean enabled) {
+        if (lowSpecMode == enabled) return;
+        lowSpecMode = enabled;
+        if (enabled) precacheGeneration.incrementAndGet();
     }
 
     /**
@@ -4609,7 +4619,7 @@ public final class PlayerController {
      *  does not trim instead of waiting for one. */
     private void requestSilenceProfile(Track t, String src) {
         SilenceProfiler profiler = silenceProfiler;
-        if (profiler == null || t == null || src == null || src.isEmpty()) return;
+        if (!transitionEnabled || profiler == null || t == null || src == null || src.isEmpty()) return;
         final String key = silenceKey(t);
         if (key == null) return;
         if (silenceProfiles.containsKey(key) || !probingSilence.add(key)) return;
@@ -4617,7 +4627,15 @@ public final class PlayerController {
         probeWorker.submit(() -> {
             SilenceProfile p = null;
             try {
+                // Cached tracks were decoded again on every process start. Read
+                // the persistent answer on this worker before opening a decoder.
+                // Also honor a setting change while this job waited in the queue.
+                if (!transitionEnabled || silenceProfileOf(t) != null) return;
                 p = profiler.probe(src, durationMs);
+                if (p != null) {
+                    silenceProfiles.put(key, p);
+                    diskCache.cacheSilence(key, p.toBytes());
+                }
             } catch (Throwable e) {
                 Logger.warn("silence probe failed for {}: {}", key, e.toString());
             } finally {
@@ -4627,8 +4645,6 @@ public final class PlayerController {
                 Logger.info("silence probe gave up for {}", key);
                 return;
             }
-            silenceProfiles.put(key, p);
-            diskCache.cacheSilence(key, p.toBytes());
             Logger.info("silence profile for {}: {}", key, p);
         });
     }
@@ -4756,7 +4772,7 @@ public final class PlayerController {
      * </ul>
      */
     private void precacheNextAudio(Track t) {
-        if (!transitionEnabled || t == null) return;
+        if (!transitionEnabled || lowSpecMode || t == null) return;
         // The three ways the ordinary case can be missed, each one line. The boundary
         // itself also prints where its source came from ("served from the audio cache,
         // nothing to resolve" / "not cached: resolved inside the boundary's window"), so
@@ -5270,7 +5286,7 @@ public final class PlayerController {
      */
     private void requestStemEdit(final Track t, final String sourcePath) {
         final StemEditRenderer renderer = stemEditRenderer;
-        if (renderer == null || !transitionEnabled || t == null
+        if (renderer == null || !transitionEnabled || lowSpecMode || t == null
                 || sourcePath == null || sourcePath.isEmpty()) {
             return;
         }
@@ -5405,7 +5421,7 @@ public final class PlayerController {
         if (outBase == null) return;
         final long generation = precacheGeneration.get();
         precacheWorker.submit(() -> {
-            if (generation != precacheGeneration.get()) return;      // the queue moved on
+            if (generation != precacheGeneration.get() || lowSpecMode) return;
             // The two numbers a FUSION needs are this boundary's own, and they are known here as
             // well as they ever will be: the blend length the pair will be given, and the
             // position the incoming deck would start at without a fusion (which is the reference
@@ -5422,7 +5438,7 @@ public final class PlayerController {
                     outgoingGrid != null ? outgoingGrid.firstBeatMs() : 0d,
                     speed,
                     blendMs, contentStart, vocalOutMs,
-                    () -> generation == precacheGeneration.get(),
+                    () -> generation == precacheGeneration.get() && !lowSpecMode,
                     aceStepBed);
             StemEditRenderer.Result result = renderer.render(request);
             if (result == null) {
@@ -5524,7 +5540,7 @@ public final class PlayerController {
      *  be resolved first does not do that resolve anywhere near the main thread. */
     private void probeBeatProfile(Track t, java.util.function.Supplier<String> source) {
         BeatProfiler profiler = beatProfiler;
-        if (profiler == null || t == null) return;
+        if (!transitionEnabled || profiler == null || t == null) return;
         final String key = silenceKey(t);
         if (key == null) return;
         if (beatProfiles.containsKey(key) || !probingBeats.add(key)) return;
@@ -5532,7 +5548,7 @@ public final class PlayerController {
         beatWorker.submit(() -> {
             BeatProfile p = null;
             try {
-                if (beatProfileOf(t) != null) return;    // the disk cache already answered
+                if (!transitionEnabled || beatProfileOf(t) != null) return;
                 String src = source.get();
                 if (src == null || src.isEmpty()) {
                     Logger.info("beat probe: no source for {} yet", key);
@@ -6792,6 +6808,12 @@ public final class PlayerController {
         playQueue(library, i);
     }
 
+    /** Play the visible local collection (album, artist or filtered results). */
+    public void playLocalTracks(List<Track> tracks, int start) {
+        if (tracks == null || start < 0 || start >= tracks.size()) return;
+        playQueue(new ArrayList<>(tracks), start);
+    }
+
     /** Queue a netease song-list and start at {@code i}. Search history is fed by
      *  the query text the user actually typed/submitted (SearchPage.qml), not by
      *  which result they clicked — a song title isn't a search the user made. */
@@ -7724,7 +7746,7 @@ public final class PlayerController {
         // boundary is decided, instead of measuring inside the nine-second lead.
         // A streamed track has no url yet at this point, so it is measured later (or
         // not at all) — see armSilenceTrim.
-        if (t.source == Track.Source.NETEASE && t.neteaseId != 0L) {
+        if (transitionEnabled && t.source == Track.Source.NETEASE && t.neteaseId != 0L) {
             String cached = diskCache.getAudio(t.neteaseId);
             if (cached != null) {
                 requestSilenceProfile(t, cached);
@@ -7732,7 +7754,7 @@ public final class PlayerController {
                 // that wants to align the two grids needs the incoming track's as
                 // well, and a track whose audio is already on disk costs nothing to
                 // measure now rather than inside a boundary's lead window.
-                requestBeatProfile(t, cached);
+                if (beatAlignmentEnabled) requestBeatProfile(t, cached);
             }
         }
     }
@@ -10493,8 +10515,17 @@ public final class PlayerController {
         playAt((playIndex + 1) % queue.size());
     }
 
+    /** Start the home feed once per login state during startup or credential refresh. */
+    public synchronized void preloadHome() {
+        boolean loggedInNow = netease.isLoggedIn();
+        if (homePreloadStarted && homePreloadLoggedIn == loggedInNow) return;
+        loadHome();
+    }
+
     /** Publish sections as they arrive; a failed optional block never blanks the daily feed. */
-    public void loadHome() {
+    public synchronized void loadHome() {
+        homePreloadStarted = true;
+        homePreloadLoggedIn = netease.isLoggedIn();
         final long generation = homeLoadGeneration.incrementAndGet();
         postHome(generation, () -> { homeLoading.set(true); homeFeedError.set(""); });
         homeWorker.submit(() -> {
@@ -10640,8 +10671,9 @@ public final class PlayerController {
         post(() -> { if (homeLoadGeneration.get() == generation) update.run(); });
     }
 
-    private void resetHomeFeed() {
+    private synchronized void resetHomeFeed() {
         homeLoadGeneration.incrementAndGet();
+        homePreloadStarted = false;
         homeSongSections.set(Collections.<NeteaseClient.HomeSongSection>emptyList());
         homePlaylistSections.set(Collections.<NeteaseClient.HomePlaylistSection>emptyList());
         homeAlbumRecommendations.set(Collections.<NeteaseAlbum>emptyList());
@@ -12796,7 +12828,7 @@ public final class PlayerController {
                     if (id > 0 && netease.consumeCredentialUnlock()) {
                         showToast("已从系统密钥库安全恢复登录凭据");
                     }
-                    loadHome();
+                    preloadHome();
                     loadMyPlaylists();
                     refreshLiked();
                     restoreListenTogetherRoom();
@@ -12811,7 +12843,7 @@ public final class PlayerController {
                 // requires it to at least try the offline path).
                 if (cookieLoggedIn) {
                     post(() -> loggedIn.set(true));
-                    loadHome();
+                    preloadHome();
                     loadMyPlaylists();
                 }
             }

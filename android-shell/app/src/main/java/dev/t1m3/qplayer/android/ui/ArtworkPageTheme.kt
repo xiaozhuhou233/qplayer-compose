@@ -25,6 +25,21 @@ import kotlinx.coroutines.withContext
 
 internal val LocalArtworkPage = staticCompositionLocalOf { false }
 
+// The artwork provider is outside the navigation host. The host reports its
+// actual transition state upward through this stable holder; no frame counter
+// or guessed delay is needed, and route reversals cannot fire a stale timer.
+private val LocalArtworkPageMotion = staticCompositionLocalOf<ArtworkPageMotionState?> { null }
+
+@Composable
+internal fun ReportArtworkPageMotion(active: Boolean) {
+    val motion = LocalArtworkPageMotion.current ?: return
+    val source = remember(motion) { Any() }
+    SideEffect { motion.update(source, active) }
+    DisposableEffect(motion, source) {
+        onDispose { motion.update(source, false) }
+    }
+}
+
 private data class ArtworkSample(val seed: Color, val frost: ImageBitmap)
 // Only tiny, pre-blurred textures are retained, never full-size artwork.
 private val artworkSamples = LruCache<String, ArtworkSample>(24)
@@ -57,30 +72,41 @@ internal fun ArtworkPageSurface(
     enabled: Boolean = true,
     content: @Composable BoxScope.() -> Unit,
 ) {
-    if (!enabled) { Box(modifier, content = content); return }
-    // Ⓜ The listener: 「歌单界面和歌手界面的动态专辑封面取色仅用于 ios 模式，md3 模式依然保持原本的
-    // 当前播放歌曲取色」. In MD3 the route keeps the app's own theme — which is already tinted from
-    // the currently playing song — so neither the artwork scheme nor the frost texture is applied
-    // here, and LocalArtworkPage is not raised (the Scaffold's transparent-container branch keys
-    // on it, and MD3 wants its normal background back).
-    val ios = LocalIosDesign.current
-    if (!ios) {
-        Box(modifier, content = content); return
-    }
-    val sample = rememberArtworkSample(image, sourceKey)
+    // This surface wraps the navigation AnimatedContent. Never switch content()
+    // between an early-return Box and a MaterialTheme subtree: that disposes the
+    // transition host when entering/leaving an artwork page and skips both animations.
+    val useArtwork = enabled && LocalIosDesign.current
+    val pageMotion = remember { ArtworkPageMotionState() }
+    val renderingActive = rememberUiRenderingActive()
+    val sample = rememberArtworkSample(if (useArtwork) image else null, sourceKey)
     val base = MaterialTheme.colorScheme
-    val target = remember(sample?.seed, base, dark) {
-        sample?.let { artworkPageScheme(base, it.seed, dark) } ?: base.withReadableContent()
+    val claudeDesign = LocalClaudeDesign.current
+    val inheritedContentColor = LocalContentColor.current
+    val inheritedGlassTint = LocalGlassTint.current
+    val inheritedGlassLuminance = LocalGlassLuminance.current
+    val target = remember(sample?.seed, base, dark, claudeDesign) {
+        sample?.let { artworkPageScheme(base, it.seed, dark) }
+            ?: if (claudeDesign) base else base.withReadableContent()
     }
-    val scheme = rememberAnimatedQPlayerColorScheme(target).withReadableContent()
+    // MD3 and ordinary pages keep their inherited colours. Only values change;
+    // the theme/provider/Box/content slot stays mounted for forward and back.
+    // Do not create 48 colour animations when their result would be discarded.
+    // Material3's ColorScheme local is static: scheduling its colour animation
+    // after the shared/container transition avoids recomposing the entire page
+    // while that transition measures and records both source and destination.
+    val scheme = if (useArtwork) rememberAnimatedQPlayerColorScheme(
+        target,
+        paused = pageMotion.active || LocalGlassMotionActive.current || !renderingActive,
+    ).withReadableContent() else base
     MaterialTheme(colorScheme = scheme) {
         CompositionLocalProvider(
-            LocalContentColor provides scheme.onBackground,
-            LocalGlassTint provides scheme.background,
-            LocalGlassLuminance provides scheme.background.luminance(),
-            LocalArtworkPage provides true,
+            LocalArtworkPageMotion provides pageMotion,
+            LocalContentColor provides if (useArtwork) scheme.onBackground else inheritedContentColor,
+            LocalGlassTint provides if (useArtwork) scheme.background else inheritedGlassTint,
+            LocalGlassLuminance provides if (useArtwork) scheme.background.luminance() else inheritedGlassLuminance,
+            LocalArtworkPage provides useArtwork,
         ) {
-            Box(modifier.background(scheme.background)) {
+            Box(modifier.then(if (useArtwork) Modifier.background(scheme.background) else Modifier)) {
                 sample?.let {
                     // A CPU-preblurred 40px texture is enough for broad frosted colour
                     // variation, including on Android 8–11. No full-screen blur pass.

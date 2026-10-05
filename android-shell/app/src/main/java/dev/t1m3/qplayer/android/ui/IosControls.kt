@@ -29,6 +29,7 @@ private fun useIosControls() = LocalIosDesign.current && LocalIosControls.curren
 
 @Composable
 private fun controlBackdrop(): com.kyant.backdrop.Backdrop {
+    LocalIosDialogGlassBackdrop.current?.let { return it }
     LocalPlayerGlassBackdrop.current?.let { return it }
     LocalIosTopBarBackdrop.current?.let { return it }
     val color = MaterialTheme.colorScheme.surfaceContainer
@@ -66,6 +67,7 @@ private fun GlassAction(onClick: () -> Unit, modifier: Modifier, enabled: Boolea
             enabled = enabled, isInteractive = enabled,
             tint = if (filled) scheme.primary else androidx.compose.ui.graphics.Color.Unspecified,
             surfaceColor = if (filled) androidx.compose.ui.graphics.Color.Unspecified
+            else if (LocalRestoredIosDialogGlass.current) androidx.compose.ui.graphics.Color.Transparent
             else iosGlassSurface(
                 scheme.background.luminance() < 0.5f,
                 LocalGlassTint.current,
@@ -122,7 +124,7 @@ internal fun IosAwareIconButton(onClick: () -> Unit, modifier: Modifier = Modifi
             onClick()
         },
     ) {
-        CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface
+        CompositionLocalProvider(LocalContentColor provides adaptiveGlassInk()
             .copy(alpha = if (enabled) 1f else 0.38f), content = content)
     }
 }

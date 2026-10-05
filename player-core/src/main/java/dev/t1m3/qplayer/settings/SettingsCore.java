@@ -201,6 +201,16 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         p.set(v);
         persist(spec, v);
         apply(spec, v);
+        // Design switches are exclusive even when changed through a non-Compose host.
+        // Claude uses a lightweight paper theme and may coexist with low-spec rendering.
+        if (Boolean.TRUE.equals(v)) {
+            if ("claudeDesign".equals(key)) setValue("iosDesign", false);
+            if ("iosDesign".equals(key)) {
+                setValue("claudeDesign", false);
+                setValue(SettingsCatalog.LOW_SPEC_MODE_KEY, false);
+            }
+            if (SettingsCatalog.LOW_SPEC_MODE_KEY.equals(key)) setValue("iosDesign", false);
+        }
         if ("aiProvider".equals(key)) applyAiProvider(((Number) v).intValue());
     }
 
@@ -455,6 +465,8 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         } else if (controller != null) {
             switch (spec.key) {
                 case "monet": controller.setMonetEnabled(bool("monet")); break;
+                case SettingsCatalog.LOW_SPEC_MODE_KEY:
+                    controller.setLowSpecMode(bool(SettingsCatalog.LOW_SPEC_MODE_KEY)); break;
                 case "unblock": controller.setUnblockEnabled(bool("unblock")); break;
                 case "mirror": controller.setUpdateMirror(bool("mirror")); break;
                 case "fade": controller.setFadeEnabled(bool("fade")); break;
@@ -510,6 +522,7 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
     private void pushToController() {
         if (controller == null) return;
         controller.setMonetEnabled(bool("monet"));
+        controller.setLowSpecMode(bool(SettingsCatalog.LOW_SPEC_MODE_KEY));
         controller.setUnblockEnabled(bool("unblock"));
         controller.setUpdateMirror(bool("mirror"));
         controller.setFadeEnabled(bool("fade"));
