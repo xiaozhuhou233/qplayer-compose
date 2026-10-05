@@ -2,6 +2,10 @@ package dev.t1m3.qplayer.bridge;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.FileOutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 
 import dev.t1m3.qplayer.audio.AceStepBed;
 import dev.t1m3.qplayer.audio.AiTransitionChooser;
@@ -1480,6 +1484,9 @@ public final class PlayerController {
     /** Snapshot of the offline-cached netease songs (cache/audio/*.cache), shown in
      *  the rail's download menu; rebuilt on open via {@link #refreshCachedSongs}. */
     public final Property<List<Track>> cachedSongs = new Property<>(Collections.<Track>emptyList());
+    /** Bilibili videos downloaded through the video player's cache action. */
+    public final Property<List<Track>> biliCachedSongs = new Property<>(Collections.<Track>emptyList());
+    private volatile BiliClient.BiliVideo currentBiliVideo;
 
     // --- Account ----------------------------------------------------------
     public final Property<Boolean> loggedIn = new Property<>(false);
@@ -7354,6 +7361,13 @@ public final class PlayerController {
                 resolveAndPlayNetease(t, i, resumeMs, currentCoverRevision);
             }
         } else if (t.source == Track.Source.BILI) {
+            if (t.filePath != null && new File(t.filePath).isFile()) {
+                playBackend(t.filePath, resumeMs);
+                playingIntent = true;
+                post(() -> { if (isCurrentTrackRequest(t, currentCoverRevision)) playing.set(true); });
+                notifyPlayback();
+                return;
+            }
             // A BILI track owns no file and no lasting url: the CDN links carry
             // short-lived tokens, so a url cached from an earlier play would just
             // 403. Every play re-resolves. resolveAndPlayBili then publishes the
@@ -10319,6 +10333,7 @@ public final class PlayerController {
      *  the collection walk come in the next slice. */
     public void playBiliVideo(dev.t1m3.qplayer.bili.BiliClient.BiliVideo video) {
         if (video == null || video.bvid == null || video.bvid.isEmpty()) return;
+        currentBiliVideo = video;
         post(() -> { loading.set(true); biliError.set(""); });
         worker.submit(() -> {
             try {
@@ -12841,6 +12856,84 @@ public final class PlayerController {
                 });
             }
         });
+    }
+
+    /** Download the currently playing B站 video through the API's fresh
+     * progressive URL and expose it in the local B站 library. */
+    public void cacheCurrentBili() {
+        Track current = currentTrack();
+        final BiliClient.BiliVideo video;
+        if (current != null && current.source == Track.Source.BILI) {
+            video = new BiliClient.BiliVideo();
+            video.bvid = current.biliBvid; video.cid = current.biliCid;
+            video.title = current.title; video.author = current.artist;
+            video.coverUrl = current.coverUrl; video.durationSeconds = current.durationMs / 1000L;
+        } else video = biliPlaying.peek() ? currentBiliVideo : null;
+        if (video == null || video.bvid == null || video.bvid.isEmpty()) {
+            showToast("当前没有可缓存的 B 站视频");
+            return;
+        }
+        worker.submit(() -> {
+            try {
+                long cid = video.cid;
+                if (cid == 0L) {
+                    List<BiliClient.BiliPart> parts = bili.parts(video.bvid);
+                    if (!parts.isEmpty()) cid = parts.get(0).cid;
+                }
+                String url = bili.progressiveUrl(video.bvid, cid, 64);
+                if (url == null || url.isEmpty()) throw new IOException("取流失败");
+                File dir = new File(diskCache.baseDir(), "bili");
+                if (!dir.exists() && !dir.mkdirs()) throw new IOException("无法创建缓存目录");
+                String key = video.bvid + "_" + cid;
+                File media = new File(dir, key + ".mp4");
+                File meta = new File(dir, key + ".properties");
+                HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+                c.setConnectTimeout(10000); c.setReadTimeout(30000);
+                c.setRequestProperty("Referer", "https://www.bilibili.com/");
+                try (InputStream in = c.getInputStream(); FileOutputStream out = new FileOutputStream(media)) {
+                    byte[] buf = new byte[64 * 1024]; int n;
+                    while ((n = in.read(buf)) >= 0) { if (n > 0) out.write(buf, 0, n); }
+                } finally { c.disconnect(); }
+                java.util.Properties p = new java.util.Properties();
+                p.setProperty("bvid", video.bvid); p.setProperty("cid", String.valueOf(cid));
+                p.setProperty("title", video.title == null ? "" : video.title);
+                p.setProperty("artist", video.author == null ? "" : video.author);
+                p.setProperty("duration", String.valueOf(video.durationSeconds * 1000L));
+                p.setProperty("cover", video.coverUrl == null ? "" : video.coverUrl);
+                try (FileOutputStream out = new FileOutputStream(meta)) { p.store(out, "qplayer bili cache"); }
+                refreshBiliCachedSongs();
+                post(() -> showToast("已缓存到本地 B 站"));
+            } catch (Throwable e) {
+                post(() -> showToast("B 站缓存失败：" + e.getMessage()));
+            }
+        });
+    }
+
+    public void refreshBiliCachedSongs() {
+        File dir = new File(diskCache.baseDir(), "bili");
+        File[] files = dir.listFiles((d, n) -> n.endsWith(".properties"));
+        List<Track> out = new ArrayList<>();
+        if (files != null) for (File meta : files) {
+            try (java.io.FileInputStream in = new java.io.FileInputStream(meta)) {
+                java.util.Properties p = new java.util.Properties(); p.load(in);
+                String base = meta.getName().substring(0, meta.getName().length() - 11);
+                File media = new File(dir, base + ".mp4"); if (!media.isFile()) continue;
+                Track t = new Track(); t.source = Track.Source.BILI; t.filePath = media.getAbsolutePath();
+                t.biliBvid = p.getProperty("bvid", ""); t.biliCid = Long.parseLong(p.getProperty("cid", "0"));
+                t.title = p.getProperty("title", ""); t.artist = p.getProperty("artist", "");
+                t.album = "哔哩哔哩"; t.durationMs = Long.parseLong(p.getProperty("duration", "0"));
+                t.coverUrl = p.getProperty("cover", ""); out.add(t);
+            } catch (Throwable ignored) { }
+        }
+        biliCachedSongs.set(out);
+    }
+
+    /** Play a downloaded B站 file without asking the network for a new URL. */
+    public void playCachedBili(Track track) {
+        if (track == null || track.filePath == null) return;
+        queue.clear(); queue.add(track); playIndex = -1;
+        queueTracks.set(new ArrayList<>(queue));
+        playAt(0);
     }
 
     /** Closing or refreshing a dialog invalidates pending network/UI answers. */

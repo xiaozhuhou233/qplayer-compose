@@ -30,9 +30,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -76,6 +76,7 @@ internal fun rememberMd3eMiniScrollConnection(onVisibilityChange: (Boolean) -> U
             private var run = 0f
 
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source != NestedScrollSource.UserInput) return Offset.Zero
                 val delta = available.y
                 if (delta == 0f) return Offset.Zero
                 run = if (run * delta < 0f) delta else run + delta
@@ -108,30 +109,37 @@ internal fun Md3eMiniPlayerDock(
         enter = if (Md3eLowSpecMode.current) androidx.compose.animation.EnterTransition.None else Md3eMotion.sheetIn(),
         exit = if (Md3eLowSpecMode.current) androidx.compose.animation.ExitTransition.None else Md3eMotion.sheetOut(),
     ) {
-        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(Modifier.fillMaxWidth().height(40.dp).padding(end = 8.dp)) {
-                SmallFloatingActionButton(
-                    onClick = {
-                        if (runtime.home.loggedIn) {
-                            runtime.play { startPrivateFm() }
-                            onOpenLyrics()
-                        } else onLogin()
-                    },
-                    modifier = Modifier.align(Alignment.TopEnd)
-                        .then(if (playerExpansion != null) Modifier.md3ePlayerChromeExit(playerExpansion) else Modifier),
-                    shape = CircleShape,
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    elevation = FloatingActionButtonDefaults.elevation(
-                        defaultElevation = 0.dp, pressedElevation = 0.dp,
-                        focusedElevation = 0.dp, hoveredElevation = 0.dp,
-                    ),
-                ) {
-                    Icon(Md3eIcons.AutoAwesome, "私人漫游")
+        if (LocalClaudeDesign.current) {
+            Md3eMiniPlayer(runtime, onOpen,
+                Modifier.fillMaxWidth().padding(horizontal = 24.dp), playerExpansion,
+                onRoam = {
+                    if (runtime.home.loggedIn) {
+                        runtime.play { startPrivateFm() }
+                        onOpenLyrics()
+                    } else onLogin()
+                })
+        } else {
+            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(Modifier.fillMaxWidth().height(40.dp).padding(end = 8.dp)) {
+                    SmallFloatingActionButton(
+                        onClick = {
+                            if (runtime.home.loggedIn) {
+                                runtime.play { startPrivateFm() }
+                                onOpenLyrics()
+                            } else onLogin()
+                        },
+                        modifier = Modifier.align(Alignment.TopEnd)
+                            .then(if (playerExpansion != null) Modifier.md3ePlayerChromeExit(playerExpansion) else Modifier),
+                        shape = CircleShape,
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 0.dp, pressedElevation = 0.dp,
+                            focusedElevation = 0.dp, hoveredElevation = 0.dp),
+                    ) { Icon(Md3eIcons.AutoAwesome, "私人漫游") }
                 }
+                Spacer(Modifier.height(8.dp))
+                Md3eMiniPlayer(runtime, onOpen, Modifier.fillMaxWidth().padding(horizontal = 16.dp), playerExpansion)
             }
-            Spacer(Modifier.height(8.dp))
-            Md3eMiniPlayer(runtime, onOpen, Modifier.fillMaxWidth().padding(horizontal = 16.dp), playerExpansion)
         }
     }
 }
@@ -142,19 +150,21 @@ internal fun Md3eMiniPlayer(
     onOpen: () -> Unit,
     modifier: Modifier = Modifier,
     playerExpansion: Md3ePlayerExpansionState? = null,
+    onRoam: () -> Unit = {},
 ) {
     val state = runtime.playback
+    val claude = LocalClaudeDesign.current
     val view = LocalView.current
     val ink = MaterialTheme.colorScheme.onSurface
     val lowSpec = Md3eLowSpecMode.current
     val playCorner by animateDpAsState(
-        targetValue = if (state.playing) 12.dp else 16.dp,
+        targetValue = if (state.playing) 16.dp else 20.dp,
         animationSpec = tween(if (lowSpec) 0 else 255),
         label = "mini_play_corner",
     )
 
     Surface(
-        modifier = modifier.height(64.dp)
+        modifier = modifier.height(if (claude) 52.dp else 64.dp)
             .then(if (playerExpansion != null) Modifier.md3ePlayerExpansionSource(playerExpansion) else Modifier)
             .clickable {
             view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
@@ -162,24 +172,20 @@ internal fun Md3eMiniPlayer(
         },
         shape = RoundedCornerShape(32.dp),
         tonalElevation = 1.dp,
-        shadowElevation = 7.dp,
-        color = androidx.compose.ui.graphics.Color.Transparent,
+        shadowElevation = if (claude) 4.dp else 7.dp,
+        color = if (claude) MaterialTheme.colorScheme.surfaceContainerLow else androidx.compose.ui.graphics.Color.Transparent,
     ) {
         Box(Modifier.fillMaxSize()) {
-            if (state.cover.isNotBlank()) {
+            if (!claude && state.cover.isNotBlank()) {
                 Artwork(state.cover, Modifier.fillMaxSize().graphicsLayer { alpha = .78f })
-                Box(Modifier.fillMaxSize().background(
-                    MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = .72f)))
+                Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = .72f)))
             }
-            Box(Modifier.fillMaxSize().background(
-                MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = .76f)))
-            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = .22f)))
-            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primary.copy(alpha = .08f)))
+            if (!claude) Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = .76f)))
             Row(
                 Modifier.fillMaxSize().padding(start = 8.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Box(Modifier.size(52.dp).pointerInput(state.duration, state.songId) {
+                Box(Modifier.size(if (claude) 40.dp else 52.dp).pointerInput(state.duration, state.songId) {
                     detectTapGestures { offset ->
                         val angle = Math.toDegrees(atan2(
                             (offset.y - size.height / 2f).toDouble(),
@@ -202,7 +208,7 @@ internal fun Md3eMiniPlayer(
                     Text(
                         state.title,
                         maxLines = 1,
-                        fontSize = 14.sp,
+                        fontSize = if (claude) 13.sp else 14.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = ink,
                         overflow = TextOverflow.Clip,
@@ -216,13 +222,13 @@ internal fun Md3eMiniPlayer(
                         state.artist,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        fontSize = 12.sp,
+                        fontSize = if (claude) 11.sp else 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 Spacer(Modifier.width(5.dp))
                 Box(
-                    Modifier.size(32.dp).clip(RoundedCornerShape(playCorner))
+                    Modifier.size(if (claude) 40.dp else 32.dp).clip(RoundedCornerShape(playCorner))
                         .background(MaterialTheme.colorScheme.primaryContainer)
                         .clickable {
                             view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
@@ -244,7 +250,7 @@ internal fun Md3eMiniPlayer(
                         Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer,
                     ) }
                 }
-                if (!state.privateFmMode) {
+                if (claude) {
                     Spacer(Modifier.width(5.dp))
                     MiniTransport(Md3eIcons.SkipPrevious, "上一首") { runtime.previous() }
                 }
@@ -264,15 +270,15 @@ private fun MiniCover(source: String) {
 private fun MiniTransport(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
     val view = LocalView.current
     Box(
-        Modifier.size(32.dp).clip(CircleShape)
-            .background(MaterialTheme.colorScheme.onPrimary)
+        Modifier.size(if (LocalClaudeDesign.current) 40.dp else 32.dp).clip(CircleShape)
+            .background(if (LocalClaudeDesign.current) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.onPrimary)
             .clickable {
                 view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                 onClick()
             },
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, label, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+        Icon(icon, label, Modifier.size(20.dp), tint = if (LocalClaudeDesign.current) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.primary)
     }
 }
 

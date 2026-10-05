@@ -47,17 +47,19 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
     val dark = when (runtime.settings.intOf("darkMode")) { 1 -> false; 2 -> true; else -> systemDark }
     SideEffect { onDarkAppearance(dark) }
     var pageMotionActive by remember { mutableStateOf(false) }
-    val scheme = rememberMd3eColorScheme(
+    val claudeDesign = runtime.settings.bool("claudeDesign")
+    val dynamicScheme = rememberMd3eColorScheme(
         seed = runtime.playback.coverSeed,
         dark = dark,
-        enabled = runtime.settings.bool("monet"),
+        enabled = !claudeDesign && runtime.settings.bool("monet"),
         paletteStyle = runtime.settings.intOf("paletteStyle").coerceIn(0, 3),
         paletteChroma = runtime.settings.intOf("paletteChroma").coerceIn(0, 2),
         animate = !runtime.settings.bool(SettingsCatalog.LOW_SPEC_MODE_KEY),
         paused = pageMotionActive,
     )
-    MaterialExpressiveTheme(colorScheme = scheme) {
-        CompositionLocalProvider(LocalContentColor provides scheme.onSurface) {
+    val scheme = if (claudeDesign) claudeColorScheme(dark) else dynamicScheme
+    MaterialExpressiveTheme(colorScheme = scheme, typography = if (claudeDesign) ClaudeTypography else Typography(), shapes = ClaudeShapes) {
+        CompositionLocalProvider(LocalContentColor provides scheme.onSurface, LocalClaudeDesign provides claudeDesign) {
         var tab by rememberSaveable { mutableStateOf("home") }
         var detail by rememberSaveable { mutableStateOf("") }
         var detailId by rememberSaveable { mutableLongStateOf(0L) }
@@ -83,6 +85,7 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
         SideEffect { pageMotionActive = pageTransitionActive }
         val routeStateHolder = rememberSaveableStateHolder()
         val lowSpec = runtime.settings.bool(SettingsCatalog.LOW_SPEC_MODE_KEY)
+        LaunchedEffect(tab, detail, runtime.playback.playbackRevision) { miniPlayerVisible = true }
         val pageTransitionPreset = runtime.settings.intOf(SettingsCatalog.PAGE_TRANSITION_KEY).let {
             if (it < SettingsCatalog.PAGE_TRANSITION_ZOOM || it > SettingsCatalog.PAGE_TRANSITION_NONE)
                 SettingsCatalog.PAGE_TRANSITION_ZOOM else it
@@ -187,8 +190,8 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                         Md3eSharedScope provides this,
                         Md3eActiveCoverKey provides activeSharedCoverKey,
                         Md3eLowSpecMode provides lowSpec,
-                        LocalMd3eDockInset provides if (runtime.playback.hasTrack && miniPlayerVisible &&
-                            detail != "settings") 124.dp else 0.dp,
+                        LocalMd3eDockInset provides if (runtime.playback.hasTrack &&
+                            detail != "settings") 68.dp else 0.dp,
                     ) {
                         pageTransition.AnimatedContent(
                             modifier = Modifier.fillMaxSize(),
@@ -232,7 +235,8 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                                             onOpen = { id -> runtime.openPlaylist(id); openDetail("playlist", id) },
                                             modifier = pageModifier)
                                         visibleRoute.tab == "local" -> Md3eLocalPage(runtime.local, onRequestAudioPermission,
-                                            onRefresh = runtime::scanLocal, onPlay = onPlay, modifier = pageModifier)
+                                            onRefresh = runtime::scanLocal, onPlay = onPlay,
+                                            onPlayBili = runtime::playCachedBili, modifier = pageModifier)
                                         else -> Md3eSearchPage(runtime.search,
                                             onSearch = runtime::search, onLoadMore = runtime::loadMoreSearch,
                                             onClearHistory = { runtime.controller.clearSearchHistory() },
@@ -274,7 +278,9 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                 },
                 detail = {
                     Md3ePlayerScreen(runtime, onBack = closeTop, initialLyrics = playerOpenLyrics,
-                        onQueue = { queueFromPlayer = true; overlay = "queue" })
+                        onQueue = { queueFromPlayer = true; overlay = "queue" },
+                        onOpenAlbum = { id -> runtime.openAlbum(id); overlay = ""; openDetail("album", id) },
+                        onOpenArtist = { id -> runtime.openArtist(id); overlay = ""; openDetail("artist", id) })
                 },
             )
             AnimatedContent(
@@ -296,7 +302,7 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
             SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
                 .padding(bottom = if (overlay.isEmpty()) {
                     (if (detail.isEmpty()) 88.dp else 12.dp) +
-                        (if (runtime.playback.hasTrack && miniPlayerVisible && detail != "settings") 124.dp else 0.dp)
+                        (if (runtime.playback.hasTrack && miniPlayerVisible && detail != "settings") 68.dp else 0.dp)
                 } else 12.dp))
         }
         if (biliAccountOpen) {

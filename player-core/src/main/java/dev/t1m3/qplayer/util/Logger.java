@@ -63,6 +63,12 @@ public final class Logger {
         sink = s != null ? s : JUL_SINK;
     }
 
+    /** The installed sink, so a host can wrap it (a capture tee) and forward to
+     *  whatever backend is already in place. */
+    public static Sink getSink() {
+        return sink;
+    }
+
     public static void info(String str, Object... o) {
         record("I", format(str, o));
     }

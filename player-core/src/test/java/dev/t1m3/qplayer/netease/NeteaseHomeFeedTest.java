@@ -8,6 +8,24 @@ import static org.junit.Assert.*;
 
 /** Offline discovery fixtures: no account, cookie, network, or playback mutation. */
 public class NeteaseHomeFeedTest {
+    @Test public void preservesRecommendationLabelsAndLeavesMissingLabelsEmpty() {
+        JsonObject labelled = song(21);
+        JsonObject data = labelled.getAsJsonObject("resourceExtInfo").getAsJsonObject("songData");
+        data.addProperty("genre", "民谣");
+        data.addProperty("reason", "根据你喜欢的歌推荐");
+        JsonObject uiReason = new JsonObject(); uiReason.addProperty("title", "不覆盖歌曲自身理由");
+        labelled.getAsJsonObject("uiElement").add("subTitle", uiReason);
+        JsonObject resourceLabel = song(22);
+        JsonObject reason = new JsonObject(); reason.addProperty("title", "适合午后聆听");
+        resourceLabel.getAsJsonObject("uiElement").add("subTitle", reason);
+        NeteaseClient.HomeFeed feed = NeteaseClient.parseHomeFeed(root(block("SONGS", "推荐", labelled, resourceLabel, song(23))));
+        assertEquals("民谣", feed.sections.get(0).songs.get(0).genre);
+        assertEquals("根据你喜欢的歌推荐", feed.sections.get(0).songs.get(0).recommendReason);
+        assertEquals("适合午后聆听", feed.sections.get(0).songs.get(1).recommendReason);
+        assertEquals("", feed.sections.get(0).songs.get(2).recommendReason);
+        assertEquals("", feed.sections.get(0).songs.get(2).genre);
+    }
+
     @Test public void keepsServerSectionsAndSongOrderInsteadOfRelabellingEverythingRadar() {
         JsonObject first = block("STYLE", "适合你的音乐", song(2), song(1), song(2));
         JsonObject second = block("HOMEPAGE_BLOCK_RADAR", "雷达推荐", song(3));

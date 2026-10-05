@@ -79,6 +79,13 @@ public final class AndroidLibraryScanner {
             while (cursor.moveToNext()) {
                 String filePath = cursor.getString(dataCol);
                 if (filePath == null) continue;
+                // Keep the Android library focused on the conventional shared
+                // Music directory. MediaStore also exposes Downloads,
+                // Recordings and app-specific folders; those must not leak into
+                // the local music page. DATA is available on every API level we
+                // support, unlike RELATIVE_PATH, so this remains compatible with
+                // Android 8 devices as well as scoped-storage releases.
+                if (!isMusicDirectory(filePath)) continue;
                 long id = cursor.getLong(idCol);
                 long size = cursor.getLong(sizeCol);
                 long mtime = cursor.getLong(mtimeCol);
@@ -101,6 +108,18 @@ public final class AndroidLibraryScanner {
         cache.save(out);
         Logger.info("AndroidLibraryScanner: scan done, {} tracks ({} reused from cache)", out.size(), reused);
         return out;
+    }
+
+    private static boolean isMusicDirectory(String path) {
+        String normalized = path.replace('\\', '/');
+        while (normalized.contains("//")) normalized = normalized.replace("//", "/");
+        String lower = normalized.toLowerCase(java.util.Locale.ROOT);
+        int marker = lower.indexOf("/music/");
+        if (marker >= 0) {
+            // Match a real path component, not names such as MusicVideos or MyMusic.
+            return true;
+        }
+        return lower.endsWith("/music");
     }
 
     /** Full (expensive) build for a new or changed file. */

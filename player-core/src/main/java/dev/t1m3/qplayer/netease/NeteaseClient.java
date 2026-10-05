@@ -834,6 +834,9 @@ public final class NeteaseClient {
                                 && !resource.get("valid").getAsBoolean()) continue;
                         if ((type.equals("SONG") || type.isEmpty()) && songs.size() < 30) {
                             NeteaseSong song = parseSong(homeObject(ext, "songData"));
+                            if (song.recommendReason.isEmpty()) {
+                                song.recommendReason = stringValue(homeObject(homeObject(resource, "uiElement"), "subTitle"), "title");
+                            }
                             if (song.id > 0L && song.name != null && !song.name.trim().isEmpty()) {
                                 if (song.coverUrl == null || song.coverUrl.isEmpty())
                                     song.coverUrl = stringValue(homeObject(homeObject(resource, "uiElement"), "image"), "imageUrl");
@@ -1182,6 +1185,9 @@ public final class NeteaseClient {
         NeteaseSong out = new NeteaseSong();
         if (s.has("id") && !s.get("id").isJsonNull()) out.id = s.get("id").getAsLong();
         if (s.has("name") && !s.get("name").isJsonNull()) out.name = s.get("name").getAsString();
+        out.recommendReason = stringValue(s, "reason");
+        if (out.recommendReason.isEmpty()) out.recommendReason = stringValue(s, "recommendReason");
+        out.genre = stringValue(s, "genre");
         if (s.has("dt"))   out.durationMs = s.get("dt").getAsLong();
         else if (s.has("duration")) out.durationMs = s.get("duration").getAsLong();
         if (s.has("fee"))  out.fee = s.get("fee").getAsInt() == 1;
@@ -2031,6 +2037,19 @@ public final class NeteaseClient {
             for (JsonElement el : arr) {
                 if (el.isJsonObject()) out.add(parseSong(el.getAsJsonObject()));
             }
+        }
+        Map<Long, String> reasons = new HashMap<>();
+        for (JsonElement element : homeArray(homeObject(obj, "data"), "recommendReasons")) {
+            if (!element.isJsonObject()) continue;
+            JsonObject row = element.getAsJsonObject();
+            try {
+                long id = Long.parseLong(stringValue(row, "songId"));
+                String reason = stringValue(row, "reason");
+                if (!reason.isEmpty()) reasons.put(id, reason);
+            } catch (NumberFormatException ignored) { }
+        }
+        for (NeteaseSong song : out) {
+            if (song.recommendReason.isEmpty()) song.recommendReason = reasons.getOrDefault(song.id, "");
         }
         return out;
     }

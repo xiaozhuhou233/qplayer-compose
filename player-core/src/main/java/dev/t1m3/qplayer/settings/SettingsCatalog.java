@@ -136,6 +136,10 @@ public final class SettingsCatalog {
         List<SettingSpec> out = new ArrayList<>();
 
         // ---- 外观 -----------------------------------------------------------
+        out.add(SettingSpec.toggle("claudeDesign", APPEARANCE, "Claude 界面", true)
+                .desc("暖纸色与橙色强调")
+                .onlyOn(ANDROID)
+                .build());
         out.add(SettingSpec.toggle("iosDesign", APPEARANCE, "ios design", false)
                 .desc("iOS 26 液态玻璃导航栏；关闭恢复 MD3。Android 13+ 支持完整折射光效")
                 .onlyOn(ANDROID)
@@ -257,6 +261,10 @@ public final class SettingsCatalog {
                 .build());
         out.add(SettingSpec.slider("aiTimeoutMs", AI, "请求超时", 60000, 10000, 180000, 5000)
                 .unit(" ms").build());
+        out.add(SettingSpec.toggle("aiDailyPhraseEnabled", AI, "每日音乐短句", true)
+                .desc("使用当前 AI 配置，每天为首页生成一句音乐寄语；未配置或离线时显示本地短句")
+                .onlyOn(ANDROID)
+                .build());
         out.add(SettingSpec.toggle("aiExcludeLiked", AI, "排除已收藏歌曲", false)
                 .desc("仍按收藏歌曲分析风格，但不重复推荐")
                 .build());
@@ -382,6 +390,15 @@ public final class SettingsCatalog {
                 .build());
 
         // ---- 关于 -----------------------------------------------------------
+        // The MD3E log system: one session file per enabled run with every level
+        // (warnings and errors included), plus an export to the downloads folder.
+        out.add(SettingSpec.toggle("logCaptureEnabled", ABOUT, "记录运行日志", false)
+                .desc("打开后记录本次启动到退出的全部日志（含所有警告与报错），写入应用私有目录的 logs/ 会话文件")
+                .build());
+        out.add(SettingSpec.action("logExport", ABOUT, "导出日志", "")
+                .icon("description")
+                .desc("把最近一次会话的日志文件导出到系统下载目录")
+                .build());
         out.add(SettingSpec.action("openRepo", ABOUT, "QPlayer", "")
                 .icon("link")
                 .provider("version").inlineProvider()

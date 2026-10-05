@@ -62,7 +62,7 @@ internal fun Md3eSealStage(
     ) { content(it) }
 }
 
-// SelectionGroup.kt: selected corners morph 12 -> 28 dp with MediumLow spring;
+// SelectionGroup.kt: selected corners morph 20 -> 32 dp with MediumLow spring;
 // both foreground and background animate using Compose's original color spec.
 @Composable
 internal fun Md3eSealSelectionItem(
@@ -74,7 +74,7 @@ internal fun Md3eSealSelectionItem(
 ) {
     val scheme = MaterialTheme.colorScheme
     val corner by animateDpAsState(
-        if (selected) 28.dp else 12.dp,
+        if (selected) 32.dp else 20.dp,
         animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
         label = "seal_selection_shape",
     )

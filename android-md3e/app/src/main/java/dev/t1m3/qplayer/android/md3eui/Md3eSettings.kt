@@ -22,11 +22,12 @@ import kotlin.math.roundToInt
 // the old SettingsCatalog-driven Android screen.
 private val md3eSettingKeys = setOf(
     SettingsCatalog.LOW_SPEC_MODE_KEY, SettingsCatalog.PAGE_TRANSITION_KEY,
-    "darkMode", "showLocalTab", "monet", "paletteStyle", "paletteChroma", "maxCacheSizeMB",
+    "claudeDesign", "darkMode", "showLocalTab", "monet", "paletteStyle", "paletteChroma", "maxCacheSizeMB",
     "lyricFontSize", "lyricLineSpacing", "lyricSpring", "lyricScale",
     "lyricGlow", "lyricShadow", "lyricLinearAnim", "lyricMd3Color",
     "lyricProgressStyle", SettingsCatalog.COVER_BACKGROUND_KEY,
     "action:clearCache", "action:openRepo", "action:checkUpdate",
+    "logCaptureEnabled", "action:logExport",
 )
 
 private fun supportedSetting(spec: SettingSpec): Boolean = spec.key in md3eSettingKeys ||
@@ -67,7 +68,7 @@ private fun Md3eSettingRow(spec: SettingSpec, runtime: Md3eRuntime,
     val current = settings.intOf(spec.key).coerceIn(spec.min, spec.max)
     val description = spec.provider.takeIf { it.isNotBlank() }?.let(settings::info)
         ?.takeIf { it.isNotBlank() } ?: spec.desc
-    Card(shape = RoundedCornerShape(8.dp),
+    Card(shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
         Column(Modifier.fillMaxWidth().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)) {

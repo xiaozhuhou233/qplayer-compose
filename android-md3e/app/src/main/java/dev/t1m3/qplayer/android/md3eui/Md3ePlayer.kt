@@ -21,6 +21,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -40,6 +41,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -77,7 +79,8 @@ import kotlin.math.sin
 
 @Composable
 internal fun Md3ePlayerScreen(runtime: Md3eRuntime, onBack: () -> Unit,
-    initialLyrics: Boolean = false, onQueue: () -> Unit) {
+    initialLyrics: Boolean = false, onQueue: () -> Unit,
+    onOpenAlbum: (Long) -> Unit = {}, onOpenArtist: (Long) -> Unit = {}) {
     val state = runtime.playback
     var tab by remember(initialLyrics) { mutableIntStateOf(if (initialLyrics) 1 else 0) }
     LaunchedEffect(runtime.bili.playing) { if (runtime.bili.playing) tab = 0 }
@@ -111,13 +114,13 @@ internal fun Md3ePlayerScreen(runtime: Md3eRuntime, onBack: () -> Unit,
             )
         }
         .background(MaterialTheme.colorScheme.surfaceContainer)) {
-        if (runtime.settings.bool("lyricCoverBackground") && state.cover.isNotBlank()) {
+        if (!LocalClaudeDesign.current && runtime.settings.bool("lyricCoverBackground") && state.cover.isNotBlank()) {
             if (tab == 1) Md3eLyricDynamicBackdrop(runtime, state.cover, Modifier.fillMaxSize())
             else Artwork(state.cover, Modifier.fillMaxSize().blur(72.dp))
             if (tab == 0) Box(Modifier.fillMaxSize().background(
                 MaterialTheme.colorScheme.surface.copy(alpha = .76f)))
         }
-        val dynamicLyrics = tab == 1 && runtime.settings.bool("lyricCoverBackground") &&
+        val dynamicLyrics = !LocalClaudeDesign.current && tab == 1 && runtime.settings.bool("lyricCoverBackground") &&
             !runtime.settings.bool("lowSpecMode") && state.cover.isNotBlank()
         val scheme = MaterialTheme.colorScheme
         val displayScheme = if (dynamicLyrics) scheme.copy(
@@ -138,7 +141,7 @@ internal fun Md3ePlayerScreen(runtime: Md3eRuntime, onBack: () -> Unit,
                     Icon(PlayerIcons.Back, "返回")
                 }
                 Spacer(Modifier.weight(1f))
-                if (!runtime.bili.playing) Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+                if (!runtime.bili.playing) Surface(shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
                     Row(Modifier.padding(3.dp)) {
                         PlayerTab("播放详情", tab == 0) { tab = 0 }
                         PlayerTab("歌词", tab == 1) { tab = 1 }
@@ -169,7 +172,8 @@ internal fun Md3ePlayerScreen(runtime: Md3eRuntime, onBack: () -> Unit,
                 transitionSpec = { Md3eMotion.tab(targetState > initialState) },
                 label = "player_detail_tab",
             ) { page ->
-                if (page == 0) PlayerDetailTab(runtime, onLyrics = { tab = 1 })
+                if (page == 0) PlayerDetailTab(runtime, onLyrics = { tab = 1 },
+                    onOpenAlbum = onOpenAlbum, onOpenArtist = onOpenArtist)
                 else PlayerLyricsTab(runtime, onDetail = { tab = 0 })
             }
         }
@@ -185,7 +189,7 @@ private fun PlayerTab(label: String, selected: Boolean, onClick: () -> Unit) {
         label = "player_tab_color",
     )
     Box(
-        Modifier.clip(RoundedCornerShape(19.dp)).background(color).clickable(onClick = onClick)
+        Modifier.clip(RoundedCornerShape(27.dp)).background(color).clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -197,7 +201,12 @@ private fun PlayerTab(label: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun PlayerDetailTab(runtime: Md3eRuntime, onLyrics: () -> Unit) {
+private fun PlayerDetailTab(runtime: Md3eRuntime, onLyrics: () -> Unit,
+    onOpenAlbum: (Long) -> Unit, onOpenArtist: (Long) -> Unit) {
+    if (LocalClaudeDesign.current) {
+        ClaudePlayerDetail(runtime, onLyrics, onOpenAlbum, onOpenArtist)
+        return
+    }
     val state = runtime.playback
     Column(
         Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally,
@@ -225,10 +234,12 @@ private fun PlayerDetailTab(runtime: Md3eRuntime, onLyrics: () -> Unit) {
                 state.title.length > 30 -> 21.sp
                 else -> 24.sp
             }
-            Text(state.title, Modifier.fillMaxWidth().height(34.dp), fontSize = size,
+            Text(state.title, Modifier.fillMaxWidth().height(34.dp)
+                .clickable(enabled = state.albumId != 0L) { onOpenAlbum(state.albumId) }, fontSize = size,
                 fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(state.artist, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            Text(state.artist, Modifier.clickable(enabled = state.artistId != 0L) { onOpenArtist(state.artistId) },
+                fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         if (!state.hasTrack && !state.loading && runtime.bili.error.isNotBlank()) Text(runtime.bili.error,
@@ -241,11 +252,80 @@ private fun PlayerDetailTab(runtime: Md3eRuntime, onLyrics: () -> Unit) {
                     Text(if (runtime.videoVisible) "显示封面" else "显示视频")
                 }
                 TextButton(onClick = { runtime.videoVisible = true; runtime.videoFullscreen = true }) { Text("全屏") }
+                TextButton(onClick = runtime::cacheCurrentBili) { Text("缓存") }
             }
             BiliProgress(runtime)
         } else PlayerProgress(state, wavy = runtime.settings.intOf("lyricProgressStyle") == 0,
             onSeek = { runtime.play { seek(it) } }, modifier = Modifier.fillMaxWidth())
         PlayerTransport(runtime)
+    }
+}
+
+@Composable
+private fun ClaudePlayerDetail(runtime: Md3eRuntime, onLyrics: () -> Unit,
+    onOpenAlbum: (Long) -> Unit, onOpenArtist: (Long) -> Unit) {
+    val state = runtime.playback
+    Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+        BoxWithConstraints(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+            if (runtime.bili.playing && runtime.videoVisible) {
+                val aspect = if (runtime.videoHeight > 0) runtime.videoWidth.toFloat() / runtime.videoHeight else 16f / 9f
+                val width = minOf(maxWidth, maxHeight * aspect)
+                Md3eVideoSlot(runtime, Modifier.width(width).height(width / aspect))
+            } else {
+                ClaudeVinylStageMd3e(state.cover, state.title, state.playing,
+                    Modifier.fillMaxSize().clickable { if (runtime.bili.playing) runtime.videoVisible = true else onLyrics() })
+            }
+            if (state.loading) CircularProgressIndicator(Modifier.size(36.dp))
+        }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(state.title.ifBlank { "尚未播放" }, fontFamily = ClaudeSerif,
+                    fontSize = 24.sp, fontWeight = FontWeight.SemiBold, maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.clickable(enabled = state.albumId != 0L) { onOpenAlbum(state.albumId) })
+                Text(state.artist.ifBlank { "选一首喜欢的歌" }, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.clickable(enabled = state.artistId != 0L) { onOpenArtist(state.artistId) }
+                        .padding(vertical = 4.dp))
+            }
+            IconButton(enabled = state.likeable, onClick = { runtime.play { toggleLike() } }) {
+                Icon(if (state.liked) PlayerIcons.Favorite else PlayerIcons.FavoriteBorder,
+                    "收藏歌曲", tint = MaterialTheme.colorScheme.primary)
+            }
+        }
+        if (runtime.bili.playing) BiliProgress(runtime) else PlayerProgress(state,
+            wavy = false, onSeek = { runtime.play { seek(it) } }, modifier = Modifier.fillMaxWidth())
+        PlayerTransport(runtime)
+    }
+}
+
+@Composable
+private fun ClaudeVinylStageMd3e(cover: String, album: String, playing: Boolean, modifier: Modifier) {
+    BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
+        val edge = minOf(maxWidth * .66f, maxHeight * .82f, 270.dp)
+        val accent = MaterialTheme.colorScheme.primary
+        Box(Modifier.width(edge * 1.36f).height(edge * 1.08f)) {
+            Column(Modifier.size(edge).align(Alignment.CenterStart).rotate(-5f)
+                .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(8.dp))
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp)).padding(12.dp)) {
+                Text("VINYL ARCHIVE", fontFamily = ClaudeMono, fontSize = 8.sp, letterSpacing = 1.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(8.dp))
+                Artwork(cover, Modifier.fillMaxWidth().weight(1f), corner = 4.dp)
+                Text(album, Modifier.padding(top = 8.dp), fontFamily = ClaudeSerif, fontSize = 12.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Box(Modifier.size(edge * .9f).align(Alignment.CenterEnd), contentAlignment = Alignment.Center) {
+                Canvas(Modifier.fillMaxSize()) {
+                    val radius = size.minDimension / 2f
+                    drawCircle(Color(0xFF171715))
+                    repeat(12) { i -> drawCircle(Color.White.copy(alpha = .08f), radius * (.44f + i * .04f),
+                        style = Stroke(.6.dp.toPx())) }
+                    drawCircle(accent, radius * .36f)
+                }
+                Artwork(cover, Modifier.fillMaxSize(.29f), corner = 100.dp)
+            }
+        }
     }
 }
 
@@ -280,7 +360,7 @@ private fun PlayerTransport(runtime: Md3eRuntime) {
     val prevWeight by animateFloatAsState(weightFor(-1), weightSpring, label = "prev_weight")
     val playWeight by animateFloatAsState(weightFor(2), weightSpring, label = "play_weight")
     val nextWeight by animateFloatAsState(weightFor(1), weightSpring, label = "next_weight")
-    val corner by animateDpAsState(if (state.playing) 26.dp else 60.dp,
+    val corner by animateDpAsState(if (state.playing) 34.dp else 60.dp,
         spring(dampingRatio = Spring.DampingRatioNoBouncy,
             stiffness = Spring.StiffnessMediumLow), label = "play_corner")
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -385,6 +465,10 @@ private fun PlayerToggleDivider() {
 
 @Composable
 private fun PlayerLyricsTab(runtime: Md3eRuntime, onDetail: () -> Unit) {
+    if (LocalClaudeDesign.current) {
+        ClaudeLyricsTab(runtime, onDetail)
+        return
+    }
     val state = runtime.playback
     val lyrics = runtime.lyricState
     val coverOnly = lyrics.coverOnly || lyrics.coverModeManual
@@ -408,7 +492,7 @@ private fun PlayerLyricsTab(runtime: Md3eRuntime, onDetail: () -> Unit) {
             }
         }
         if (offsetOpen) {
-            Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            Surface(shape = RoundedCornerShape(28.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
                 Column(Modifier.padding(horizontal = 18.dp, vertical = 14.dp)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -484,6 +568,36 @@ private fun PlayerLyricsTab(runtime: Md3eRuntime, onDetail: () -> Unit) {
             }
             Spacer(Modifier.height(8.dp))
         }
+    }
+}
+
+@Composable
+private fun ClaudeLyricsTab(runtime: Md3eRuntime, onDetail: () -> Unit) {
+    val state = runtime.playback
+    Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+        Row(Modifier.fillMaxWidth().height(72.dp), verticalAlignment = Alignment.CenterVertically) {
+            Artwork(state.cover, Modifier.size(56.dp).clickable(onClick = onDetail), corner = 6.dp)
+            Column(Modifier.weight(1f).padding(start = 14.dp)) {
+                Text(state.title, fontFamily = ClaudeSerif, fontSize = 19.sp, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(state.artist, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            IconButton(onClick = onDetail) { Icon(PlayerIcons.Album, "返回唱片") }
+        }
+        Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+            if (runtime.lyricState.loading) CircularProgressIndicator(Modifier.size(36.dp))
+            else if (runtime.lyricState.lines.isEmpty()) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("此刻，听音乐就好", fontFamily = ClaudeSerif, fontSize = 22.sp)
+                    Text("这首歌暂时没有歌词。", color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp))
+                }
+            }
+            else Md3eLyricColumn(runtime)
+        }
+        PlayerProgress(state, wavy = false, onSeek = { runtime.play { seek(it) } }, modifier = Modifier.fillMaxWidth())
+        PlayerTransport(runtime)
     }
 }
 
@@ -867,7 +981,7 @@ internal fun Md3eQueueScreen(runtime: Md3eRuntime, onBack: () -> Unit) {
 private fun QueueRow(track: Track, selected: Boolean, dragging: Boolean,
     modifier: Modifier = Modifier, onPlay: () -> Unit, onRemove: () -> Unit,
     dragHandle: @Composable () -> Unit) {
-    Surface(onClick = onPlay, modifier = modifier, shape = RoundedCornerShape(12.dp),
+    Surface(onClick = onPlay, modifier = modifier, shape = RoundedCornerShape(20.dp),
         shadowElevation = if (dragging) 6.dp else 0.dp,
         color = when {
             selected -> MaterialTheme.colorScheme.primaryContainer

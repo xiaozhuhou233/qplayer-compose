@@ -7,11 +7,11 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.view.Choreographer
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.Stable
+import androidx.compose.runtime.snapshots.Snapshot
 import androidx.core.content.ContextCompat
 import dev.t1m3.qplayer.android.library.AndroidMetadataReader
 import dev.t1m3.qplayer.android.library.AndroidLibraryScanner
@@ -64,12 +64,6 @@ internal data class LyricState(
     val index: Int = -1,
 )
 
-@Stable
-internal class PlaybackClock {
-    var position by mutableLongStateOf(0L)
-    var sampledAtNanos by mutableLongStateOf(0L)
-}
-
 internal data class PlaybackState(
     val title: String = "还没有播放歌曲",
     val artist: String = "从推荐中选一首，开始听歌",
@@ -81,6 +75,8 @@ internal data class PlaybackState(
     val queueSize: Int = 0,
     val duration: Long = 0,
     val songId: Long = 0,
+    val albumId: Long = 0,
+    val artistId: Long = 0,
     val liked: Boolean = false,
     val likeable: Boolean = false,
     val playMode: Int = 0,
@@ -89,10 +85,16 @@ internal data class PlaybackState(
     val playbackRevision: Long = 0,
     val seekRevision: Long = 0,
     val clock: PlaybackClock = PlaybackClock(),
+    val album: String = "",
+    val artistIdsCsv: String = "",
+    val artistNamesCsv: String = "",
 ) {
     val position: Long get() = clock.position
     val sampledAtNanos: Long get() = clock.sampledAtNanos
 }
+
+internal data class TransportState(val playing: Boolean = false, val hasTrack: Boolean = false,
+    val privateFm: Boolean = false)
 
 internal data class SearchState(
     val query: String = "",
@@ -118,10 +120,12 @@ internal data class PlaylistState(
     val subscribed: Boolean = false,
     val owned: Boolean = false,
     val loggedIn: Boolean = false,
+    val id: Long = 0L,
 )
 
 internal data class LocalState(
     val tracks: List<Track> = emptyList(),
+    val bili: List<Track> = emptyList(),
     val scanning: Boolean = false,
     val error: String = "",
     val permissionGranted: Boolean = false,
@@ -134,6 +138,7 @@ internal data class ArtistDetailState(
     val songs: List<NeteaseSong> = emptyList(),
     val albums: List<NeteaseAlbum> = emptyList(),
     val loading: Boolean = false,
+    val id: Long = 0L,
 )
 
 internal data class AlbumDetailState(
@@ -142,7 +147,10 @@ internal data class AlbumDetailState(
     val artistName: String = "",
     val tracks: List<NeteaseSong> = emptyList(),
     val loading: Boolean = false,
+    val id: Long = 0L,
 )
+
+internal data class Md3ePageNavigation(val revision: Long = 0L, val target: String = "", val id: Long = 0L)
 
 /** Process-owned playback; neither backend nor service callbacks retain an Activity. */
 internal class Md3eRuntime private constructor(context: Context) {
@@ -154,6 +162,11 @@ internal class Md3eRuntime private constructor(context: Context) {
     private val scanner = AndroidLibraryScanner(app.contentResolver, AndroidMetadataReader(app))
     private val scanWorker = Executors.newSingleThreadExecutor()
     private val playbackClock = PlaybackClock()
+    // AnimatedContent keeps the outgoing route composed while another detail loads.
+    // Keep its snapshot separate from the controller's single current-detail slot.
+    private val playlistSnapshots = linkedMapOf<Long, PlaylistState>()
+    private val albumSnapshots = linkedMapOf<Long, AlbumDetailState>()
+    private val artistSnapshots = linkedMapOf<Long, ArtistDetailState>()
     var home by mutableStateOf(HomeState())
         private set
     var neteaseLogin by mutableStateOf(NeteaseLoginState())
@@ -176,6 +189,8 @@ internal class Md3eRuntime private constructor(context: Context) {
         private set
     var albumDetail by mutableStateOf(AlbumDetailState())
         private set
+    var pageNavigation by mutableStateOf(Md3ePageNavigation())
+        private set
     var unblockEnabled by mutableStateOf(true)
         private set
     var notice by mutableStateOf<String?>(null)
@@ -190,6 +205,42 @@ internal class Md3eRuntime private constructor(context: Context) {
         private set
     private val biliCookies = java.io.File(app.filesDir, "bili_cookies.txt")
     private var lastBiliLoggedIn = false
+    var uiVisible by mutableStateOf(false)
+        private set
+    var transportMotionActive by mutableStateOf(false)
+        private set
+    var requestedRefreshRate by mutableStateOf(60f)
+        private set
+    var reducedRendering by mutableStateOf(false)
+        private set
+
+    fun updateRenderProfile(refreshRate: Float, reduced: Boolean) {
+        requestedRefreshRate = refreshRate
+        reducedRendering = reducedRendering || reduced
+    }
+
+    var transportState by mutableStateOf(TransportState())
+        private set
+    private val transportVisualGate = TransportVisualGate()
+    private var publishedPlaybackTrack: Track? = null
+
+    fun setTransportMotionActive(owner: Any, active: Boolean) {
+        val changed = transportVisualGate.setActive(owner, active)
+        if (changed && transportVisualGate.active) {
+            // The visual gate closes synchronously, but notify the broad theme/
+            // backdrop composition only AFTER the native first frame is sent.
+            Choreographer.getInstance().postFrameCallback {
+                handler.post { transportMotionActive = transportVisualGate.active }
+            }
+        } else if (changed) transportMotionActive = false
+        if (changed && !transportVisualGate.active) {
+            // Read the latest controller state once; never replay intermediate
+            // loading/cover/lyric snapshots accumulated during the spring.
+            handler.removeCallbacks(tick)
+            handler.post(tick)
+        }
+    }
+
     private var visibleHosts = 0
     private var loadedHotSearches = false
     private var lastLoggedIn = false
@@ -209,17 +260,48 @@ internal class Md3eRuntime private constructor(context: Context) {
         settings.registerAction("openRepo") {
             controller.openExternalUrl("https://github.com/TIMER-err/qplayer")
         }
+        // The log system: export copies the newest session file out, and the
+        // flag is applied at startup and on every settings change (idempotent).
+        settings.registerAction("logExport") {
+            val path = LogCapture.export(app)
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                android.widget.Toast.makeText(app,
+                    if (path != null) "日志已导出：$path"
+                    else "没有可导出的日志（先打开记录运行日志）",
+                    android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
         settings.registerInfo("version") { "v${controller.appVersion.peek()}" }
         settings.registerInfo("cacheUsage") { "${controller.cacheSizeMB.peek()} MB" }
         settings.load(PrefsSettingsStore(app), SettingsCatalog.ANDROID)
+        LogCapture.setEnabled(app, settings.bool("logCaptureEnabled"))
         unblockEnabled = settings.bool("unblock")
         attachService()
         controller.preloadHome()
+        controller.refreshBiliCachedSongs()
     }
 
     private val tick = object : Runnable {
         override fun run() {
             controller.pump()
+            val loggedIn = controller.loggedIn.peek()
+            if (loggedIn && !lastLoggedIn) controller.loadMyPlaylists()
+            lastLoggedIn = loggedIn
+            val biliLoggedIn = controller.biliLoggedIn.peek()
+            if (biliLoggedIn != lastBiliLoggedIn) {
+                lastBiliLoggedIn = biliLoggedIn
+                val cookies = controller.biliClient().cookieHeader()
+                scanWorker.execute { runCatching { biliCookies.writeText(cookies) } }
+            }
+            // Keep pumping audio/service work in the background without allocating
+            // and publishing every page's visual snapshot.
+            if (visibleHosts > 0) {
+                transportState = TransportState(controller.isPlaying(), controller.currentTrack() != null,
+                    controller.privateFmActive.peek() == true)
+            }
+            // Freeze one coherent visual snapshot, including its clock, while
+            // transport RenderNodes animate. Audio/service callbacks still pump.
+            if (visibleHosts > 0 && !transportVisualGate.active) Snapshot.withMutableSnapshot {
             home = HomeState(
                 loading = controller.homeLoading.peek(),
                 error = controller.homeFeedError.peek(),
@@ -240,13 +322,12 @@ internal class Md3eRuntime private constructor(context: Context) {
                 error = controller.qrLoginError.peek(),
                 successRevision = controller.webLoginSuccessRevision.peek(),
             )
-            val loggedIn = controller.loggedIn.peek()
-            if (loggedIn && !lastLoggedIn) controller.loadMyPlaylists()
-            lastLoggedIn = loggedIn
-            val hasTrack = controller.currentTrack() != null
-            val songId = controller.currentTrack()?.neteaseId ?: 0L
-            playbackClock.position = controller.mediaSessionPosition().coerceAtLeast(0)
-            playbackClock.sampledAtNanos = System.nanoTime()
+            val currentTrack = controller.currentTrack()
+            publishedPlaybackTrack = currentTrack
+            val hasTrack = currentTrack != null
+            val songId = currentTrack?.neteaseId ?: 0L
+            playbackClock.publish(controller.mediaSessionPosition().coerceAtLeast(0),
+                System.nanoTime(), controller.isPlaying())
             val nextPlayback = PlaybackState(
                 controller.title.peek().ifBlank { "还没有播放歌曲" },
                 controller.artist.peek().ifBlank { if (hasTrack) "未知歌手" else "从推荐中选一首，开始听歌" },
@@ -255,10 +336,13 @@ internal class Md3eRuntime private constructor(context: Context) {
                 controller.isPlaying(), controller.loading.peek(),
                 hasTrack, controller.queueTracks.peek().size,
                 controller.durationMs.peek().coerceAtLeast(0),
-                songId, controller.currentLiked.peek(), songId != 0L && loggedIn,
+                songId, controller.playingAlbumId.peek(), controller.playingArtistId.peek(),
+                controller.currentLiked.peek(), songId != 0L && loggedIn,
                 controller.playMode.peek(), controller.index.peek(),
                 controller.privateFmActive.peek() == true,
                 controller.playbackRevision(), controller.seekRevision(), playbackClock,
+                currentTrack?.album.orEmpty(), currentTrack?.artistIdsCsv.orEmpty(),
+                currentTrack?.artistNamesCsv.orEmpty(),
             )
             // The clock is observable on its own. Avoid invalidating every
             // playback consumer at the sampling cadence when no metadata or
@@ -272,7 +356,7 @@ internal class Md3eRuntime private constructor(context: Context) {
                 coverOnly = controller.lyricsCoverOnly.peek(),
                 coverModeManual = controller.coverModeManual.peek(),
                 offsetMs = controller.lyricOffsetMs.peek(),
-                index = controller.lyricIndex.peek(),
+                // Line selection belongs to the visible lyric consumer.
             )
             queue = controller.queueTracks.peek()
             bili = BiliState(
@@ -286,10 +370,6 @@ internal class Md3eRuntime private constructor(context: Context) {
                 favError = controller.biliFavError.peek(), items = controller.biliFavItems.peek(),
                 itemsLoading = controller.biliFavItemsLoading.peek(), folderTitle = controller.biliFavItemsTitle.peek(),
             )
-            if (bili.loggedIn != lastBiliLoggedIn) {
-                lastBiliLoggedIn = bili.loggedIn
-                runCatching { biliCookies.writeText(controller.biliClient().cookieHeader()) }
-            }
             if (!bili.playing) videoFullscreen = false
             search = search.copy(
                 mode = search.mode, songs = controller.searchResults.peek(),
@@ -300,26 +380,47 @@ internal class Md3eRuntime private constructor(context: Context) {
                 videoError = controller.biliError.peek(),
             )
             if (search.mode == "bili") search = search.copy(loading = controller.biliSearchLoading.peek(), hasMore = false)
+            val playlistId = controller.openPlaylistId.peek()
+            if (playlists.id != playlistId) rememberDetail(playlistSnapshots, playlists.id, playlists)
+            val previousPlaylist = playlists.takeIf { it.id == playlistId }
             playlists = PlaylistState(
-                controller.myPlaylists.peek(), controller.playlistTitle.peek(),
-                controller.playlistCoverPath.peek(), controller.playlistTracks.peek(),
+                controller.myPlaylists.peek(), controller.playlistTitle.peek().ifBlank { previousPlaylist?.title.orEmpty() },
+                controller.playlistCoverPath.peek().ifBlank { previousPlaylist?.cover.orEmpty() }, controller.playlistTracks.peek(),
                 controller.playlistLoading.peek(), controller.playlistSubscribed.peek(),
-                controller.playlistOwned.peek(), loggedIn,
+                controller.playlistOwned.peek(), loggedIn, playlistId,
             )
-            local = local.copy(tracks = controller.tracks.peek())
+            local = local.copy(tracks = controller.tracks.peek(), bili = controller.biliCachedSongs.peek())
+            val artistId = controller.openArtistId.peek()
+            if (artistDetail.id != artistId) rememberDetail(artistSnapshots, artistDetail.id, artistDetail)
+            val previousArtist = artistDetail.takeIf { it.id == artistId }
             artistDetail = ArtistDetailState(
-                controller.artistName.peek(), controller.artistCoverPath.peek(),
+                controller.artistName.peek().ifBlank { previousArtist?.name.orEmpty() },
+                controller.artistCoverPath.peek().ifBlank { previousArtist?.cover.orEmpty() },
                 controller.artistBriefDesc.peek(), controller.artistSongs.peek(),
-                controller.artistAlbums.peek(), controller.artistLoading.peek(),
+                controller.artistAlbums.peek(), controller.artistLoading.peek(), artistId,
             )
+            val albumId = controller.openAlbumId.peek()
+            if (albumDetail.id != albumId) rememberDetail(albumSnapshots, albumDetail.id, albumDetail)
+            val previousAlbum = albumDetail.takeIf { it.id == albumId }
             albumDetail = AlbumDetailState(
-                controller.albumName.peek(), controller.albumCoverPath.peek(),
-                controller.albumArtistName.peek(), controller.albumTracks.peek(),
-                controller.albumLoading.peek(),
+                controller.albumName.peek().ifBlank { previousAlbum?.name.orEmpty() },
+                controller.albumCoverPath.peek().ifBlank { previousAlbum?.cover.orEmpty() },
+                controller.albumArtistName.peek().ifBlank { previousAlbum?.artistName.orEmpty() }, controller.albumTracks.peek(),
+                controller.albumLoading.peek(), albumId,
             )
+            val navigationRevision = controller.pageNavigationRevision.peek()
+            if (navigationRevision != pageNavigation.revision) {
+                val target = controller.pageNavigationTarget.peek()
+                pageNavigation = Md3ePageNavigation(navigationRevision, target, when (target) {
+                    "album" -> controller.openAlbumId.peek()
+                    "artist" -> controller.openArtistId.peek()
+                    else -> 0L
+                })
+            }
             controller.toast.peek().takeIf { it.isNotBlank() }?.let {
                 notice = it
                 controller.toast.set("")
+            }
             }
             // Drain core UI work in the background while the playback service owns the
             // session. No frame loop or Activity reference is needed for audio to advance.
@@ -337,6 +438,9 @@ internal class Md3eRuntime private constructor(context: Context) {
     }
 
     private fun startService() {
+        // A live service already receives controller changes in-process. Starting
+        // it for every transport tap adds an IPC and a duplicate notification.
+        if (PlaybackService.isRunning()) return
         try {
             ContextCompat.startForegroundService(app,
                 Intent(app, PlaybackService::class.java).setAction(PlaybackService.ACTION_REFRESH))
@@ -349,6 +453,7 @@ internal class Md3eRuntime private constructor(context: Context) {
 
     fun onVisible() {
         visibleHosts++
+        uiVisible = true
         attachService()
         handler.removeCallbacks(tick)
         handler.post(tick)
@@ -356,6 +461,7 @@ internal class Md3eRuntime private constructor(context: Context) {
 
     fun onHidden() {
         visibleHosts = (visibleHosts - 1).coerceAtLeast(0)
+        uiVisible = visibleHosts > 0
         controller.saveSessionState()
     }
 
@@ -365,6 +471,17 @@ internal class Md3eRuntime private constructor(context: Context) {
         controller.action()
         handler.removeCallbacks(tick)
         handler.post(tick)
+    }
+
+    // A buffered lyric/progress/like view must not act on a different song.
+    fun seekDisplayed(state: PlaybackState, position: Long) {
+        if (publishedPlaybackTrack != null && publishedPlaybackTrack === controller.currentTrack() &&
+            state.playbackRevision == controller.playbackRevision()) play { seek(position) }
+    }
+
+    fun likeDisplayed(state: PlaybackState) {
+        if (publishedPlaybackTrack != null && publishedPlaybackTrack === controller.currentTrack() &&
+            state.playbackRevision == controller.playbackRevision()) play { toggleLike() }
     }
 
     fun toggle() = play { toggle() }
@@ -379,6 +496,7 @@ internal class Md3eRuntime private constructor(context: Context) {
         settings.put(key, value)
         unblockEnabled = settings.bool("unblock")
         settingsRevision++
+        LogCapture.setEnabled(app, settings.bool("logCaptureEnabled"))
     }
 
     fun invokeSetting(action: String) {
@@ -413,9 +531,62 @@ internal class Md3eRuntime private constructor(context: Context) {
 
     fun loadMoreSearch() = controller.loadMoreSearch()
     fun loadMyPlaylists() = controller.loadMyPlaylists()
-    fun openPlaylist(id: Long) = controller.openPlaylist(id)
-    fun openArtist(id: Long) = controller.openArtist(id)
-    fun openAlbum(id: Long) = controller.openAlbum(id)
+    fun playlistFor(id: Long): PlaylistState = if (playlists.id == id) playlists
+        else playlistSnapshots[id] ?: PlaylistState(id = id, loading = true)
+
+    fun albumFor(id: Long): AlbumDetailState = if (albumDetail.id == id) albumDetail
+        else albumSnapshots[id] ?: AlbumDetailState(id = id, loading = true)
+
+    fun artistFor(id: Long): ArtistDetailState = if (artistDetail.id == id) artistDetail
+        else artistSnapshots[id] ?: ArtistDetailState(id = id, loading = true)
+
+    fun openPlaylist(id: Long) {
+        if (id <= 0) return
+        rememberDetail(playlistSnapshots, playlists.id, playlists)
+        val previous = playlistSnapshots[id]
+        val item = (playlists.mine + home.playlists + home.playlistSections.flatMap { it.playlists }).firstOrNull { it.id == id }
+        playlists = PlaylistState(mine = playlists.mine, id = id,
+            title = previous?.title?.takeIf { it.isNotBlank() } ?: item?.name.orEmpty(),
+            cover = previous?.cover?.takeIf { it.isNotBlank() } ?: item?.let { it.coverThumbPath ?: it.coverUrl }.orEmpty(),
+            loading = true, loggedIn = home.loggedIn)
+        controller.openPlaylist(id)
+    }
+
+    fun openArtist(id: Long) {
+        if (id <= 0) return
+        rememberDetail(artistSnapshots, artistDetail.id, artistDetail)
+        val previous = artistSnapshots[id]
+        val item = search.artists.firstOrNull { it.id == id }
+        artistDetail = ArtistDetailState(id = id,
+            name = previous?.name?.takeIf { it.isNotBlank() } ?: item?.name.orEmpty(),
+            cover = previous?.cover?.takeIf { it.isNotBlank() } ?: item?.let { it.coverThumbPath ?: it.coverUrl }.orEmpty(),
+            loading = true)
+        controller.openArtist(id)
+    }
+
+    fun openAlbum(id: Long) {
+        if (id <= 0) return
+        rememberDetail(albumSnapshots, albumDetail.id, albumDetail)
+        val previous = albumSnapshots[id]
+        val item = (search.albums + home.albums + artistDetail.albums).firstOrNull { it.id == id }
+        val song = (home.daily + home.sections.flatMap { it.songs }).firstOrNull { it.albumId == id }
+        albumDetail = AlbumDetailState(id = id,
+            name = previous?.name?.takeIf { it.isNotBlank() } ?: item?.name ?: song?.album.orEmpty(),
+            cover = previous?.cover?.takeIf { it.isNotBlank() } ?: item?.let { it.coverThumbPath ?: it.coverUrl }
+                ?: song?.let { it.coverThumbPath ?: it.coverUrl }.orEmpty(),
+            artistName = previous?.artistName?.takeIf { it.isNotBlank() } ?: item?.artistName ?: song?.artist.orEmpty(),
+            loading = true)
+        controller.openAlbum(id)
+    }
+
+    private fun <T> rememberDetail(snapshots: MutableMap<Long, T>, id: Long, state: T) {
+        if (id <= 0) return
+        snapshots.remove(id)
+        snapshots[id] = state
+        while (snapshots.size > 8) snapshots.remove(snapshots.keys.first())
+    }
+    fun cacheCurrentBili() = controller.cacheCurrentBili()
+    fun playCachedBili(track: Track) = play { playCachedBili(track) }
 
     fun setLocalPermission(granted: Boolean) {
         local = local.copy(permissionGranted = granted,

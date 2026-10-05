@@ -72,7 +72,7 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 private const val LYRIC_ANCHOR = .35f
-private val GoogleSansFlexBold = FontFamily(Font(R.font.google_sans_flex_bold, FontWeight.Bold))
+private val LyricTypeface = FontFamily(Font(R.font.google_sans_flex_bold, FontWeight.Bold))
 private val lyricOpacityEasing = CubicBezierEasing(.33f, 0f, .20f, .10f)
 
 private sealed interface DisplayLyricRow {
@@ -332,7 +332,7 @@ private fun Md3eLyricIndicator(row: DisplayLyricRow, position: State<Long>, play
             }
         }
         if (compact) Text("间奏", fontSize = (fontSize * .7f).sp,
-            fontWeight = FontWeight.Bold, fontFamily = GoogleSansFlexBold,
+            fontWeight = FontWeight.Bold, fontFamily = LyricTypeface,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
@@ -453,13 +453,13 @@ private fun Md3eLyricText(row: DisplayLyricRow.Line, position: State<Long>, inde
         }
         line.romaji?.takeIf { it.isNotBlank() }?.let {
             Text(it.trim(), fontSize = (size * .5f).sp, lineHeight = (size * .55f).sp,
-                fontWeight = fontWeight, fontFamily = GoogleSansFlexBold, color = idleColor.copy(alpha = .75f),
+                fontWeight = fontWeight, fontFamily = LyricTypeface, color = idleColor.copy(alpha = .75f),
                 textAlign = if (right) TextAlign.Right else TextAlign.Left,
                 modifier = Modifier.fillMaxWidth())
         }
         line.translation?.takeIf { it.isNotBlank() }?.let {
             Text(it.trim(), fontSize = (size * .5f).sp, lineHeight = (size * .55f).sp,
-                fontWeight = fontWeight, fontFamily = GoogleSansFlexBold, color = idleColor.copy(alpha = .75f),
+                fontWeight = fontWeight, fontFamily = LyricTypeface, color = idleColor.copy(alpha = .75f),
                 textAlign = if (right) TextAlign.Right else TextAlign.Left,
                 modifier = Modifier.fillMaxWidth())
         }
@@ -480,7 +480,7 @@ private fun Md3eLyricGlyphs(glyphs: List<TimedGlyph>, position: State<Long>,
         val widthPx = with(density) { maxWidth.roundToPx() }.coerceAtLeast(1)
         val fullText = remember(glyphs) { glyphs.joinToString("") { it.text } }
         val style = remember(fontSize, lineHeight, weight, right) {
-            TextStyle(fontSize = fontSize.sp, lineHeight = lineHeight.sp, fontWeight = weight, fontFamily = GoogleSansFlexBold,
+            TextStyle(fontSize = fontSize.sp, lineHeight = lineHeight.sp, fontWeight = weight, fontFamily = LyricTypeface,
                 textAlign = if (right) TextAlign.Right else TextAlign.Left)
         }
         val textLayout = remember(fullText, style, widthPx, textMeasurer) {
@@ -500,7 +500,7 @@ private fun Md3eLyricGlyphs(glyphs: List<TimedGlyph>, position: State<Long>,
             return@BoxWithConstraints
         }
         val glyphStyle = remember(fontSize, lineHeight, weight) {
-            TextStyle(fontSize = fontSize.sp, lineHeight = lineHeight.sp, fontWeight = weight, fontFamily = GoogleSansFlexBold)
+            TextStyle(fontSize = fontSize.sp, lineHeight = lineHeight.sp, fontWeight = weight, fontFamily = LyricTypeface)
         }
         val glyphLayouts = remember(glyphs, glyphStyle, textMeasurer) {
             glyphs.map { textMeasurer.measure(it.text, glyphStyle, softWrap = false) }

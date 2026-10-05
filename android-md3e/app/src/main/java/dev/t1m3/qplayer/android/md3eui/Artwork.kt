@@ -32,7 +32,7 @@ private val artworkCache = object : LruCache<String, Bitmap>(8 * 1024 * 1024) {
 private val artworkRequests = Semaphore(3)
 
 @Composable
-internal fun Artwork(url: String, modifier: Modifier = Modifier) {
+internal fun Artwork(url: String, modifier: Modifier = Modifier, corner: androidx.compose.ui.unit.Dp = 24.dp) {
     val bitmap by produceState<Bitmap?>(null, url) {
         value = null
         if (url.isNotBlank()) value = withContext(Dispatchers.IO) {
@@ -44,7 +44,7 @@ internal fun Artwork(url: String, modifier: Modifier = Modifier) {
     // Seal AsyncImageImpl crossfade(true): reveal an arriving image over its placeholder.
     val imageAlpha by animateFloatAsState(if (bitmap != null) 1f else 0f,
         animationSpec = tween(100), label = "seal_artwork_crossfade")
-    Surface(modifier, shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+    Surface(modifier, shape = RoundedCornerShape(corner), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
         val image = bitmap
         Box(contentAlignment = Alignment.Center) {
             if (imageAlpha < 1f) Icon(Md3eIcons.MusicNote, null, Modifier.size(28.dp),

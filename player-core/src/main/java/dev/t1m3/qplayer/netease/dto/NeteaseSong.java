@@ -21,6 +21,9 @@ public class NeteaseSong {
 
     public long id;
     public String name;
+    /** Optional labels supplied by the recommendation API; never inferred locally. */
+    public String recommendReason = "";
+    public String genre = "";
     /** All artists joined with " / ". Null if absent. */
     public String artist;
     /** Id of the first-listed artist -- lets the UI open that artist's page. 0 if absent. */
