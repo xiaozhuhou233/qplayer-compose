@@ -418,6 +418,19 @@ class ComposeQPlayerActivity : ComponentActivity() {
 
         settings = SettingsCore()
         settings.attach(controller)
+        // Ⓜ The log system（「在设置里添加一个日志开关……再加一个导出开关」）: the
+        // capture starts in onCreate so a session's log reaches back to the very
+        // first lines, registers the crash hook so 退出 also includes how it exited,
+        // and follows the 关于 page's toggle live.
+        settings.registerAction("logExport") {
+            val path = LogCapture.export(this)
+            android.widget.Toast.makeText(
+                this,
+                if (path != null) "日志已导出：$path" else "没有可导出的日志（先打开记录运行日志）",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+        }
+        LogCapture.setEnabled(this, settings.bool("logCaptureEnabled"))
         settings.setSystemDark(isSystemDark())
         settings.registerAction("clearCache", controller::clearDiskCache)
         settings.registerAction("checkUpdate", controller::checkForUpdateManual)
@@ -1615,6 +1628,13 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
     // previous track's cover seed. The live LayerBackdrop supplies the actual
     // pixels underneath, so surfaces follow scrolling/page changes without a
     // stale red (or other cover-colour) cast.
+    // Ⓜ The log toggle is followed live: the switch in 关于 starts/stops the
+    // session file without waiting for the next process start.
+    val logCaptureEnabled = settings.bool("logCaptureEnabled")
+    val logCaptureContext = androidx.compose.ui.platform.LocalContext.current
+    androidx.compose.runtime.LaunchedEffect(logCaptureEnabled) {
+        LogCapture.setEnabled(logCaptureContext, logCaptureEnabled)
+    }
     val glassTint = scheme.background
     val expansionMoving by remember(playerExpansion) {
         derivedStateOf {

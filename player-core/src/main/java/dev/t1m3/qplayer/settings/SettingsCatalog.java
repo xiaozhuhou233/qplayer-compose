@@ -383,6 +383,12 @@ public final class SettingsCatalog {
                 .build());
 
         // ---- 关于 -----------------------------------------------------------
+        out.add(SettingSpec.toggle("logCaptureEnabled", ABOUT, "记录运行日志", false)
+                .desc("打开后记录本次启动到退出的全部日志（含所有警告与报错），写入应用私有目录的 logs/ 会话文件")
+                .build());
+        out.add(SettingSpec.action("logExport", ABOUT, "导出日志", "")
+                .desc("把最近一次会话的日志文件导出到系统下载目录")
+                .build());
         out.add(SettingSpec.action("openRepo", ABOUT, "QPlayer", "")
                 .icon("link")
                 .provider("version").inlineProvider()
