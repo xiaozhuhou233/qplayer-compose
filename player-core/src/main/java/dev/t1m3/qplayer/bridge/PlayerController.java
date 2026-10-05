@@ -6824,6 +6824,12 @@ public final class PlayerController {
         playQueue(library, i);
     }
 
+    /** Play the visible local collection (album, artist or filtered results). */
+    public void playLocalTracks(List<Track> tracks, int start) {
+        if (tracks == null || start < 0 || start >= tracks.size()) return;
+        playQueue(new ArrayList<>(tracks), start);
+    }
+
     /** Queue a netease song-list and start at {@code i}. Search history is fed by
      *  the query text the user actually typed/submitted (SearchPage.qml), not by
      *  which result they clicked — a song title isn't a search the user made. */

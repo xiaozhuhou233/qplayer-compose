@@ -208,6 +208,16 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         p.set(v);
         persist(spec, v);
         apply(spec, v);
+        // Design switches are exclusive even when changed through a non-Compose host.
+        // Claude uses a lightweight paper theme and may coexist with low-spec rendering.
+        if (Boolean.TRUE.equals(v)) {
+            if ("claudeDesign".equals(key)) setValue("iosDesign", false);
+            if ("iosDesign".equals(key)) {
+                setValue("claudeDesign", false);
+                setValue(SettingsCatalog.LOW_SPEC_MODE_KEY, false);
+            }
+            if (SettingsCatalog.LOW_SPEC_MODE_KEY.equals(key)) setValue("iosDesign", false);
+        }
         if ("aiProvider".equals(key)) applyAiProvider(((Number) v).intValue());
     }
 

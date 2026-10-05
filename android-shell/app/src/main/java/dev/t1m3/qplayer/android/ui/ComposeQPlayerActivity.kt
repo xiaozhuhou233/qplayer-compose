@@ -1,5 +1,7 @@
 package dev.t1m3.qplayer.android.ui
 
+import androidx.compose.runtime.SideEffect
+import androidx.compose.material.icons.filled.Radio
 import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -416,6 +418,19 @@ class ComposeQPlayerActivity : ComponentActivity() {
 
         settings = SettingsCore()
         settings.attach(controller)
+        // Ⓜ The log system（「在设置里添加一个日志开关……再加一个导出开关」）: the
+        // capture starts in onCreate so a session's log reaches back to the very
+        // first lines, registers the crash hook so 退出 also includes how it exited,
+        // and follows the 关于 page's toggle live.
+        settings.registerAction("logExport") {
+            val path = LogCapture.export(this)
+            android.widget.Toast.makeText(
+                this,
+                if (path != null) "日志已导出：$path" else "没有可导出的日志（先打开记录运行日志）",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+        }
+        LogCapture.setEnabled(this, settings.bool("logCaptureEnabled"))
         settings.setSystemDark(isSystemDark())
         settings.registerAction("clearCache", controller::clearDiskCache)
         settings.registerAction("checkUpdate", controller::checkForUpdateManual)
@@ -447,7 +462,7 @@ class ComposeQPlayerActivity : ComponentActivity() {
         (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
             Configuration.UI_MODE_NIGHT_YES
 
-    private fun requestAudioPermission() {
+    internal fun requestAudioPermission() {
         val permission = if (android.os.Build.VERSION.SDK_INT >= 33) {
             Manifest.permission.READ_MEDIA_AUDIO
         } else {
@@ -500,7 +515,7 @@ class ComposeQPlayerActivity : ComponentActivity() {
     }
 }
 
-private enum class ComposeScreen { HOME, SEARCH, LIBRARY, LOCAL, PRIVATE_FM, QUEUE, SETTINGS, ACCOUNT, PLAYLIST, ALBUM, ARTIST, LYRICS, BILI_FAV, BILI_FAV_DETAIL }
+internal enum class ComposeScreen { HOME, SEARCH, LIBRARY, LOCAL, PRIVATE_FM, QUEUE, SETTINGS, ACCOUNT, PLAYLIST, ALBUM, ARTIST, LYRICS, BILI_FAV, BILI_FAV_DETAIL }
 
 /** A screen plus the id needed to restore the exact drill-down destination. */
 /** The concrete MediaPlayer-backed backend, so the UI can hand a video surface
@@ -709,7 +724,7 @@ private val screenOrder = listOf(
     ComposeScreen.ALBUM, ComposeScreen.ARTIST, ComposeScreen.BILI_FAV, ComposeScreen.BILI_FAV_DETAIL
 )
 
-private data class PlayerUiState(
+internal data class PlayerUiState(
     val playing: Boolean = false,
     val title: String = "",
     val artist: String = "",
@@ -1130,7 +1145,7 @@ private fun playingArtists(state: PlayerUiState): List<PlayingArtist> {
 }
 
 @Composable
-private fun PlayingArtistLinks(
+internal fun PlayingArtistLinks(
     state: PlayerUiState,
     openArtist: (Long) -> Unit,
     fontSize: androidx.compose.ui.unit.TextUnit,
@@ -1379,7 +1394,7 @@ private fun rememberPlayerState(controller: PlayerController, settings: Settings
 }
 
 private data class ShellAppearance(
-    val iosDesign: Boolean, val refraction: Boolean, val monet: Boolean,
+    val iosDesign: Boolean, val claudeDesign: Boolean, val refraction: Boolean, val monet: Boolean,
     val paletteStyle: Int, val paletteChroma: Int, val pageTransition: Int,
     val showLocalTab: Boolean, val lowSpec: Boolean,
 )
@@ -1472,7 +1487,7 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
     // The legacy bridge is not snapshot state. Publish only changed appearance
     // values, not a ticking revision that refreshes every glass layer at 4 Hz.
     fun readAppearance() = ShellAppearance(
-        settings.bool("iosDesign"), settings.bool("iosGlassRefraction"), settings.bool("monet"),
+        settings.bool("iosDesign"), settings.bool("claudeDesign"), settings.bool("iosGlassRefraction"), settings.bool("monet"),
         settings.intOf("paletteStyle").coerceIn(0, 3), settings.intOf("paletteChroma").coerceIn(0, 2),
         settings.intOf(SettingsCatalog.PAGE_TRANSITION_KEY), settings.bool("showLocalTab"),
         settings.bool(SettingsCatalog.LOW_SPEC_MODE_KEY)
@@ -1590,28 +1605,36 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
         }
     }
 
-    val iosDesign = appearance.iosDesign && !appearance.lowSpec
+    val claudeDesign = appearance.claudeDesign
+    val iosDesign = appearance.iosDesign && !appearance.lowSpec && !claudeDesign
     val liquidBackdrop = if (iosDesign) rememberLayerBackdrop() else null
     val glassRefraction = appearance.refraction
     // The iOS/cover player has a dark backdrop even when the app uses a light theme.
     val systemBarsDark = state.dark ||
-        (playerExpansion.active && (iosDesign ||
+        (playerExpansion.active && !claudeDesign && (iosDesign ||
             (state.lyricCoverBackground && !appearance.lowSpec)))
     SystemBarAppearance(dark = systemBarsDark)
-    val scheme = (if (iosDesign) iosDesignColorScheme(state.dark) else rememberQPlayerColorScheme(
+    val scheme = (if (claudeDesign) claudeColorScheme(state.dark) else if (iosDesign) iosDesignColorScheme(state.dark) else rememberQPlayerColorScheme(
         seed = state.coverSeed,
         dark = state.dark,
         enabled = appearance.monet,
         paletteStyle = appearance.paletteStyle,
         paletteChroma = appearance.paletteChroma,
         animate = !appearance.lowSpec,
-    )).withReadableContent()
+    )).let { if (claudeDesign) it else it.withReadableContent() }
     // Same as legado's LegadoTheme: the official expressive motion scheme drives
     // every Material component (sheets, menus, buttons) instead of per-call specs.
     // Glass colour is intentionally derived from the current surface, not the
     // previous track's cover seed. The live LayerBackdrop supplies the actual
     // pixels underneath, so surfaces follow scrolling/page changes without a
     // stale red (or other cover-colour) cast.
+    // Ⓜ The log toggle is followed live: the switch in 关于 starts/stops the
+    // session file without waiting for the next process start.
+    val logCaptureEnabled = settings.bool("logCaptureEnabled")
+    val logCaptureContext = androidx.compose.ui.platform.LocalContext.current
+    androidx.compose.runtime.LaunchedEffect(logCaptureEnabled) {
+        LogCapture.setEnabled(logCaptureContext, logCaptureEnabled)
+    }
     val glassTint = scheme.background
     val expansionMoving by remember(playerExpansion) {
         derivedStateOf {
@@ -1625,6 +1648,7 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
     androidx.compose.runtime.CompositionLocalProvider(
         LocalLowSpecMode provides appearance.lowSpec,
         LocalIosDesign provides iosDesign,
+        LocalClaudeDesign provides claudeDesign,
         LocalGlassRefraction provides glassRefraction,
         LocalGlassTint provides glassTint,
         LocalGlassLuminance provides glassLuminance,
@@ -1633,6 +1657,8 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
     ) {
     MaterialTheme(
         colorScheme = scheme,
+        typography = if (claudeDesign) ClaudeTypography else androidx.compose.material3.Typography(),
+        shapes = if (claudeDesign) ClaudeShapes else androidx.compose.material3.Shapes(),
         motionScheme = if (appearance.lowSpec) MotionScheme.standard() else MotionScheme.expressive()
     ) {
         QPlayerDialogBackdropHost(enabled = iosDesign) {
@@ -1654,7 +1680,7 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                         androidx.compose.runtime.CompositionLocalProvider(LocalIosControls provides false) {
                         // ui.zip uses a dark scrim in either system theme.
                         // Keep titles readable without changing control shapes.
-                        MaterialTheme(colorScheme = if ((state.lyricCoverBackground && !appearance.lowSpec) || iosDesign) scheme.copy(
+                        MaterialTheme(colorScheme = if (!claudeDesign && ((state.lyricCoverBackground && !appearance.lowSpec) || iosDesign)) scheme.copy(
                             onSurface = ComposeColor.White,
                             onSurfaceVariant = ComposeColor(0xFFDDDDDD),
                             onBackground = ComposeColor.White,
@@ -1783,7 +1809,19 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                         // Surface; NavigationBar owns its height, insets, and
                         // selection indicator.
                         bottomBar = {
-                            if (isMainTab && !iosDesign) {
+                            if (claudeDesign) {
+                                Column(Modifier.fillMaxWidth()) {
+                                    if (state.title.isNotBlank() && screen != ComposeScreen.SETTINGS) {
+                                        ClaudeMiniPlayer(state, Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                            .playerExpansionSource(playerExpansion),
+                                            onOpen = { navigateTo(ComposeRoute(ComposeScreen.LYRICS)) },
+                                            onToggle = { controller.toggle() }, onNext = { controller.next() })
+                                    }
+                                    if (isMainTab) ClaudeBottomNav(screen, appearance.showLocalTab,
+                                        onScreen = { navigateTo(ComposeRoute(it), asRoot = true) })
+                                    else Spacer(Modifier.navigationBarsPadding())
+                                }
+                            } else if (isMainTab && !iosDesign) {
                                 StandardBottomNav(
                                     modifier = Modifier.fillMaxWidth().playerChromeExit(playerExpansion),
                                     screen = screen,
@@ -2060,7 +2098,7 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                 },
                             )
                         }
-                        if (!useIosNavigation) Column(
+                        if (!useIosNavigation && !claudeDesign) Column(
                             modifier = Modifier
                                 .align(Alignment.BottomCenter)
                                 .fillMaxWidth()
@@ -2126,7 +2164,7 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
         }
         }
         } // Background page glass sampling pauses while covered by the player.
-        if (!(videoFullscreen && state.biliPlaying)) {
+        if (!claudeDesign && !(videoFullscreen && state.biliPlaying)) {
             StatusBarShadow(dark = state.dark, opacity = {
                 val base = if (state.dark) 0.16f else 0.07f
                 base * (1f - playerExpansion.progress.value).coerceIn(0f, 1f)
@@ -2207,6 +2245,10 @@ private fun ComposeTopBar(
 ) {
     val haptic = LocalView.current
     val title = pageTopTitle(route, state) ?: "QPlayer"
+    if (LocalClaudeDesign.current) {
+        ClaudeTopBar(title, canGoBack, onBack, onQueue, onSettings, onAccount, onRecognize)
+        return
+    }
     TopAppBar(
         colors = TopAppBarDefaults.topAppBarColors(
             containerColor = ComposeColor.Transparent,
@@ -2845,7 +2887,7 @@ private fun decodeRemoteCover(source: String, maxEdge: Int): androidx.compose.ui
 }
 
 @Composable
-private fun rememberCoverBitmap(bytes: ByteArray?, path: String?, maxEdge: Int = 1024): androidx.compose.ui.graphics.ImageBitmap? {
+internal fun rememberCoverBitmap(bytes: ByteArray?, path: String?, maxEdge: Int = 1024): androidx.compose.ui.graphics.ImageBitmap? {
     val remoteSource = path?.takeIf {
         it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true)
     }?.let(::httpsCoverSource)
@@ -2916,6 +2958,7 @@ private fun HomeScreen(
     controller: PlayerController? = null,
     settings: SettingsCore? = null
 ) {
+    val claudeDesign = LocalClaudeDesign.current
     var aiText by remember { mutableStateOf("") }
     var aiOpen by remember { mutableStateOf(false) }
     var aiPreferenceMode by remember { mutableStateOf(false) }
@@ -2985,7 +3028,19 @@ private fun HomeScreen(
         }
     }
     LazyColumn(state = listState, contentPadding = pageContentPadding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = if (iosNavigation) 200.dp else 16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        item(key = "home_greeting") { Text(if (state.userName.isBlank()) "你好" else "你好，${state.userName}", fontSize = 27.sp, fontWeight = FontWeight.SemiBold) }
+        item(key = "home_greeting") {
+            if (claudeDesign) ClaudeGreeting(state.userName)
+            else Text(if (state.userName.isBlank()) "你好" else "你好，${state.userName}", fontSize = 27.sp, fontWeight = FontWeight.SemiBold)
+        }
+        if (claudeDesign && controller != null) item(key = "claude_fm") {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                ClaudeBadge("TODAY’S ACOUSTIC MOOD")
+                TextButton(onClick = { controller.startPrivateFm() }) {
+                    Icon(Icons.Default.Radio, null, Modifier.size(16.dp))
+                    Spacer(Modifier.width(5.dp)); Text("私人 FM")
+                }
+            }
+        }
         item(key = "home_ai") {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(aiText, { aiText = it }, Modifier.weight(1f), placeholder = { Text("今天想听点什么呢？告诉你的ai吧！") }, singleLine = true, shape = RoundedCornerShape(18.dp))
@@ -3124,7 +3179,7 @@ private fun HomeScreen(
             }
         }
     }
-    if (aiOpen) AlertDialog(
+    if (aiOpen) ClaudeAwareAiDialog(
         onDismissRequest = { aiOpen = false; aiPreferenceMode = false },
         showActions = false,
         title = { Text("AI DJ") },
@@ -3215,6 +3270,7 @@ private fun SearchScreen(
     openPlaylist: (Long, String) -> Unit = { _, _ -> },
     openArtist: (Long) -> Unit
 ) {
+    val claudeDesign = LocalClaudeDesign.current
     var query by rememberSaveable { mutableStateOf("") }
     var searchTab by rememberSaveable { mutableStateOf(0) }   // 0 网易云 / 1 B站
     val listState = rememberLazyListState()
@@ -3232,6 +3288,10 @@ private fun SearchScreen(
         controller.searchBili(value)
     }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp).padding(top = pageStatusBarInset())) {
+        if (claudeDesign) {
+            Text("寻找下一段共鸣", style = MaterialTheme.typography.headlineMedium, modifier = Modifier.padding(top = 12.dp))
+            Text("歌曲、歌手，或一种心情。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(query, { value -> query = value; submitSearch(value) }, Modifier.weight(1f), label = { Text("搜索歌曲、专辑或歌手") }, singleLine = true)
             IconButton(onClick = {
@@ -3253,6 +3313,16 @@ private fun SearchScreen(
             }
         }
         LazyColumn(state = listState, contentPadding = PaddingValues(bottom = if (iosNavigation) 200.dp else 0.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            if (claudeDesign && query.isBlank()) item(key = "claude_search_discover") {
+                ClaudeSearchDiscovery { value -> query = value; submitSearch(value) }
+            }
+            if (claudeDesign && query.isNotBlank()) {
+                if ((searchTab == 0 && state.searchLoading) || (searchTab == 1 && state.biliSearchLoading)) item(key = "claude_search_loading") {
+                    LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 12.dp))
+                } else if (neteaseRows.isEmpty() && biliRows.isEmpty()) item(key = "claude_search_empty") {
+                    ClaudeEmpty("暂时没有找到", "换个关键词，再找找喜欢的声音。")
+                }
+            }
             if (state.searchArtistId != 0L && searchTab == 0) {
                 item(key = "search_artist_pinned") {
                     SearchArtistCard(
@@ -3289,6 +3359,7 @@ private fun SearchScreen(
 /** 两个搜索来源的切换按钮。 */
 @Composable
 private fun SearchSourceTab(text: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    if (LocalClaudeDesign.current) { ClaudeChoice(text, selected, onClick, modifier); return }
     Surface(
         modifier = modifier.clickable(onClick = onClick),
         shape = RoundedCornerShape(percent = 50),
@@ -3456,6 +3527,10 @@ private fun LibraryScreen(
     openBiliFav: () -> Unit,
     controller: PlayerController,
 ) {
+    if (LocalClaudeDesign.current) {
+        ClaudeLibrary(state, controller, openLogin, openPlaylist, openBiliFav)
+        return
+    }
     var createOpen by remember { mutableStateOf(false) }
     var createName by remember { mutableStateOf("") }
     // A B站-only session still gets in: the 收藏夹 entry below is theirs to open, and
@@ -3530,6 +3605,7 @@ private fun LibraryScreen(
 
 @Composable
 private fun LocalScreen(state: PlayerUiState, controller: PlayerController, iosNavigation: Boolean = false) {
+    if (LocalClaudeDesign.current) { ClaudeLocal(state, controller); return }
     if (state.tracks.isEmpty()) {
         EmptyState("还没有本地音乐", "授权音乐权限后会自动扫描") { }
         return
@@ -3555,7 +3631,7 @@ private fun LocalScreen(state: PlayerUiState, controller: PlayerController, iosN
 
 @Composable
 @OptIn(androidx.compose.animation.ExperimentalAnimationApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
-private fun DraggableQueueList(
+internal fun DraggableQueueList(
     state: PlayerUiState,
     controller: PlayerController,
     modifier: Modifier = Modifier,
@@ -3854,7 +3930,7 @@ private fun QueueScreen(state: PlayerUiState, controller: PlayerController, slee
 }
 
 @Composable
-private fun SleepTimerControl(minutes: Int, remaining: Long, onMinutesChanged: (Int) -> Unit, armed: Boolean = true) {
+internal fun SleepTimerControl(minutes: Int, remaining: Long, onMinutesChanged: (Int) -> Unit, armed: Boolean = true) {
     val haptic = rememberHapticAction { }
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
         Text(
@@ -3890,6 +3966,12 @@ private fun PlaylistScreen(
     fallbackCoverPath: String = "",
 
 ) {
+    if (LocalClaudeDesign.current) {
+        ClaudeCollection(state.playlistTitle.ifBlank { "歌单" }, "PLAYLIST ARCHIVE", "",
+            state.playlistCoverPath.ifBlank { fallbackCoverPath }, state.playlistTracks, state.playlistLoading,
+            "cover:playlist:$playlistId", { controller.playPlaylistTrack(it) }, { controller.enqueueNeteaseSong(it) })
+        return
+    }
     // The core flags an in-flight playlist fetch; until the first track lands
     // there is nothing to show, so the page waits with the expressive loader
     // instead of an empty "0 首歌曲" header (the QML shell does the same with
@@ -3968,6 +4050,12 @@ private fun AlbumScreen(
     fallbackCoverPath: String = "",
 
 ) {
+    if (LocalClaudeDesign.current) {
+        ClaudeCollection(state.albumTitle.ifBlank { "专辑" }, "ALBUM ARCHIVE", "${state.albumArtist} · ${state.albumYear}".trim(' ', '·'),
+            state.albumCoverPath.ifBlank { fallbackCoverPath }, state.albumTracks, state.albumLoading,
+            "cover:album:$albumId", { controller.playAlbumTrack(it) }, { controller.enqueueNeteaseSong(it) })
+        return
+    }
     // Material's decelerate curve (0.2, 0, 0, 1): leaves quickly and settles softly.
     // A linear tween reads as mechanical and a spring overshoots the container's
     // bounds, so this is the curve the container transform is specified with.
@@ -4045,6 +4133,7 @@ private fun AlbumScreen(
 
 @Composable
 private fun SettingsScreen(settings: SettingsCore, controller: PlayerController) {
+    val claudeDesign = LocalClaudeDesign.current
     var category by remember { mutableStateOf(SettingsCatalog.APPEARANCE) }
     // SettingsCore isn't observable: a tap writes the store but nothing
     // recomposes this screen (its params never change), so controls appeared
@@ -4065,6 +4154,9 @@ private fun SettingsScreen(settings: SettingsCore, controller: PlayerController)
             }
         }
         LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (claudeDesign && category == SettingsCatalog.APPEARANCE) item(key = "claude_preview") {
+                ClaudeAppearancePreview()
+            }
             items(settings.rows(category), key = { it.key }) { spec ->
                 SettingRow(spec, settings, controller, revision) { revision++ }
             }
@@ -4085,7 +4177,8 @@ private fun SettingRow(
     val providerText = if (spec.provider.isNotBlank()) settings.info(spec.provider) else ""
     val description = providerText.ifBlank { spec.desc }
     val currentInt = settings.intOf(spec.key).coerceIn(spec.min, spec.max)
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        border = if (LocalClaudeDesign.current) BorderStroke(.8.dp, MaterialTheme.colorScheme.outlineVariant) else null) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -5021,6 +5114,11 @@ private fun PlayerDetailScreen(
     sleepArmed: Boolean = true,
     onSleepMinutesChanged: (Int) -> Unit = {}
 ) {
+    if (LocalClaudeDesign.current) {
+        ClaudePlayer(state, controller, openAlbum, openArtist, close,
+            sleepMinutes, sleepRemaining, sleepArmed, onSleepMinutesChanged)
+        return
+    }
     val iosPlayer = LocalIosDesign.current
     val lowSpec = LocalLowSpecMode.current
     val playerBackdrop = if (iosPlayer) rememberLayerBackdrop() else null
@@ -5699,6 +5797,22 @@ private fun VideoSlotReporter(priority: Int, modifier: Modifier = Modifier) {
     )
 }
 
+/** Claude reports a slot to the existing single video layer, sharing its fullscreen controls. */
+@Composable
+internal fun ClaudeVideoSlot(obscured: Boolean, modifier: Modifier = Modifier) {
+    val aspect = if (videoSourceHeight > 0) videoSourceWidth.toFloat() / videoSourceHeight else 16f / 9f
+    VideoSlotReporter(2, modifier.aspectRatio(aspect))
+    SideEffect { videoSlotObscured = obscured }
+    DisposableEffect(Unit) {
+        onDispose {
+            videoFullscreen = false
+            videoSlotRect = null
+            videoSlotPriority = 0
+            videoSlotObscured = false
+        }
+    }
+}
+
 /** The one place the B站 picture is drawn.
  *
  *  <p>Always composed, and afterwards only moved and resized, so the player keeps the
@@ -5828,7 +5942,7 @@ private var biliFavDetailTitle by mutableStateOf("")
 /** 收藏夹多选框：列出用户的 B站收藏夹，已收藏的打勾；确定时**只提交差异**（新增的
  *  进 add、取消的进 del），所以点开不改、直接确定不会发出任何写请求。 */
 @Composable
-private fun BiliFavPickerDialog(
+internal fun BiliFavPickerDialog(
     state: PlayerUiState,
     controller: PlayerController,
     bvid: String,
@@ -6052,7 +6166,7 @@ private fun BiliFavItemsScreen(
  *  preview passes the surrounding UI's 32dp; full-screen passes 0, which is the
  *  unclipped, edge-to-edge case. */
 @Composable
-private fun BiliVideoSurface(modifier: Modifier = Modifier, cornerRadiusPx: Float = 0f) {
+internal fun BiliVideoSurface(modifier: Modifier = Modifier, cornerRadiusPx: Float = 0f) {
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
@@ -7394,7 +7508,7 @@ private fun validDisplayLineDistance(
  * shared animated scroll and no end-of-transition reset.
  */
 @Composable
-private fun QmlLyricColumnRestored(
+internal fun QmlLyricColumnRestored(
     state: PlayerUiState,
     modifier: Modifier = Modifier,
     onLineClick: (Long) -> Unit = {}
@@ -8968,6 +9082,7 @@ private fun QmlLyricRow(
     onLineClick: (Long) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val lyricFamily = if (LocalClaudeDesign.current) ClaudeSerif else GoogleSansFlexBold
     val lowSpec = LocalLowSpecMode.current
     val isBackground = LyricTimeline.isBackground(line.vocalChannel)
     // The source renderer scales the active line as one stable layer. Keep the
@@ -9027,26 +9142,26 @@ private fun QmlLyricRow(
         2 -> FontWeight.Normal
         else -> FontWeight.Medium
     }
-    val mainTextLayout = remember(glyphText, baseSize, textScale, lineHeight, lyricWeight, textBudgetPx, textMeasurer) {
+    val mainTextLayout = remember(lyricFamily, glyphText, baseSize, textScale, lineHeight, lyricWeight, textBudgetPx, textMeasurer) {
         if (textBudgetPx <= 0) null else textMeasurer.measure(
             text = glyphText,
             style = androidx.compose.ui.text.TextStyle(
                 fontSize = (baseSize * textScale).sp,
                 lineHeight = lineHeight.sp,
-                fontFamily = GoogleSansFlexBold,
+                fontFamily = lyricFamily,
                 fontWeight = lyricWeight
             ),
             constraints = Constraints(maxWidth = textBudgetPx)
         )
     }
-    val secondaryTextHeightPx = remember(line, baseSize, textBudgetPx, textMeasurer) {
+    val secondaryTextHeightPx = remember(lyricFamily, line, baseSize, textBudgetPx, textMeasurer) {
         listOfNotNull(line.romaji, line.translation).filter { it.isNotBlank() }.sumOf { secondary ->
             textMeasurer.measure(
                 text = secondary.trim(),
                 style = androidx.compose.ui.text.TextStyle(
                     fontSize = (baseSize * 0.5f).sp,
                     lineHeight = (baseSize * 0.55f).sp,
-                    fontFamily = GoogleSansFlexBold
+                    fontFamily = lyricFamily
                 ),
                 constraints = Constraints(maxWidth = textBudgetPx.coerceAtLeast(1))
             ).size.height
@@ -9139,7 +9254,7 @@ private fun QmlLyricRow(
                     fontSize = (baseSize * textScale).sp,
                     lineHeight = lineHeight.sp,
                     fontWeight = lyricWeight,
-                    fontFamily = GoogleSansFlexBold,
+                    fontFamily = lyricFamily,
                     color = if (focused || index < focusIndex) playedColor else unplayedColor,
                     maxLines = Int.MAX_VALUE,
                     overflow = TextOverflow.Clip,
@@ -9170,7 +9285,7 @@ private fun QmlLyricRow(
                 fontSize = (baseSize * 0.5f).sp,
                 lineHeight = (baseSize * 0.55f).sp,
                 fontWeight = lyricWeight,
-                fontFamily = GoogleSansFlexBold,
+                fontFamily = lyricFamily,
                 color = (if (state.lyricMd3Color) MaterialTheme.colorScheme.onSurfaceVariant
                 else ComposeColor.White).copy(alpha = 0.75f),
                 modifier = Modifier.width(textWidth)
@@ -9183,7 +9298,7 @@ private fun QmlLyricRow(
                 fontSize = (baseSize * 0.5f).sp,
                 lineHeight = (baseSize * 0.55f).sp,
                 fontWeight = lyricWeight,
-                fontFamily = GoogleSansFlexBold,
+                fontFamily = lyricFamily,
                 color = (if (state.lyricMd3Color) MaterialTheme.colorScheme.onSurfaceVariant
                 else ComposeColor.White).copy(alpha = 0.75f),
                 modifier = Modifier.width(textWidth)
@@ -9207,6 +9322,7 @@ private fun LyricGlyphText(
     policy: LyricRenderPolicy,
     modifier: Modifier = Modifier
 ) {
+    val lyricFamily = if (LocalClaudeDesign.current) ClaudeSerif else GoogleSansFlexBold
     if (!policy.sweep) {
         // Plain LRC + spring on: reuse the already shaped whole line. Do not
         // create/measure one text layout per letter just to translate them all
@@ -9236,11 +9352,11 @@ private fun LyricGlyphText(
     }
     val textMeasurer = rememberTextMeasurer()
     val density = LocalDensity.current
-    val glyphStyle = remember(fontSize, lineHeight, fontWeight) {
+    val glyphStyle = remember(lyricFamily, fontSize, lineHeight, fontWeight) {
         androidx.compose.ui.text.TextStyle(
             fontSize = fontSize,
             lineHeight = lineHeight,
-            fontFamily = GoogleSansFlexBold,
+            fontFamily = lyricFamily,
             fontWeight = fontWeight
         )
     }
@@ -9876,6 +9992,7 @@ private fun PlaylistCard(
 
     onClick: () -> Unit,
 ) {
+    if (LocalClaudeDesign.current) { ClaudePlaylistCard(playlist, onClick); return }
     val coverBitmap = rememberCoverBitmap(null, playlist.coverThumbPath ?: playlist.coverUrl, maxEdge = 256)
     // The card's text is not part of the shared element, so it disappears fast
     // instead of lingering半透明 under the detail page's own text.
@@ -9915,7 +10032,7 @@ private fun PlaylistCard(
 @Composable
 @OptIn(
     androidx.compose.foundation.ExperimentalFoundationApi::class,)
-private fun PlaylistListRow(
+internal fun PlaylistListRow(
     playlist: NeteasePlaylist,
 
     onClick: () -> Unit,
@@ -9972,7 +10089,7 @@ private fun PlaylistListRow(
     }
 
 @Composable
-private fun SongRow(
+internal fun SongRow(
     title: String,
     artist: String,
     coverBytes: ByteArray? = null,
@@ -9981,6 +10098,11 @@ private fun SongRow(
     onLongPressQueue: (() -> Unit)? = null,
     horizontalInset: Dp = 12.dp
 ) {
+    if (LocalClaudeDesign.current) {
+        ClaudeSongRow(title, artist, coverBytes, coverPath, onClick, onLongPressQueue,
+            Modifier.padding(horizontal = horizontalInset))
+        return
+    }
     val coverBitmap = rememberCoverBitmap(coverBytes, coverPath, maxEdge = 256)
     val interactionSource = remember { MutableInteractionSource() }
     var menu by remember { mutableStateOf(false) }
@@ -10038,6 +10160,7 @@ private fun HomeSongPages(
     onPlay: (Int) -> Unit,
     onEnqueue: (NeteaseSong) -> Unit
 ) {
+    if (LocalClaudeDesign.current) { ClaudeSongShelf(title, songs, onPlay, onEnqueue); return }
     val pageCount = (songs.size + 2) / 3
     if (pageCount == 0) return
     val pager = androidx.compose.foundation.pager.rememberPagerState(pageCount = { pageCount })
@@ -10103,7 +10226,10 @@ private fun HomeAlbumCard(album: NeteaseAlbum, onClick: () -> Unit) {
 }
 
 @Composable
-private fun SectionTitle(text: String) { Text(text, fontSize = 19.sp, fontWeight = FontWeight.SemiBold) }
+private fun SectionTitle(text: String) {
+    if (LocalClaudeDesign.current) ClaudeSectionTitle(text)
+    else Text(text, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+}
 
 /**
  * Which of the three states the lyric page body is showing. LOADING is driven by

@@ -80,11 +80,13 @@ internal fun ArtworkPageSurface(
     val renderingActive = rememberUiRenderingActive()
     val sample = rememberArtworkSample(if (useArtwork) image else null, sourceKey)
     val base = MaterialTheme.colorScheme
+    val claudeDesign = LocalClaudeDesign.current
     val inheritedContentColor = LocalContentColor.current
     val inheritedGlassTint = LocalGlassTint.current
     val inheritedGlassLuminance = LocalGlassLuminance.current
-    val target = remember(sample?.seed, base, dark) {
-        sample?.let { artworkPageScheme(base, it.seed, dark) } ?: base.withReadableContent()
+    val target = remember(sample?.seed, base, dark, claudeDesign) {
+        sample?.let { artworkPageScheme(base, it.seed, dark) }
+            ?: if (claudeDesign) base else base.withReadableContent()
     }
     // MD3 and ordinary pages keep their inherited colours. Only values change;
     // the theme/provider/Box/content slot stays mounted for forward and back.
