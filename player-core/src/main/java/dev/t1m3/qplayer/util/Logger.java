@@ -50,7 +50,9 @@ public final class Logger {
 
     private static volatile Sink sink = JUL_SINK;
 
-    private static final int CAPACITY = 200;
+    // Deep enough that a log-capture session started mid-run still flushes the whole
+    // startup history when it flushes the ring.
+    private static final int CAPACITY = 800;
     private static final Deque<String> RING = new ArrayDeque<>(CAPACITY);
     private static final AtomicLong VERSION = new AtomicLong();
 
