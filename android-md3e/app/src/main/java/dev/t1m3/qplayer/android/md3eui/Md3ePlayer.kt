@@ -11,14 +11,11 @@ import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.border
@@ -41,6 +38,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.clipRect
+import kotlinx.coroutines.flow.collectLatest
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -116,7 +118,7 @@ internal fun Md3ePlayerScreen(runtime: Md3eRuntime, onBack: () -> Unit,
         .background(MaterialTheme.colorScheme.surfaceContainer)) {
         if (!LocalClaudeDesign.current && runtime.settings.bool("lyricCoverBackground") && state.cover.isNotBlank()) {
             if (tab == 1) Md3eLyricDynamicBackdrop(runtime, state.cover, Modifier.fillMaxSize())
-            else Artwork(state.cover, Modifier.fillMaxSize().blur(72.dp))
+            else Md3eSoftArtworkBackdrop(state.cover, Modifier.fillMaxSize())
             if (tab == 0) Box(Modifier.fillMaxSize().background(
                 MaterialTheme.colorScheme.surface.copy(alpha = .76f)))
         }
@@ -184,12 +186,12 @@ internal fun Md3ePlayerScreen(runtime: Md3eRuntime, onBack: () -> Unit,
 
 @Composable
 private fun PlayerTab(label: String, selected: Boolean, onClick: () -> Unit) {
-    val color by animateColorAsState(
+    val color = animateColorAsState(
         if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
         label = "player_tab_color",
     )
     Box(
-        Modifier.clip(RoundedCornerShape(27.dp)).background(color).clickable(onClick = onClick)
+        Modifier.clip(RoundedCornerShape(27.dp)).drawBehind { drawRect(color.value) }.clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -214,12 +216,14 @@ private fun PlayerDetailTab(runtime: Md3eRuntime, onLyrics: () -> Unit,
     ) {
         BoxWithConstraints(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
             val coverSize = minOf(maxWidth, maxHeight)
-            val scale by animateFloatAsState(if (state.playing) 1f else .95f, tween(260), label = "detail_cover_scale")
+            val scale = animateFloatAsState(if (state.playing) 1f else .95f, tween(260), label = "detail_cover_scale")
             if (runtime.bili.playing && runtime.videoVisible) {
                 val aspect = if (runtime.videoHeight > 0) runtime.videoWidth.toFloat() / runtime.videoHeight else 16f / 9f
                 val videoWidth = minOf(maxWidth, maxHeight * aspect)
                 Md3eVideoSlot(runtime, Modifier.width(videoWidth).height(videoWidth / aspect))
-            } else Artwork(state.cover, Modifier.size(coverSize).graphicsLayerScale(scale).clickable {
+            } else Artwork(state.cover, Modifier.size(coverSize).graphicsLayer {
+                scaleX = scale.value; scaleY = scale.value
+            }.clickable {
                 if (runtime.bili.playing) runtime.videoVisible = true else onLyrics()
             })
             if (state.loading) CircularProgressIndicator(Modifier.size(48.dp))
@@ -235,12 +239,13 @@ private fun PlayerDetailTab(runtime: Md3eRuntime, onLyrics: () -> Unit,
                 else -> 24.sp
             }
             Text(state.title, Modifier.fillMaxWidth().height(34.dp)
-                .clickable(enabled = state.albumId != 0L) { onOpenAlbum(state.albumId) }, fontSize = size,
+                .clickable(enabled = state.albumId != 0L || state.album.isNotBlank()) {
+                    if (state.albumId != 0L) onOpenAlbum(state.albumId)
+                    else runtime.controller.openAlbumByName(state.album)
+                }, fontSize = size,
                 fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(state.artist, Modifier.clickable(enabled = state.artistId != 0L) { onOpenArtist(state.artistId) },
-                fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Md3ePlayingArtistLinks(state, onOpenArtist)
         }
         if (!state.hasTrack && !state.loading && runtime.bili.error.isNotBlank()) Text(runtime.bili.error,
             color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, maxLines = 2)
@@ -256,7 +261,7 @@ private fun PlayerDetailTab(runtime: Md3eRuntime, onLyrics: () -> Unit,
             }
             BiliProgress(runtime)
         } else PlayerProgress(state, wavy = runtime.settings.intOf("lyricProgressStyle") == 0,
-            onSeek = { runtime.play { seek(it) } }, modifier = Modifier.fillMaxWidth())
+            onSeek = { runtime.seekDisplayed(state, it) }, modifier = Modifier.fillMaxWidth())
         PlayerTransport(runtime)
     }
 }
@@ -282,19 +287,20 @@ private fun ClaudePlayerDetail(runtime: Md3eRuntime, onLyrics: () -> Unit,
                 Text(state.title.ifBlank { "尚未播放" }, fontFamily = ClaudeSerif,
                     fontSize = 24.sp, fontWeight = FontWeight.SemiBold, maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.clickable(enabled = state.albumId != 0L) { onOpenAlbum(state.albumId) })
-                Text(state.artist.ifBlank { "选一首喜欢的歌" }, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.clickable(enabled = state.artistId != 0L) { onOpenArtist(state.artistId) }
-                        .padding(vertical = 4.dp))
+                    modifier = Modifier.clickable(enabled = state.albumId != 0L || state.album.isNotBlank()) {
+                        if (state.albumId != 0L) onOpenAlbum(state.albumId)
+                        else runtime.controller.openAlbumByName(state.album)
+                    })
+                Md3ePlayingArtistLinks(state, onOpenArtist,
+                    Modifier.padding(vertical = 4.dp), centered = false)
             }
-            IconButton(enabled = state.likeable, onClick = { runtime.play { toggleLike() } }) {
+            IconButton(enabled = state.likeable, onClick = { runtime.likeDisplayed(state) }) {
                 Icon(if (state.liked) PlayerIcons.Favorite else PlayerIcons.FavoriteBorder,
                     "收藏歌曲", tint = MaterialTheme.colorScheme.primary)
             }
         }
         if (runtime.bili.playing) BiliProgress(runtime) else PlayerProgress(state,
-            wavy = false, onSeek = { runtime.play { seek(it) } }, modifier = Modifier.fillMaxWidth())
+            wavy = false, onSeek = { runtime.seekDisplayed(state, it) }, modifier = Modifier.fillMaxWidth())
         PlayerTransport(runtime)
     }
 }
@@ -315,7 +321,8 @@ private fun ClaudeVinylStageMd3e(cover: String, album: String, playing: Boolean,
                 Text(album, Modifier.padding(top = 8.dp), fontFamily = ClaudeSerif, fontSize = 12.sp,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            Box(Modifier.size(edge * .9f).align(Alignment.CenterEnd), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(edge * .9f).align(Alignment.CenterEnd)
+                .shadow(14.dp, CircleShape, clip = false), contentAlignment = Alignment.Center) {
                 Canvas(Modifier.fillMaxSize()) {
                     val radius = size.minDimension / 2f
                     drawCircle(Color(0xFF171715))
@@ -329,10 +336,6 @@ private fun ClaudeVinylStageMd3e(cover: String, album: String, playing: Boolean,
     }
 }
 
-private fun Modifier.graphicsLayerScale(scale: Float): Modifier = this.then(
-    Modifier.graphicsLayer { scaleX = scale; scaleY = scale }
-)
-
 @Composable
 private fun PlayerTransport(runtime: Md3eRuntime) {
     val state = runtime.playback
@@ -340,78 +343,16 @@ private fun PlayerTransport(runtime: Md3eRuntime) {
     var biliLoginOpen by remember { mutableStateOf(false) }
     if (biliFavoriteOpen) Md3eBiliFavPickerDialog(runtime) { biliFavoriteOpen = false }
     if (biliLoginOpen) Md3eBiliLoginDialog(runtime) { biliLoginOpen = false }
-    val view = LocalView.current
-    var lastClicked by remember { mutableIntStateOf(0) }
-    var clickRevision by remember { mutableIntStateOf(0) }
-    fun animateClick(button: Int) {
-        lastClicked = button
-        clickRevision++
-        view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
-    }
-    LaunchedEffect(clickRevision) {
-        if (lastClicked != 0) {
-            kotlinx.coroutines.delay(if (lastClicked == 2) 220L else 600L)
-            lastClicked = 0
-        }
-    }
-    fun weightFor(id: Int) = when (lastClicked) { 0 -> 1f; id -> 1.1f; else -> .65f }
-    val weightSpring = spring<Float>(dampingRatio = Spring.DampingRatioMediumBouncy,
-        stiffness = Spring.StiffnessMediumLow)
-    val prevWeight by animateFloatAsState(weightFor(-1), weightSpring, label = "prev_weight")
-    val playWeight by animateFloatAsState(weightFor(2), weightSpring, label = "play_weight")
-    val nextWeight by animateFloatAsState(weightFor(1), weightSpring, label = "next_weight")
-    val corner by animateDpAsState(if (state.playing) 34.dp else 60.dp,
-        spring(dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = Spring.StiffnessMediumLow), label = "play_corner")
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Row(Modifier.fillMaxWidth().height(80.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Box(
-                Modifier.weight(prevWeight).fillMaxHeight().clip(CircleShape)
-                    .background(if (!state.privateFmMode) MaterialTheme.colorScheme.secondaryContainer
-                        else MaterialTheme.colorScheme.onSurface.copy(alpha = .12f))
-                    .semantics { contentDescription = "上一首" }
-                    .clickable(enabled = state.hasTrack && !state.privateFmMode,
-                        interactionSource = remember { MutableInteractionSource() }, indication = null) {
-                        animateClick(-1)
-                        runtime.previous()
-                    },
-                contentAlignment = Alignment.Center,
-            ) { Icon(Md3eIcons.SkipPrevious, "上一首", Modifier.size(32.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer) }
-            Box(
-                Modifier.weight(playWeight).fillMaxHeight().clip(RoundedCornerShape(corner))
-                    .background(MaterialTheme.colorScheme.primary)
-                    .semantics { contentDescription = "播放/暂停" }
-                    .clickable(enabled = state.hasTrack,
-                        interactionSource = remember { MutableInteractionSource() }, indication = null) {
-                        animateClick(2)
-                        runtime.toggle()
-                    },
-                contentAlignment = Alignment.Center,
-            ) {
-                AnimatedContent(targetState = state.playing,
-                    transitionSpec = {
-                        (scaleIn(initialScale = .5f, animationSpec = spring(
-                            dampingRatio = Spring.DampingRatioMediumBouncy,
-                            stiffness = Spring.StiffnessMedium)) + fadeIn(tween(140))) togetherWith
-                            (scaleOut(targetScale = .5f, animationSpec = tween(100)) + fadeOut(tween(100)))
-                    },
-                    label = "play_pause_icon_morph") { playing ->
-                    Icon(if (playing) Md3eIcons.Pause else Md3eIcons.PlayArrow, "播放/暂停",
-                        Modifier.size(36.dp), tint = MaterialTheme.colorScheme.onPrimary)
-                }
-            }
-            Box(
-                Modifier.weight(nextWeight).fillMaxHeight().clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.secondaryContainer)
-                    .semantics { contentDescription = "下一首" }
-                    .clickable(enabled = state.hasTrack,
-                        interactionSource = remember { MutableInteractionSource() }, indication = null) {
-                        animateClick(1)
-                        runtime.next()
-                    },
-                contentAlignment = Alignment.Center,
-            ) { Icon(Md3eIcons.SkipNext, "下一首", Modifier.size(32.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer) }
-        }
+        PlayerTransportButtons(
+            playing = runtime.transportState.playing,
+            hasTrack = runtime.transportState.hasTrack,
+            privateFm = runtime.transportState.privateFm,
+            onPrevious = runtime::previous,
+            onToggle = runtime::toggle,
+            onNext = runtime::next,
+            onMotionChanged = runtime::setTransportMotionActive,
+        )
         Spacer(Modifier.height(14.dp))
         Row(
             Modifier.width(264.dp).height(56.dp).clip(RoundedCornerShape(28.dp))
@@ -435,7 +376,7 @@ private fun PlayerTransport(runtime: Md3eRuntime) {
                 MaterialTheme.colorScheme.onTertiary, Modifier.weight(1f), enabled = runtime.bili.playing || state.likeable) {
                 if (runtime.bili.playing) {
                     if (runtime.bili.loggedIn) biliFavoriteOpen = true else biliLoginOpen = true
-                } else runtime.play { toggleLike() }
+                } else runtime.likeDisplayed(state)
             }
         }
     }
@@ -445,11 +386,11 @@ private fun PlayerTransport(runtime: Md3eRuntime) {
 private fun PlayerToggle(icon: ImageVector, label: String, active: Boolean,
     activeColor: Color, activeContent: Color, modifier: Modifier,
     enabled: Boolean = true, onClick: () -> Unit) {
-    val background by animateColorAsState(
+    val background = animateColorAsState(
         if (active) activeColor else Color.Transparent,
         label = "player_toggle_background",
     )
-    Box(modifier.fillMaxHeight().clip(CircleShape).background(background)
+    Box(modifier.fillMaxHeight().clip(CircleShape).drawBehind { drawRect(background.value) }
         .clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) {
         Icon(icon, label, Modifier.size(24.dp),
             tint = if (active) activeContent
@@ -481,8 +422,7 @@ private fun PlayerLyricsTab(runtime: Md3eRuntime, onDetail: () -> Unit) {
             Column(Modifier.weight(1f).padding(start = 14.dp)) {
                 Text(state.title, fontSize = 19.sp, fontWeight = FontWeight.Bold,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(state.artist, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Md3ePlayingArtistLinks(state, runtime::openArtist, centered = false)
             }
             if (!coverOnly) IconButton(onClick = { runtime.controller.setCoverMode(true) }) {
                 Icon(PlayerIcons.Album, "显示封面")
@@ -539,9 +479,7 @@ private fun PlayerLyricsTab(runtime: Md3eRuntime, onDetail: () -> Unit) {
                         }
                         Text(state.title, fontSize = 20.sp, fontWeight = FontWeight.Bold,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(state.artist, fontSize = 13.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Md3ePlayingArtistLinks(state, runtime::openArtist)
                     }
                     else -> Md3eLyricColumn(runtime)
                 }
@@ -550,7 +488,7 @@ private fun PlayerLyricsTab(runtime: Md3eRuntime, onDetail: () -> Unit) {
         Column(Modifier.fillMaxWidth().height(112.dp)) {
             Spacer(Modifier.height(12.dp))
             PlayerProgress(state, wavy = runtime.settings.intOf("lyricProgressStyle") == 0,
-                onSeek = { runtime.play { seek(it) } }, modifier = Modifier.fillMaxWidth())
+                onSeek = { runtime.seekDisplayed(state, it) }, modifier = Modifier.fillMaxWidth())
             Spacer(Modifier.weight(1f))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically) {
@@ -580,8 +518,7 @@ private fun ClaudeLyricsTab(runtime: Md3eRuntime, onDetail: () -> Unit) {
             Column(Modifier.weight(1f).padding(start = 14.dp)) {
                 Text(state.title, fontFamily = ClaudeSerif, fontSize = 19.sp, fontWeight = FontWeight.SemiBold,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(state.artist, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Md3ePlayingArtistLinks(state, runtime::openArtist, centered = false)
             }
             IconButton(onClick = onDetail) { Icon(PlayerIcons.Album, "返回唱片") }
         }
@@ -596,7 +533,7 @@ private fun ClaudeLyricsTab(runtime: Md3eRuntime, onDetail: () -> Unit) {
             }
             else Md3eLyricColumn(runtime)
         }
-        PlayerProgress(state, wavy = false, onSeek = { runtime.play { seek(it) } }, modifier = Modifier.fillMaxWidth())
+        PlayerProgress(state, wavy = false, onSeek = { runtime.seekDisplayed(state, it) }, modifier = Modifier.fillMaxWidth())
         PlayerTransport(runtime)
     }
 }
@@ -604,7 +541,7 @@ private fun ClaudeLyricsTab(runtime: Md3eRuntime, onDetail: () -> Unit) {
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun PlayerCoverPlaceholder() {
-    ContainedLoadingIndicator(Modifier.size(96.dp))
+    Md3eLoadingIndicator(Modifier.size(96.dp), contained = true)
 }
 
 @Composable
@@ -638,7 +575,7 @@ private fun PlayerLyricLines(runtime: Md3eRuntime) {
                 when (row) {
                     is PlayerLyricRow.Line -> PlayerLyricLine(row.lyric, index == active, index, active,
                         positionMs, fontSize, runtime, Modifier.fillMaxWidth()) {
-                        runtime.play { seek(row.startMs) }
+                        runtime.seekDisplayed(state, row.startMs)
                     }
                     is PlayerLyricRow.Intro -> PlayerLyricIndicator(
                         positionMs, row.startMs, row.endMs, index == active,
@@ -646,7 +583,7 @@ private fun PlayerLyricLines(runtime: Md3eRuntime) {
                     is PlayerLyricRow.Instrumental -> PlayerLyricIndicator(
                         positionMs, row.startMs, row.endMs, index == active,
                         state.playing, fontSize, true) {
-                        runtime.play { seek(row.startMs) }
+                        runtime.seekDisplayed(state, row.startMs)
                     }
                 }
             }
@@ -721,7 +658,7 @@ private fun PlayerLyricIndicator(positionMs: Long, startMs: Long, endMs: Long,
         verticalAlignment = Alignment.CenterVertically) {
         repeat(3) { index ->
             if (active && playing && index <= beat) {
-                LoadingIndicator(Modifier.size(size), color = colors[index])
+                Md3eLoadingIndicator(Modifier.size(size), color = colors[index])
             } else {
                 Box(Modifier.size(size), contentAlignment = Alignment.Center) {
                     Box(Modifier.size(size * .52f).clip(CircleShape)
@@ -815,12 +752,17 @@ private fun PlayerProgress(state: PlaybackState, wavy: Boolean,
     var dragging by remember(state.songId) { mutableStateOf(false) }
     var fraction by remember(state.songId) { mutableFloatStateOf(0f) }
     val duration = state.duration.coerceAtLeast(1L)
-    val shown = if (dragging) fraction else progress(state.position, duration)
-    val animated by animateFloatAsState(shown, tween(if (dragging) 0 else 180), label = "player_progress")
+    val rendering = LocalMd3eRenderingActive.current && !LocalMd3eMotionActive.current
+    val animated = remember(state.songId) { Animatable(progress(state.position, duration)) }
+    LaunchedEffect(state.clock, state.songId, state.playing, duration, state.seekRevision, rendering) {
+        if (rendering) snapshotFlow { progress(state.position, duration) }.collectLatest { target ->
+            if (state.playing) animated.animateTo(target, tween(100)) else animated.snapTo(target)
+        }
+    }
     val primary = MaterialTheme.colorScheme.primary
     val track = MaterialTheme.colorScheme.surfaceContainerHighest
     Column(modifier.widthIn(max = 600.dp)) {
-        Canvas(Modifier.fillMaxWidth().height(32.dp)
+        Box(Modifier.fillMaxWidth().height(32.dp)
             .pointerInput(duration) {
                 detectTapGestures { point -> onSeek((duration * (point.x / size.width).coerceIn(0f, 1f)).toLong()) }
             }
@@ -831,46 +773,56 @@ private fun PlayerProgress(state: PlaybackState, wavy: Boolean,
                     onDragEnd = { onSeek((duration * fraction).toLong()); dragging = false },
                     onDragCancel = { dragging = false },
                 )
-            }) {
-            val center = size.height / 2f
-            val thumbX = (size.width * animated).coerceIn(10.dp.toPx(), (size.width - 10.dp.toPx()).coerceAtLeast(10.dp.toPx()))
-            val gap = 10.dp.toPx()
-            if (wavy) {
+            }.drawWithCache {
+                val center = size.height / 2f
                 val amplitude = if (dragging) 4.dp.toPx() else 2.5.dp.toPx()
                 val stroke = Stroke(width = if (dragging) 5.dp.toPx() else 3.dp.toPx(),
                     cap = androidx.compose.ui.graphics.StrokeCap.Round)
-                var x = 0f
-                while (x < size.width) {
-                    val next = (x + 2.dp.toPx()).coerceAtMost(size.width)
-                    val y1 = center + sin(x / size.width * (4f * PI).toFloat()) * amplitude
-                    val y2 = center + sin(next / size.width * (4f * PI).toFloat()) * amplitude
-                    if (next < thumbX - gap || x > thumbX + gap) {
-                        drawLine(if (x < thumbX) primary else track, Offset(x, y1), Offset(next, y2),
-                            strokeWidth = stroke.width, cap = androidx.compose.ui.graphics.StrokeCap.Round)
-                    }
-                    x = next
-                }
-            } else {
+                val gap = 10.dp.toPx()
                 val height = if (dragging) 14.dp.toPx() else 10.dp.toPx()
-                drawRoundRect(primary, topLeft = Offset(0f, center - height / 2f),
-                    size = Size((thumbX - gap).coerceAtLeast(0f), height),
-                    cornerRadius = CornerRadius(height / 2f))
-                drawRoundRect(track, topLeft = Offset((thumbX + gap).coerceAtMost(size.width), center - height / 2f),
-                    size = Size((size.width - thumbX - gap).coerceAtLeast(0f), height),
-                    cornerRadius = CornerRadius(height / 2f))
-            }
-            if (!state.loading) drawRoundRect(primary,
-                topLeft = Offset(thumbX - 2.dp.toPx(), center - if (dragging) 14.dp.toPx() else 11.dp.toPx()),
-                size = Size(4.dp.toPx(), if (dragging) 28.dp.toPx() else 22.dp.toPx()),
-                cornerRadius = CornerRadius(2.dp.toPx()))
-        }
+                // Geometry changes only with size or drag mode, never with time.
+                val wave = Path()
+                if (wavy && size.width > 0f) {
+                    val step = 2.dp.toPx().coerceAtLeast(1f)
+                    wave.moveTo(0f, center)
+                    var x = step
+                    while (x < size.width) {
+                        wave.lineTo(x, center + sin(x / size.width * (4f * PI).toFloat()) * amplitude)
+                        x += step
+                    }
+                    wave.lineTo(size.width, center)
+                }
+                onDrawBehind {
+                    val shown = if (dragging) fraction else animated.value
+                    val thumbX = (size.width * shown).coerceIn(gap, (size.width - gap).coerceAtLeast(gap))
+                    if (wavy) {
+                        clipRect(right = (thumbX - gap).coerceAtLeast(0f)) { drawPath(wave, primary, style = stroke) }
+                        clipRect(left = (thumbX + gap).coerceAtMost(size.width)) { drawPath(wave, track, style = stroke) }
+                    } else {
+                        drawRoundRect(primary, topLeft = Offset(0f, center - height / 2f),
+                            size = Size((thumbX - gap).coerceAtLeast(0f), height), cornerRadius = CornerRadius(height / 2f))
+                        drawRoundRect(track, topLeft = Offset((thumbX + gap).coerceAtMost(size.width), center - height / 2f),
+                            size = Size((size.width - thumbX - gap).coerceAtLeast(0f), height), cornerRadius = CornerRadius(height / 2f))
+                    }
+                    if (!state.loading) drawRoundRect(primary,
+                        topLeft = Offset(thumbX - 2.dp.toPx(), center - if (dragging) 14.dp.toPx() else 11.dp.toPx()),
+                        size = Size(4.dp.toPx(), if (dragging) 28.dp.toPx() else 22.dp.toPx()), cornerRadius = CornerRadius(2.dp.toPx()))
+                }
+            })
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(playerTime(if (dragging) (duration * fraction).toLong() else state.position),
-                fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            PlayerElapsedTime(state, if (dragging) (duration * fraction).toLong() else null)
             Text(playerTime(state.duration), fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
+}
+
+@Composable
+private fun PlayerElapsedTime(state: PlaybackState, draggedPosition: Long?) {
+    val seconds by remember(state.clock, draggedPosition) {
+        derivedStateOf { (draggedPosition ?: state.position) / 1000L }
+    }
+    Text(playerTime(seconds * 1000L), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
 @Composable

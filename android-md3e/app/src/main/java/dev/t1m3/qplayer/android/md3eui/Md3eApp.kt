@@ -35,6 +35,8 @@ import dev.t1m3.qplayer.settings.SettingsCatalog
 
 internal typealias PlayAction = (PlayerController.() -> Unit) -> Unit
 
+private val Md3eTypography = Typography()
+
 private data class Md3ePageRoute(val tab: String, val detail: String, val id: Long)
 
 @Composable
@@ -47,6 +49,7 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
     val dark = when (runtime.settings.intOf("darkMode")) { 1 -> false; 2 -> true; else -> systemDark }
     SideEffect { onDarkAppearance(dark) }
     var pageMotionActive by remember { mutableStateOf(false) }
+    val playerExpansion = rememberMd3ePlayerExpansionState()
     val claudeDesign = runtime.settings.bool("claudeDesign")
     val dynamicScheme = rememberMd3eColorScheme(
         seed = runtime.playback.coverSeed,
@@ -54,12 +57,16 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
         enabled = !claudeDesign && runtime.settings.bool("monet"),
         paletteStyle = runtime.settings.intOf("paletteStyle").coerceIn(0, 3),
         paletteChroma = runtime.settings.intOf("paletteChroma").coerceIn(0, 2),
-        animate = !runtime.settings.bool(SettingsCatalog.LOW_SPEC_MODE_KEY),
-        paused = pageMotionActive,
+        animate = !claudeDesign && !runtime.settings.bool(SettingsCatalog.LOW_SPEC_MODE_KEY),
+        paused = pageMotionActive || playerExpansion.moving || runtime.transportMotionActive || !runtime.uiVisible,
     )
     val scheme = if (claudeDesign) claudeColorScheme(dark) else dynamicScheme
-    MaterialExpressiveTheme(colorScheme = scheme, typography = if (claudeDesign) ClaudeTypography else Typography(), shapes = ClaudeShapes) {
-        CompositionLocalProvider(LocalContentColor provides scheme.onSurface, LocalClaudeDesign provides claudeDesign) {
+    MaterialExpressiveTheme(colorScheme = scheme, typography = if (claudeDesign) ClaudeTypography else Md3eTypography, shapes = ClaudeShapes) {
+        CompositionLocalProvider(LocalContentColor provides scheme.onSurface,
+            LocalClaudeDesign provides claudeDesign,
+            LocalMd3eReducedEffects provides runtime.reducedRendering,
+            LocalMd3eRenderingActive provides runtime.uiVisible,
+            LocalMd3eMotionActive provides (pageMotionActive || playerExpansion.moving || runtime.transportMotionActive)) {
         var tab by rememberSaveable { mutableStateOf("home") }
         var detail by rememberSaveable { mutableStateOf("") }
         var detailId by rememberSaveable { mutableLongStateOf(0L) }
@@ -77,7 +84,6 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
         var activeSharedCoverKey by remember { mutableStateOf<String?>(null) }
         var miniPlayerVisible by remember { mutableStateOf(true) }
         val miniScrollConnection = rememberMd3eMiniScrollConnection { miniPlayerVisible = it }
-        val playerExpansion = rememberMd3ePlayerExpansionState()
         val route = Md3ePageRoute(tab, detail, detailId)
         val pageTransition = updateTransition(route, label = "page_transition")
         val pageTransitionActive = pageTransition.isRunning ||
@@ -102,6 +108,19 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                 else -> null
             }
         }
+        var handledNavigationRevision by remember {
+            mutableLongStateOf(runtime.controller.pageNavigationRevision.peek())
+        }
+        LaunchedEffect(runtime.pageNavigation) {
+            val request = runtime.pageNavigation
+            if (request.revision > handledNavigationRevision) {
+                handledNavigationRevision = request.revision
+                if (request.id != 0L && (request.target == "album" || request.target == "artist")) {
+                    overlay = ""
+                    openDetail(request.target, request.id)
+                }
+            }
+        }
         val openVideoPlayer = {
             queueFromPlayer = false
             playerOpenLyrics = false
@@ -123,6 +142,13 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                     detailStack = detailStack.dropLast(1)
                     detail = previous?.substringBeforeLast(':').orEmpty()
                     detailId = previous?.substringAfterLast(':')?.toLongOrNull() ?: 0L
+                    // Restore the controller slot when returning to an older detail
+                    // of the same kind; outgoing pages keep their own snapshots.
+                    when (detail) {
+                        "playlist" -> if (runtime.playlists.id != detailId) runtime.openPlaylist(detailId)
+                        "album" -> if (runtime.albumDetail.id != detailId) runtime.openAlbum(detailId)
+                        "artist" -> if (runtime.artistDetail.id != detailId) runtime.openArtist(detailId)
+                    }
                 }
                 tab != "home" -> tab = "home"
             }
@@ -154,9 +180,9 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                 containerColor = MaterialTheme.colorScheme.background,
                 topBar = {
                     Md3eMainTopBar(tab, detail, when (detail) {
-                        "playlist" -> runtime.playlists.title
-                        "album" -> runtime.albumDetail.name
-                        "artist" -> runtime.artistDetail.name
+                        "playlist" -> runtime.playlistFor(detailId).title
+                        "album" -> runtime.albumFor(detailId).name
+                        "artist" -> runtime.artistFor(detailId).name
                         "biliFolders" -> "B站收藏夹"
                         "biliFolder" -> biliFolderTitle
                         else -> ""
@@ -199,6 +225,10 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                                 val detailInvolved = initialState.detail.isNotEmpty() || targetState.detail.isNotEmpty()
                                 when {
                                     lowSpec -> Md3eMotion.lowSpecPage(!navigatingBack)
+                                    activeSharedCoverKey != null &&
+                                        (initialState.detail in setOf("playlist", "album") ||
+                                            targetState.detail in setOf("playlist", "album")) ->
+                                        Md3eMotion.collectionPage().using(null)
                                     detailInvolved -> Md3eMotion.sealDetail(!navigatingBack)
                                     else -> Md3eMotion.page(!navigatingBack, pageTransitionPreset)
                                 }
@@ -207,16 +237,20 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                             routeStateHolder.SaveableStateProvider("${visibleRoute.tab}:${visibleRoute.detail}:${visibleRoute.id}") {
                                 CompositionLocalProvider(Md3eAnimatedScope provides this) {
                                     val pageModifier = Modifier.fillMaxSize()
-                                    when {
-                                        visibleRoute.detail == "playlist" -> Md3ePlaylistDetail(runtime.playlists, visibleRoute.id,
+                                    val collectionKey = if (visibleRoute.detail in setOf("playlist", "album"))
+                                        "cover:${visibleRoute.detail}:${visibleRoute.id}" else null
+                                    Md3eCollectionContainer(collectionKey, Modifier.fillMaxSize(), detail = true) {
+when {
+                                        visibleRoute.detail == "playlist" -> Md3ePlaylistDetail(runtime.playlistFor(visibleRoute.id), visibleRoute.id,
                                             onBack = closeTop,
                                             onRefresh = { runtime.openPlaylist(visibleRoute.id) },
                                             onPlay = onPlay, modifier = pageModifier)
-                                        visibleRoute.detail == "album" -> Md3eAlbumDetail(runtime.albumDetail, visibleRoute.id,
+                                        visibleRoute.detail == "album" -> Md3eAlbumDetail(runtime.albumFor(visibleRoute.id), visibleRoute.id,
                                             onBack = closeTop, onPlay = onPlay, modifier = pageModifier)
-                                        visibleRoute.detail == "artist" -> Md3eArtistDetail(runtime.artistDetail,
+                                        visibleRoute.detail == "artist" -> Md3eArtistDetail(runtime.artistFor(visibleRoute.id),
                                             onBack = closeTop,
-                                            onAlbum = { id -> runtime.openAlbum(id); openDetail("album", id) },
+                                            onAlbum = runtime::openAlbum,
+                                            onEnqueue = runtime.controller::enqueueNeteaseSong,
                                             onPlay = onPlay, modifier = pageModifier)
                                         visibleRoute.detail == "settings" -> Md3eSettingsPage(runtime, modifier = pageModifier)
                                         visibleRoute.detail == "biliFolders" -> Md3eBiliFavFoldersPage(runtime,
@@ -228,7 +262,7 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                                             onOpenPlayer = openVideoPlayer)
                                         visibleRoute.tab == "home" -> Md3eHomePage(runtime, { neteaseLoginOpen = true }, onPlay,
                                             onOpenPlaylist = { id -> runtime.openPlaylist(id); openDetail("playlist", id) },
-                                            onOpenAlbum = { id -> runtime.openAlbum(id); openDetail("album", id) },
+                                            onOpenAlbum = runtime::openAlbum,
                                             onRefresh = runtime.controller::loadHome, modifier = pageModifier)
                                         visibleRoute.tab == "playlists" -> Md3ePlaylistsPage(runtime.playlists, { neteaseLoginOpen = true },
                                             onRefresh = runtime::loadMyPlaylists,
@@ -240,14 +274,15 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                                         else -> Md3eSearchPage(runtime.search,
                                             onSearch = runtime::search, onLoadMore = runtime::loadMoreSearch,
                                             onClearHistory = { runtime.controller.clearSearchHistory() },
-                                            onOpenAlbum = { id -> runtime.openAlbum(id); openDetail("album", id) },
-                                            onOpenArtist = { id -> runtime.openArtist(id); openDetail("artist", id) },
+                                            onOpenAlbum = runtime::openAlbum,
+                                            onOpenArtist = runtime::openArtist,
                                             onPlay = onPlay, modifier = pageModifier,
                                             onOpenPlayer = openVideoPlayer,
                                             onBiliLogin = { biliAccountOpen = true },
                                             onBiliFavorites = { openDetail("biliFolders", 0L) },
                                             biliLoggedIn = runtime.bili.loggedIn)
                                     }
+    }
                                 }
                             }
                         }
@@ -279,8 +314,8 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                 detail = {
                     Md3ePlayerScreen(runtime, onBack = closeTop, initialLyrics = playerOpenLyrics,
                         onQueue = { queueFromPlayer = true; overlay = "queue" },
-                        onOpenAlbum = { id -> runtime.openAlbum(id); overlay = ""; openDetail("album", id) },
-                        onOpenArtist = { id -> runtime.openArtist(id); overlay = ""; openDetail("artist", id) })
+                        onOpenAlbum = runtime::openAlbum,
+                        onOpenArtist = runtime::openArtist)
                 },
             )
             AnimatedContent(
@@ -378,7 +413,7 @@ private fun HomeContent(
         if (state.loading) item {
             Row(Modifier.fillMaxWidth().padding(20.dp), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                LoadingIndicator(Modifier.size(36.dp))
+                Md3eLoadingIndicator(Modifier.size(36.dp))
                 Text("正在寻找好音乐…", style = MaterialTheme.typography.bodyMedium)
             }
         }

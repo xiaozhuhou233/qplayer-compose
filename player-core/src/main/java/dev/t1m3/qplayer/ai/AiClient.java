@@ -68,12 +68,22 @@ public final class AiClient {
         return chatOnce(system, user, false, 0.2d);
     }
 
+    /** A small plain-text answer, without paying the playlist's full output budget. */
+    public String chatPlain(String system, String user, int maxTokens) throws IOException {
+        return chatOnce(system, user, false, 0.7d, Math.max(32, Math.min(8192, maxTokens)));
+    }
+
     private String chatOnce(String system, String user, boolean requestJson) throws IOException {
         return chatOnce(system, user, requestJson, 0.2d);
     }
 
     private String chatOnce(String system, String user, boolean requestJson, double temperature)
             throws IOException {
+        return chatOnce(system, user, requestJson, temperature, 8192);
+    }
+
+    private String chatOnce(String system, String user, boolean requestJson, double temperature,
+                            int maxTokens) throws IOException {
         JsonObject root = new JsonObject();
         root.addProperty("model", model);
         root.addProperty("temperature", Math.max(0d, Math.min(2d, temperature)));
@@ -82,7 +92,7 @@ public final class AiClient {
         // hidden-style explanations from compatible gateways.
         // One compact item is roughly 25-35 tokens.  A fixed 1400-token cap
         // truncates larger requests and leaves an invalid JSON document.
-        root.addProperty("max_tokens", 8192);
+        root.addProperty("max_tokens", maxTokens);
         // Ask OpenAI-compatible providers to enforce a JSON object response.
         // Providers that do not support this field are handled by the caller's
         // Markdown fallback parser.

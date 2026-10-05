@@ -4,6 +4,9 @@ import android.os.Build
 import android.graphics.Color as AndroidColor
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.EnterExitState
+import androidx.compose.animation.core.animateDp
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.ExperimentalSharedTransitionApi
@@ -35,6 +38,16 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -57,7 +70,9 @@ private val emphasize = PathEasing(Path().apply {
 @OptIn(ExperimentalSharedTransitionApi::class)
 private val LocalPageSharedScope = staticCompositionLocalOf<SharedTransitionScope?> { null }
 private val LocalPageAnimatedScope = staticCompositionLocalOf<AnimatedVisibilityScope?> { null }
-private val LocalActiveCoverKey = staticCompositionLocalOf<String?> { null }
+// The clicked key changes on navigation. Track readers rather than invalidating
+// the entire outgoing home/list subtree with a static CompositionLocal.
+private val LocalActiveCoverKey = compositionLocalOf<String?> { null }
 private val LocalLowSpecMode = staticCompositionLocalOf { false }
 
 @OptIn(ExperimentalSharedTransitionApi::class)
@@ -69,16 +84,112 @@ internal val Md3eLowSpecMode get() = LocalLowSpecMode
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 internal fun Modifier.md3eSharedCover(key: String): Modifier {
-    if (LocalLowSpecMode.current || LocalActiveCoverKey.current != key) return this
+    if (LocalLowSpecMode.current) return this
     val shared = LocalPageSharedScope.current ?: return this
     val animated = LocalPageAnimatedScope.current ?: return this
     return with(shared) {
+        val state = rememberSharedContentState(key)
+        // Freeze endpoint layout and scale its recorded layer. Remeasuring the
+        // Surface/Image at every intermediate bound also rebuilt its round clip.
         sharedBounds(
-            sharedContentState = rememberSharedContentState(key),
+            sharedContentState = state,
+            enter = EnterTransition.None,
+            exit = ExitTransition.None,
+            resizeMode = SharedTransitionScope.ResizeMode.ScaleToBounds(
+                androidx.compose.ui.layout.ContentScale.Crop),
             animatedVisibilityScope = animated,
-            enter = fadeIn(tween(160)),
-            exit = fadeOut(tween(90)),
-        )
+            boundsTransform = { _, _ -> tween(400, easing = emphasizedDecelerate) },
+            zIndexInOverlay = 1f,
+        ).graphicsLayer {
+            // Only the incoming endpoint paints the matched image. Both endpoint
+            // layouts stay registered for cold taps and rapid reversal.
+            alpha = if (state.isMatchFound && animated.transition.targetState != EnterExitState.Visible) 0f else 1f
+        }
+    }
+}
+
+// Register both endpoints before navigation, so a cold first tap has source bounds.
+// Only the empty background layer morphs; the LazyColumn is never scaled or clipped.
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+internal fun Md3eCollectionContainer(
+    key: String?,
+    modifier: Modifier = Modifier,
+    corner: Dp = 0.dp,
+    detail: Boolean = false,
+    content: @Composable () -> Unit,
+) {
+    val shared = LocalPageSharedScope.current
+    val animated = LocalPageAnimatedScope.current
+    if (key == null || LocalLowSpecMode.current || shared == null || animated == null) {
+        Box(modifier) { content() }
+        return
+    }
+    val color = MaterialTheme.colorScheme.background
+    // Keep source bounds registered, but only animate the selected card and detail.
+    val participant = detail || LocalActiveCoverKey.current == key
+    val radius = if (participant) animated.transition.animateDp(
+        transitionSpec = { tween(400, easing = emphasizedDecelerate) },
+        label = "collection_corner",
+    ) {
+        if (detail) { if (it == EnterExitState.Visible) 0.dp else 16.dp }
+        else { if (it == EnterExitState.Visible) corner else 0.dp }
+    } else null
+    val contentAlpha = if (participant) animated.transition.animateFloat(
+        transitionSpec = {
+            if (targetState == EnterExitState.Visible)
+                tween(400, easing = emphasizedDecelerate)
+            else tween(120)
+        },
+        label = "collection_content",
+    ) { if (it == EnterExitState.Visible) 1f else 0f } else null
+    val collectionState = with(shared) { rememberSharedContentState("collection:$key") }
+    // Reuse one path in draw phase; the content reveal uses the actual shared bounds,
+    // rather than a separate clock or a full-page scaling/re-measuring animation.
+    val clipPath = remember { Path() }
+    val overlayClip = remember(radius, corner) {
+        object : SharedTransitionScope.OverlayClip {
+            override fun getClipPath(
+                sharedContentState: SharedTransitionScope.SharedContentState,
+                bounds: androidx.compose.ui.geometry.Rect,
+                layoutDirection: androidx.compose.ui.unit.LayoutDirection,
+                density: androidx.compose.ui.unit.Density,
+            ): Path {
+                val r = with(density) { (radius?.value ?: corner).toPx() }
+                clipPath.reset()
+                clipPath.addRoundRect(androidx.compose.ui.geometry.RoundRect(bounds, CornerRadius(r, r)))
+                return clipPath
+            }
+        }
+    }
+    Box(modifier) {
+        Box(with(shared) {
+            Modifier.matchParentSize().sharedElement(
+                sharedContentState = collectionState,
+                animatedVisibilityScope = animated,
+                boundsTransform = { _, _ -> tween(400, easing = emphasizedDecelerate) },
+                zIndexInOverlay = 0f,
+                clipInOverlayDuringTransition = overlayClip,
+            )
+        }.drawBehind {
+            val r = (radius?.value ?: corner).toPx()
+            drawRoundRect(color, cornerRadius = CornerRadius(r, r))
+        })
+        // On return, the incoming card's labels must also render above the shrinking
+        // background. Otherwise they stay occluded until the cover lands at 400 ms.
+        val reveal = if (participant) with(shared) {
+            Modifier.renderInSharedTransitionScopeOverlay(
+                renderInOverlay = { isTransitionActive && collectionState.isMatchFound },
+                zIndexInOverlay = .5f,
+                clipInOverlayDuringTransition = { _, _ -> collectionState.clipPathInOverlay },
+            )
+        } else Modifier
+        val opacity = if (contentAlpha == null) Modifier else Modifier.graphicsLayer {
+            // Avoid allocating an offscreen full-screen buffer on the first faded frame.
+            compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.ModulateAlpha
+            alpha = contentAlpha.value
+        }
+        Box(reveal.then(opacity)) { content() }
     }
 }
 
@@ -128,6 +239,10 @@ internal object Md3eMotion {
                 (outgoing + scaleOut(tween(350, easing = emphasizedAccelerate), targetScale = 0.9f))
         else incoming togetherWith outgoing
     }
+
+    // Container bounds carry the motion; pages must not slide or scale underneath.
+    fun collectionPage(): ContentTransform =
+        EnterTransition.None togetherWith ExitTransition.None
 
     fun sharedPage(forward: Boolean): ContentTransform {
         val duration = axisDuration + 80

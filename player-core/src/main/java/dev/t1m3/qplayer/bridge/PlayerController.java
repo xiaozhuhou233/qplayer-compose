@@ -66,6 +66,7 @@ import com.google.gson.JsonParser;
 import io.github.timer_err.qml4j.engine.binding.Property;
 import io.github.timer_err.qml4j.runtime.color.StyleManager;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -5738,14 +5739,13 @@ public final class PlayerController {
 
     /** Drain queued UI mutations, refresh the play head + log. Call once per frame. */
     public void pump() {
-        Runnable r;
-        while ((r = uiQueue.poll()) != null) {
-            try {
-                r.run();
-            } catch (Throwable e) {
-                Logger.exception(e);
-            }
-        }
+        pump(Long.MAX_VALUE, Integer.MAX_VALUE);
+    }
+
+    /** Drain a bounded FIFO batch, then update playback. The host schedules the
+     *  next batch when true is returned. An individual callback cannot be preempted. */
+    public boolean pump(long budgetNanos, int maxTasks) {
+        BudgetedTaskDrain.drain(uiQueue, budgetNanos, maxTasks, System::nanoTime, Logger::exception);
         long now = System.currentTimeMillis();
         tickFade();
         if (now - lastPositionPush >= 200L) {
@@ -5773,6 +5773,7 @@ public final class PlayerController {
                 logText.set(sb.toString());
             }
         }
+        return !uiQueue.isEmpty();
     }
 
     /** The debug log overlay's visibility; gates the per-frame logText rebuild. */
@@ -12910,23 +12911,71 @@ public final class PlayerController {
     }
 
     public void refreshBiliCachedSongs() {
-        File dir = new File(diskCache.baseDir(), "bili");
-        File[] files = dir.listFiles((d, n) -> n.endsWith(".properties"));
         List<Track> out = new ArrayList<>();
-        if (files != null) for (File meta : files) {
+        // QPlayer's own cache plus the official Bilibili Android download root.
+        scanQplayerBiliCache(new File(diskCache.baseDir(), "bili"), out);
+        scanOfficialBiliCache(new File("/storage/emulated/0/Android/data/tv.danmaku.bili/download/"), out);
+        biliCachedSongs.set(out);
+    }
+
+    private void scanQplayerBiliCache(File dir, List<Track> out) {
+        File[] files = dir.listFiles((d, n) -> n.endsWith(".properties"));
+        if (files == null) return;
+        for (File meta : files) {
             try (java.io.FileInputStream in = new java.io.FileInputStream(meta)) {
                 java.util.Properties p = new java.util.Properties(); p.load(in);
                 String base = meta.getName().substring(0, meta.getName().length() - 11);
                 File media = new File(dir, base + ".mp4"); if (!media.isFile()) continue;
                 Track t = new Track(); t.source = Track.Source.BILI; t.filePath = media.getAbsolutePath();
-                t.biliBvid = p.getProperty("bvid", ""); t.biliCid = Long.parseLong(p.getProperty("cid", "0"));
+                t.biliBvid = p.getProperty("bvid", ""); t.biliCid = parseLong(p.getProperty("cid", "0"));
                 t.title = p.getProperty("title", ""); t.artist = p.getProperty("artist", "");
-                t.album = "哔哩哔哩"; t.durationMs = Long.parseLong(p.getProperty("duration", "0"));
+                t.album = "哔哩哔哩"; t.durationMs = parseLong(p.getProperty("duration", "0"));
                 t.coverUrl = p.getProperty("cover", ""); out.add(t);
             } catch (Throwable ignored) { }
         }
-        biliCachedSongs.set(out);
     }
+
+    /** Reads official Bilibili Android downloads (entry.json + video.m4s/video.mp4). */
+    private void scanOfficialBiliCache(File root, List<Track> out) {
+        if (!root.isDirectory()) return;
+        ArrayDeque<File> dirs = new ArrayDeque<>(); dirs.add(root);
+        int visited = 0;
+        while (!dirs.isEmpty() && visited++ < 2000) {
+            File dir = dirs.removeFirst(); File[] children = dir.listFiles();
+            if (children == null) continue;
+            File entry = null, media = null;
+            for (File child : children) {
+                if (child.isDirectory()) { dirs.addLast(child); continue; }
+                String n = child.getName().toLowerCase(java.util.Locale.ROOT);
+                if (n.equals("entry.json")) entry = child;
+                else if (n.equals("video.mp4") || n.endsWith(".mp4")) media = child;
+            }
+            if (entry == null || media == null || !media.isFile() || media.length() < 4096) continue;
+            String json = readSmallText(entry); if (json == null) json = "";
+            Track t = new Track(); t.source = Track.Source.BILI; t.filePath = media.getAbsolutePath();
+            t.title = jsonField(json, "title", dir.getName());
+            t.artist = jsonField(json, "page_data", "哔哩哔哩");
+            t.biliBvid = jsonField(json, "bvid", "");
+            t.biliCid = parseLong(jsonField(json, "cid", "0"));
+            t.album = "哔哩哔哩"; t.coverUrl = jsonField(json, "cover", "");
+            t.durationMs = parseLong(jsonField(json, "duration", "0")); if (t.durationMs < 10000) t.durationMs *= 1000L;
+            out.add(t);
+        }
+    }
+
+    private static String readSmallText(File file) {
+        try { if (file.length() > 1024 * 1024) return null;
+            return new String(java.nio.file.Files.readAllBytes(file.toPath()), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Throwable ignored) { return null; }
+    }
+
+    private static String jsonField(String json, String key, String fallback) {
+        if (json == null) return fallback;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\\"" + key + "\\\"\\s*:\\s*\\\"([^\\\"]*)\\\"").matcher(json);
+        return m.find() ? m.group(1).replace("\\\\/", "/") : fallback;
+    }
+
+    private static long parseLong(String value) { try { return Long.parseLong(value); } catch (Throwable ignored) { return 0L; } }
 
     /** Play a downloaded B站 file without asking the network for a new URL. */
     public void playCachedBili(Track track) {

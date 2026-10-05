@@ -12,6 +12,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
@@ -68,6 +69,11 @@ internal class Md3ePlayerExpansionState(val miniLayer: GraphicsLayer) {
     var refreshSnapshot by mutableStateOf(false)
     var hasSnapshot by mutableStateOf(false)
     val active: Boolean by derivedStateOf { expanded || progress.value > 0f }
+
+    val moving: Boolean by derivedStateOf {
+        progress.isRunning || settle.isRunning ||
+            (expanded && progress.value < 1f) || (!expanded && progress.value > 0f)
+    }
 
     fun prepareOpen() {
         if (!active) flightBounds = miniBounds
@@ -153,6 +159,7 @@ internal fun Md3ePlayerExpansionHost(
     }
 
     val density = LocalDensity.current
+    val rendering = LocalMd3eRenderingActive.current
     LaunchedEffect(expanded, durationMillis) {
         state.settle.snapTo(0f)
         if (expanded) {
@@ -175,7 +182,10 @@ internal fun Md3ePlayerExpansionHost(
         .onGloballyPositioned { state.hostOrigin = it.positionInRoot() }) {
         Box(Modifier.fillMaxSize()
             .then(if (expanded || state.active) Modifier.clearAndSetSemantics {} else Modifier)) {
-            base()
+            val baseRendering by remember(state, rendering) {
+                derivedStateOf { rendering && (state.refreshSnapshot || !state.active) }
+            }
+            CompositionLocalProvider(LocalMd3eRenderingActive provides baseRendering) { base() }
         }
         if (expanded || state.active) {
             Box(Modifier.fillMaxSize()
@@ -205,7 +215,9 @@ internal fun Md3ePlayerExpansionHost(
                     scaleX = if (size.width > 0f) bounds.width / size.width else 1f
                     scaleY = if (size.height > 0f) bounds.height / size.height else 1f
                     alpha = ((state.progress.value - .06f) / .48f).coerceIn(0f, 1f)
-                }) { detail() }
+                }) {
+                    CompositionLocalProvider(LocalMd3eRenderingActive provides (rendering && !state.moving)) { detail() }
+                }
                 val sourceWidth = state.flightBounds.width
                 val sourceHeight = state.flightBounds.height
                 if (state.hasSnapshot && sourceWidth > 0f && sourceHeight > 0f) {

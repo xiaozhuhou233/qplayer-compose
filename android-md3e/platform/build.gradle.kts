@@ -16,6 +16,7 @@ val stagePlatform by tasks.registering(Sync::class) {
         include("dev/t1m3/qplayer/android/graphics/AndroidColorExtractor.java")
         include("dev/t1m3/qplayer/android/playback/AndroidAudioBackend.java")
         include("dev/t1m3/qplayer/android/playback/PlaybackService.java")
+        include("dev/t1m3/qplayer/android/playback/PlaybackArtworkLoader.java")
     }
     into(layout.buildDirectory.dir("generated/platformJava"))
 }
@@ -37,6 +38,7 @@ dependencies {
     // Keep platform compile dependencies aligned with the Compose app's versions.
     implementation("androidx.collection:collection:1.5.0")
     implementation("androidx.annotation:annotation:1.9.1")
+    implementation("androidx.profileinstaller:profileinstaller:1.4.0")
     implementation("org.jetbrains.kotlin:kotlin-stdlib:2.0.21")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 }

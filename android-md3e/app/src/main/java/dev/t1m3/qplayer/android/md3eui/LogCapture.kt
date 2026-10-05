@@ -36,6 +36,7 @@ internal object LogCapture {
     private var logcatThread: Thread? = null
     private var written = 0L
     private var capped = false
+    private val ownLogTag = Regex("(?:[VDIWEAF]/(?:musicplayer|QPlayerGlass)\\s*\\(\\s*\\d+\\)\\s*:|\\s(?:musicplayer|QPlayerGlass)\\s*:)")
 
     val active: Boolean get() = writer != null
 
@@ -99,7 +100,7 @@ internal object LogCapture {
                     process.inputStream.bufferedReader().useLines { lines ->
                         lines.forEach { raw ->
                             // Our own tag already arrives through the tee, richer.
-                            if (raw.contains(" musicplayer:") || raw.contains(" QPlayerGlass:")) return@forEach
+                            if (ownLogTag.containsMatchIn(raw)) return@forEach
                             line(raw)
                         }
                     }
@@ -219,16 +220,16 @@ internal object LogCapture {
     /** Forwards to the backend installed before the capture and appends the same
      *  line to the session file. */
     private class TeeSink(private val prior: Logger.Sink) : Logger.Sink {
-        private val stamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+        private val stamp = ThreadLocal.withInitial { SimpleDateFormat("HH:mm:ss.SSS", Locale.US) }
 
         override fun log(level: String, message: String) {
             prior.log(level, message)
-            line("${stamp.format(Date())} $level $message")
+            line("${stamp.get().format(Date())} $level $message")
         }
 
         override fun exception(message: String, t: Throwable) {
             prior.exception(message, t)
-            line("${stamp.format(Date())} E $message")
+            line("${stamp.get().format(Date())} E $message")
             line(t.stackTraceToString())
         }
     }

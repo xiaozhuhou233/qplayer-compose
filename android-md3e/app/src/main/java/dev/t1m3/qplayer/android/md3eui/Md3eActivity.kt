@@ -12,6 +12,7 @@ import androidx.core.view.WindowCompat
 
 class Md3eActivity : ComponentActivity() {
     private lateinit var runtime: Md3eRuntime
+    private lateinit var frameMonitor: Md3eFrameMonitor
     private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
     private val audioPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         runtime.setLocalPermission(granted)
@@ -21,6 +22,7 @@ class Md3eActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         runtime = Md3eRuntime.get(applicationContext)
+        frameMonitor = Md3eFrameMonitor(this, runtime)
         runtime.setLocalPermission(checkSelfPermission(audioPermissionName()) == PackageManager.PERMISSION_GRANTED)
         setContent {
             Md3eApp(runtime, onDarkAppearance = { dark ->
@@ -49,9 +51,11 @@ class Md3eActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         runtime.onVisible()
+        frameMonitor.start()
     }
 
     override fun onStop() {
+        frameMonitor.stop()
         runtime.onHidden()
         super.onStop()
     }

@@ -54,19 +54,20 @@ internal fun ClaudeBadge(text: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-internal fun ClaudeGreeting(name: String) {
+internal fun ClaudeGreeting(name: String, dailyPhrase: String) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("YOUR DAILY SOUNDTRACK", style = MaterialTheme.typography.labelSmall,
             letterSpacing = 1.5.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(if (name.isBlank()) "你好，今天想听什么？" else "你好，$name", style = MaterialTheme.typography.headlineMedium)
-        Text("留一点时间，给喜欢的声音。", fontFamily = ClaudeSerif, fontStyle = FontStyle.Italic,
+        Text(dailyPhrase, fontFamily = ClaudeSerif, fontStyle = FontStyle.Italic,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
 @Composable
 internal fun ClaudePlaylistCard(playlist: NeteasePlaylist, onClick: () -> Unit) {
-    Surface(Modifier.width(166.dp).clickable(onClick = onClick), shape = RoundedCornerShape(12.dp),
+    Md3eCollectionContainer("cover:playlist:${playlist.id}", corner = 12.dp) {
+Surface(Modifier.width(166.dp).clickable(onClick = onClick), shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         border = BorderStroke(.8.dp, MaterialTheme.colorScheme.outlineVariant)) {
         Column(Modifier.padding(9.dp)) {
@@ -85,6 +86,7 @@ internal fun ClaudePlaylistCard(playlist: NeteasePlaylist, onClick: () -> Unit) 
             Text("${playlist.trackCount} 首歌曲", Modifier.padding(top = 5.dp, bottom = 3.dp),
                 fontFamily = ClaudeMono, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+    }
     }
 }
 

@@ -3,6 +3,7 @@
 package dev.t1m3.qplayer.android.md3eui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -150,9 +151,11 @@ private fun ClaudePlaylistsPage(state: PlaylistState, onLogin: () -> Unit, onRef
 
 @Composable
 private fun ClaudePlaylistRow(playlist: NeteasePlaylist, onOpen: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(vertical = 9.dp),
+    Md3eCollectionContainer("cover:playlist:${playlist.id}", Modifier.fillMaxWidth(), corner = 8.dp) {
+Row(Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-        Artwork(playlist.coverThumbPath ?: playlist.coverUrl.orEmpty(), Modifier.size(62.dp), corner = 8.dp)
+        Artwork(playlist.coverThumbPath ?: playlist.coverUrl.orEmpty(),
+            Modifier.size(62.dp).md3eSharedCover("cover:playlist:${playlist.id}"), corner = 8.dp)
         Column(Modifier.weight(1f)) {
             Text(playlist.name.orEmpty(), fontFamily = ClaudeSerif, fontSize = 16.sp,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -161,12 +164,14 @@ private fun ClaudePlaylistRow(playlist: NeteasePlaylist, onOpen: () -> Unit) {
         }
         Icon(Md3eIcons.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
+    }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .7f))
 }
 
 @Composable
 private fun PlaylistRow(playlist: NeteasePlaylist, onOpen: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable(onClick = onOpen).heightIn(min = 76.dp)
+    Md3eCollectionContainer("cover:playlist:${playlist.id}", Modifier.fillMaxWidth(), corner = 16.dp) {
+Row(Modifier.fillMaxWidth().clickable(onClick = onOpen).heightIn(min = 76.dp)
         .padding(horizontal = 20.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp)) {
         Artwork(playlist.coverThumbPath ?: playlist.coverUrl.orEmpty(),
@@ -179,6 +184,7 @@ private fun PlaylistRow(playlist: NeteasePlaylist, onOpen: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Icon(Md3eIcons.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
     }
     HorizontalDivider(Modifier.padding(start = 94.dp, end = 20.dp), color = MaterialTheme.colorScheme.outlineVariant)
 }
@@ -422,7 +428,23 @@ private fun SearchSuggestions(title: String, terms: List<String>, onClear: (() -
 
 @Composable
 internal fun Md3eArtistDetail(state: ArtistDetailState, onBack: () -> Unit, onAlbum: (Long) -> Unit,
-    onPlay: PlayAction, modifier: Modifier = Modifier) {
+    onPlay: PlayAction, onEnqueue: (NeteaseSong) -> Unit, modifier: Modifier = Modifier) {
+    var menuSong by remember(state.id) { mutableStateOf<NeteaseSong?>(null) }
+    menuSong?.let { song ->
+        ModalBottomSheet(onDismissRequest = { menuSong = null }) {
+            Text(song.name.orEmpty(), Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
+                style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            ListItem(
+                headlineContent = { Text("添加到播放列表") },
+                leadingContent = { Icon(Md3eIcons.Playlist, null) },
+                modifier = Modifier.fillMaxWidth().clickable {
+                    menuSong = null
+                    onEnqueue(song)
+                },
+            )
+            Spacer(Modifier.height(20.dp))
+        }
+    }
     LazyColumn(modifier, contentPadding = PaddingValues(bottom = 24.dp + LocalMd3eDockInset.current)) {
         item {
             Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically,
@@ -440,7 +462,7 @@ internal fun Md3eArtistDetail(state: ArtistDetailState, onBack: () -> Unit, onAl
         if (state.loading) item { CenterLoading("正在加载歌手") }
         if (state.songs.isNotEmpty()) item { ListHeading("热门歌曲", state.songs.size) }
         itemsIndexed(state.songs, key = { index, song -> "$index-${song.id}" }) { index, song ->
-            NeteaseSongRow(song, index + 1) { onPlay { playArtistSong(index) } }
+            NeteaseSongRow(song, index + 1, onLongClick = { menuSong = song }) { onPlay { playArtistSong(index) } }
         }
         if (state.albums.isNotEmpty()) item { ListHeading("专辑", state.albums.size) }
         items(state.albums, key = { it.id }) { album -> AlbumRow(album) { onAlbum(album.id) } }
@@ -562,8 +584,8 @@ private fun ListHeading(title: String, count: Int) {
 }
 
 @Composable
-private fun NeteaseSongRow(song: NeteaseSong, number: Int?, onPlay: () -> Unit) {
-    SongResultRow(song.coverThumbPath ?: song.coverUrl.orEmpty(), song.name.orEmpty(), song.artist.orEmpty(), number, onPlay)
+private fun NeteaseSongRow(song: NeteaseSong, number: Int?, onLongClick: (() -> Unit)? = null, onPlay: () -> Unit) {
+    SongResultRow(song.coverThumbPath ?: song.coverUrl.orEmpty(), song.name.orEmpty(), song.artist.orEmpty(), number, onPlay, onLongClick)
 }
 
 @Composable
@@ -572,8 +594,11 @@ private fun LocalSongRow(track: Track, number: Int?, onPlay: () -> Unit) {
 }
 
 @Composable
-private fun SongResultRow(cover: String, title: String, artist: String, number: Int?, onPlay: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable(onClick = onPlay).heightIn(min = 64.dp)
+private fun SongResultRow(cover: String, title: String, artist: String, number: Int?, onPlay: () -> Unit,
+    onLongClick: (() -> Unit)? = null) {
+    val interaction = if (onLongClick == null) Modifier.clickable(onClick = onPlay)
+        else Modifier.combinedClickable(onClick = onPlay, onLongClick = onLongClick, onLongClickLabel = "歌曲选项")
+    Row(Modifier.fillMaxWidth().then(interaction).heightIn(min = 64.dp)
         .padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         if (number != null) Text(number.toString(), Modifier.width(24.dp), style = MaterialTheme.typography.labelMedium,
@@ -590,7 +615,8 @@ private fun SongResultRow(cover: String, title: String, artist: String, number: 
 
 @Composable
 private fun AlbumRow(album: NeteaseAlbum, onOpen: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(horizontal = 20.dp, vertical = 8.dp),
+    Md3eCollectionContainer("cover:album:${album.id}", Modifier.fillMaxWidth(), corner = 16.dp) {
+Row(Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(horizontal = 20.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
         Artwork(album.coverThumbPath ?: album.coverUrl.orEmpty(),
             Modifier.size(60.dp).md3eSharedCover("cover:album:${album.id}"))
@@ -600,6 +626,7 @@ private fun AlbumRow(album: NeteaseAlbum, onOpen: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Icon(Md3eIcons.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
     }
 }
 

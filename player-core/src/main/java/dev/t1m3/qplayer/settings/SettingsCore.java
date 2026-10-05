@@ -71,8 +71,15 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
     private volatile boolean resolvedDarkSnapshot;
     private boolean systemDark;
     private boolean loaded;
+    private boolean nativeFontRendererEnabled = true;
 
     // ---- host setup ---------------------------------------------------------
+
+    /** Compose hosts render fonts themselves and must never initialize Skija. */
+    public void setNativeFontRendererEnabled(boolean enabled) {
+        if (loaded) throw new IllegalStateException("Configure font renderer before load");
+        nativeFontRendererEnabled = enabled;
+    }
 
     /** Override a default that only the host knows (a home-relative music folder,
      *  the platform cache directory). Call before {@link #load}. */
@@ -136,7 +143,7 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         // The Compose Android shell does not ship the legacy Skija renderer.
         // Font selection is optional there, so a missing native FontMgr must not
         // prevent the rest of the settings and the application from starting.
-        availableFontFamilies.set(sortedFontFamilies());
+        availableFontFamilies.set(nativeFontRendererEnabled ? sortedFontFamilies() : Collections.emptyList());
         registerFontProviders();
         loaded = true;
         applyAll();
@@ -704,7 +711,8 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         }
     }
 
-    private static void applyFontSelection(String selection) {
+    private void applyFontSelection(String selection) {
+        if (!nativeFontRendererEnabled) return;
         try {
             Fonts.setSelection(selection);
         } catch (LinkageError unavailable) {

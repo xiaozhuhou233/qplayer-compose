@@ -7,6 +7,11 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
@@ -16,44 +21,88 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URI
 
 private val artworkCache = object : LruCache<String, Bitmap>(8 * 1024 * 1024) {
     override fun sizeOf(key: String, value: Bitmap) = value.byteCount
 }
 private val artworkRequests = Semaphore(3)
+private val artworkScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+private val artworkInFlight = mutableMapOf<String, Deferred<Bitmap?>>()
 
 @Composable
 internal fun Artwork(url: String, modifier: Modifier = Modifier, corner: androidx.compose.ui.unit.Dp = 24.dp) {
-    val bitmap by produceState<Bitmap?>(null, url) {
-        value = null
-        if (url.isNotBlank()) value = withContext(Dispatchers.IO) {
-            artworkCache.get(url) ?: artworkRequests.withPermit {
-                loadArtwork(url)?.also { artworkCache.put(url, it) }
-            }
-        }
+    val source = remember(url) { artworkRequestSource(url) }
+    // Read memory before the first draw. A new destination composition must display
+    // the same cached cover immediately, without a placeholder frame or another fade.
+    var bitmap by remember(source) { mutableStateOf(artworkCache.get(source)) }
+    LaunchedEffect(source) {
+        if (source.isNotBlank() && bitmap == null) bitmap = awaitArtwork(source)
     }
     // Seal AsyncImageImpl crossfade(true): reveal an arriving image over its placeholder.
-    val imageAlpha by animateFloatAsState(if (bitmap != null) 1f else 0f,
-        animationSpec = tween(100), label = "seal_artwork_crossfade")
+    val imageAlpha = animateFloatAsState(if (bitmap != null) 1f else 0f,
+        animationSpec = tween(if (Md3eLowSpecMode.current || !LocalMd3eRenderingActive.current ||
+            LocalMd3eMotionActive.current) 0 else 100), label = "seal_artwork_crossfade")
     Surface(modifier, shape = RoundedCornerShape(corner), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
         val image = bitmap
         Box(contentAlignment = Alignment.Center) {
-            if (imageAlpha < 1f) Icon(Md3eIcons.MusicNote, null, Modifier.size(28.dp),
-                tint = MaterialTheme.colorScheme.primary.copy(alpha = 1f - imageAlpha))
-            if (image != null) Image(image.asImageBitmap(), null, Modifier.matchParentSize(),
-                contentScale = ContentScale.Crop, alpha = imageAlpha)
+            if (bitmap == null) Icon(Md3eIcons.MusicNote, null, Modifier.size(28.dp),
+                tint = MaterialTheme.colorScheme.primary)
+            if (image != null) {
+                val imageBitmap = remember(image) { image.asImageBitmap() }
+                Image(imageBitmap, null, Modifier.matchParentSize().graphicsLayer {
+                    compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.ModulateAlpha
+                    alpha = imageAlpha.value
+                }, contentScale = ContentScale.Crop)
+            }
         }
     }
 }
+
+/** A list thumbnail and its detail cover share one download and decoded bitmap. */
+internal fun artworkRequestSource(source: String): String {
+    if (!source.startsWith("https://") && !source.startsWith("http://")) return source.removePrefix("file://")
+    val uri = runCatching { URI(source) }.getOrNull() ?: return source
+    val host = uri.host.orEmpty().lowercase()
+    if (host != "music.126.net" && !host.endsWith(".music.126.net")) return source
+    val query = uri.rawQuery.orEmpty().split('&').filter { it.isNotEmpty() && it.substringBefore('=') != "param" }
+    val suffix = (query + "param=256y256").joinToString("&")
+    return "https://${uri.rawAuthority}${uri.rawPath}?$suffix"
+}
+
+internal suspend fun awaitArtwork(source: String): Bitmap? {
+    artworkCache.get(source)?.let { return it }
+    val request = synchronized(artworkInFlight) {
+        artworkInFlight[source] ?: artworkScope.async(start = CoroutineStart.LAZY) {
+            artworkRequests.withPermit {
+                artworkCache.get(source) ?: loadArtwork(source)?.also { artworkCache.put(source, it) }
+            }
+        }.also { deferred ->
+            artworkInFlight[source] = deferred
+            deferred.invokeOnCompletion {
+                synchronized(artworkInFlight) {
+                    if (artworkInFlight[source] === deferred) artworkInFlight.remove(source)
+                }
+            }
+        }
+    }
+    return request.await()
+}
+
 private fun loadArtwork(source: String): Bitmap? {
     if (!source.startsWith("https://") && !source.startsWith("http://")) {
         val file = File(source.removePrefix("file://"))
@@ -69,9 +118,9 @@ private fun loadArtwork(source: String): Bitmap? {
             BitmapFactory.decodeFile(file.path, options)
         } catch (_: Exception) { null }
     }
-    // Always request a thumbnail, including the now-playing full-size cover URL.
-    val url = source.substringBefore('?').replace("http://", "https://") + "?param=256y256"
-    val connection = try { URL(url).openConnection() as HttpURLConnection } catch (_: Exception) { return null }
+    // Only NetEase URLs have been normalized above. Other providers' query strings
+    // may contain signatures and must survive unchanged.
+    val connection = try { URL(source).openConnection() as HttpURLConnection } catch (_: Exception) { return null }
     return try {
         connection.connectTimeout = 8000
         connection.readTimeout = 8000
@@ -100,3 +149,16 @@ private fun java.io.InputStream.readBytesBounded(limit: Int): ByteArray? {
     }
 }
 
+
+/** Blurred backgrounds need a soft texture, not a full-resolution offscreen buffer. */
+@Composable
+internal fun Md3eSoftArtworkBackdrop(cover: String, modifier: Modifier = Modifier,
+    radius: androidx.compose.ui.unit.Dp = 72.dp) {
+    BoxWithConstraints(modifier.clipToBounds()) {
+        Artwork(cover, Modifier.size(maxWidth / 4, maxHeight / 4).graphicsLayer {
+            transformOrigin = TransformOrigin(0f, 0f)
+            scaleX = 4f
+            scaleY = 4f
+        }.blur(radius / 4), corner = 0.dp)
+    }
+}

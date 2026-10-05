@@ -13,6 +13,8 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.Handler;
+import android.os.Looper;
 import android.support.v4.media.MediaMetadataCompat;
 import android.support.v4.media.session.MediaSessionCompat;
 import android.support.v4.media.session.PlaybackStateCompat;
@@ -24,6 +26,8 @@ import dev.t1m3.qplayer.bridge.PlayerController;
 import dev.t1m3.qplayer.model.Track;
 import dev.t1m3.qplayer.util.Logger;
 
+import java.util.Objects;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -60,11 +64,28 @@ public final class PlaybackService extends Service {
     private MediaSessionCompat session;
     private final PlayerController.PlaybackListener selfListener = this::onControllerChanged;
     private ScheduledExecutorService checkpointWorker;
+    private final Handler refreshHandler = new Handler(Looper.getMainLooper());
+    private final Runnable refreshTask = this::refreshSafely;
+    private boolean refreshPending;
+    private boolean stopping;
+    private ExecutorService artworkWorker;
+    private PlaybackArtworkLoader<Bitmap> artworkLoader;
+    private Track metadataTrack;
+    private String metadataTitle, metadataArtist, metadataAlbum;
+    private long metadataDuration = -1L;
+    private Bitmap metadataArt;
 
     @Override
     public void onCreate() {
         super.onCreate();
         instance = this;
+        artworkWorker = Executors.newSingleThreadExecutor(r -> {
+            Thread thread = new Thread(r, "notification-artwork");
+            thread.setDaemon(true);
+            return thread;
+        });
+        artworkLoader = new PlaybackArtworkLoader<>(artworkWorker,
+                command -> refreshHandler.post(command), PlaybackService::decode, this::onControllerChanged);
         createChannel();
         session = new MediaSessionCompat(this, "qplayer");
         session.setCallback(new MediaSessionCompat.Callback() {
@@ -115,6 +136,16 @@ public final class PlaybackService extends Service {
     }
 
     private void onControllerChanged() {
+        // Several cover/state callbacks can belong to one switch. One refresh
+        // after this display frame avoids repeating metadata/notification IPC.
+        if (stopping || refreshPending) return;
+        refreshPending = true;
+        refreshHandler.postDelayed(refreshTask, 16L);
+    }
+
+    private void refreshSafely() {
+        refreshPending = false;
+        if (stopping) return;
         try {
             refresh();
         } catch (Throwable e) {
@@ -128,11 +159,10 @@ public final class PlaybackService extends Service {
         MediaButtonReceiver.handleIntent(session, intent);
         PlayerController c = controller;
         if (c != null) c.setPlaybackListener(selfListener);
-        try {
-            refresh();
-        } catch (Throwable e) {
-            Logger.error("PlaybackService: refresh failed: {}", e.toString());
-        }
+        refreshHandler.removeCallbacks(refreshTask);
+        // The first foreground notification must be immediate; its artwork is
+        // filled in later and must never hold up startForeground().
+        refreshSafely();
         return START_NOT_STICKY;
     }
 
@@ -145,6 +175,7 @@ public final class PlaybackService extends Service {
     public void onDestroy() {
         // Stop playback and release audio backend — called when the task is
         // swiped away (stopWithTask="true") or explicitly stopped.
+        stopVisualRefreshes();
         if (instance == this) instance = null;
         if (checkpointWorker != null) {
             checkpointWorker.shutdownNow();
@@ -212,7 +243,18 @@ public final class PlaybackService extends Service {
         super.onTaskRemoved(rootIntent);
     }
 
+    private void stopVisualRefreshes() {
+        stopping = true;
+        refreshPending = false;
+        refreshHandler.removeCallbacks(refreshTask);
+        if (artworkLoader != null) artworkLoader.close();
+        if (artworkWorker != null) artworkWorker.shutdownNow();
+    }
+
     private void clearNotification() {
+        // A pending refresh or decode result must not resurrect a stopped
+        // notification (including the gap before onDestroy()).
+        stopVisualRefreshes();
         try {
             if (Build.VERSION.SDK_INT >= 24) {
                 stopForeground(Service.STOP_FOREGROUND_REMOVE);
@@ -251,25 +293,32 @@ public final class PlaybackService extends Service {
         long pos = c.mediaSessionPosition();
         long dur = playing ? c.duration() : (durProp != null && durProp > 0 ? durProp : 0L);
 
-        MediaMetadataCompat.Builder mb = new MediaMetadataCompat.Builder();
-        Bitmap art = null;
-        if (t != null) {
-            mb.putString(MediaMetadataCompat.METADATA_KEY_TITLE, nz(t.title));
-            mb.putString(MediaMetadataCompat.METADATA_KEY_ARTIST, nz(t.artist));
-            mb.putString(MediaMetadataCompat.METADATA_KEY_ALBUM, nz(t.album));
-            if (dur > 0) mb.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, dur);
-            // Read the cover from the current Track's plain bytes, set synchronously by
-            // the loader before it fires the refresh (netease downloads, local
-            // file-backed and embedded covers all populate t.coverBytes). The coverBytes
-            // Property is only committed on the render queue, which is paused while
-            // backgrounded — reading it primary left a background track-switch showing the
-            // previous song's art. It stays as a fallback for any path that only sets it.
-            byte[] coverData = t.coverBytes;
-            if (coverData == null) coverData = c.coverBytes.peek();
-            art = decode(coverData);
-            if (art != null) mb.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, art);
+        // Track bytes describe the current selection even before pump(). Never
+        // fall back to the outgoing cover Property while this cover is loading.
+        Bitmap art = artworkLoader.get(t != null ? t.coverBytes : null);
+        String title = t != null ? nz(t.title) : "";
+        String artist = t != null ? nz(t.artist) : "";
+        String album = t != null ? nz(t.album) : "";
+        if (metadataTrack != t || metadataDuration != dur || metadataArt != art
+                || !Objects.equals(metadataTitle, title)
+                || !Objects.equals(metadataArtist, artist)
+                || !Objects.equals(metadataAlbum, album)) {
+            MediaMetadataCompat.Builder mb = new MediaMetadataCompat.Builder();
+            if (t != null) {
+                mb.putString(MediaMetadataCompat.METADATA_KEY_TITLE, title);
+                mb.putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist);
+                mb.putString(MediaMetadataCompat.METADATA_KEY_ALBUM, album);
+                if (dur > 0) mb.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, dur);
+                if (art != null) mb.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, art);
+            }
+            session.setMetadata(mb.build());
+            metadataTrack = t;
+            metadataDuration = dur;
+            metadataArt = art;
+            metadataTitle = title;
+            metadataArtist = artist;
+            metadataAlbum = album;
         }
-        session.setMetadata(mb.build());
 
         session.setPlaybackState(new PlaybackStateCompat.Builder()
                 .setActions(PlaybackStateCompat.ACTION_PLAY
@@ -357,7 +406,18 @@ public final class PlaybackService extends Service {
     private static Bitmap decode(byte[] bytes) {
         if (bytes == null || bytes.length == 0) return null;
         try {
-            return BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+            // Decode at notification size on the artwork worker. Passing the full
+            // 1024px cover through MediaSession/Notification adds decode and IPC cost.
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null;
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inSampleSize = 1;
+            while (Math.max(bounds.outWidth, bounds.outHeight) / options.inSampleSize > 256) {
+                options.inSampleSize *= 2;
+            }
+            return BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
         } catch (Throwable e) {
             return null;
         }

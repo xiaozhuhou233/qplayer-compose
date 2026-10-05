@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.Trace
 import android.view.Choreographer
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -30,6 +31,8 @@ import dev.t1m3.qplayer.model.Track
 import dev.t1m3.qplayer.lyric.LyricLine
 import dev.t1m3.qplayer.settings.SettingsCatalog
 import dev.t1m3.qplayer.settings.SettingsCore
+import dev.t1m3.qplayer.util.Logger
+import io.github.timer_err.qml4j.engine.binding.Property
 import java.util.concurrent.Executors
 
 internal data class HomeState(
@@ -254,6 +257,7 @@ internal class Md3eRuntime private constructor(context: Context) {
             videoWidth = width
             videoHeight = height
         } }
+        settings.setNativeFontRendererEnabled(false)
         settings.attach(controller)
         settings.registerAction("clearCache", controller::clearDiskCache)
         settings.registerAction("checkUpdate", controller::checkForUpdateManual)
@@ -283,150 +287,215 @@ internal class Md3eRuntime private constructor(context: Context) {
 
     private val tick = object : Runnable {
         override fun run() {
-            controller.pump()
-            val loggedIn = controller.loggedIn.peek()
-            if (loggedIn && !lastLoggedIn) controller.loadMyPlaylists()
-            lastLoggedIn = loggedIn
-            val biliLoggedIn = controller.biliLoggedIn.peek()
-            if (biliLoggedIn != lastBiliLoggedIn) {
-                lastBiliLoggedIn = biliLoggedIn
-                val cookies = controller.biliClient().cookieHeader()
-                scanWorker.execute { runCatching { biliCookies.writeText(cookies) } }
-            }
-            // Keep pumping audio/service work in the background without allocating
-            // and publishing every page's visual snapshot.
-            if (visibleHosts > 0) {
-                transportState = TransportState(controller.isPlaying(), controller.currentTrack() != null,
-                    controller.privateFmActive.peek() == true)
-            }
-            // Freeze one coherent visual snapshot, including its clock, while
-            // transport RenderNodes animate. Audio/service callbacks still pump.
-            if (visibleHosts > 0 && !transportVisualGate.active) Snapshot.withMutableSnapshot {
-            home = HomeState(
-                loading = controller.homeLoading.peek(),
-                error = controller.homeFeedError.peek(),
-                daily = controller.recommendations.peek(),
-                sections = controller.homeSongSections.peek(),
-                playlists = controller.recommendPlaylists.peek(),
-                playlistSections = controller.homePlaylistSections.peek(),
-                albums = controller.homeAlbumRecommendations.peek(),
-                loggedIn = controller.loggedIn.peek(),
-                userName = controller.userName.peek(),
-                loginBusy = controller.webLoginBusy.peek(),
-                loginError = controller.webLoginError.peek(),
-            )
-            neteaseLogin = NeteaseLoginState(
-                qrImage = controller.qrImage.peek(),
-                qrStatus = controller.qrStatus.peek(),
-                busy = controller.webLoginBusy.peek(),
-                error = controller.qrLoginError.peek(),
-                successRevision = controller.webLoginSuccessRevision.peek(),
-            )
-            val currentTrack = controller.currentTrack()
-            publishedPlaybackTrack = currentTrack
-            val hasTrack = currentTrack != null
-            val songId = currentTrack?.neteaseId ?: 0L
-            playbackClock.publish(controller.mediaSessionPosition().coerceAtLeast(0),
-                System.nanoTime(), controller.isPlaying())
-            val nextPlayback = PlaybackState(
-                controller.title.peek().ifBlank { "还没有播放歌曲" },
-                controller.artist.peek().ifBlank { if (hasTrack) "未知歌手" else "从推荐中选一首，开始听歌" },
-                controller.coverPath.peek().ifBlank { controller.coverUrl.peek() },
-                controller.coverSeed.peek(),
-                controller.isPlaying(), controller.loading.peek(),
-                hasTrack, controller.queueTracks.peek().size,
-                controller.durationMs.peek().coerceAtLeast(0),
-                songId, controller.playingAlbumId.peek(), controller.playingArtistId.peek(),
-                controller.currentLiked.peek(), songId != 0L && loggedIn,
-                controller.playMode.peek(), controller.index.peek(),
-                controller.privateFmActive.peek() == true,
-                controller.playbackRevision(), controller.seekRevision(), playbackClock,
-                currentTrack?.album.orEmpty(), currentTrack?.artistIdsCsv.orEmpty(),
-                currentTrack?.artistNamesCsv.orEmpty(),
-            )
-            // The clock is observable on its own. Avoid invalidating every
-            // playback consumer at the sampling cadence when no metadata or
-            // control state changed; this keeps the 100 ms pump off the main
-            // composition path while lyric/progress draw code still sees time.
-            if (nextPlayback != playback) playback = nextPlayback
-            lyricState = LyricState(
-                lines = controller.lyrics.peek(),
-                revision = controller.lyricsRevision.peek(),
-                loading = controller.lyricsLoading.peek(),
-                coverOnly = controller.lyricsCoverOnly.peek(),
-                coverModeManual = controller.coverModeManual.peek(),
-                offsetMs = controller.lyricOffsetMs.peek(),
-                // Line selection belongs to the visible lyric consumer.
-            )
-            queue = controller.queueTracks.peek()
-            bili = BiliState(
-                loggedIn = controller.biliLoggedIn.peek(),
-                playing = controller.biliPlaying.peek(),
-                bvid = controller.currentTrack()?.biliBvid.orEmpty(),
-                qrUrl = controller.biliQrUrl.peek(), qrStatus = controller.biliQrStatus.peek(),
-                error = controller.biliError.peek(),
-                chapters = controller.biliChapterMarks.peek(),
-                folders = controller.biliFavFolders.peek(), foldersLoading = controller.biliFavLoading.peek(),
-                favError = controller.biliFavError.peek(), items = controller.biliFavItems.peek(),
-                itemsLoading = controller.biliFavItemsLoading.peek(), folderTitle = controller.biliFavItemsTitle.peek(),
-            )
-            if (!bili.playing) videoFullscreen = false
-            search = search.copy(
-                mode = search.mode, songs = controller.searchResults.peek(),
-                albums = controller.searchAlbumResults.peek(), artists = controller.searchArtistResults.peek(),
-                local = controller.localSearchResults.peek(), loading = controller.searchLoading.peek(),
-                hasMore = controller.searchHasMore.peek(), history = controller.searchHistory.peek(),
-                hot = controller.hotSearches.peek(), videos = controller.biliSearchResults.peek(),
-                videoError = controller.biliError.peek(),
-            )
-            if (search.mode == "bili") search = search.copy(loading = controller.biliSearchLoading.peek(), hasMore = false)
-            val playlistId = controller.openPlaylistId.peek()
-            if (playlists.id != playlistId) rememberDetail(playlistSnapshots, playlists.id, playlists)
-            val previousPlaylist = playlists.takeIf { it.id == playlistId }
-            playlists = PlaylistState(
-                controller.myPlaylists.peek(), controller.playlistTitle.peek().ifBlank { previousPlaylist?.title.orEmpty() },
-                controller.playlistCoverPath.peek().ifBlank { previousPlaylist?.cover.orEmpty() }, controller.playlistTracks.peek(),
-                controller.playlistLoading.peek(), controller.playlistSubscribed.peek(),
-                controller.playlistOwned.peek(), loggedIn, playlistId,
-            )
-            local = local.copy(tracks = controller.tracks.peek(), bili = controller.biliCachedSongs.peek())
-            val artistId = controller.openArtistId.peek()
-            if (artistDetail.id != artistId) rememberDetail(artistSnapshots, artistDetail.id, artistDetail)
-            val previousArtist = artistDetail.takeIf { it.id == artistId }
-            artistDetail = ArtistDetailState(
-                controller.artistName.peek().ifBlank { previousArtist?.name.orEmpty() },
-                controller.artistCoverPath.peek().ifBlank { previousArtist?.cover.orEmpty() },
-                controller.artistBriefDesc.peek(), controller.artistSongs.peek(),
-                controller.artistAlbums.peek(), controller.artistLoading.peek(), artistId,
-            )
-            val albumId = controller.openAlbumId.peek()
-            if (albumDetail.id != albumId) rememberDetail(albumSnapshots, albumDetail.id, albumDetail)
-            val previousAlbum = albumDetail.takeIf { it.id == albumId }
-            albumDetail = AlbumDetailState(
-                controller.albumName.peek().ifBlank { previousAlbum?.name.orEmpty() },
-                controller.albumCoverPath.peek().ifBlank { previousAlbum?.cover.orEmpty() },
-                controller.albumArtistName.peek().ifBlank { previousAlbum?.artistName.orEmpty() }, controller.albumTracks.peek(),
-                controller.albumLoading.peek(), albumId,
-            )
-            val navigationRevision = controller.pageNavigationRevision.peek()
-            if (navigationRevision != pageNavigation.revision) {
-                val target = controller.pageNavigationTarget.peek()
-                pageNavigation = Md3ePageNavigation(navigationRevision, target, when (target) {
-                    "album" -> controller.openAlbumId.peek()
-                    "artist" -> controller.openArtistId.peek()
-                    else -> 0L
-                })
-            }
-            controller.toast.peek().takeIf { it.isNotBlank() }?.let {
-                notice = it
-                controller.toast.set("")
-            }
-            }
+            drainCoreQueue()
+            publishState()
             // Drain core UI work in the background while the playback service owns the
             // session. No frame loop or Activity reference is needed for audio to advance.
             if (visibleHosts > 0 || PlaybackService.isRunning() || controller.isPlaying()) {
                 // Match the legacy lyric clock's 100 ms foreground samples.
                 handler.postDelayed(this, if (visibleHosts > 0 && controller.isPlaying()) 100 else 250)
+            }
+        }
+    }
+
+    private var coreDrainScheduled = false
+    private var lastSlowPumpLog = 0L
+    private var lastSlowSnapshotLog = 0L
+    private var lastSnapshotAt = 0L
+    private var lastSnapshotVersion = -1L
+    private var lastSnapshotPlaybackRevision = -1L
+    private var lastSnapshotSeekRevision = -1L
+    private var lastSnapshotTransport: TransportState? = null
+    private val coreDrainFrame = Choreographer.FrameCallback {
+        coreDrainScheduled = false
+        drainCoreQueue()
+    }
+    private val coreDrainWorker = Runnable {
+        coreDrainScheduled = false
+        drainCoreQueue()
+    }
+
+    private fun drainCoreQueue() {
+        val start = System.nanoTime()
+        Trace.beginSection("QPlayer.corePump")
+        val pending = try {
+            // At 120Hz this leaves most of the 8.33ms frame for composition/draw.
+            controller.pump(2_000_000L, 16)
+        } finally { Trace.endSection() }
+        val elapsed = System.nanoTime() - start
+        if (elapsed > 16_000_000L && start - lastSlowPumpLog > 5_000_000_000L) {
+            lastSlowPumpLog = start
+            Logger.warn("MD3E slow core pump: {} ms, pending={}", elapsed / 1_000_000L, pending)
+        }
+        if (pending && !coreDrainScheduled) {
+            coreDrainScheduled = true
+            if (visibleHosts > 0) Choreographer.getInstance().postFrameCallback(coreDrainFrame)
+            else handler.postDelayed(coreDrainWorker, 16L)
+        }
+    }
+
+    private fun publishState() {
+        val loggedIn = controller.loggedIn.peek()
+        if (loggedIn && !lastLoggedIn) controller.loadMyPlaylists()
+        lastLoggedIn = loggedIn
+        val biliLoggedIn = controller.biliLoggedIn.peek()
+        if (biliLoggedIn != lastBiliLoggedIn) {
+            lastBiliLoggedIn = biliLoggedIn
+            val cookies = controller.biliClient().cookieHeader()
+            scanWorker.execute { runCatching { biliCookies.writeText(cookies) } }
+        }
+        // Keep pumping audio/service work in the background without allocating
+        // and publishing every page's visual snapshot.
+        if (visibleHosts > 0) {
+            transportState = TransportState(controller.isPlaying(), controller.currentTrack() != null,
+                controller.privateFmActive.peek() == true)
+        }
+        // Freeze one coherent visual snapshot, including its clock, while
+        // transport RenderNodes animate. Audio/service callbacks still pump.
+        if (visibleHosts <= 0 || transportVisualGate.active) return
+        // The clock is independent of page metadata and continues smoothly.
+        playbackClock.publish(controller.mediaSessionPosition().coerceAtLeast(0),
+            System.nanoTime(), controller.isPlaying())
+        val snapshotStart = System.nanoTime()
+        val version = Property.changeVersion()
+        val playbackRevision = controller.playbackRevision()
+        val seekRevision = controller.seekRevision()
+        if (version == lastSnapshotVersion && playbackRevision == lastSnapshotPlaybackRevision &&
+            seekRevision == lastSnapshotSeekRevision && transportState == lastSnapshotTransport &&
+            controller.currentTrack() === publishedPlaybackTrack &&
+            snapshotStart - lastSnapshotAt < 1_000_000_000L) return
+        Trace.beginSection("QPlayer.uiSnapshot")
+        try {
+            Snapshot.withMutableSnapshot {
+                home = HomeState(
+                    loading = controller.homeLoading.peek(),
+                    error = controller.homeFeedError.peek(),
+                    daily = controller.recommendations.peek(),
+                    sections = controller.homeSongSections.peek(),
+                    playlists = controller.recommendPlaylists.peek(),
+                    playlistSections = controller.homePlaylistSections.peek(),
+                    albums = controller.homeAlbumRecommendations.peek(),
+                    loggedIn = controller.loggedIn.peek(),
+                    userName = controller.userName.peek(),
+                    loginBusy = controller.webLoginBusy.peek(),
+                    loginError = controller.webLoginError.peek(),
+                )
+                neteaseLogin = NeteaseLoginState(
+                    qrImage = controller.qrImage.peek(),
+                    qrStatus = controller.qrStatus.peek(),
+                    busy = controller.webLoginBusy.peek(),
+                    error = controller.qrLoginError.peek(),
+                    successRevision = controller.webLoginSuccessRevision.peek(),
+                )
+                val currentTrack = controller.currentTrack()
+                publishedPlaybackTrack = currentTrack
+                val hasTrack = currentTrack != null
+                val songId = currentTrack?.neteaseId ?: 0L
+                val nextPlayback = PlaybackState(
+                    controller.title.peek().ifBlank { "还没有播放歌曲" },
+                    controller.artist.peek().ifBlank { if (hasTrack) "未知歌手" else "从推荐中选一首，开始听歌" },
+                    controller.coverPath.peek().ifBlank { controller.coverUrl.peek() },
+                    controller.coverSeed.peek(),
+                    controller.isPlaying(), controller.loading.peek(),
+                    hasTrack, controller.queueTracks.peek().size,
+                    controller.durationMs.peek().coerceAtLeast(0),
+                    songId, controller.playingAlbumId.peek(), controller.playingArtistId.peek(),
+                    controller.currentLiked.peek(), songId != 0L && loggedIn,
+                    controller.playMode.peek(), controller.index.peek(),
+                    controller.privateFmActive.peek() == true,
+                    controller.playbackRevision(), controller.seekRevision(), playbackClock,
+                    currentTrack?.album.orEmpty(), currentTrack?.artistIdsCsv.orEmpty(),
+                    currentTrack?.artistNamesCsv.orEmpty(),
+                )
+                // The clock is observable on its own. Avoid invalidating every
+                // playback consumer at the sampling cadence when no metadata or
+                // control state changed; this keeps the 100 ms pump off the main
+                // composition path while lyric/progress draw code still sees time.
+                if (nextPlayback != playback) playback = nextPlayback
+                lyricState = LyricState(
+                    lines = controller.lyrics.peek(),
+                    revision = controller.lyricsRevision.peek(),
+                    loading = controller.lyricsLoading.peek(),
+                    coverOnly = controller.lyricsCoverOnly.peek(),
+                    coverModeManual = controller.coverModeManual.peek(),
+                    offsetMs = controller.lyricOffsetMs.peek(),
+                    // Line selection belongs to the visible lyric consumer.
+                )
+                queue = controller.queueTracks.peek()
+                bili = BiliState(
+                    loggedIn = controller.biliLoggedIn.peek(),
+                    playing = controller.biliPlaying.peek(),
+                    bvid = controller.currentTrack()?.biliBvid.orEmpty(),
+                    qrUrl = controller.biliQrUrl.peek(), qrStatus = controller.biliQrStatus.peek(),
+                    error = controller.biliError.peek(),
+                    chapters = controller.biliChapterMarks.peek(),
+                    folders = controller.biliFavFolders.peek(), foldersLoading = controller.biliFavLoading.peek(),
+                    favError = controller.biliFavError.peek(), items = controller.biliFavItems.peek(),
+                    itemsLoading = controller.biliFavItemsLoading.peek(), folderTitle = controller.biliFavItemsTitle.peek(),
+                )
+                if (!bili.playing) videoFullscreen = false
+                search = search.copy(
+                    mode = search.mode, songs = controller.searchResults.peek(),
+                    albums = controller.searchAlbumResults.peek(), artists = controller.searchArtistResults.peek(),
+                    local = controller.localSearchResults.peek(), loading = controller.searchLoading.peek(),
+                    hasMore = controller.searchHasMore.peek(), history = controller.searchHistory.peek(),
+                    hot = controller.hotSearches.peek(), videos = controller.biliSearchResults.peek(),
+                    videoError = controller.biliError.peek(),
+                )
+                if (search.mode == "bili") search = search.copy(loading = controller.biliSearchLoading.peek(), hasMore = false)
+                val playlistId = controller.openPlaylistId.peek()
+                if (playlists.id != playlistId) rememberDetail(playlistSnapshots, playlists.id, playlists)
+                val previousPlaylist = playlists.takeIf { it.id == playlistId }
+                playlists = PlaylistState(
+                    controller.myPlaylists.peek(), controller.playlistTitle.peek().ifBlank { previousPlaylist?.title.orEmpty() },
+                    controller.playlistCoverPath.peek().ifBlank { previousPlaylist?.cover.orEmpty() }, controller.playlistTracks.peek(),
+                    controller.playlistLoading.peek(), controller.playlistSubscribed.peek(),
+                    controller.playlistOwned.peek(), loggedIn, playlistId,
+                )
+                local = local.copy(tracks = controller.tracks.peek(), bili = controller.biliCachedSongs.peek())
+                val artistId = controller.openArtistId.peek()
+                if (artistDetail.id != artistId) rememberDetail(artistSnapshots, artistDetail.id, artistDetail)
+                val previousArtist = artistDetail.takeIf { it.id == artistId }
+                artistDetail = ArtistDetailState(
+                    controller.artistName.peek().ifBlank { previousArtist?.name.orEmpty() },
+                    controller.artistCoverPath.peek().ifBlank { previousArtist?.cover.orEmpty() },
+                    controller.artistBriefDesc.peek(), controller.artistSongs.peek(),
+                    controller.artistAlbums.peek(), controller.artistLoading.peek(), artistId,
+                )
+                val albumId = controller.openAlbumId.peek()
+                if (albumDetail.id != albumId) rememberDetail(albumSnapshots, albumDetail.id, albumDetail)
+                val previousAlbum = albumDetail.takeIf { it.id == albumId }
+                albumDetail = AlbumDetailState(
+                    controller.albumName.peek().ifBlank { previousAlbum?.name.orEmpty() },
+                    controller.albumCoverPath.peek().ifBlank { previousAlbum?.cover.orEmpty() },
+                    controller.albumArtistName.peek().ifBlank { previousAlbum?.artistName.orEmpty() }, controller.albumTracks.peek(),
+                    controller.albumLoading.peek(), albumId,
+                )
+                val navigationRevision = controller.pageNavigationRevision.peek()
+                if (navigationRevision != pageNavigation.revision) {
+                    val target = controller.pageNavigationTarget.peek()
+                    pageNavigation = Md3ePageNavigation(navigationRevision, target, when (target) {
+                        "album" -> controller.openAlbumId.peek()
+                        "artist" -> controller.openArtistId.peek()
+                        else -> 0L
+                    })
+                }
+                controller.toast.peek().takeIf { it.isNotBlank() }?.let {
+                    notice = it
+                    controller.toast.set("")
+                }
+            }
+            lastSnapshotAt = snapshotStart
+            lastSnapshotVersion = version
+            lastSnapshotPlaybackRevision = playbackRevision
+            lastSnapshotSeekRevision = seekRevision
+            lastSnapshotTransport = transportState
+        } finally {
+            Trace.endSection()
+            val elapsed = System.nanoTime() - snapshotStart
+            if (elapsed > 16_000_000L && snapshotStart - lastSlowSnapshotLog > 5_000_000_000L) {
+                lastSlowSnapshotLog = snapshotStart
+                Logger.warn("MD3E slow snapshot: {} ms", elapsed / 1_000_000L)
             }
         }
     }
@@ -462,6 +531,12 @@ internal class Md3eRuntime private constructor(context: Context) {
     fun onHidden() {
         visibleHosts = (visibleHosts - 1).coerceAtLeast(0)
         uiVisible = visibleHosts > 0
+        if (!uiVisible && coreDrainScheduled) {
+            Choreographer.getInstance().removeFrameCallback(coreDrainFrame)
+            handler.removeCallbacks(coreDrainWorker)
+            coreDrainScheduled = false
+            drainCoreQueue()
+        }
         controller.saveSessionState()
     }
 
@@ -607,7 +682,7 @@ internal class Md3eRuntime private constructor(context: Context) {
                 val tracks = scanner.scan()
                 handler.post {
                     controller.scanTracks(tracks)
-                    controller.pump()
+                    drainCoreQueue()
                     local = local.copy(scanning = false, tracks = tracks)
                 }
             } catch (error: Exception) {

@@ -157,11 +157,8 @@ internal fun Md3eMiniPlayer(
     val view = LocalView.current
     val ink = MaterialTheme.colorScheme.onSurface
     val lowSpec = Md3eLowSpecMode.current
-    val playCorner by animateDpAsState(
-        targetValue = if (state.playing) 16.dp else 20.dp,
-        animationSpec = tween(if (lowSpec) 0 else 255),
-        label = "mini_play_corner",
-    )
+    val rendering = LocalMd3eRenderingActive.current && !LocalMd3eMotionActive.current
+
 
     Surface(
         modifier = modifier.height(if (claude) 52.dp else 64.dp)
@@ -185,7 +182,7 @@ internal fun Md3eMiniPlayer(
                 Modifier.fillMaxSize().padding(start = 8.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Box(Modifier.size(if (claude) 40.dp else 52.dp).pointerInput(state.duration, state.songId) {
+                Box(Modifier.size(if (claude) 44.dp else 52.dp).pointerInput(state.duration, state.songId) {
                     detectTapGestures { offset ->
                         val angle = Math.toDegrees(atan2(
                             (offset.y - size.height / 2f).toDouble(),
@@ -204,52 +201,9 @@ internal fun Md3eMiniPlayer(
                     ) { cover -> MiniCover(cover) }
                 }
                 Spacer(Modifier.width(7.dp))
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
-                    Text(
-                        state.title,
-                        maxLines = 1,
-                        fontSize = if (claude) 13.sp else 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = ink,
-                        overflow = TextOverflow.Clip,
-                        // A B站 P title can be much longer than the dock. Keep the
-                        // complete string available on low-spec devices too; the
-                        // marquee is a single lightweight text layer and avoids
-                        // measuring/recomposing the whole dock to fit it.
-                        modifier = Modifier.basicMarquee(initialDelayMillis = 600),
-                    )
-                    Text(
-                        state.artist,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        fontSize = if (claude) 11.sp else 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                MiniTrackInfo(state.title, state.artist, claude, ink, rendering)
                 Spacer(Modifier.width(5.dp))
-                Box(
-                    Modifier.size(if (claude) 40.dp else 32.dp).clip(RoundedCornerShape(playCorner))
-                        .background(MaterialTheme.colorScheme.primaryContainer)
-                        .clickable {
-                            view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
-                            runtime.toggle()
-                        },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    if (lowSpec) Icon(
-                        if (state.playing) Md3eIcons.Pause else Md3eIcons.PlayArrow,
-                        if (state.playing) "暂停" else "播放",
-                        Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                    ) else AnimatedContent(
-                        targetState = state.playing,
-                        transitionSpec = { fadeIn(tween(140)) togetherWith fadeOut(tween(100)) },
-                        label = "mini_play_icon",
-                    ) { playing -> Icon(
-                        if (playing) Md3eIcons.Pause else Md3eIcons.PlayArrow,
-                        if (playing) "暂停" else "播放",
-                        Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                    ) }
-                }
+                MiniPlayPause(state.playing, claude, lowSpec, runtime::toggle)
                 if (claude) {
                     Spacer(Modifier.width(5.dp))
                     MiniTransport(Md3eIcons.SkipPrevious, "上一首") { runtime.previous() }
@@ -262,8 +216,74 @@ internal fun Md3eMiniPlayer(
 }
 
 @Composable
+private fun androidx.compose.foundation.layout.RowScope.MiniTrackInfo(
+    title: String, artist: String, claude: Boolean,
+    ink: androidx.compose.ui.graphics.Color, rendering: Boolean,
+) {
+    Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
+        Text(
+            title,
+            maxLines = 1,
+            fontSize = if (claude) 13.sp else 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = ink,
+            overflow = TextOverflow.Clip,
+            // A B站 P title can be much longer than the dock. Keep the
+            // complete string available on low-spec devices too; the
+            // marquee is a single lightweight text layer and avoids
+            // measuring/recomposing the whole dock to fit it.
+            modifier = Modifier.graphicsLayer {}.basicMarquee(
+                iterations = if (rendering) Int.MAX_VALUE else 0, initialDelayMillis = 600),
+        )
+        Text(
+            artist,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            fontSize = if (claude) 11.sp else 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun MiniPlayPause(playing: Boolean, claude: Boolean, lowSpec: Boolean, onToggle: () -> Unit) {
+    val view = LocalView.current
+    val playCorner = animateDpAsState(
+        targetValue = if (playing) 16.dp else 20.dp,
+        animationSpec = tween(if (lowSpec) 0 else 255),
+        label = "mini_play_corner",
+    )
+    Box(
+        Modifier.size(if (claude) 40.dp else 32.dp).graphicsLayer {
+            shape = RoundedCornerShape(playCorner.value)
+            clip = true
+        }
+            .background(MaterialTheme.colorScheme.primaryContainer)
+            .clickable {
+                view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                onToggle()
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        if (lowSpec) Icon(
+            if (playing) Md3eIcons.Pause else Md3eIcons.PlayArrow,
+            if (playing) "暂停" else "播放",
+            Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer,
+        ) else AnimatedContent(
+            targetState = playing,
+            transitionSpec = { fadeIn(tween(140)) togetherWith fadeOut(tween(100)) },
+            label = "mini_play_icon",
+        ) { playing -> Icon(
+            if (playing) Md3eIcons.Pause else Md3eIcons.PlayArrow,
+            if (playing) "暂停" else "播放",
+            Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer,
+        ) }
+    }
+}
+
+@Composable
 private fun MiniCover(source: String) {
-    Artwork(source, Modifier.size(42.dp).clip(CircleShape))
+    Artwork(source, Modifier.size(if (LocalClaudeDesign.current) 40.dp else 42.dp).clip(CircleShape))
 }
 
 @Composable
@@ -284,47 +304,21 @@ private fun MiniTransport(icon: androidx.compose.ui.graphics.vector.ImageVector,
 
 @Composable
 private fun MiniCoverProgress(state: PlaybackState) {
-    val trackColor = MaterialTheme.colorScheme.secondaryContainer
+    val claude = LocalClaudeDesign.current
+    val trackColor = MaterialTheme.colorScheme.surfaceVariant
     val progressColor = MaterialTheme.colorScheme.primary
     val lowSpec = Md3eLowSpecMode.current
-    val animateWave = !lowSpec && state.playing && !state.loading
-    val wave = if (animateWave) rememberInfiniteTransition(label = "mini_cover_wave")
-        .animateFloat(0f, (2 * PI).toFloat(), infiniteRepeatable(tween(1300, easing = LinearEasing)),
-            label = "mini_cover_wave_phase") else null
-    val loading = if (state.loading && !lowSpec) rememberInfiniteTransition(label = "mini_cover_loading")
-        .animateFloat(0f, 360f, infiniteRepeatable(tween(900, easing = LinearEasing)),
-            label = "mini_cover_loading_rotation") else null
-
+    val rendering = LocalMd3eRenderingActive.current && !LocalMd3eMotionActive.current
+    val rotation = if (rendering && state.loading && !lowSpec) rememberInfiniteTransition(label = "mini_cover_loading")
+        .animateFloat(0f, 360f, infiniteRepeatable(tween(900, easing = LinearEasing)), label = "mini_cover_loading_rotation") else null
     Canvas(Modifier.fillMaxSize()) {
-        val strokeWidth = 3.dp.toPx()
-        val stroke = Stroke(width = strokeWidth, cap = StrokeCap.Round)
-        val gap = 14f
-        val start = -90f + gap / 2f
-        val sweep = 360f - gap
-        val progress = (state.position.toFloat() / state.duration.coerceAtLeast(1L)).coerceIn(0f, 1f)
-        val progressSweep = (sweep * progress - gap / 2f).coerceAtLeast(0f)
-        val playedSweep = if (state.playing) maxOf(progressSweep, 24f) else progressSweep
-        val unplayedStart = start + playedSweep + gap
-        drawArc(trackColor, unplayedStart, (start + sweep - unplayedStart).coerceAtLeast(0f), false, style = stroke)
-        if (state.loading) {
-            drawArc(progressColor, (loading?.value ?: 0f) - 90f, 86f, false, style = stroke)
-        } else if (playedSweep > 0f && lowSpec) {
-            drawArc(progressColor, start, playedSweep, false, style = stroke)
-        } else if (playedSweep > 0f) {
-            val center = Offset(size.width / 2f, size.height / 2f)
-            val radius = minOf(size.width, size.height) / 2f - strokeWidth / 2f
-            val phase = wave?.value ?: 0f
-            val amplitude = if (state.playing) 1.72f else .52f
-            val path = Path()
-            val steps = (playedSweep * .7f).toInt().coerceIn(24, 180)
-            repeat(steps + 1) { index ->
-                val angle = Math.toRadians((start + playedSweep * index / steps).toDouble())
-                val lift = sin(phase.toDouble() + index * playedSweep.toDouble() / steps / 30.0 * 2.0 * PI).toFloat() * amplitude
-                val point = Offset(center.x + cos(angle).toFloat() * (radius + lift),
-                    center.y + sin(angle).toFloat() * (radius + lift))
-                if (index == 0) path.moveTo(point.x, point.y) else path.lineTo(point.x, point.y)
-            }
-            drawPath(path, progressColor, style = stroke)
-        }
+        val strokeWidth = if (claude) 1.5.dp.toPx() else 2.dp.toPx()
+        val inset = strokeWidth / 2f
+        val diameter = minOf(size.width, size.height) - strokeWidth
+        val progress = if (rendering) (state.position.toFloat() / state.duration.coerceAtLeast(1L)).coerceIn(0f, 1f) else 0f
+        val rect = androidx.compose.ui.geometry.Size(diameter, diameter)
+        drawArc(trackColor, 0f, 360f, false, topLeft = Offset(inset, inset), size = rect, style = Stroke(width = strokeWidth))
+        if (state.loading) drawArc(progressColor, (rotation?.value ?: 0f) - 90f, 88f, false, topLeft = Offset(inset, inset), size = rect, style = Stroke(width = strokeWidth, cap = StrokeCap.Round))
+        else if (progress > 0f) drawArc(progressColor, -90f, progress * 360f, false, topLeft = Offset(inset, inset), size = rect, style = Stroke(width = strokeWidth, cap = StrokeCap.Round))
     }
 }

@@ -9,6 +9,7 @@ package dev.t1m3.qplayer.android.md3eui
 import androidx.compose.animation.rememberSplineBasedDecay
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.combinedClickable
@@ -29,12 +30,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -99,6 +102,7 @@ internal fun Md3eHomePage(runtime: Md3eRuntime, onLogin: () -> Unit, onPlay: Pla
     onOpenPlaylist: (Long) -> Unit, onOpenAlbum: (Long) -> Unit, onRefresh: () -> Unit,
     modifier: Modifier = Modifier) {
     val state = runtime.home
+    val dailyPhrase by rememberMd3eDailyPhrase(runtime)
     val dockInset = LocalMd3eDockInset.current
     val listState = rememberLazyListState()
     val density = LocalDensity.current
@@ -138,6 +142,9 @@ internal fun Md3eHomePage(runtime: Md3eRuntime, onLogin: () -> Unit, onPlay: Pla
         }
     }
     val dailyShelves = remember(state.daily) { state.daily.chunked(HOME_SHELF_CHUNK) }
+    val albumShelves = remember(albums) { albums.chunked(HOME_ALBUM_CHUNK) }
+    val playlistHead = remember(firstPlaylists) { firstPlaylists.take(HOME_HEAD_SHELF) }
+    val playlistTail = remember(firstPlaylists) { firstPlaylists.drop(HOME_HEAD_SHELF).chunked(HOME_PLAYLIST_CHUNK) }
     var aiPrompt by remember { mutableStateOf("") }
     var aiOpen by remember { mutableStateOf(false) }
     var aiMode by remember { mutableStateOf<Boolean?>(null) }
@@ -162,15 +169,24 @@ internal fun Md3eHomePage(runtime: Md3eRuntime, onLogin: () -> Unit, onPlay: Pla
         }
     }
     Column(modifier.nestedScroll(headerScroll)) {
-    Spacer(Modifier.height(with(density) { headerOffset.toDp() }))
-    if (headerOffset <= 0.1f && headerHeight > 0f) HorizontalDivider(thickness = Dp.Hairline)
+    Spacer(Modifier.layout { measurable, constraints ->
+        val height = headerOffset.toInt().coerceAtLeast(0)
+        val placeable = measurable.measure(constraints.copy(minHeight = height, maxHeight = height))
+        layout(placeable.width, placeable.height) { placeable.placeRelative(0, 0) }
+    })
+    val collapsed by remember(headerHeight) { derivedStateOf { headerOffset <= 0.1f } }
+    if (collapsed && headerHeight > 0f) HorizontalDivider(thickness = Dp.Hairline)
     LazyColumn(Modifier.weight(1f), state = listState,
         contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 16.dp + dockInset),
         verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item(key = "greeting") {
-            if (claude) ClaudeGreeting(state.userName)
-            else Text(if (state.userName.isBlank()) "你好" else "你好，${state.userName}",
+            if (claude) ClaudeGreeting(state.userName, dailyPhrase)
+            else Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(if (state.userName.isBlank()) "你好" else "你好，${state.userName}",
                 fontSize = 27.sp, fontWeight = FontWeight.SemiBold)
+                Text(dailyPhrase, style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
         if (claude) item(key = "claude_fm") {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -203,7 +219,9 @@ internal fun Md3eHomePage(runtime: Md3eRuntime, onLogin: () -> Unit, onPlay: Pla
                         aiOpen = true
                     }
                 ), contentAlignment = Alignment.Center) {
-                    Icon(Md3eIcons.AutoAwesome, "打开 AI DJ")
+                    if (claude) Image(painterResource(R.drawable.ic_claude_ai_dj),
+                        contentDescription = "打开 AI DJ", modifier = Modifier.size(44.dp))
+                    else Icon(Md3eIcons.AutoAwesome, "打开 AI DJ")
                 }
             }
         }
@@ -214,7 +232,7 @@ internal fun Md3eHomePage(runtime: Md3eRuntime, onLogin: () -> Unit, onPlay: Pla
             }
         }
         if (firstPlaylists.isNotEmpty()) item(key = "playlists") {
-            HomePlaylistShelf("推荐歌单", firstPlaylists.take(HOME_HEAD_SHELF), onOpenPlaylist)
+            HomePlaylistShelf("推荐歌单", playlistHead, onOpenPlaylist)
         }
         dailyShelves.forEachIndexed { shelf, songs ->
             item(key = "daily_$shelf") {
@@ -223,7 +241,7 @@ internal fun Md3eHomePage(runtime: Md3eRuntime, onLogin: () -> Unit, onPlay: Pla
                     { runtime.controller.enqueueNeteaseSong(it) })
             }
         }
-        albums.chunked(HOME_ALBUM_CHUNK).forEachIndexed { shelf, chunk ->
+        albumShelves.forEachIndexed { shelf, chunk ->
             item(key = "albums_$shelf") {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     HomeTitle(if (shelf == 0) "推荐新碟" else "更多新碟")
@@ -242,7 +260,7 @@ internal fun Md3eHomePage(runtime: Md3eRuntime, onLogin: () -> Unit, onPlay: Pla
         items(morePlaylists, key = { "playlist_section_${it.first}" }) { (title, playlists) ->
             HomePlaylistShelf(title, playlists, onOpenPlaylist)
         }
-        firstPlaylists.drop(HOME_HEAD_SHELF).chunked(HOME_PLAYLIST_CHUNK).forEachIndexed { shelf, chunk ->
+        playlistTail.forEachIndexed { shelf, chunk ->
             item(key = "playlist_tail_$shelf") {
                 HomePlaylistShelf(if (shelf == 0) "更多歌单" else "更多歌单 · ${shelf + 1}", chunk, onOpenPlaylist)
             }
@@ -312,10 +330,10 @@ internal fun Md3eHomePage(runtime: Md3eRuntime, onLogin: () -> Unit, onPlay: Pla
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         if (visibleStatus == "running") {
-                            Md3eSealProgressRing(progress = -1f) {
-                                Icon(Md3eIcons.AutoAwesome, null, Modifier.size(36.dp),
-                                    tint = MaterialTheme.colorScheme.secondaryFixed)
-                            }
+                            SongChecklistWriting(
+                                modifier = Modifier.size(160.dp),
+                                backdropColor = null,
+                            )
                         }
                         if (visibleStatus != "status" || aiProgress.isNotBlank()) {
                             val statusText = when (visibleStatus) {
@@ -327,7 +345,7 @@ internal fun Md3eHomePage(runtime: Md3eRuntime, onLogin: () -> Unit, onPlay: Pla
                             Md3eSealStatusText(visibleStatus, statusText,
                                 color = if (visibleStatus == "error") MaterialTheme.colorScheme.error
                                 else MaterialTheme.colorScheme.onSurfaceVariant,
-                                showIndicator = true)
+                                showIndicator = false)
                         }
                         if (aiSummary.isNotBlank()) Text("$aiSummary")
                         if (aiDetails.isNotBlank()) {
@@ -368,7 +386,8 @@ private fun HomePlaylistShelf(title: String, playlists: List<NeteasePlaylist>, o
             contentPadding = PaddingValues(vertical = 8.dp)) {
             items(playlists, key = { it.id }) { playlist ->
                 if (LocalClaudeDesign.current) ClaudePlaylistCard(playlist) { onOpen(playlist.id) }
-                else Column(Modifier.width(164.dp).clip(RoundedCornerShape(16.dp))
+                else Md3eCollectionContainer("cover:playlist:${playlist.id}", corner = 16.dp) {
+Column(Modifier.width(164.dp).clip(RoundedCornerShape(16.dp))
                     .clickable { onOpen(playlist.id) }) {
                     Artwork(playlist.coverThumbPath ?: playlist.coverUrl.orEmpty(),
                         Modifier.fillMaxWidth().aspectRatio(1f).md3eSharedCover("cover:playlist:${playlist.id}"))
@@ -377,6 +396,7 @@ private fun HomePlaylistShelf(title: String, playlists: List<NeteasePlaylist>, o
                     Text("${playlist.trackCount} 首歌曲", Modifier.padding(10.dp), fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+    }
             }
         }
     }
@@ -384,7 +404,8 @@ private fun HomePlaylistShelf(title: String, playlists: List<NeteasePlaylist>, o
 
 @Composable
 private fun HomeAlbumCard(album: NeteaseAlbum, onOpen: () -> Unit) {
-    Column(Modifier.width(132.dp).clip(RoundedCornerShape(if (LocalClaudeDesign.current) 14.dp else 22.dp)).clickable(onClick = onOpen),
+    Md3eCollectionContainer("cover:album:${album.id}", corner = if (LocalClaudeDesign.current) 14.dp else 22.dp) {
+Column(Modifier.width(132.dp).clip(RoundedCornerShape(if (LocalClaudeDesign.current) 14.dp else 22.dp)).clickable(onClick = onOpen),
         verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Artwork(album.coverThumbPath ?: album.coverUrl.orEmpty(),
             Modifier.fillMaxWidth().aspectRatio(1f).md3eSharedCover("cover:album:${album.id}"),
@@ -392,6 +413,7 @@ private fun HomeAlbumCard(album: NeteaseAlbum, onOpen: () -> Unit) {
         Text(album.name ?: "未知专辑", maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(album.artistName.orEmpty(), maxLines = 1, overflow = TextOverflow.Ellipsis,
             fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
     }
 }
 

@@ -37,6 +37,10 @@ android {
     buildTypes.named("debug") {
         signingConfigs.findByName("workspaceDebug")?.let { signingConfig = it }
     }
+    buildTypes.named("release") {
+        isDebuggable = false
+        signingConfigs.findByName("workspaceDebug")?.let { signingConfig = it }
+    }
     packaging.resources.excludes += setOf("META-INF/AL2.0", "META-INF/LGPL2.1", "META-INF/*.kotlin_module")
 }
 dependencies {
