@@ -603,6 +603,27 @@ internal class Md3eRuntime private constructor(context: Context) {
         pushEqToBackend()
     }
 
+    /** Ⓜ Quick shapes so the EQ can be heard immediately（「这玩意咋调的」）: millibel
+     *  levels against a 5-band 60/230/910/3600/14000 layout, clipped per band by the
+     *  backend to the device's real range anyway. */
+    fun applyEqPreset(which: String) {
+        when (which) {
+            "bass" -> {
+                settings.put("eqBands", "900,600,150,-200,-300")
+                settings.put("eqBass", "700")
+            }
+            "vocal" -> {
+                settings.put("eqBands", "-300,-100,500,400,150")
+                settings.put("eqBass", "0")
+            }
+            else -> {
+                settings.put("eqBands", "")
+                settings.put("eqBass", "0")
+            }
+        }
+        pushEqToBackend()
+    }
+
     private fun pushEqToBackend() {
         audioBackend.setEqEnabled(settings.bool("eqEnabled"))
         audioBackend.setEqLevels(eqBandLevels().toIntArray())

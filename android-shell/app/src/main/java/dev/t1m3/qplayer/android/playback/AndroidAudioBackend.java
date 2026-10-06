@@ -445,24 +445,52 @@ public final class AndroidAudioBackend implements AudioBackend {
             final short lower = listenerEq.getBandLevelRange()[0];
             final short upper = listenerEq.getBandLevelRange()[1];
             final int[] levels = eqLevels;
+            // Ⓜ 低音 must never be a no-op: BassBoost is unimplemented on plenty of
+            // ROMs (getStrengthSupported()==false and setStrength silently does
+            // nothing — exactly the listener's 「拉高拉低低音都没感觉」). The slider
+            // therefore rides the Equalizer's OWN lowest bands, and BassBoost is only
+            // layered on top where the device really implements it.
+            final int bassMillibels = (int) Math.round(eqBassStrength / 1000.0 * 1200); // 0..+12 dB
+            final StringBuilder boostBands = new StringBuilder();
+            int verified = 0;
             for (short b = 0; b < bands; b++) {
                 int millibels = b < levels.length ? levels[b] : 0;
+                final int centerHz = listenerEq.getCenterFreq(b) / 1000;
+                if (bassMillibels > 0 && centerHz <= 300) {
+                    millibels += bassMillibels;
+                    if (boostBands.length() > 0) boostBands.append("/");
+                    boostBands.append(centerHz).append("Hz");
+                }
                 listenerEq.setBandLevel(b, (short) Math.max(lower, Math.min(upper, millibels)));
+                if (listenerEq.getBandLevel(b) == Math.max(lower, Math.min(upper, millibels))) verified++;
             }
             listenerEq.setEnabled(true);
+            String bassNote = "";
             if (eqBassStrength > 0) {
+                bassNote = "，低音 +" + (bassMillibels / 100.0) + "dB → " + boostBands;
+                boolean hardware = false;
                 if (listenerBass == null) {
-                    try { listenerBass = new android.media.audiofx.BassBoost(0, session); } catch (Throwable ignored) { }
+                    try {
+                        listenerBass = new android.media.audiofx.BassBoost(0, session);
+                    } catch (Throwable ignored) { }
                 }
                 if (listenerBass != null) {
-                    listenerBass.setStrength((short) eqBassStrength);
-                    listenerBass.setEnabled(true);
+                    try {
+                        hardware = listenerBass.getStrengthSupported();
+                        if (hardware) {
+                            listenerBass.setStrength((short) eqBassStrength);
+                            listenerBass.setEnabled(true);
+                        }
+                    } catch (Throwable ignored) { }
                 }
+                bassNote += hardware ? "（含 BassBoost）" : "（本机不支持 BassBoost，已由低频段承担）";
             } else if (listenerBass != null) {
-                listenerBass.setEnabled(false);
+                try { listenerBass.setEnabled(false); } catch (Throwable ignored) { }
             }
             eqStatus = "均衡器：已挂载（" + bands + " 段 " + (lower / 100) + "–" + (upper / 100)
-                    + "dB" + (eqBassStrength > 0 ? "，低音 " + (eqBassStrength * 100 / 1000) + "%" : "") + "）";
+                    + "dB，写入校验 " + verified + "/" + bands + bassNote + "）";
+            Logger.info("eq attached on session {}: bands={} range=[{},{}] bass={} verified={}",
+                    session, bands, lower, upper, eqBassStrength, verified);
         } catch (Throwable failure) {
             eqStatus = "均衡器：应用失败（" + failure + "）";
             Logger.warn("eq apply failed: {}", failure.toString());

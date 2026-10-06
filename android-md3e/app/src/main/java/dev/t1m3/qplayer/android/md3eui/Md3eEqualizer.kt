@@ -48,6 +48,12 @@ internal fun Md3eEqualizerDialog(runtime: Md3eRuntime, onDismiss: () -> Unit) {
                     color = if (status.contains("已挂载")) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(10.dp))
+                Text(
+                    "说明：低音滑杆作用于均衡器最低的两个频段（约 60Hz/120Hz），不是设备的 BassBoost；" +
+                        "先点「低音增强」预设最容易听出差别。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(8.dp))
                 if (!runtime.settings.bool("eqEnabled")) {
                     Text("均衡器开关当前是关的：滑杆会保存数值，打开「均衡器」开关后生效。",
                         style = MaterialTheme.typography.bodySmall,
@@ -78,6 +84,23 @@ internal fun Md3eEqualizerDialog(runtime: Md3eRuntime, onDismiss: () -> Unit) {
                     }
                 }
                 Spacer(Modifier.height(10.dp))
+                // Quick presets: the fastest way to hear that the EQ is doing
+                // something at all.
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = {
+                        runtime.applyEqPreset("bass")
+                        levels = runtime.eqBandLevels().toMutableList()
+                        bass = runtime.eqBassStrength()
+                        status = backend.eqState()
+                    }) { Text("低音增强") }
+                    TextButton(onClick = {
+                        runtime.applyEqPreset("vocal")
+                        levels = runtime.eqBandLevels().toMutableList()
+                        bass = runtime.eqBassStrength()
+                        status = backend.eqState()
+                    }) { Text("人声突出") }
+                }
+                Spacer(Modifier.height(6.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("低音", Modifier.width(56.dp),
                         style = MaterialTheme.typography.labelMedium,
