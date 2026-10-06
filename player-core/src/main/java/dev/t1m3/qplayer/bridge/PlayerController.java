@@ -9239,8 +9239,15 @@ public final class PlayerController {
     /** Play a B站 video the way the rest of the app expects: its parts become the
      *  queue, so the media session, notification, position bookkeeping and the queue
      *  list all treat it as an ordinary track instead of a detour. */
+    /** Ⓜ Bumped by every bili play request: a resolve still in flight for an older
+     *  generation bails at once instead of holding the single resolveWorker thread
+     *  (head-of-line) and racing the newer request. */
+    private final java.util.concurrent.atomic.AtomicInteger biliResolveGeneration =
+            new java.util.concurrent.atomic.AtomicInteger();
+
     public void playBiliCollection(BiliClient.BiliVideo video) {
         if (video == null || video.bvid == null || video.bvid.isEmpty()) return;
+        biliResolveGeneration.incrementAndGet();
         post(() -> { loading.set(true); biliError.set(""); });
         worker.submit(() -> {
             try {
@@ -9281,14 +9288,28 @@ public final class PlayerController {
      *  picture and sound stay on one clock). */
     private void resolveAndPlayBili(Track t, int expectedIndex, long resumeMs,
                                     long expectedCoverRevision) {
+        final int generation = biliResolveGeneration.get();
         playResolveWorker.submit(() -> {
             try {
+                if (generation != biliResolveGeneration.get()) return;
                 if (!isCurrentTrackRequest(t, expectedCoverRevision)) return;
-                final String url = bili.progressiveUrl(t.biliBvid, t.biliCid, 64);
+                String url = bili.progressiveUrl(t.biliBvid, t.biliCid, 64);
+                // Ⓜ Rapid switching hammers the bili web API and trips its rate
+                // limit（「快速切换b站视频就不能播放」）: the first ask then comes back
+                // empty and the skip chain burns the whole queue. One short, quiet
+                // retry rides out the window; a newer generation or track cancels it.
+                if (url == null) {
+                    Thread.sleep(600);
+                    if (generation != biliResolveGeneration.get()) return;
+                    if (!isCurrentTrackRequest(t, expectedCoverRevision)) return;
+                    url = bili.progressiveUrl(t.biliBvid, t.biliCid, 64);
+                }
                 if (url == null) {
                     onMain(() -> skipUnplayableRequest(t, expectedCoverRevision, "B站取流失败"));
                     return;
                 }
+                if (generation != biliResolveGeneration.get()) return;
+                final String streamUrl = url;
                 // onMain defers this body to the main looper, which puts it OUTSIDE
                 // the try/catch below: anything it throws (startBiliStream reaching
                 // the backend, publishing properties) would be an uncaught main-
@@ -9296,7 +9317,7 @@ public final class PlayerController {
                 // It therefore guards itself.
                 onMain(() -> {
                     try {
-                        startBiliStream(t, url, expectedIndex, resumeMs, expectedCoverRevision);
+                        startBiliStream(t, streamUrl, expectedIndex, resumeMs, expectedCoverRevision);
                     } catch (Throwable e) {
                         Logger.warn("bili start failed for {}: {}", t.biliBvid, e.toString());
                         skipUnplayableRequest(t, expectedCoverRevision, "B站播放失败");

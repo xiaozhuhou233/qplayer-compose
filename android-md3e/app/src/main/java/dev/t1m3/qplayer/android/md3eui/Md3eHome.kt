@@ -169,14 +169,8 @@ internal fun Md3eHomePage(runtime: Md3eRuntime, onLogin: () -> Unit, onPlay: Pla
         }
     }
     Column(modifier.nestedScroll(headerScroll)) {
-    Spacer(Modifier.layout { measurable, constraints ->
-        val height = headerOffset.toInt().coerceAtLeast(0)
-        val placeable = measurable.measure(constraints.copy(minHeight = height, maxHeight = height))
-        layout(placeable.width, placeable.height) { placeable.placeRelative(0, 0) }
-    })
-    val collapsed by remember(headerHeight) { derivedStateOf { headerOffset <= 0.1f } }
-    if (collapsed && headerHeight > 0f) HorizontalDivider(thickness = Dp.Hairline)
-    LazyColumn(Modifier.weight(1f), state = listState,
+        Md3eHomeHeaderSpacer(offsetProvider = { headerOffset }, headerHeight = headerHeight)
+        LazyColumn(Modifier.weight(1f), state = listState,
         contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 16.dp + dockInset),
         verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item(key = "greeting") {
@@ -471,5 +465,19 @@ private fun HomeSongPager(title: String, songs: List<NeteaseSong>, onPlay: (Int)
             }
             }
         }
+    }
+}
+
+@Composable
+private fun Md3eHomeHeaderSpacer(offsetProvider: () -> Float, headerHeight: Float) {
+    if (headerHeight <= 0f) return
+    Column {
+        Spacer(Modifier.layout { measurable, constraints ->
+            val height = offsetProvider().toInt().coerceAtLeast(0)
+            val placeable = measurable.measure(constraints.copy(minHeight = height, maxHeight = height))
+            layout(placeable.width, placeable.height) { placeable.placeRelative(0, 0) }
+        })
+        val collapsed by remember(headerHeight) { derivedStateOf { offsetProvider() <= 0.1f } }
+        if (collapsed) HorizontalDivider(thickness = Dp.Hairline)
     }
 }
