@@ -29,6 +29,7 @@ public final class SettingsCatalog {
     public static final String PLAYBACK = "播放";
     public static final String LYRIC = "歌词";
     public static final String LOCAL = "本地";
+    public static final String SOUND = "音效";
     public static final String ABOUT = "关于";
     public static final String AI = "AI";
     /** ACE-Step: the cloud model that GENERATES a transition passage from the two neighbours.
@@ -51,7 +52,7 @@ public final class SettingsCatalog {
     public static final String ACE_STEP_BED_DB_KEY = "aceStepBedDb";
 
     public static final List<String> CATEGORIES = Collections.unmodifiableList(
-            Arrays.asList(APPEARANCE, PLAYBACK, LYRIC, LOCAL, AI, ACE_STEP, PALETTE, ABOUT));
+            Arrays.asList(APPEARANCE, PLAYBACK, SOUND, LYRIC, LOCAL, AI, ACE_STEP, PALETTE, ABOUT));
 
     /** Fluid-background mode, 0 dynamic / 1 static. Stored under a new key
      *  because the same setting used to be a boolean ("lyricBgStatic") and a
@@ -387,6 +388,17 @@ public final class SettingsCatalog {
                 .desc("修改后将自动重新扫描该目录中的音乐文件")
                 .hint("目录路径")
                 .onlyOn(DESKTOP)
+                .build());
+
+        // ---- 音效 -----------------------------------------------------------
+        // Ⓜ The equalizer: a device Equalizer on the playing audio session, with
+        // per-band levels stored as a CSV of millibels (see Md3eEqualizer).
+        out.add(SettingSpec.toggle("eqEnabled", SOUND, "均衡器", false)
+                .desc("对正在播放的音频会话应用均衡器；切歌时随新会话自动重新挂载")
+                .build());
+        out.add(SettingSpec.action("eqEditor", SOUND, "均衡器调节", "")
+                .icon("tune")
+                .desc("逐频段调整增益，另含低音增强；改动即时生效并保存")
                 .build());
 
         // ---- 关于 -----------------------------------------------------------

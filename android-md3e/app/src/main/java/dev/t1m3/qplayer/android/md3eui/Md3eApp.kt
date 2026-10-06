@@ -172,6 +172,8 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
             }
         }
         Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+            if (runtime.eqDialogRequested) Md3eEqualizerDialog(runtime,
+                onDismiss = { runtime.eqDialogRequested = false })
             Md3eRecognizeDialogHost(visible = recognizeOpen,
                 onDismiss = { recognizeOpen = false },
                 onPlayById = { runtime.playById(it) },

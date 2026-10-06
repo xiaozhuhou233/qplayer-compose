@@ -162,6 +162,8 @@ internal class Md3eRuntime private constructor(context: Context) {
     val audioBackend = AndroidAudioBackend(app)
     val controller = PlayerController(audioBackend, AndroidMetadataReader(app), NeteaseClient.INSTANCE)
     val settings = SettingsCore()
+    val equalizer = Md3eEqualizer()
+    var eqDialogRequested by mutableStateOf(false)
     private val scanner = AndroidLibraryScanner(app.contentResolver, AndroidMetadataReader(app))
     private val scanWorker = Executors.newSingleThreadExecutor()
     private val playbackClock = PlaybackClock()
@@ -279,6 +281,12 @@ internal class Md3eRuntime private constructor(context: Context) {
         settings.registerInfo("cacheUsage") { "${controller.cacheSizeMB.peek()} MB" }
         settings.load(PrefsSettingsStore(app), SettingsCatalog.ANDROID)
         LogCapture.setEnabled(app, settings.bool("logCaptureEnabled"))
+        // The equalizer re-attaches to every new audio session and follows the
+        // 音效 settings live.
+        audioBackend.audioSessionListener = java.util.function.IntConsumer { sessionId ->
+            handler.post { applyEqToSession(sessionId) }
+        }
+        applyEqToSession(audioBackend.currentAudioSessionId())
         unblockEnabled = settings.bool("unblock")
         attachService()
         controller.preloadHome()
@@ -572,11 +580,47 @@ internal class Md3eRuntime private constructor(context: Context) {
         controller.playNetease(id)
     }
 
+    /** Parse "eqBands" (CSV of millibels per band). */
+    fun eqBandLevels(): List<Int> =
+        settings.str("eqBands").split(",").mapNotNull { it.trim().toIntOrNull() }
+
+    fun eqBassStrength(): Int = settings.str("eqBass").trim().toIntOrNull() ?: 0
+
+    fun setEqBandLevel(index: Int, millibels: Int) {
+        val levels = eqBandLevels().toMutableList()
+        while (levels.size <= index) levels.add(0)
+        levels[index] = millibels
+        settings.put("eqBands", levels.joinToString(","))
+        applyEqToSession(audioBackend.currentAudioSessionId())
+    }
+
+    fun setEqBass(strength: Int) {
+        settings.put("eqBass", strength.toString())
+        applyEqToSession(audioBackend.currentAudioSessionId())
+    }
+
+    fun resetEq() {
+        settings.put("eqBands", "")
+        settings.put("eqBass", "0")
+        applyEqToSession(audioBackend.currentAudioSessionId())
+    }
+
+    private fun applyEqToSession(sessionId: Int) {
+        if (!settings.bool("eqEnabled") || sessionId == 0) {
+            equalizer.detach()
+            return
+        }
+        equalizer.attach(sessionId, eqBandLevels(), eqBassStrength())
+    }
+
     fun updateSetting(key: String, value: Any) {
         settings.put(key, value)
         unblockEnabled = settings.bool("unblock")
         settingsRevision++
         LogCapture.setEnabled(app, settings.bool("logCaptureEnabled"))
+        if (key == "eqEnabled" || key == "eqBands" || key == "eqBass") {
+            applyEqToSession(audioBackend.currentAudioSessionId())
+        }
     }
 
     fun invokeSetting(action: String) {

@@ -27,7 +27,7 @@ private val md3eSettingKeys = setOf(
     "lyricGlow", "lyricShadow", "lyricLinearAnim", "lyricMd3Color",
     "lyricProgressStyle", SettingsCatalog.COVER_BACKGROUND_KEY,
     "action:clearCache", "action:openRepo", "action:checkUpdate",
-    "logCaptureEnabled", "action:logExport",
+    "logCaptureEnabled", "action:logExport", "eqEnabled", "action:eqEditor",
 )
 
 private fun supportedSetting(spec: SettingSpec): Boolean = spec.key in md3eSettingKeys ||
@@ -90,7 +90,11 @@ private fun Md3eSettingRow(spec: SettingSpec, runtime: Md3eRuntime,
                             enabled = current < spec.max) { Text("+", fontSize = 22.sp) }
                     }
                     SettingSpec.SLIDER -> Text(formatMd3eSettingValue(spec, current), fontSize = 12.sp)
-                    SettingSpec.ACTION -> TextButton(onClick = { runtime.invokeSetting(spec.action) }) {
+                    SettingSpec.ACTION -> TextButton(onClick = {
+                        // The equalizer editor needs UI state, not a plain runnable.
+                        if (spec.action == "eqEditor") runtime.eqDialogRequested = true
+                        else runtime.invokeSetting(spec.action)
+                    }) {
                         Text(spec.button.ifBlank { "打开" })
                     }
                 }

@@ -345,7 +345,19 @@ public final class AndroidAudioBackend implements AudioBackend {
         audioManager = (AudioManager) appContext.getSystemService(Context.AUDIO_SERVICE);
     }
 
-    @Override
+    /** Ⓜ Fired on every new MediaPlayer with its audio session id (the MD3E
+     *  equalizer attaches its audiofx chain to this). */
+    public volatile java.util.function.IntConsumer audioSessionListener;
+
+    /** The live player's audio session id, or 0 when nothing is prepared. */
+    public synchronized int currentAudioSessionId() {
+        try {
+            return player != null ? player.getAudioSessionId() : 0;
+        } catch (Throwable e) {
+            return 0;
+        }
+    }
+
     public synchronized void play(String src, long startMs) {
         if (src == null || src.isEmpty()) return;
         releasePlayer();
@@ -376,6 +388,12 @@ public final class AndroidAudioBackend implements AudioBackend {
         mp.setOnErrorListener(this::onPlayerError);
         mp.setOnVideoSizeChangedListener(this::onVideoSizeChanged);
         player = mp;
+        // Ⓜ Session observers (the MD3E equalizer re-attaches here): every new
+        // MediaPlayer owns a fresh audio session, so the hook fires per track.
+        java.util.function.IntConsumer sessionListener = audioSessionListener;
+        if (sessionListener != null) {
+            try { sessionListener.accept(mp.getAudioSessionId()); } catch (Throwable ignored) { }
+        }
         try {
             // The requested offset is part of the line on purpose: "the track started
             // from its beginning again" is a claim about this number, and without it

@@ -22,12 +22,14 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -339,9 +341,33 @@ private fun ClaudeVinylStageMd3e(cover: String, album: String, playing: Boolean,
 @Composable
 private fun PlayerTransport(runtime: Md3eRuntime) {
     val state = runtime.playback
+    val context = LocalContext.current
     var biliFavoriteOpen by remember { mutableStateOf(false) }
+    var playlistPickOpen by remember { mutableStateOf(false) }
     var biliLoginOpen by remember { mutableStateOf(false) }
     if (biliFavoriteOpen) Md3eBiliFavPickerDialog(runtime) { biliFavoriteOpen = false }
+    // The old app's 添加到歌单 dialog: your playlists; picking one adds the
+    // current song to it.
+    if (playlistPickOpen) AlertDialog(
+        onDismissRequest = { playlistPickOpen = false },
+        title = { Text("添加到歌单") },
+        text = {
+            if (runtime.playlists.mine.isEmpty()) {
+                Text("还没有自己的歌单（或未登录）", Modifier.padding(16.dp))
+            } else LazyColumn(Modifier.heightIn(max = 360.dp)) {
+                items(runtime.playlists.mine, key = { it.id }) { playlist ->
+                    Text(playlist.name ?: "未命名歌单",
+                        modifier = Modifier.fillMaxWidth().clickable {
+                            runtime.controller.addToPlaylist(playlist.id, runtime.playback.songId)
+                            Toast.makeText(context, "已添加到：${playlist.name ?: "未命名歌单"}",
+                                Toast.LENGTH_SHORT).show()
+                            playlistPickOpen = false
+                        }.padding(16.dp))
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { playlistPickOpen = false }) { Text("取消") } }
+    )
     if (biliLoginOpen) Md3eBiliLoginDialog(runtime) { biliLoginOpen = false }
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         PlayerTransportButtons(
@@ -373,7 +399,14 @@ private fun PlayerTransport(runtime: Md3eRuntime) {
             PlayerToggleDivider()
             PlayerToggle(if (state.liked) PlayerIcons.Favorite else PlayerIcons.FavoriteBorder,
                 "收藏", state.liked, MaterialTheme.colorScheme.tertiary,
-                MaterialTheme.colorScheme.onTertiary, Modifier.weight(1f), enabled = runtime.bili.playing || state.likeable) {
+                MaterialTheme.colorScheme.onTertiary, Modifier.weight(1f),
+                enabled = runtime.bili.playing || state.likeable,
+                // The old app's long-press heart: pick which of your playlists the
+                // current song is collected into.
+                onLongClick = {
+                    if (!runtime.bili.playing && runtime.playback.songId != 0L
+                        && runtime.playlists.loggedIn) playlistPickOpen = true
+                }) {
                 if (runtime.bili.playing) {
                     if (runtime.bili.loggedIn) biliFavoriteOpen = true else biliLoginOpen = true
                 } else runtime.likeDisplayed(state)
@@ -383,15 +416,17 @@ private fun PlayerTransport(runtime: Md3eRuntime) {
 }
 
 @Composable
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 private fun PlayerToggle(icon: ImageVector, label: String, active: Boolean,
     activeColor: Color, activeContent: Color, modifier: Modifier,
-    enabled: Boolean = true, onClick: () -> Unit) {
+    enabled: Boolean = true, onLongClick: (() -> Unit)? = null, onClick: () -> Unit) {
     val background = animateColorAsState(
         if (active) activeColor else Color.Transparent,
         label = "player_toggle_background",
     )
     Box(modifier.fillMaxHeight().clip(CircleShape).drawBehind { drawRect(background.value) }
-        .clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) {
+        .combinedClickable(enabled = enabled, onLongClick = onLongClick, onClick = onClick),
+        contentAlignment = Alignment.Center) {
         Icon(icon, label, Modifier.size(24.dp),
             tint = if (active) activeContent
                 else MaterialTheme.colorScheme.onSurfaceVariant)
