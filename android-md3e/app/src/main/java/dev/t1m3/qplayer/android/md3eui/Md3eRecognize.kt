@@ -152,10 +152,13 @@ internal fun Md3eRecognizeDialogHost(visible: Boolean, onDismiss: () -> Unit,
                 Box(Modifier.size(56.dp), contentAlignment = Alignment.Center) {
                     when (phase) {
                         RecognizePhase.INTRO -> Unit
-                        RecognizePhase.LISTENING ->
-                            ListeningBarsMd3e(color = MaterialTheme.colorScheme.primary)
-                        RecognizePhase.FOUND ->
-                            MorphLoaderMd3e(color = MaterialTheme.colorScheme.primary)
+                        // Ⓜ The Claude-design spinner replaces the generic loaders
+                        // （「把加载动画换成 claude 模式下同款 claude 图标旋转加载动画」）.
+                        RecognizePhase.LISTENING, RecognizePhase.FOUND ->
+                            SpinningDeformIcon(
+                                painter = androidx.compose.ui.res.painterResource(
+                                    dev.t1m3.qplayer.android.md3eui.R.drawable.ic_claude_color),
+                                contentDescription = null)
                     }
                 }
                 if (status.isNotEmpty()) {
