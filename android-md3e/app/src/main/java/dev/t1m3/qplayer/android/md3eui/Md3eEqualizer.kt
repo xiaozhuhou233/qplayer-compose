@@ -1,11 +1,3 @@
-// Ⓜ 2026-10-06: the listener's EQ, rewritten（「不管用，重新写均衡器」）. The first
-// version attached the effect from a separate helper and recreated it on every
-// slider tick — and, fatally, the APK never declared MODIFY_AUDIO_SETTINGS, so the
-// Equalizer constructor threw and the failure was swallowed. The effect now lives
-// in the audio backend (one instance per player session, created when the player
-// is created and re-applied on prepare), the permission is declared, and this
-// dialog drives it directly and shows the REAL attachment state instead of
-// guessing. Slider movement only pushes band values; nothing is recreated.
 package dev.t1m3.qplayer.android.md3eui
 
 import androidx.compose.foundation.layout.*
@@ -17,6 +9,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 
 /** The editor behind 设置/音效/「均衡器调节」: one slider per band (applied live
  *  through the backend, persisted per change), a bass slider, a reset — and the
@@ -25,12 +18,19 @@ import androidx.compose.ui.unit.dp
 internal fun Md3eEqualizerDialog(runtime: Md3eRuntime, onDismiss: () -> Unit) {
     val backend = runtime.audioBackend
     var status by remember { mutableStateOf(backend.eqState()) }
+    LaunchedEffect(backend) {
+        while (true) {
+            status = backend.eqState()
+            delay(500)
+        }
+    }
     val bandCount = backend.eqBandCount()
     val range = backend.eqBandRange()
     val lower = range.getOrElse(0) { -1500 }
     val upper = range.getOrElse(1) { 1500 }
     val centers = backend.eqCenterFreqs()
-    var levels by remember { mutableStateOf(runtime.eqBandLevels().toMutableList()) }
+    var levels by remember { mutableStateOf(runtime.eqBandLevels()) }
+    var enabled by remember { mutableStateOf(runtime.settings.bool("eqEnabled")) }
     var bass by remember { mutableIntStateOf(runtime.eqBassStrength()) }
 
     fun bandLabel(index: Int): String {
@@ -44,17 +44,24 @@ internal fun Md3eEqualizerDialog(runtime: Md3eRuntime, onDismiss: () -> Unit) {
         title = { Text("均衡器") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("启用均衡器", Modifier.weight(1f))
+                    Switch(enabled, onCheckedChange = {
+                        enabled = it
+                        runtime.updateSetting("eqEnabled", it)
+                        status = backend.eqState()
+                    })
+                }
                 Text(status, style = MaterialTheme.typography.bodySmall,
                     color = if (status.contains("已挂载")) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(10.dp))
                 Text(
-                    "说明：低音滑杆作用于均衡器最低的两个频段（约 60Hz/120Hz），不是设备的 BassBoost；" +
-                        "先点「低音增强」预设最容易听出差别。",
+                    "频段向右提升、向左衰减；低音滑杆增强 300Hz 以下频段。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(8.dp))
-                if (!runtime.settings.bool("eqEnabled")) {
+                if (!enabled) {
                     Text("均衡器开关当前是关的：滑杆会保存数值，打开「均衡器」开关后生效。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -71,8 +78,9 @@ internal fun Md3eEqualizerDialog(runtime: Md3eRuntime, onDismiss: () -> Unit) {
                             value = value,
                             onValueChange = { newValue ->
                                 val millibels = newValue.toInt()
-                                while (levels.size <= index) levels.add(0)
-                                levels[index] = millibels
+                                levels = List(bandCount) { band ->
+                                    if (band == index) millibels else levels.getOrElse(band) { 0 }
+                                }
                                 runtime.setEqBandLevel(index, millibels)
                                 status = backend.eqState()
                             },
@@ -89,13 +97,13 @@ internal fun Md3eEqualizerDialog(runtime: Md3eRuntime, onDismiss: () -> Unit) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick = {
                         runtime.applyEqPreset("bass")
-                        levels = runtime.eqBandLevels().toMutableList()
+                        levels = runtime.eqBandLevels()
                         bass = runtime.eqBassStrength()
                         status = backend.eqState()
                     }) { Text("低音增强") }
                     TextButton(onClick = {
                         runtime.applyEqPreset("vocal")
-                        levels = runtime.eqBandLevels().toMutableList()
+                        levels = runtime.eqBandLevels()
                         bass = runtime.eqBassStrength()
                         status = backend.eqState()
                     }) { Text("人声突出") }
@@ -122,7 +130,7 @@ internal fun Md3eEqualizerDialog(runtime: Md3eRuntime, onDismiss: () -> Unit) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     TextButton(onClick = {
                         runtime.resetEq()
-                        levels = mutableListOf()
+                        levels = emptyList()
                         bass = 0
                         status = backend.eqState()
                     }) { Text("全部归零") }

@@ -361,18 +361,26 @@ public final class AndroidAudioBackend implements AudioBackend {
     private volatile int eqBassStrength = 0;
     private volatile String eqStatus = "均衡器：未启用";
 
-    public void setEqEnabled(boolean on) {
+    /** Apply one complete editor snapshot; never briefly replay the old bands/bass. */
+    public synchronized void setEqualizer(boolean enabled, int[] levels, int bassStrength) {
+        eqEnabled = enabled;
+        eqLevels = levels != null ? levels.clone() : new int[0];
+        eqBassStrength = Math.max(0, Math.min(1000, bassStrength));
+        applyListenerEq();
+    }
+
+    public synchronized void setEqEnabled(boolean on) {
         eqEnabled = on;
         applyListenerEq();
     }
 
     /** Millibel levels per band; index = band. */
-    public void setEqLevels(int[] levels) {
+    public synchronized void setEqLevels(int[] levels) {
         eqLevels = levels != null ? levels.clone() : new int[0];
         applyListenerEq();
     }
 
-    public void setEqBassStrength(int strength) {
+    public synchronized void setEqBassStrength(int strength) {
         eqBassStrength = Math.max(0, Math.min(1000, strength));
         applyListenerEq();
     }
@@ -417,7 +425,7 @@ public final class AndroidAudioBackend implements AudioBackend {
     }
 
     private synchronized void applyListenerEq() {
-        if (!eqEnabled || player == null) {
+        if (!eqEnabled || player == null || !prepared) {
             releaseListenerEq();
             eqStatus = eqEnabled ? "均衡器：已启用，等待播放" : "均衡器：未启用";
             return;
@@ -429,11 +437,25 @@ public final class AndroidAudioBackend implements AudioBackend {
             eqStatus = "均衡器：会话不可用（" + failure + "）";
             return;
         }
+        if (session <= 0) {
+            eqStatus = "均衡器：等待有效音频会话";
+            return;
+        }
+        boolean attached = false;
         if (listenerEq == null || listenerEqSession != session) {
             releaseListenerEq();
             try {
                 listenerEq = new android.media.audiofx.Equalizer(0, session);
                 listenerEqSession = session;
+                attached = true;
+                final Equalizer effect = listenerEq;
+                effect.setControlStatusListener((audioEffect, hasControl) -> {
+                    synchronized (AndroidAudioBackend.this) {
+                        if (listenerEq != effect) return;
+                        if (hasControl) applyListenerEq();
+                        else eqStatus = "均衡器：音效控制权暂不可用";
+                    }
+                });
             } catch (Throwable failure) {
                 eqStatus = "均衡器：挂载失败（" + failure + "）";
                 Logger.warn("eq attach failed on session {}: {}", session, failure.toString());
@@ -441,6 +463,10 @@ public final class AndroidAudioBackend implements AudioBackend {
             }
         }
         try {
+            if (!listenerEq.hasControl()) {
+                eqStatus = "均衡器：音效控制权暂不可用";
+                return;
+            }
             final short bands = listenerEq.getNumberOfBands();
             final short lower = listenerEq.getBandLevelRange()[0];
             final short upper = listenerEq.getBandLevelRange()[1];
@@ -464,7 +490,11 @@ public final class AndroidAudioBackend implements AudioBackend {
                 listenerEq.setBandLevel(b, (short) Math.max(lower, Math.min(upper, millibels)));
                 if (listenerEq.getBandLevel(b) == Math.max(lower, Math.min(upper, millibels))) verified++;
             }
-            listenerEq.setEnabled(true);
+            int enableResult = listenerEq.setEnabled(true);
+            if (enableResult != android.media.audiofx.AudioEffect.SUCCESS || !listenerEq.getEnabled()) {
+                eqStatus = "均衡器：设备未能启用音效（" + enableResult + "）";
+                return;
+            }
             String bassNote = "";
             if (eqBassStrength > 0) {
                 bassNote = "，低音 +" + (bassMillibels / 100.0) + "dB → " + boostBands;
@@ -489,7 +519,7 @@ public final class AndroidAudioBackend implements AudioBackend {
             }
             eqStatus = "均衡器：已挂载（" + bands + " 段 " + (lower / 100) + "–" + (upper / 100)
                     + "dB，写入校验 " + verified + "/" + bands + bassNote + "）";
-            Logger.info("eq attached on session {}: bands={} range=[{},{}] bass={} verified={}",
+            if (attached) Logger.info("eq attached on session {}: bands={} range=[{},{}] bass={} verified={}",
                     session, bands, lower, upper, eqBassStrength, verified);
         } catch (Throwable failure) {
             eqStatus = "均衡器：应用失败（" + failure + "）";
@@ -498,7 +528,11 @@ public final class AndroidAudioBackend implements AudioBackend {
     }
 
     private synchronized void releaseListenerEq() {
-        try { if (listenerEq != null) { listenerEq.setEnabled(false); listenerEq.release(); } } catch (Throwable ignored) { }
+        if (listenerEq != null) {
+            try { listenerEq.setControlStatusListener(null); } catch (Throwable ignored) { }
+            try { if (listenerEq.hasControl()) listenerEq.setEnabled(false); } catch (Throwable ignored) { }
+            try { listenerEq.release(); } catch (Throwable ignored) { }
+        }
         listenerEq = null;
         try { if (listenerBass != null) { listenerBass.setEnabled(false); listenerBass.release(); } } catch (Throwable ignored) { }
         listenerBass = null;
@@ -674,13 +708,13 @@ public final class AndroidAudioBackend implements AudioBackend {
         // media thread. Never let an old source start, publish onStarted, or apply its
         // state to the replacement MediaPlayer after a rapid track switch.
         if (player != preparedPlayer) return;
-        // The session is definitely live now: (re)attach the listener's EQ.
-        applyListenerEq();
+
         // The surface may have been attached before prepare finished.
         if (videoSurface != null) {
             try { preparedPlayer.setSurface(videoSurface); } catch (Throwable ignored) { }
         }
         prepared = true;
+        applyListenerEq();
         Logger.info("MediaPlayer: prepared, duration={}ms", preparedPlayer.getDuration());
         applyVolume();
         if (pendingSeekMs > 0L) {
@@ -2716,6 +2750,8 @@ public final class AndroidAudioBackend implements AudioBackend {
         // outgoing track is gone, so this changes nothing that can be heard — it is
         // here so the effect engines and the sessions behind them are not leaked.
         releaseEqualizers();
+        // Promotion does not fire onPrepared again: bind the EQ to the audible session.
+        applyListenerEq();
         // And so does the stretch: the promoted track has been running at A's tempo and
         // in A's key since the ramp began, which was right while both were audible and
         // is artefact now that only one is. Eased back over six seconds, immediately on
@@ -3062,6 +3098,8 @@ public final class AndroidAudioBackend implements AudioBackend {
         // must not touch the *next* player, which is why the generation is bumped here
         // as well).
         finishRestoreNow();
+        releaseListenerEq();
+        eqStatus = eqEnabled ? "均衡器：已启用，等待播放" : "均衡器：未启用";
         releaseOne(player);
         player = null;
         prepared = false;

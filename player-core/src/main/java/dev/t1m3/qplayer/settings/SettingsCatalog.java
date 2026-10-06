@@ -393,6 +393,9 @@ public final class SettingsCatalog {
         // ---- 音效 -----------------------------------------------------------
         // Ⓜ The equalizer: a device Equalizer on the playing audio session, with
         // per-band levels stored as a CSV of millibels (see Md3eEqualizer).
+        // The editor owns these values; hidden entries still participate in persistence.
+        out.add(SettingSpec.hidden("eqBands", SettingSpec.TEXT, "").build());
+        out.add(SettingSpec.hidden("eqBass", SettingSpec.TEXT, "0").build());
         out.add(SettingSpec.toggle("eqEnabled", SOUND, "均衡器", false)
                 .desc("对正在播放的音频会话应用均衡器；切歌时随新会话自动重新挂载")
                 .build());

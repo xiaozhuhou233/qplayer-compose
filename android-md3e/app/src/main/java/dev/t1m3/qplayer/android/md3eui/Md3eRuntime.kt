@@ -580,20 +580,23 @@ internal class Md3eRuntime private constructor(context: Context) {
 
     /** Parse "eqBands" (CSV of millibels per band). */
     fun eqBandLevels(): List<Int> =
-        settings.str("eqBands").split(",").mapNotNull { it.trim().toIntOrNull() }
+        settings.str("eqBands").takeIf { it.isNotBlank() }
+            ?.split(",")?.map { it.trim().toIntOrNull() ?: 0 }.orEmpty()
 
-    fun eqBassStrength(): Int = settings.str("eqBass").trim().toIntOrNull() ?: 0
+    fun eqBassStrength(): Int = (settings.str("eqBass").trim().toIntOrNull() ?: 0).coerceIn(0, 1000)
 
     fun setEqBandLevel(index: Int, millibels: Int) {
+        if (index !in 0 until audioBackend.eqBandCount()) return
         val levels = eqBandLevels().toMutableList()
         while (levels.size <= index) levels.add(0)
-        levels[index] = millibels
+        val range = audioBackend.eqBandRange()
+        levels[index] = millibels.coerceIn(range[0], range[1])
         settings.put("eqBands", levels.joinToString(","))
         pushEqToBackend()
     }
 
     fun setEqBass(strength: Int) {
-        settings.put("eqBass", strength.toString())
+        settings.put("eqBass", strength.coerceIn(0, 1000).toString())
         pushEqToBackend()
     }
 
@@ -625,9 +628,8 @@ internal class Md3eRuntime private constructor(context: Context) {
     }
 
     private fun pushEqToBackend() {
-        audioBackend.setEqEnabled(settings.bool("eqEnabled"))
-        audioBackend.setEqLevels(eqBandLevels().toIntArray())
-        audioBackend.setEqBassStrength(eqBassStrength())
+        audioBackend.setEqualizer(settings.bool("eqEnabled"),
+            eqBandLevels().toIntArray(), eqBassStrength())
     }
 
     fun updateSetting(key: String, value: Any) {

@@ -23,6 +23,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -78,12 +82,6 @@ private sealed interface DisplayLyricRow {
     data class Break(override val start: Long, override val end: Long) : DisplayLyricRow
 }
 
-private class LyricRowMotion(active: Boolean) {
-    val offset = Animatable(0f)
-    val scale = Animatable(if (active) 1f else .98f)
-    val alpha = Animatable(if (active) .85f else .175f)
-}
-
 @Composable
 internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier) {
     val state = runtime.playback
@@ -99,6 +97,7 @@ internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier
     val smooth = remember(state.songId) { mutableLongStateOf(state.position - lyrics.offsetMs) }
     val clock = remember(state.songId) { Md3eLyricClock() }
     val listState = rememberLazyListState()
+    var pointerHeld by remember { mutableStateOf(false) }
     val lowSpec = runtime.settings.bool("lowSpecMode")
     val springEnabled = runtime.settings.bool("lyricSpring") && !lowSpec
     // Playback samples are frame-rate data. Keying this effect by position
@@ -127,125 +126,123 @@ internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier
     val motions = remember(state.songId, lyrics.revision, rows.size) {
         mutableMapOf<Int, LyricRowMotion>()
     }
-    var previous by remember(state.songId, lyrics.revision) { mutableIntStateOf(initial) }
-
-    // Manual scrolling while paused must not retain animations for every visited
-    // row. Keep only the viewport, its neighbours and the active lyric.
-    LaunchedEffect(motions, listState, indexLookup) {
-        snapshotFlow {
-            val visible = listState.layoutInfo.visibleItemsInfo
-            Triple((visible.firstOrNull()?.index ?: active) - 2,
-                (visible.lastOrNull()?.index ?: active) + 2, active)
-        }.collect { (first, last, current) ->
-            motions.keys.removeAll { it != current && it !in first..last }
-        }
-    }
+    var previous by remember(state.songId, lyrics.revision) { mutableIntStateOf(-1) }
 
     BoxWithConstraints(modifier) {
         val centerPadding = (maxHeight * .42f).coerceAtLeast(32.dp)
         val fontSize = runtime.settings.intOf("lyricFontSize").coerceIn(14, 40)
         val spacing = (runtime.settings.intOf("lyricLineSpacing").coerceIn(100, 250) * 24f / 200f)
             .dp.coerceAtLeast(10.dp)
-        LaunchedEffect(state.songId, lyrics.revision, rows.size) {
-            if (initial !in rows.indices) return@LaunchedEffect
-            listState.scrollToItem(initial)
-            withFrameNanos { }
-            listState.centerLyricRow(initial)
-        }
-        LaunchedEffect(state.songId, lyrics.revision, active, springEnabled) {
-            val index = active
-            if (index !in rows.indices || index == previous) return@LaunchedEffect
-            val old = previous
-            previous = index
-            val visible = listState.layoutInfo.visibleItemsInfo
-            val target = visible.firstOrNull { it.index == index }
-            val retained = ((visible.firstOrNull()?.index ?: index) - 2).coerceAtLeast(0)..
-                ((visible.lastOrNull()?.index ?: index) + 2).coerceAtMost(rows.lastIndex)
-            motions.keys.retainAll(retained.toSet() + index)
-            if (target == null || abs(index - old) > 4 || lowSpec) {
-                listState.scrollToItem(index)
-                withFrameNanos { }
-                listState.centerLyricRow(index)
-                coroutineScope {
-                    motions.toMap().forEach { (rowIndex, motion) ->
-                        launch {
-                            motion.offset.snapTo(0f)
-                            motion.scale.snapTo(if (rowIndex == index) 1f else .98f)
-                            motion.alpha.snapTo(if (rowIndex == index) .85f else .175f)
+        LaunchedEffect(state.songId, lyrics.revision, active, springEnabled, pointerHeld) {
+            if (pointerHeld) return@LaunchedEffect
+            runLyricScroll(motions) {
+                val index = initial
+                if (index !in rows.indices || index == previous) return@runLyricScroll
+                val old = previous
+                val visible = listState.layoutInfo.visibleItemsInfo
+                val target = visible.firstOrNull { it.index == index }
+                if (old < 0 || target == null || abs(index - old) > 4 || lowSpec) {
+                    listState.scrollToItem(index)
+                    withFrameNanos { }
+                    listState.centerLyricRow(index)
+                    coroutineScope {
+                        motions.toMap().forEach { (rowIndex, motion) ->
+                            launch {
+                                motion.offset.snapTo(0f)
+                                motion.scale.snapTo(if (rowIndex == index) 1f else .98f)
+                                motion.alpha.snapTo(if (rowIndex == index) .85f else .175f)
+                            }
+                        }
+                    }
+                    previous = index
+                    return@runLyricScroll
+                }
+                val anchor = listState.layoutInfo.let { info ->
+                    info.viewportStartOffset + (info.viewportEndOffset - info.viewportStartOffset) * LYRIC_ANCHOR
+                }
+                val delta = target.offset + target.size / 2f - anchor
+                val first = visible.firstOrNull()?.index ?: old
+                val affected = (minOf(first, index) - 2).coerceAtLeast(0)..
+                    (maxOf(visible.lastOrNull()?.index ?: index, index) + 2).coerceAtMost(rows.lastIndex)
+                motions.toMap().forEach { (rowIndex, motion) ->
+                    motion.offset.snapTo(if (rowIndex in affected) motion.offset.value + delta else 0f)
+                }
+                val consumed = listState.scrollBy(delta)
+                if (abs(consumed - delta) > .01f) {
+                    affected.forEach { rowIndex ->
+                        motions[rowIndex]?.let { motion ->
+                            motion.offset.snapTo(motion.offset.value + consumed - delta)
                         }
                     }
                 }
-                return@LaunchedEffect
-            }
-            val anchor = listState.layoutInfo.let { info ->
-                info.viewportStartOffset + (info.viewportEndOffset - info.viewportStartOffset) * LYRIC_ANCHOR
-            }
-            val delta = target.offset + target.size / 2f - anchor
-            val first = visible.firstOrNull()?.index ?: old
-            val affected = (minOf(first, index) - 2).coerceAtLeast(0)..
-                (maxOf(visible.lastOrNull()?.index ?: index, index) + 2).coerceAtMost(rows.lastIndex)
-            motions.toMap().forEach { (rowIndex, motion) ->
-                motion.offset.snapTo(if (rowIndex in affected) motion.offset.value + delta else 0f)
-            }
-            val consumed = listState.scrollBy(delta)
-            if (abs(consumed - delta) > .01f) {
-                affected.forEach { rowIndex ->
-                    motions[rowIndex]?.let { motion ->
-                        motion.offset.snapTo(motion.offset.value + consumed - delta)
-                    }
-                }
-            }
-            val row = rows[index]
-            val prior = rows.getOrNull((index - 1).coerceAtLeast(0))
-            val gap = ((row.start - (prior?.end ?: row.start)).coerceAtLeast(0L)) / 1000f
-            val gapAmount = ((gap - .20f) / .55f).coerceIn(0f, 1f)
-            var damping = if (timed) .90f - .12f * gapAmount else .90f
-            var stiffness = if (timed) {
-                val response = .48f + .27f * gapAmount
-                (2f * PI.toFloat() / response).let { it * it }
-            } else 100f
-            val remaining = (row.end - smooth.longValue) / 1000f - .50f
-            if (remaining < .60f) {
-                damping = 1f
-                stiffness = (4.60517f / .30f).let { it * it }
-            } else {
-                val envelope = 4.60517f / (sqrt(stiffness) * damping.coerceIn(.10f, 1f))
-                if (remaining < .80f && envelope - remaining < -.05f) {
+                val row = rows[index]
+                val prior = rows.getOrNull((index - 1).coerceAtLeast(0))
+                val gap = ((row.start - (prior?.end ?: row.start)).coerceAtLeast(0L)) / 1000f
+                val gapAmount = ((gap - .20f) / .55f).coerceIn(0f, 1f)
+                var damping = if (timed) .90f - .12f * gapAmount else .90f
+                var stiffness = if (timed) {
+                    val response = .48f + .27f * gapAmount
+                    (2f * PI.toFloat() / response).let { it * it }
+                } else 100f
+                val remaining = (row.end - smooth.longValue) / 1000f - .50f
+                if (remaining < .60f) {
                     damping = 1f
-                    stiffness = (4.60517f / maxOf(remaining - .40f, .30f)).let { it * it }
-                }
-            }
-            val rowSpring = spring<Float>(dampingRatio = damping, stiffness = stiffness)
-            coroutineScope {
-                motions.toMap().forEach { (rowIndex, motion) ->
-                    val alpha = if (rowIndex == index) .85f else .175f
-                    val scale = if (rowIndex == index) 1f else .98f
-                    if (rowIndex !in affected) {
-                        motion.alpha.snapTo(alpha)
-                        motion.scale.snapTo(scale)
-                        return@forEach
-                    }
-                    val delayMs = if (springEnabled && !listState.isScrollInProgress)
-                        (abs(rowIndex - first) - 1).coerceAtLeast(0) * 50L else 0L
-                    launch { motion.alpha.animateTo(alpha, tween(120, easing = lyricOpacityEasing)) }
-                    launch {
-                        if (delayMs > 0) delay(delayMs)
-                        motion.offset.animateTo(0f,
-                            if (springEnabled) rowSpring else tween(320, easing = FastOutSlowInEasing))
-                    }
-                    launch {
-                        if (delayMs > 0) delay(delayMs)
-                        motion.scale.animateTo(scale,
-                            if (springEnabled) rowSpring else tween(320, easing = FastOutSlowInEasing))
+                    stiffness = (4.60517f / .30f).let { it * it }
+                } else {
+                    val envelope = 4.60517f / (sqrt(stiffness) * damping.coerceIn(.10f, 1f))
+                    if (remaining < .80f && envelope - remaining < -.05f) {
+                        damping = 1f
+                        stiffness = (4.60517f / maxOf(remaining - .40f, .30f)).let { it * it }
                     }
                 }
+                val rowSpring = spring<Float>(dampingRatio = damping, stiffness = stiffness)
+                coroutineScope {
+                    motions.toMap().forEach { (rowIndex, motion) ->
+                        val alpha = if (rowIndex == index) .85f else .175f
+                        val scale = if (rowIndex == index) 1f else .98f
+                        if (rowIndex !in affected) {
+                            motion.alpha.snapTo(alpha)
+                            motion.scale.snapTo(scale)
+                            return@forEach
+                        }
+                        val delayMs = if (springEnabled && !listState.isScrollInProgress)
+                            (abs(rowIndex - first) - 1).coerceAtLeast(0) * 50L else 0L
+                        launch { motion.alpha.animateTo(alpha, tween(120, easing = lyricOpacityEasing)) }
+                        launch {
+                            if (delayMs > 0) delay(delayMs)
+                            motion.offset.animateTo(0f,
+                                if (springEnabled) rowSpring else tween(320, easing = FastOutSlowInEasing))
+                        }
+                        launch {
+                            if (delayMs > 0) delay(delayMs)
+                            motion.scale.animateTo(scale,
+                                if (springEnabled) rowSpring else tween(320, easing = FastOutSlowInEasing))
+                        }
+                    }
+                }
+                previous = index
             }
         }
-        LazyColumn(Modifier.fillMaxSize(), state = listState,
+        LazyColumn(Modifier.fillMaxSize().pointerInput(Unit) {
+            awaitEachGesture {
+                awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                pointerHeld = true
+                try {
+                    do {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                    } while (event.changes.any { it.pressed })
+                } finally { pointerHeld = false }
+            }
+        }, state = listState,
             contentPadding = PaddingValues(vertical = centerPadding),
             verticalArrangement = Arrangement.spacedBy(spacing)) {
             itemsIndexed(rows, key = { index, row -> "lyric_${row.start}_${row.end}_$index" }) { index, row ->
-                val motion = motions.getOrPut(index) { LyricRowMotion(index == active) }
+                // State belongs to the composed row, not a viewport-pruned map.
+                val motion = remember(state.songId, lyrics.revision, index) { LyricRowMotion(index == active) }
+                DisposableEffect(state.songId, lyrics.revision, index, motion) {
+                    motions[index] = motion
+                    onDispose { if (motions[index] === motion) motions.remove(index) }
+                }
                 when (row) {
                     is DisplayLyricRow.Intro -> Md3eLyricIndicator(row, smooth, state.playing,
                         index == active, fontSize, motion, false, null)
