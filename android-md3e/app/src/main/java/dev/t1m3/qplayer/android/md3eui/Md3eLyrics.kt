@@ -488,7 +488,7 @@ private fun Md3eLyricGlyphs(glyphs: List<TimedGlyph>, position: State<Long>,
     weight: FontWeight, idle: Color, active: Color, right: Boolean) {
     if (glyphs.isEmpty()) return
     val lyricTypeface = LyricTypeface
-    val textMeasurer = rememberTextMeasurer(cacheSize = 0)
+    val textMeasurer = rememberTextMeasurer(cacheSize = 16)
     val density = LocalDensity.current
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val widthPx = with(density) { maxWidth.roundToPx() }.coerceAtLeast(1)
@@ -801,16 +801,14 @@ internal fun Md3eLyricDynamicBackdrop(runtime: Md3eRuntime, cover: String,
     }
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
         Box(modifier.background(fallback)) {
-            // Keep the old soft backdrop while halving the large blur kernel on
-            // pre-T devices. The full-screen blur is otherwise one of the
-            // steadiest GPU costs on older Adreno hardware.
             Md3eSoftArtworkBackdrop(cover, Modifier.fillMaxSize(), 64.dp)
             Box(Modifier.fillMaxSize().background(fallback.copy(alpha = if (dark) .39f else .10f)))
         }
         return
     }
+    val context = androidx.compose.ui.platform.LocalContext.current.applicationContext
     val artwork by produceState<Bitmap?>(null, cover) {
-        value = awaitArtwork(artworkRequestSource(cover))
+        value = awaitArtworkBitmap(context, artworkRequestSource(cover))
     }
     val rendering = LocalMd3eRenderingActive.current && !LocalMd3eMotionActive.current &&
         !LocalMd3eReducedEffects.current

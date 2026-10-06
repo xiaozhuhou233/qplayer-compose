@@ -126,23 +126,27 @@ internal fun Md3eCollectionContainer(
         return
     }
     val color = MaterialTheme.colorScheme.background
-    // Keep source bounds registered, but only animate the selected card and detail.
-    val participant = detail || LocalActiveCoverKey.current == key
-    val radius = if (participant) animated.transition.animateDp(
+    val activeKey = LocalActiveCoverKey.current
+    val participant = detail || activeKey == key
+    if (!participant) {
+        Box(modifier) { content() }
+        return
+    }
+    val radius = animated.transition.animateDp(
         transitionSpec = { tween(400, easing = emphasizedDecelerate) },
         label = "collection_corner",
     ) {
         if (detail) { if (it == EnterExitState.Visible) 0.dp else 16.dp }
         else { if (it == EnterExitState.Visible) corner else 0.dp }
-    } else null
-    val contentAlpha = if (participant) animated.transition.animateFloat(
+    }
+    val contentAlpha = animated.transition.animateFloat(
         transitionSpec = {
             if (targetState == EnterExitState.Visible)
                 tween(400, easing = emphasizedDecelerate)
             else tween(120)
         },
         label = "collection_content",
-    ) { if (it == EnterExitState.Visible) 1f else 0f } else null
+    ) { if (it == EnterExitState.Visible) 1f else 0f }
     val collectionState = with(shared) { rememberSharedContentState("collection:$key") }
     // Reuse one path in draw phase; the content reveal uses the actual shared bounds,
     // rather than a separate clock or a full-page scaling/re-measuring animation.
@@ -155,7 +159,7 @@ internal fun Md3eCollectionContainer(
                 layoutDirection: androidx.compose.ui.unit.LayoutDirection,
                 density: androidx.compose.ui.unit.Density,
             ): Path {
-                val r = with(density) { (radius?.value ?: corner).toPx() }
+                val r = with(density) { radius.value.toPx() }
                 clipPath.reset()
                 clipPath.addRoundRect(androidx.compose.ui.geometry.RoundRect(bounds, CornerRadius(r, r)))
                 return clipPath
@@ -172,20 +176,19 @@ internal fun Md3eCollectionContainer(
                 clipInOverlayDuringTransition = overlayClip,
             )
         }.drawBehind {
-            val r = (radius?.value ?: corner).toPx()
+            val r = radius.value.toPx()
             drawRoundRect(color, cornerRadius = CornerRadius(r, r))
         })
         // On return, the incoming card's labels must also render above the shrinking
         // background. Otherwise they stay occluded until the cover lands at 400 ms.
-        val reveal = if (participant) with(shared) {
+        val reveal = with(shared) {
             Modifier.renderInSharedTransitionScopeOverlay(
                 renderInOverlay = { isTransitionActive && collectionState.isMatchFound },
                 zIndexInOverlay = .5f,
                 clipInOverlayDuringTransition = { _, _ -> collectionState.clipPathInOverlay },
             )
-        } else Modifier
-        val opacity = if (contentAlpha == null) Modifier else Modifier.graphicsLayer {
-            // Avoid allocating an offscreen full-screen buffer on the first faded frame.
+        }
+        val opacity = Modifier.graphicsLayer {
             compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.ModulateAlpha
             alpha = contentAlpha.value
         }
