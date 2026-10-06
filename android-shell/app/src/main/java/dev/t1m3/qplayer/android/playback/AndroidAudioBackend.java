@@ -349,6 +349,134 @@ public final class AndroidAudioBackend implements AudioBackend {
      *  equalizer attaches its audiofx chain to this). */
     public volatile java.util.function.IntConsumer audioSessionListener;
 
+    // Ⓜ The listener's EQ（「重新写均衡器」）: the backend owns it, because the
+    // Equalizer must live with the MediaPlayer it attaches to. One instance per
+    // session, created when the player is created and re-applied on prepare;
+    // slider movement only pushes band values, never recreates the effect.
+    private android.media.audiofx.Equalizer listenerEq;
+    private android.media.audiofx.BassBoost listenerBass;
+    private int listenerEqSession = 0;
+    private volatile boolean eqEnabled = false;
+    private volatile int[] eqLevels = new int[0];
+    private volatile int eqBassStrength = 0;
+    private volatile String eqStatus = "均衡器：未启用";
+
+    public void setEqEnabled(boolean on) {
+        eqEnabled = on;
+        applyListenerEq();
+    }
+
+    /** Millibel levels per band; index = band. */
+    public void setEqLevels(int[] levels) {
+        eqLevels = levels != null ? levels.clone() : new int[0];
+        applyListenerEq();
+    }
+
+    public void setEqBassStrength(int strength) {
+        eqBassStrength = Math.max(0, Math.min(1000, strength));
+        applyListenerEq();
+    }
+
+    /** Human-readable attachment state for the editor dialog. */
+    public String eqState() {
+        return eqStatus;
+    }
+
+    /** Band geometry for the editor; defaults when nothing is attached yet. */
+    public int eqBandCount() {
+        synchronized (this) {
+            try { if (listenerEq != null) return listenerEq.getNumberOfBands(); } catch (Throwable ignored) { }
+        }
+        return 5;
+    }
+
+    public int[] eqBandRange() {
+        synchronized (this) {
+            try {
+                if (listenerEq != null) {
+                    short[] range = listenerEq.getBandLevelRange();
+                    return new int[] { range[0], range[1] };
+                }
+            } catch (Throwable ignored) { }
+        }
+        return new int[] { -1500, 1500 };
+    }
+
+    public int[] eqCenterFreqs() {
+        synchronized (this) {
+            try {
+                if (listenerEq != null) {
+                    int bands = listenerEq.getNumberOfBands();
+                    int[] out = new int[bands];
+                    for (int i = 0; i < bands; i++) out[i] = listenerEq.getCenterFreq((short) i);
+                    return out;
+                }
+            } catch (Throwable ignored) { }
+        }
+        return new int[0];
+    }
+
+    private synchronized void applyListenerEq() {
+        if (!eqEnabled || player == null) {
+            releaseListenerEq();
+            eqStatus = eqEnabled ? "均衡器：已启用，等待播放" : "均衡器：未启用";
+            return;
+        }
+        final int session;
+        try {
+            session = player.getAudioSessionId();
+        } catch (Throwable failure) {
+            eqStatus = "均衡器：会话不可用（" + failure + "）";
+            return;
+        }
+        if (listenerEq == null || listenerEqSession != session) {
+            releaseListenerEq();
+            try {
+                listenerEq = new android.media.audiofx.Equalizer(0, session);
+                listenerEqSession = session;
+            } catch (Throwable failure) {
+                eqStatus = "均衡器：挂载失败（" + failure + "）";
+                Logger.warn("eq attach failed on session {}: {}", session, failure.toString());
+                return;
+            }
+        }
+        try {
+            final short bands = listenerEq.getNumberOfBands();
+            final short lower = listenerEq.getBandLevelRange()[0];
+            final short upper = listenerEq.getBandLevelRange()[1];
+            final int[] levels = eqLevels;
+            for (short b = 0; b < bands; b++) {
+                int millibels = b < levels.length ? levels[b] : 0;
+                listenerEq.setBandLevel(b, (short) Math.max(lower, Math.min(upper, millibels)));
+            }
+            listenerEq.setEnabled(true);
+            if (eqBassStrength > 0) {
+                if (listenerBass == null) {
+                    try { listenerBass = new android.media.audiofx.BassBoost(0, session); } catch (Throwable ignored) { }
+                }
+                if (listenerBass != null) {
+                    listenerBass.setStrength((short) eqBassStrength);
+                    listenerBass.setEnabled(true);
+                }
+            } else if (listenerBass != null) {
+                listenerBass.setEnabled(false);
+            }
+            eqStatus = "均衡器：已挂载（" + bands + " 段 " + (lower / 100) + "–" + (upper / 100)
+                    + "dB" + (eqBassStrength > 0 ? "，低音 " + (eqBassStrength * 100 / 1000) + "%" : "") + "）";
+        } catch (Throwable failure) {
+            eqStatus = "均衡器：应用失败（" + failure + "）";
+            Logger.warn("eq apply failed: {}", failure.toString());
+        }
+    }
+
+    private synchronized void releaseListenerEq() {
+        try { if (listenerEq != null) { listenerEq.setEnabled(false); listenerEq.release(); } } catch (Throwable ignored) { }
+        listenerEq = null;
+        try { if (listenerBass != null) { listenerBass.setEnabled(false); listenerBass.release(); } } catch (Throwable ignored) { }
+        listenerBass = null;
+        listenerEqSession = 0;
+    }
+
     /** The live player's audio session id, or 0 when nothing is prepared. */
     public synchronized int currentAudioSessionId() {
         try {
@@ -388,6 +516,8 @@ public final class AndroidAudioBackend implements AudioBackend {
         mp.setOnErrorListener(this::onPlayerError);
         mp.setOnVideoSizeChangedListener(this::onVideoSizeChanged);
         player = mp;
+        // A fresh player means a fresh session for the EQ too.
+        releaseListenerEq();
         // Ⓜ Session observers (the MD3E equalizer re-attaches here): every new
         // MediaPlayer owns a fresh audio session, so the hook fires per track.
         java.util.function.IntConsumer sessionListener = audioSessionListener;
@@ -516,6 +646,8 @@ public final class AndroidAudioBackend implements AudioBackend {
         // media thread. Never let an old source start, publish onStarted, or apply its
         // state to the replacement MediaPlayer after a rapid track switch.
         if (player != preparedPlayer) return;
+        // The session is definitely live now: (re)attach the listener's EQ.
+        applyListenerEq();
         // The surface may have been attached before prepare finished.
         if (videoSurface != null) {
             try { preparedPlayer.setSurface(videoSurface); } catch (Throwable ignored) { }

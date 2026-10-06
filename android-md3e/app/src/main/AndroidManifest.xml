@@ -7,6 +7,14 @@
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Attaching android.media.audiofx.Equalizer/BassBoost to an audio session
+         needs this normal permission; without it the constructor throws and the
+         equalizer silently does nothing. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Attaching android.media.audiofx.Equalizer/BassBoost to an audio session
+         needs this normal permission; without it the constructor throws and the
+         equalizer silently does nothing. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <application android:name="dev.t1m3.qplayer.android.app.QPlayerApplication"
         android:label="QPlayer MD3E" android:theme="@style/Md3eTheme"
         android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:allowBackup="false"

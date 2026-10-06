@@ -1,13 +1,13 @@
-// Ⓜ 2026-10-06: the listener's EQ（「加入 eq 调音和均衡器设置，放到设置中新加一个音效里」）.
-// A device android.media.audiofx.Equalizer (+ BassBoost) attached to the PLAYING
-// audio session; the backend fires a session hook per new MediaPlayer so the chain
-// re-attaches on every track. Band levels live in SettingsCore as a CSV of
-// millibels under "eqBands" (bass strength under "eqBass"), applied and persisted
-// from the editor dialog.
+// Ⓜ 2026-10-06: the listener's EQ, rewritten（「不管用，重新写均衡器」）. The first
+// version attached the effect from a separate helper and recreated it on every
+// slider tick — and, fatally, the APK never declared MODIFY_AUDIO_SETTINGS, so the
+// Equalizer constructor threw and the failure was swallowed. The effect now lives
+// in the audio backend (one instance per player session, created when the player
+// is created and re-applied on prepare), the permission is declared, and this
+// dialog drives it directly and shows the REAL attachment state instead of
+// guessing. Slider movement only pushes band values; nothing is recreated.
 package dev.t1m3.qplayer.android.md3eui
 
-import android.media.audiofx.BassBoost
-import android.media.audiofx.Equalizer
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -17,103 +17,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import dev.t1m3.qplayer.util.Logger
 
-/** Owns the audiofx chain for the MD3E app. One Equalizer (+ BassBoost) on the
- *  live audio session; detached and released whenever the session goes away or
- *  the toggle is off. The transition engine's own low-end hand-over uses its own
- *  instances and is untouched. */
-internal class Md3eEqualizer {
-    private var equalizer: Equalizer? = null
-    private var bass: BassBoost? = null
-
-    var bandCount: Int = 0
-        private set
-    var lowerMillibels: Int = -1500
-        private set
-    var upperMillibels: Int = 1500
-        private set
-    var centerFreqsMilliHz: List<Int> = emptyList()
-        private set
-
-    /** Read the band geometry off a session (the playing one, or the output mix
-     *  as a fallback). Fills the defaults the editor dialog needs even before
-     *  anything plays: 5 bands ±15 dB is what every real device reports, but the
-     *  range is only trusted once a probe succeeds. */
-    @Synchronized
-    fun probe(sessionId: Int): Boolean {
-        if (bandCount > 0) return true
-        return try {
-            val eq = Equalizer(0, sessionId)
-            try {
-                bandCount = eq.numberOfBands.toInt()
-                val range = eq.bandLevelRange
-                lowerMillibels = range[0].toInt()
-                upperMillibels = range[1].toInt()
-                centerFreqsMilliHz = (0 until bandCount).map { eq.getCenterFreq(it.toShort()) }
-            } finally {
-                eq.release()
-            }
-            true
-        } catch (failure: Throwable) {
-            Logger.warn("eq probe failed on session {}: {}", sessionId, failure.toString())
-            false
-        }
-    }
-
-    @Synchronized
-    fun attach(sessionId: Int, levels: List<Int>, bassStrength: Int) {
-        detach()
-        try {
-            val eq = Equalizer(0, sessionId)
-            equalizer = eq
-            val count = eq.numberOfBands.toInt()
-            val lower = eq.bandLevelRange[0].toInt()
-            val upper = eq.bandLevelRange[1].toInt()
-            for (index in 0 until count) {
-                val millibels = levels.getOrNull(index)?.coerceIn(lower, upper) ?: continue
-                eq.setBandLevel(index.toShort(), millibels.toShort())
-            }
-            eq.enabled = true
-            if (bassStrength > 0) {
-                try {
-                    val boost = BassBoost(0, sessionId)
-                    bass = boost
-                    boost.setStrength(bassStrength.coerceIn(0, 1000).toShort())
-                    boost.enabled = true
-                } catch (failure: Throwable) {
-                    Logger.warn("bass boost unavailable: {}", failure.toString())
-                }
-            }
-        } catch (failure: Throwable) {
-            Logger.warn("eq attach failed on session {}: {}", sessionId, failure.toString())
-            detach()
-        }
-    }
-
-    @Synchronized
-    fun detach() {
-        runCatching { equalizer?.enabled = false }
-        runCatching { equalizer?.release() }
-        equalizer = null
-        runCatching { bass?.release() }
-        bass = null
-    }
-}
-
-/** The editor behind 关于/音效/「均衡器调节」: one slider per band (applied live
- *  through the runtime, persisted per change), a bass slider, a reset. */
+/** The editor behind 设置/音效/「均衡器调节」: one slider per band (applied live
+ *  through the backend, persisted per change), a bass slider, a reset — and the
+ *  backend's own attachment state on top, so "not working" is visible. */
 @Composable
 internal fun Md3eEqualizerDialog(runtime: Md3eRuntime, onDismiss: () -> Unit) {
-    val sessionId = runtime.audioBackend.currentAudioSessionId()
-    LaunchedEffect(sessionId) { runtime.equalizer.probe(sessionId) }
-    val bandCount = runtime.equalizer.bandCount.takeIf { it > 0 } ?: 5
-    val lower = runtime.equalizer.lowerMillibels
-    val upper = runtime.equalizer.upperMillibels
-    val centers = runtime.equalizer.centerFreqsMilliHz
-    var levels by remember {
-        mutableStateOf(runtime.eqBandLevels().toMutableList())
-    }
+    val backend = runtime.audioBackend
+    var status by remember { mutableStateOf(backend.eqState()) }
+    val bandCount = backend.eqBandCount()
+    val range = backend.eqBandRange()
+    val lower = range.getOrElse(0) { -1500 }
+    val upper = range.getOrElse(1) { 1500 }
+    val centers = backend.eqCenterFreqs()
+    var levels by remember { mutableStateOf(runtime.eqBandLevels().toMutableList()) }
     var bass by remember { mutableIntStateOf(runtime.eqBassStrength()) }
 
     fun bandLabel(index: Int): String {
@@ -127,6 +44,10 @@ internal fun Md3eEqualizerDialog(runtime: Md3eRuntime, onDismiss: () -> Unit) {
         title = { Text("均衡器") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(status, style = MaterialTheme.typography.bodySmall,
+                    color = if (status.contains("已挂载")) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(10.dp))
                 if (!runtime.settings.bool("eqEnabled")) {
                     Text("均衡器开关当前是关的：滑杆会保存数值，打开「均衡器」开关后生效。",
                         style = MaterialTheme.typography.bodySmall,
@@ -137,28 +58,28 @@ internal fun Md3eEqualizerDialog(runtime: Md3eRuntime, onDismiss: () -> Unit) {
                     val value = (levels.getOrNull(index) ?: 0)
                         .coerceIn(lower, upper).toFloat()
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(bandLabel(index), Modifier.width(52.dp),
+                        Text(bandLabel(index), Modifier.width(56.dp),
                             style = MaterialTheme.typography.labelMedium,
                             textAlign = TextAlign.Center)
                         Slider(
                             value = value,
                             onValueChange = { newValue ->
                                 val millibels = newValue.toInt()
-                                if (index < levels.size) levels[index] = millibels
-                                else while (levels.size <= index) levels.add(0)
-                                if (index < levels.size) levels[index] = millibels
+                                while (levels.size <= index) levels.add(0)
+                                levels[index] = millibels
                                 runtime.setEqBandLevel(index, millibels)
+                                status = backend.eqState()
                             },
                             valueRange = lower.toFloat()..upper.toFloat(),
                             modifier = Modifier.weight(1f))
-                        Text("${value.toInt() / 100.0}dB", Modifier.width(64.dp),
+                        Text("${"%.1f".format(value / 100f)}dB", Modifier.width(56.dp),
                             style = MaterialTheme.typography.labelMedium,
                             textAlign = TextAlign.End)
                     }
                 }
                 Spacer(Modifier.height(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("低音", Modifier.width(52.dp),
+                    Text("低音", Modifier.width(56.dp),
                         style = MaterialTheme.typography.labelMedium,
                         textAlign = TextAlign.Center)
                     Slider(
@@ -166,10 +87,11 @@ internal fun Md3eEqualizerDialog(runtime: Md3eRuntime, onDismiss: () -> Unit) {
                         onValueChange = { newValue ->
                             bass = newValue.toInt()
                             runtime.setEqBass(bass)
+                            status = backend.eqState()
                         },
                         valueRange = 0f..1000f,
                         modifier = Modifier.weight(1f))
-                    Text("${bass * 100 / 1000}%", Modifier.width(64.dp),
+                    Text("${bass * 100 / 1000}%", Modifier.width(56.dp),
                         style = MaterialTheme.typography.labelMedium,
                         textAlign = TextAlign.End)
                 }
@@ -179,6 +101,7 @@ internal fun Md3eEqualizerDialog(runtime: Md3eRuntime, onDismiss: () -> Unit) {
                         runtime.resetEq()
                         levels = mutableListOf()
                         bass = 0
+                        status = backend.eqState()
                     }) { Text("全部归零") }
                 }
             }
