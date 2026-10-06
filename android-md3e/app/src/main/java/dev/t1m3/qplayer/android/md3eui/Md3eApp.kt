@@ -72,6 +72,8 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
         var detailId by rememberSaveable { mutableLongStateOf(0L) }
         var biliFolderTitle by rememberSaveable { mutableStateOf("") }
         var biliAccountOpen by rememberSaveable { mutableStateOf(false) }
+        var recognizeOpen by rememberSaveable { mutableStateOf(false) }
+        var autoBiliQuery by rememberSaveable { mutableStateOf("") }
         var neteaseLoginOpen by rememberSaveable { mutableStateOf(false) }
         LaunchedEffect(runtime.home.loggedIn) {
             if (runtime.home.loggedIn) neteaseLoginOpen = false
@@ -170,6 +172,15 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
             }
         }
         Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+            Md3eRecognizeDialogHost(visible = recognizeOpen,
+                onDismiss = { recognizeOpen = false },
+                onPlayById = { runtime.playById(it) },
+                onBiliSearch = { query ->
+                    recognizeOpen = false
+                    autoBiliQuery = query
+                    detail = ""
+                    tab = "search"
+                })
             Md3ePlayerExpansionHost(
                 expanded = overlay == "player" || (overlay == "queue" && queueFromPlayer),
                 state = playerExpansion,
@@ -277,6 +288,9 @@ when {
                                             onOpenAlbum = runtime::openAlbum,
                                             onOpenArtist = runtime::openArtist,
                                             onPlay = onPlay, modifier = pageModifier,
+                                            recognizeOpen = recognizeOpen, onRecognize = { recognizeOpen = true },
+                                            autoBiliQuery = autoBiliQuery.ifBlank { null },
+                                            onAutoBiliConsumed = { autoBiliQuery = "" },
                                             onOpenPlayer = openVideoPlayer,
                                             onBiliLogin = { biliAccountOpen = true },
                                             onBiliFavorites = { openDetail("biliFolders", 0L) },

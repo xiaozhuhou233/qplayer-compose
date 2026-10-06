@@ -567,6 +567,11 @@ internal class Md3eRuntime private constructor(context: Context) {
         updateSetting("unblock", enabled)
     }
 
+    /** The recognise dialog's 试听/选择: play a candidate by its netease id. */
+    fun playById(id: Long) {
+        controller.playNetease(id)
+    }
+
     fun updateSetting(key: String, value: Any) {
         settings.put(key, value)
         unblockEnabled = settings.bool("unblock")

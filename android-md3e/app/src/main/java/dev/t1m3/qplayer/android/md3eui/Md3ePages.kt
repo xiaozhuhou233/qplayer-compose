@@ -317,9 +317,21 @@ internal fun Md3eSearchPage(state: SearchState, onSearch: (String, String) -> Un
     onLoadMore: () -> Unit, onClearHistory: () -> Unit, onOpenAlbum: (Long) -> Unit,
     onOpenArtist: (Long) -> Unit, onPlay: PlayAction, modifier: Modifier = Modifier,
     onOpenPlayer: () -> Unit = {}, onBiliLogin: () -> Unit = {}, onBiliFavorites: () -> Unit = {},
-    biliLoggedIn: Boolean = false) {
+    biliLoggedIn: Boolean = false, recognizeOpen: Boolean = false, onRecognize: () -> Unit = {},
+    autoBiliQuery: String? = null, onAutoBiliConsumed: () -> Unit = {}) {
     var query by rememberSaveable { mutableStateOf(state.query) }
     var mode by rememberSaveable { mutableStateOf(state.mode) }
+    // Ⓜ The recognise dialog's 「去B站搜索」: land here with the recognised title
+    // already in the B站 tab and searched once.
+    LaunchedEffect(autoBiliQuery) {
+        val term = autoBiliQuery
+        if (!term.isNullOrBlank()) {
+            mode = "bili"
+            query = term
+            onSearch(term, "bili")
+            onAutoBiliConsumed()
+        }
+    }
     val submit = { term: String ->
         query = term
         if (term.isNotBlank()) onSearch(term.trim(), mode)
@@ -344,6 +356,9 @@ internal fun Md3eSearchPage(state: SearchState, onSearch: (String, String) -> Un
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                     keyboardActions = KeyboardActions(onSearch = { submit(query) }))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onRecognize) {
+                        Text("识曲", fontWeight = FontWeight.SemiBold)
+                    }
                     TextButton(onClick = { submit(query) }, enabled = query.isNotBlank()) {
                         Icon(Md3eIcons.Search, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("搜索")
                     }
@@ -388,6 +403,13 @@ internal fun Md3eSearchPage(state: SearchState, onSearch: (String, String) -> Un
                     }
                 }
                 "song" -> {
+                    // Ⓜ The old app's search layout: matching artists first, songs below.
+                    if (state.artists.isNotEmpty()) {
+                        item { ListHeading("歌手", state.artists.size) }
+                        items(state.artists.take(4), key = { "artist-${it.id}" }) { artist ->
+                            ArtistRow(artist) { onOpenArtist(artist.id) }
+                        }
+                    }
                     if (state.songs.isNotEmpty()) item { ListHeading("网易云歌曲", state.songs.size) }
                     itemsIndexed(state.songs, key = { index, song -> "song-$index-${song.id}" }) { index, song ->
                         NeteaseSongRow(song, index + 1) { onPlay { playSearchResult(index) } }
