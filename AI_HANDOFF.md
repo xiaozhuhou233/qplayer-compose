@@ -4764,3 +4764,26 @@ APK 里 `aapt2 dump permissions` 查到 `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`�
 `保后台运行`/`batteryStatus`/`单行紧凑`。**设备离线，未装机实测。**
 两个树现在在 AiClient 上逐位一致；其余功能仍各自保有本树的独有改动（桌面有 Codex 的 B站/蓝牙，
 888a 有识曲/均衡器/Claude 加载动画）。
+
+### 2026-10-07 续（第二轮提速：极简输出 + 低思考档，目标「五秒出结果」）
+
+用户原话：「ai还不够快，继续优化提示词，争取五秒出结果」。**选曲要求一条没动**；动的只有
+「模型要写多少」和「允许它想多久」（`player-core/src/main/java/dev/t1m3/qplayer/ai/AiClient.java`）：
+
+1. **输出格式砍到最简**：`{"name":"…","songs":[["歌名","歌手"],…]}`——数组对代替带键名的对象，
+   没有 summary、没有逐首 reason、单行无空格。输出 token 大致减半，出结果的时间就是输出 token 的时间。
+   `parseResult` 同时接受旧的对象格式（模型给哪种都能落地）。
+2. **max_tokens 按数量推导**（`80 + 40×count`，不再是固定 8192）+ **推理型模型 `reasoning_effort=low`**
+   （它们延迟的最大头），另给 2K 余量兜住隐藏思考（思考溢出 ⇒ JSON 截断 ⇒ 三次重试 = 最慢路径）；
+   网关拒绝该字段时自动去掉重试一次。
+3. **`looksLikeReasoner(model)`**：gpt-5/o1/o3/o4/*thinking*/*reason*/deepseek-r/qwq 命中。
+4. **匹配搜索 10 条**（原 30）+ 匹配到目标数量即停（client 把搜索串行化，每条响应体积都是真实时间）。
+5. **耗时进日志**：`ai playlist: generated N song(s) in X ms — matched M real track(s) in Y ms`
+   （tag `musicplayer`）——下一轮按数字调，不猜。
+
+**验证**：两棵树 player-core 编译绿、聚焦测试 24/24；888a `:app:compileDebugKotlin` 绿、
+桌面 `:app:assembleDebug` 绿。签名 Release：
+`android-build-output/QPlayer-MD3E-AI-Fast5s-KeepAlive-release.apk`（10,676,243 bytes，
+sha256 `d0c0ad39fe9fdf91ace2e4c1e8e540057b23dea485a3faa72469d874e42efd5c`，证书 `dd20d880…`
+与手机上现有版本同源 ⇒ 可覆盖安装）。**未装机实测**（设备离线）。
+**提交**：桌面 `879354b`（只含 AiClient+PlayerController；另一会话 12 个在飞文件原样未动、未推）。
