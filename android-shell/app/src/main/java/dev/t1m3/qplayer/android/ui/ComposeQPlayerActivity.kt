@@ -437,6 +437,36 @@ class ComposeQPlayerActivity : ComponentActivity() {
         settings.registerAction("openRepo") {
             controller.openExternalUrl("https://github.com/TIMER-err/qplayer")
         }
+        // 保后台：与 MD3E 同名 action —— 打开系统的「忽略电池优化」申请对话框。
+        settings.registerInfo("batteryStatus") {
+            if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M) "系统无需设置"
+            else {
+                val power = getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+                if (power != null && power.isIgnoringBatteryOptimizations(packageName)) "已加入电池优化白名单"
+                else "未加入白名单，后台播放可能被系统冻结"
+            }
+        }
+        settings.registerAction("backgroundKeepAlive") {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                val power = getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+                if (power != null && power.isIgnoringBatteryOptimizations(packageName)) {
+                    android.widget.Toast.makeText(this, "已加入电池优化白名单，无需重复申请",
+                        android.widget.Toast.LENGTH_LONG).show()
+                } else {
+                    try {
+                        startActivity(Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                            .setData(android.net.Uri.parse("package:$packageName")))
+                    } catch (ignored: Exception) {
+                        try {
+                            startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                        } catch (ignored2: Exception) {
+                            android.widget.Toast.makeText(this, "系统没有提供电池优化设置页面",
+                                android.widget.Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            }
+        }
         settings.registerInfo("version") { "v${controller.appVersion.peek()}" }
         settings.registerInfo("cacheUsage") { "${controller.cacheSizeMB.peek()} MB" }
         settings.load(PrefsSettingsStore(this), SettingsCatalog.ANDROID)

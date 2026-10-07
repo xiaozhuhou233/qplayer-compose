@@ -4727,3 +4727,40 @@ adb shell "CLASSPATH=/data/local/tmp/probe.jar app_process /system/bin dev.t1m3.
   IosLiquidGlass 维持 01g 参数**——两套材质现在刻意不同：导航栏跟库，其余跟 App 配方。
 - 教训：`git push | tail` 管道吞退出码，push 失败后 && 链照样走——**校验 push 结果要用
   `git push ... && echo OK` 或 `set -o pipefail`**。
+
+---
+
+## 2026-10-07（桌面树合并：保后台申请 + AI 推荐提速）
+
+**来源**：这两处功能先在 ZCode 线的 `C:\Users\xiaoz\.codex\worktrees\888a\qplayer`（`codex/md3e-claude-isolation`）
+做成并发布（tag `md3e-2026-10-07a`，APK sha256 `171dbf55…`），用户随后要求合并进**桌面 SkidTime 树**。
+合并方式：**纯叠加**——只把本轮的新增行插入桌面现有文件，逐文件用锚点字符串定位，
+**没有回退或替换任何 Codex 会话的在飞改动**（`PlayerController.java`、`Md3eRuntime.kt`、`Md3eBili.kt` 等）。
+diff 逐行核对过：相对合并前备份，桌面 `Md3eRuntime.kt` 只多了本轮的 43 行，`PlayerController.java`
+只多了 6 行匹配循环守卫。**未提交、未推送**（桌面 `claude` 落后 `origin/claude` 8 个提交，
+且工作树里混着 Codex 会话未提交的 B站/蓝牙工作——提交策略由用户决定）。
+
+**保后台**（用户原话「像用户发送申请保后台」）：
+- 设置 → 播放 新增「保后台运行」，状态行读 `PowerManager.isIgnoringBatteryOptimizations` 真实结果
+  （`已加入电池优化白名单` / `未加入白名单，后台播放可能被系统冻结`），按钮打开
+  `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`（包名直指本应用）；无此对话框的 ROM 退回
+  `ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS`。
+- 两份清单声明 `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`（与 RECORD_AUDIO 同一个坑：不声明 ⇒ 系统对话框直接被拒）。
+- `Md3eRuntime.onVisible()` 里 `settingsRevision++`，从系统页返回时状态行刷新。
+- 注意桌面 `onVisible()` 里有 Codex 会话新加的 `audioBackend.setVideoForeground(true)`，**合并时原样保留**。
+
+**AI 推荐提速**（「更改提示词，但不要改变要求」）：要求逐条未动（R&B 规则 / 语种自由 / 四项选曲 /
+随机性 / 老歌+新歌 / 短描述也返回 / 歌手名请求 / 只输出 JSON）。改的是：
+① `AiClient` 提示词要求**单行紧凑 JSON**、`reason` 一律空串、**恰好**目标数量（旧文案鼓励多给，
+多给一首就多一次搜索与解析）；② `PlayerController` 匹配循环**达到 `count` 立即 break**（模型多给的
+部分不再逐首搜索 —— `searchSongs` 走 `synchronized eapiCall`，慢在这里）；③ 同一对歌（title|artist）
+去重只搜一次。返回仍是模型顺序的前 `count` 首，`bestAiSongMatch` 阈值未动。
+
+**桌面树验证**：`android-md3e :app:compileDebugKotlin` + `:app:assembleDebug` 绿
+（APK `b4d3710cfd1a836a00297050733e22d5d2d59f101ff3d61233badab34d6e0d57`，14,290,519 bytes）；
+`android-shell :app:compileDebugKotlin` 绿；`mvn -pl player-core test-compile` 绿、
+聚焦测试 22/22 绿（`SettingsCatalogTest`/`SettingsEqualizerTest`/`AiReferenceTest`/`PlaylistMixerTest`）。
+APK 里 `aapt2 dump permissions` 查到 `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`，dex 里查到
+`保后台运行`/`batteryStatus`/`单行紧凑`。**设备离线，未装机实测。**
+两个树现在在 AiClient 上逐位一致；其余功能仍各自保有本树的独有改动（桌面有 Codex 的 B站/蓝牙，
+888a 有识曲/均衡器/Claude 加载动画）。

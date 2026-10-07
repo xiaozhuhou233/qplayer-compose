@@ -1264,7 +1264,17 @@ public final class PlayerController {
     private static final int BILI_FAV_MAX_PAGES = 25;
     /** Signing, search, parts and playurl all go through one client so the wbi key
      *  cache and the login cookies are shared. */
-    private final BiliClient bili = new BiliClient(15000);
+    private final BiliClient bili;
+    private final java.util.concurrent.atomic.AtomicLong biliOpenGeneration =
+            new java.util.concurrent.atomic.AtomicLong();
+    private volatile Track biliRelatedSeed;
+    // A slow recommendation must not hold up opening the next selected video or
+    // the general worker's session/cache writes. Stream resolution stays separate.
+    private final ExecutorService biliQueueWorker = Executors.newFixedThreadPool(2, r -> {
+        Thread thread = new Thread(r, "bili-queue");
+        thread.setDaemon(true);
+        return thread;
+    });
     private final java.util.concurrent.atomic.AtomicLong biliLoginGeneration =
             new java.util.concurrent.atomic.AtomicLong();
     /** Search results from the user-configured custom API source (independent of
@@ -1361,6 +1371,20 @@ public final class PlayerController {
      * continuation can run with the same request, count and provider while the current list is still
      * playing. Cleared whenever a user-started queue takes over (see {@link #setQueueOrigin}).
      */
+    private final AtomicLong aiRequestGeneration = new AtomicLong();
+    private volatile java.util.concurrent.Future<?> aiRequestTask;
+    private volatile boolean awaitingAiConfirmation;
+    private PendingAiPlayback pendingAiPlayback;
+    private static final class PendingAiPlayback {
+        final long generation;
+        final List<NeteaseSong> songs;
+        final AiContinuation continuation;
+        PendingAiPlayback(long generation, List<NeteaseSong> songs, AiContinuation continuation) {
+            this.generation = generation;
+            this.songs = new ArrayList<>(songs);
+            this.continuation = continuation;
+        }
+    }
     private volatile AiContinuation aiContinuation;
     /** True from the instant a continuation is asked for until its batch is behind the queue or the
      *  attempt has failed, so one list can only ever ask for one more. */
@@ -1590,9 +1614,15 @@ public final class PlayerController {
     }
 
     public PlayerController(AudioBackend backend, MetadataReader metadataReader, NeteaseClient netease) {
+        this(backend, metadataReader, netease, new BiliClient(15000));
+    }
+
+    PlayerController(AudioBackend backend, MetadataReader metadataReader,
+                     NeteaseClient netease, BiliClient bili) {
         this.backend = backend;
         this.metadataReader = metadataReader;
         this.netease = netease;
+        this.bili = bili;
         // Surface any netease failure reason (private playlist, risk control, ...) as a
         // toast, same Snackbar the auto-source notice uses. Fires on a worker thread, so
         // hop to the render thread to touch the Property.
@@ -7076,6 +7106,10 @@ public final class PlayerController {
     }
 
     private void playQueue(List<Track> q, int start, long sourcePlaylistId) {
+        final long request = biliOpenGeneration.incrementAndGet();
+        final long selection = coverRevision.get();
+        biliRelatedSeed = null;
+        unshuffledBackup = null;
         privateFmMode = false;
         post(() -> privateFmActive.set(false));
         privateFmGeneration.incrementAndGet();
@@ -7088,7 +7122,9 @@ public final class PlayerController {
         queue.clear();
         queue.addAll(q);
         queueTracks.set(new ArrayList<>(queue));
-        onMain(() -> playAt(start));
+        onMain(() -> {
+            if (isCurrentBiliOpen(request, selection)) playAt(start);
+        });
     }
 
     // Runs on the main thread (via onMain). Updates the plain playIndex synchronously,
@@ -9227,9 +9263,6 @@ public final class PlayerController {
         return t;
     }
 
-    /** Play a B站 video the way the rest of the app expects: its parts become the
-     *  queue, so the media session, notification, position bookkeeping and the queue
-     *  list all treat it as an ordinary track instead of a detour. */
     /** Ⓜ Bumped by every bili play request: a resolve still in flight for an older
      *  generation bails at once instead of holding the single resolveWorker thread
      *  (head-of-line) and racing the newer request. */
@@ -9238,36 +9271,135 @@ public final class PlayerController {
 
     public void playBiliCollection(BiliClient.BiliVideo video) {
         if (video == null || video.bvid == null || video.bvid.isEmpty()) return;
+        final long request = biliOpenGeneration.incrementAndGet();
+        final long selection = coverRevision.get();
+        biliRelatedSeed = null;
         biliResolveGeneration.incrementAndGet();
-        post(() -> { loading.set(true); biliError.set(""); });
-        worker.submit(() -> {
+        post(() -> {
+            if (!isCurrentBiliOpen(request, selection)) return;
+            loading.set(true);
+            biliError.set("");
+        });
+        biliQueueWorker.submit(() -> {
             try {
-                java.util.List<BiliClient.BiliPart> parts = bili.parts(video.bvid);
-                java.util.List<Track> q = new java.util.ArrayList<>();
-                if (parts.isEmpty()) {
-                    q.add(toTrackBili(video, video.cid, video.title));
-                } else {
-                    for (int i = 0; i < parts.size(); i++) {
-                        BiliClient.BiliPart part = parts.get(i);
-                        // An untitled part must not fall back to the video's own title:
-                        // every such part would then be labelled identically, leaving the
-                        // queue rows indistinguishable. P-numbers are what bilibili's own
-                        // player shows for these anyway.
-                        String label = part.title != null && !part.title.isEmpty()
-                                ? part.title : "P" + (i + 1);
-                        Track t = toTrackBili(video, part.cid, label);
-                        if (part.durationSeconds > 0) t.durationMs = part.durationSeconds * 1000L;
-                        q.add(t);
-                    }
+                if (!isCurrentBiliOpen(request, selection)) return;
+                BiliClient.BiliVideoDetails details;
+                boolean verifiedDetails = true;
+                try {
+                    details = bili.videoDetails(video.bvid);
+                } catch (IOException error) {
+                    // Still play if view is temporarily unavailable. Do not assume
+                    // an unknown single-P video has no collection and replace it.
+                    Logger.warn("bili detail lookup failed for {}: {}", video.bvid, error.toString());
+                    details = new BiliClient.BiliVideoDetails();
+                    details.video = video;
+                    details.parts.addAll(bili.parts(video.bvid));
+                    verifiedDetails = false;
                 }
-                onMain(() -> playQueue(q, 0));
+                BiliQueuePlan plan = biliQueuePlan(video, details, verifiedDetails);
+                onMain(() -> {
+                    if (!isCurrentBiliOpen(request, selection)) return;
+                    playQueue(plan.tracks, plan.start);
+                    if (plan.related) {
+                        Track seed = plan.tracks.get(plan.start);
+                        biliRelatedSeed = seed;
+                        loadBiliRelatedQueue(seed);
+                    }
+                });
             } catch (Throwable e) {
                 Logger.warn("bili collection failed for {}: {}", video.bvid, e.getMessage());
                 post(() -> {
+                    if (!isCurrentBiliOpen(request, selection)) return;
                     loading.set(false);
                     String error = e.getMessage() == null ? "B 站视频加载失败" : e.getMessage();
                     biliError.set(error);
                     showToast("B 站视频加载失败：" + error);
+                });
+            }
+        });
+    }
+
+    private boolean isCurrentBiliOpen(long request, long selection) {
+        return biliOpenGeneration.get() == request && coverRevision.get() == selection;
+    }
+
+    private static final class BiliQueuePlan {
+        final List<Track> tracks = new ArrayList<>();
+        int start;
+        boolean related;
+    }
+
+    private BiliQueuePlan biliQueuePlan(BiliClient.BiliVideo selected,
+                                       BiliClient.BiliVideoDetails details, boolean verified) {
+        BiliQueuePlan plan = new BiliQueuePlan();
+        BiliClient.BiliVideo video = details.video;
+        if (video.title.isEmpty()) video.title = selected.title;
+        if (video.author.isEmpty()) video.author = selected.author;
+        if (video.coverUrl.isEmpty()) video.coverUrl = selected.coverUrl;
+        if (details.parts.size() > 1) {
+            for (int i = 0; i < details.parts.size(); i++) {
+                BiliClient.BiliPart part = details.parts.get(i);
+                String label = part.title == null || part.title.isEmpty() ? "P" + (i + 1) : part.title;
+                Track track = toTrackBili(video, part.cid, label);
+                if (part.durationSeconds > 0L) track.durationMs = part.durationSeconds * 1000L;
+                if (selected.cid > 0L && selected.cid == part.cid) plan.start = i;
+                plan.tracks.add(track);
+            }
+        } else if (!details.episodes.isEmpty()) {
+            boolean found = false;
+            for (BiliClient.BiliVideo episode : details.episodes) {
+                if (selected.bvid.equals(episode.bvid)) {
+                    plan.start = plan.tracks.size();
+                    found = true;
+                }
+                plan.tracks.add(toTrackBili(episode, episode.cid, null));
+            }
+            if (!found) {
+                plan.tracks.add(0, toTrackBili(video, video.cid, null));
+                plan.start = 0;
+            }
+        } else {
+            long cid = details.parts.isEmpty() ? video.cid : details.parts.get(0).cid;
+            plan.tracks.add(toTrackBili(video, cid, null));
+            plan.related = verified;
+        }
+        return plan;
+    }
+
+    private void loadBiliRelatedQueue(Track seed) {
+        biliQueueWorker.submit(() -> {
+            if (biliRelatedSeed != seed || !queue.contains(seed)) return;
+            try {
+                List<BiliClient.BiliVideo> related = bili.relatedVideos(seed.biliBvid);
+                onMain(() -> {
+                    synchronized (queueMoveLock) {
+                        if (biliRelatedSeed != seed || !queue.contains(seed)) return;
+                        Set<String> seen = new HashSet<>();
+                        for (Track track : queue) {
+                            if (track.source == Track.Source.BILI) seen.add(track.biliBvid);
+                        }
+                        List<Track> added = new ArrayList<>();
+                        for (BiliClient.BiliVideo video : related) {
+                            if (video == null || video.bvid == null || video.bvid.isEmpty()
+                                    || !seen.add(video.bvid)) continue;
+                            added.add(toTrackBili(video, video.cid, null));
+                        }
+                        queue.addAll(added);
+                        if (unshuffledBackup != null && unshuffledBackup.contains(seed)) {
+                            unshuffledBackup.addAll(added);
+                        }
+                        queueTracks.set(new ArrayList<>(queue));
+                    }
+                    // Append only: the playing stream, progress, pause state and
+                    // any user-added queue rows are retained when the response lands.
+                    worker.submit(this::saveQueue);
+                });
+            } catch (IOException e) {
+                Logger.warn("bili recommendations failed for {}: {}", seed.biliBvid, e.toString());
+                post(() -> {
+                    if (biliRelatedSeed == seed && queue.contains(seed)) {
+                        showToast("相关推荐暂不可用，当前视频可继续播放");
+                    }
                 });
             }
         });
@@ -9284,6 +9416,14 @@ public final class PlayerController {
             try {
                 if (generation != biliResolveGeneration.get()) return;
                 if (!isCurrentTrackRequest(t, expectedCoverRevision)) return;
+                if (t.biliCid <= 0L) {
+                    List<BiliClient.BiliPart> parts = bili.parts(t.biliBvid);
+                    if (parts.isEmpty() || parts.get(0).cid <= 0L) {
+                        throw new IOException("B站视频缺少可播放分P");
+                    }
+                    if (!isCurrentTrackRequest(t, expectedCoverRevision)) return;
+                    t.biliCid = parts.get(0).cid;
+                }
                 String url = bili.progressiveUrl(t.biliBvid, t.biliCid, 64);
                 // Ⓜ Rapid switching hammers the bili web API and trips its rate
                 // limit（「快速切换b站视频就不能播放」）: the first ask then comes back
@@ -9296,7 +9436,11 @@ public final class PlayerController {
                     url = bili.progressiveUrl(t.biliBvid, t.biliCid, 64);
                 }
                 if (url == null) {
-                    onMain(() -> skipUnplayableRequest(t, expectedCoverRevision, "B站取流失败"));
+                    onMain(() -> {
+                        if (generation == biliResolveGeneration.get()) {
+                            skipUnplayableRequest(t, expectedCoverRevision, "B站取流失败");
+                        }
+                    });
                     return;
                 }
                 if (generation != biliResolveGeneration.get()) return;
@@ -9307,6 +9451,7 @@ public final class PlayerController {
                 // thread crash instead of the graceful skip the worker path gets.
                 // It therefore guards itself.
                 onMain(() -> {
+                    if (generation != biliResolveGeneration.get()) return;
                     try {
                         startBiliStream(t, streamUrl, expectedIndex, resumeMs, expectedCoverRevision);
                     } catch (Throwable e) {
@@ -9316,7 +9461,11 @@ public final class PlayerController {
                 });
             } catch (Throwable e) {
                 Logger.warn("bili resolve failed for {}: {}", t.biliBvid, e.getMessage());
-                onMain(() -> skipUnplayableRequest(t, expectedCoverRevision, "B站解析失败"));
+                onMain(() -> {
+                    if (generation == biliResolveGeneration.get()) {
+                        skipUnplayableRequest(t, expectedCoverRevision, "B站解析失败");
+                    }
+                });
             }
         });
     }
@@ -11351,19 +11500,93 @@ public final class PlayerController {
      *   ({@link #appendAiBatch}), which is what lets the music continue without a seam.</li>
      * </ul>
      */
+    /** Generate a preview without replacing or starting the current queue. */
+    public long prepareAiPlaylist(String baseUrl, String apiKey, String model,
+            String request, int count, boolean excludeLiked, boolean forceKnowledge,
+            boolean useLikedPreferences) {
+        generateAiPlaylist(baseUrl, apiKey, model, request, count, true, excludeLiked,
+                false, "", "", forceKnowledge, useLikedPreferences, null, false, true);
+        return aiRequestGeneration.get();
+    }
+
+    /** Consume this dialog's result exactly once, only after its explicit confirmation. */
+    public boolean confirmAiPlaylistPlayback(long generation) {
+        PendingAiPlayback pending = pendingAiPlayback;
+        if (pending == null || pending.generation != generation ||
+                generation != aiRequestGeneration.get() || aiLoading.peek()) return false;
+        pendingAiPlayback = null;
+        awaitingAiConfirmation = false;
+        startAiPlayback(pending.songs, pending.continuation);
+        return true;
+    }
+
+    private void finishAiPlaylist(long generation, List<NeteaseSong> songs, String name,
+            AiContinuation continuation, boolean deferPlayback) {
+        if (generation != aiRequestGeneration.get()) return;
+        aiSongs.set(songs);
+        aiPlaylistName.set(name);
+        if (deferPlayback) pendingAiPlayback = new PendingAiPlayback(generation, songs, continuation);
+        else startAiPlayback(songs, continuation);
+    }
+
+    private void startAiPlayback(List<NeteaseSong> songs, AiContinuation continuation) {
+        playSongList(songs, 0);
+        setQueueOrigin(QueueOrigin.AI);
+        aiContinuation = continuation;
+        aiProgress.set("AI 播放列表已开始播放");
+    }
+
+    /** Cancels the foreground recommendation and invalidates already-posted UI/queue callbacks. */
+    public void cancelAiPlaylistGeneration() {
+        aiRequestGeneration.incrementAndGet();
+        pendingAiPlayback = null;
+        awaitingAiConfirmation = false;
+        java.util.concurrent.Future<?> pending = aiRequestTask;
+        aiRequestTask = null;
+        if (pending != null) pending.cancel(true);
+        aiLoading.set(false);
+        aiProgress.set("已取消");
+        aiError.set("");
+        aiContinuation = null;
+        aiContinuationInFlight = false;
+    }
+
+    private void postAiGeneration(long generation, Runnable action) {
+        post(() -> {
+            if (generation == aiRequestGeneration.get()) action.run();
+        });
+    }
+
     private void generateAiPlaylist(String baseUrl, String apiKey, String model,
             String request, int count, boolean replaceQueue, boolean excludeLiked,
             boolean webSearchEnabled, String webSearchUrl, String webSearchKey,
             boolean forceKnowledge, boolean useLikedPreferences,
             List<Track> oldSongs, boolean append) {
+        generateAiPlaylist(baseUrl, apiKey, model, request, count, replaceQueue, excludeLiked,
+                webSearchEnabled, webSearchUrl, webSearchKey, forceKnowledge, useLikedPreferences,
+                oldSongs, append, false);
+    }
+
+    private void generateAiPlaylist(String baseUrl, String apiKey, String model,
+            String request, int count, boolean replaceQueue, boolean excludeLiked,
+            boolean webSearchEnabled, String webSearchUrl, String webSearchKey,
+            boolean forceKnowledge, boolean useLikedPreferences,
+            List<Track> oldSongs, boolean append, boolean deferPlayback) {
         if (count <= 0 || baseUrl == null || baseUrl.trim().isEmpty()) {
             if (append) aiContinuationInFlight = false;
             return;
         }
+        final long generation = aiRequestGeneration.incrementAndGet();
+        pendingAiPlayback = null;
+        awaitingAiConfirmation = deferPlayback;
+        final java.util.concurrent.Future<?> previousRequest = aiRequestTask;
+        if (previousRequest != null) previousRequest.cancel(true);
         final AiContinuation continuationForAppend = append ? aiContinuation : null;
         aiLoading.set(true); aiError.set(""); aiProgress.set("正在准备 AI 推荐…"); aiSummary.set(""); aiDetails.set("");
-        worker.execute(() -> {
+        aiSongs.set(Collections.emptyList());
+        aiRequestTask = worker.submit(() -> {
             try {
+                if (generation != aiRequestGeneration.get()) return;
                 // Normal requests deliberately do not read local playlists.
                 // The long-press taste shortcut opts into a bounded sample.
                 String text = "";
@@ -11393,7 +11616,7 @@ public final class PlayerController {
                         // Taste analysis is best effort; AI can still respond.
                     }
                 }
-                post(() -> aiProgress.set("正在让 AI 分析音乐风格并生成推荐…"));
+                postAiGeneration(generation, () -> aiProgress.set("正在让 AI 分析音乐风格并生成推荐…"));
                 // Round 35: the listening history is a reference for EVERY generation — the user:
                 // 「推荐歌曲除了当红歌还需要我的历史记录参考」 — and it is a random DRAW of it rather than
                 // its newest page, because the same request must not come back with the same list
@@ -11427,7 +11650,7 @@ public final class PlayerController {
                         if (forceKnowledge) webContext = "[KNOWLEDGE_BASE_FALLBACK] 未提供联网资料，请使用模型内置音乐知识库，必须输出可搜索的真实歌名和歌手。";
                         else throw new IllegalStateException("该问题需要联网搜索，请在设置 > AI 中填写 Tavily Search API Key");
                     } else {
-                        post(() -> aiProgress.set("正在联网查询榜单和热门歌曲…"));
+                        postAiGeneration(generation, () -> aiProgress.set("正在联网查询榜单和热门歌曲…"));
                         try {
                             webContext = new WebSearchClient(webSearchUrl, webSearchKey, 30000)
                                     .search(request, 5);
@@ -11444,6 +11667,7 @@ public final class PlayerController {
                 AiPlaylistResult rec = null;
                 IOException lastAiError = null;
                 for (int attempt = 1; attempt <= 3 && rec == null; attempt++) {
+                    if (generation != aiRequestGeneration.get()) return;
                     try {
                         rec = new AiClient(baseUrl, apiKey, model, 60000)
                                 .generatePlaylist(text, request, count,
@@ -11454,7 +11678,7 @@ public final class PlayerController {
                     } catch (IOException retryable) {
                         lastAiError = retryable;
                         final int retryNo = attempt;
-                        post(() -> aiProgress.set("AI 未返回有效歌曲，正在重试（" + retryNo + "/3）…"));
+                        postAiGeneration(generation, () -> aiProgress.set("AI 未返回有效歌曲，正在重试（" + retryNo + "/3）…"));
                     }
                 }
                 if (rec == null) throw new IllegalStateException(
@@ -11462,14 +11686,24 @@ public final class PlayerController {
                 final AiPlaylistResult finalRec = rec;
                 StringBuilder detail = new StringBuilder();
                 for (AiPlaylistResult.Song x : rec.songs) {
+                    if (generation != aiRequestGeneration.get()) return;
                     detail.append(x.title).append(" — ").append(x.artist);
                     if (x.reason != null && !x.reason.trim().isEmpty()) detail.append("\n  ").append(x.reason);
                     detail.append('\n');
                 }
                 final String finalDetail = detail.toString();
-                post(() -> { aiSummary.set(finalRec.summary == null ? "" : finalRec.summary); aiDetails.set(finalDetail); aiProgress.set("正在通过网易云搜索匹配真实歌曲…"); });
+                postAiGeneration(generation, () -> { aiSummary.set(finalRec.summary == null ? "" : finalRec.summary); aiDetails.set(finalDetail); aiProgress.set("正在通过网易云搜索匹配真实歌曲…"); });
                 List<NeteaseSong> resolved = new ArrayList<>();
+                // 2026-10-07 提速（「大幅度优化 AI 推荐歌曲的速度」）：这段匹配是耗时的大头之一
+                // —— 每首歌一次网易云搜索，而客户端自身的锁会把请求串行化，所以①匹配量达到
+                // 目标数量立即停（模型多给的部分不再逐首搜索），②模型重复的同一对歌只搜一次。
+                // 输出与以前逐位相同：返回的仍是按模型顺序的前 count 首。
+                Set<String> matchedPairs = new HashSet<>();
+                int matchTarget = Math.max(1, count);
                 for (AiPlaylistResult.Song x : rec.songs) {
+                    if (generation != aiRequestGeneration.get()) return;
+                    if (resolved.size() >= matchTarget) break;
+                    if (!matchedPairs.add(normalizeAiText(x.title) + '|' + normalizeAiText(x.artist))) continue;
                     List<NeteaseSong> candidates = netease.searchSongs(x.title + " " + x.artist, 30, 0);
                     NeteaseSong match = bestAiSongMatch(candidates, x.title, x.artist);
                     if (match == null) {
@@ -11488,44 +11722,37 @@ public final class PlayerController {
                 // its tests) for whenever a forced mix is wanted again.
                 final List<NeteaseSong> ordered = resolved;
                 String name = rec.playlistName == null || rec.playlistName.trim().isEmpty() ? "AI 推荐歌单" : rec.playlistName;
+                if (generation != aiRequestGeneration.get()) return;
                 if (append) {
                     // The continuation: behind the list that is playing, never in front of it.
                     final String appendedName = name;
-                    post(() -> appendAiBatchIfCurrent(ordered, appendedName, continuationForAppend));
+                    postAiGeneration(generation, () -> appendAiBatchIfCurrent(ordered, appendedName, continuationForAppend));
                 } else if (!replaceQueue) {
                     long playlistId = netease.createPlaylist(name, false);
                     int added = 0;
                     for (NeteaseSong s : ordered) {
+                        if (generation != aiRequestGeneration.get()) return;
                         if (netease.manipulatePlaylistTracks(playlistId, s.id, true)) added++;
                     }
                     final int totalAdded = added;
-                    post(() -> { aiSongs.set(ordered); aiPlaylistName.set(name);
+                    postAiGeneration(generation, () -> { aiSongs.set(ordered); aiPlaylistName.set(name);
                         if (totalAdded != ordered.size()) aiError.set("歌单已创建，但仅添加 " + totalAdded + "/" + ordered.size() + " 首");
                         loadMyPlaylists();
                     });
                 } else {
-                    post(() -> {
-                        aiSongs.set(ordered);
-                        aiPlaylistName.set(name);
-                        // playQueue() inside this resets the origin to USER (it is what every other
-                        // way of filling the queue does); the tag is re-applied here, and the
-                        // continuation's own request is remembered right beside it.
-                        playSongList(ordered, 0);
-                        setQueueOrigin(QueueOrigin.AI);
-                        aiContinuation = new AiContinuation(baseUrl, apiKey, model, request, count,
-                                excludeLiked);
-                        aiProgress.set("AI 歌单已开始播放：播到倒数第二首会自动续下一张（老歌 + 新歌、中英混排）");
-                    });
+                    postAiGeneration(generation, () -> finishAiPlaylist(generation, ordered, name,
+                            new AiContinuation(baseUrl, apiKey, model, request, count, excludeLiked),
+                            deferPlayback));
                 }
             } catch (Throwable e) {
-                post(() -> {
+                postAiGeneration(generation, () -> {
                     if (!append || aiContinuation == continuationForAppend) {
                         aiError.set(e.getMessage() == null ? "AI 推荐失败" : e.getMessage());
                         aiContinuationInFlight = false;
                     }
                 });
             }
-                finally { post(() -> { aiLoading.set(false); aiProgress.set("处理完成"); }); }
+                finally { postAiGeneration(generation, () -> { aiLoading.set(false); aiProgress.set("处理完成"); }); }
         });
     }
 
@@ -11560,6 +11787,8 @@ public final class PlayerController {
      * the listener choosing their own music.
      */
     private void maybeContinueAiPlaylist() {
+        // A background continuation must not supersede a result awaiting the dialog's Done button.
+        if (awaitingAiConfirmation) return;
         final AiContinuation c = aiContinuation;
         if (c == null || aiContinuationInFlight) return;
         if (queueOriginKind != QueueOrigin.AI) return;
@@ -11979,6 +12208,36 @@ public final class PlayerController {
             cancelFadeAtGain(1f);
             backend.pause();
         }
+        notifyPlayback();
+    }
+
+    /** An output disappearing must not fade audible sound through the replacement
+     *  speaker. Cancel any pending fade/focus resume and pause even if a regular
+     *  pause is already fading out or the backend is still preparing. Repeated
+     *  noisy/device-removal signals are pause commands, never playback toggles. */
+    public void mediaPauseForDisconnectedOutput() {
+        biliOpenGeneration.incrementAndGet();
+        backend.cancelAutoResume();
+        playingIntent = false;
+        final long pausedRevision;
+        synchronized (queueMoveLock) {
+            // A URL resolution can finish after the device disappears. Invalidate
+            // that request; the user's next resume reopens the selected track.
+            if (!playbackStarted && currentTrack() != null) {
+                needsReplay = true;
+                pausedRevision = coverRevision.incrementAndGet();
+            } else {
+                pausedRevision = coverRevision.get();
+            }
+        }
+        cancelFadeAtGain(0f);
+        backend.pause();
+        post(() -> {
+            if (coverRevision.get() == pausedRevision && !playingIntent) {
+                playing.set(false);
+                loading.set(false);
+            }
+        });
         notifyPlayback();
     }
 
@@ -13169,6 +13428,9 @@ public final class PlayerController {
     }
 
     public void shutdown() {
+        biliOpenGeneration.incrementAndGet();
+        biliRelatedSeed = null;
+        biliQueueWorker.shutdownNow();
         cancelQrLogin();
         cancelBiliLogin();
         // Capture the final position before release() tears down the backend (a
