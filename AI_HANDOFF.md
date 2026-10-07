@@ -4775,3 +4775,31 @@ adb shell "CLASSPATH=/data/local/tmp/probe.jar app_process /system/bin dev.t1m3.
 
 **未做 / 待验**：设备离线，**保后台与提速都未装机实测**——申请对话框的实机路径、以及「同样描述出结果
 快多少」都要用户回报。若某 ROM 拒绝申请，状态行会留着「未加入白名单」并可在系统设置里手动加。
+
+### 2026-10-07 续（第二轮提速：极简输出 + 低思考档，目标「五秒出结果」）
+
+用户原话：「ai还不够快，继续优化提示词，争取五秒出结果」。**选曲要求一条没动**；动的只有
+「模型要写多少」和「允许它想多久」：
+
+1. **输出格式砍到最简**：`{"name":"…","songs":[["歌名","歌手"],…]}`——数组对代替带键名的对象，
+   没有 summary、没有逐首 reason、单行无空格。输出 token 大致减半，而**出结果的时间就是输出
+   token 的时间**。解析器（`AiClient.parseResult`）同时接受旧的对象格式，模型给哪种都能落地。
+2. **max_tokens 按数量推导**（不再是固定 8192）+ **推理型模型 `reasoning_effort=low`**（这是它们
+   延迟的最大头），另给 2K 余量兜住隐藏思考（思考溢出 ⇒ JSON 截断 ⇒ 三次重试，那是最慢路径）。
+   网关拒绝该字段时自动去掉重试一次（`chat(...)` 的重载里）。
+3. **`looksLikeReasoner(model)`**：gpt-5/o1/o3/o4/*thinking*/*reason*/deepseek-r/qwq 命中。
+4. **匹配搜索 10 条**（原 30）：网易云客户端把搜索串行化，每条响应的体积都是真实时间；
+   匹配到目标数量即停的逻辑（第一轮加的）保留。
+5. **耗时进日志**：`ai playlist: generated N song(s) in X ms — matched M real track(s) in Y ms`
+   （tag `musicplayer`）。下一轮按这份数字调，不再猜。
+
+**验证**：两棵树 `player-core` 编译绿；聚焦测试 24/24（`AiReferenceTest`/`PlaylistMixerTest`/
+`SettingsCatalogTest`/`SettingsEqualizerTest`）；888a `:app:compileDebugKotlin` 绿、桌面
+`:app:assembleDebug` 绿。签名 Release 已出：
+`android-build-output/QPlayer-MD3E-AI-Fast5s-KeepAlive-release.apk`（10,676,243 bytes，
+sha256 `d0c0ad39fe9fdf91ace2e4c1e8e540057b23dea485a3faa72469d874e42efd5c`，签名证书
+`dd20d880…` 与用户手机上现有版本同源 ⇒ 可直接覆盖安装）。dex 里核对到 `reasoning_effort`、
+`保后台运行`、`歌单名(不超过10个字)`。**未装机实测**（设备离线）。
+
+**提交**：888a `980ced7`（已推）；桌面树 `879354b`（**只提交 AiClient+PlayerController**，
+另一会话的 12 个在飞文件原样未动；桌面 `claude` 仍落后 `origin/claude`，未推）。
