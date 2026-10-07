@@ -4727,3 +4727,51 @@ adb shell "CLASSPATH=/data/local/tmp/probe.jar app_process /system/bin dev.t1m3.
   IosLiquidGlass 维持 01g 参数**——两套材质现在刻意不同：导航栏跟库，其余跟 App 配方。
 - 教训：`git push | tail` 管道吞退出码，push 失败后 && 链照样走——**校验 push 结果要用
   `git push ... && echo OK` 或 `set -o pipefail`**。
+
+---
+
+## 2026-10-07（MD3E 2026-10-07a：保后台申请 + AI 推荐提速）
+
+**分工背景**：本轮与一个 Codex 会话并行——它在**桌面仓库**（`claude` 分支）改 B站后台只解码音频 +
+蓝牙断开暂停（未提交的 `AndroidAudioBackend`/`PlaybackService`/`Md3eRuntime` 等改动就是它留的）。本轮所有
+改动都在 **`C:\Users\xiaoz\.codex\worktrees\888a\qplayer`（`codex/md3e-claude-isolation`）**，避开它正在动的文件；
+打 tag 前按规矩查过 `git ls-remote --tags`（10-07 无占用）。
+
+**发布**：tag `md3e-2026-10-07a`（= `abfa0e1`），APK **14,515,454 bytes**、sha256
+`171dbf550bf9afa4d489383360b00bfa4e3117f48e105d044c63799d54171867`（`gh` 输出与本地逐位一致）。
+**在提交状态上重编译过**（`assembleDebug` 36s，hash 与提交前一致 ⇒ tag 与 APK 同源）。
+提交链：`d249b9b`（本轮功能）+ `9fbdbc5`（工作区快照：上一轮 MD3E UI/Claude AI DJ/一次性动效等已在树里、
+且已在 APK 里的改动）+ `abfa0e1`（BiliClient 流修复与测试）。**源码树现在干净**（只剩脚本/文档类未跟踪文件）。
+
+### 保后台（用户原话：「像用户发送申请保后台」）
+
+- 设置 → 播放 新增一行 **「保后台运行」**（`SettingSpec.action("backgroundKeepAlive", PLAYBACK, …)`，
+  `.provider("batteryStatus").inlineProvider()`）：状态行读 `PowerManager.isIgnoringBatteryOptimizations`
+  的真实结果（`已加入电池优化白名单` / `未加入白名单，后台播放可能被系统冻结`），按钮打开
+  `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`（包名直指本 app）；无此对话框的 ROM 退回
+  `ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS`。
+- 两份清单声明 `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`（**与 RECORD_AUDIO 同一个坑：不声明 ⇒ 系统对话框
+  直接被拒**）。MD3E 的 `Md3eRuntime` 与旧 app 的 `ComposeQPlayerActivity` 都注册了同名 action/info。
+- `Md3eRuntime.onVisible()` 里 `settingsRevision++`：从系统页返回时状态行会刷新。
+- 顺带清掉 MD3E 清单里 **重复声明两次的 `MODIFY_AUDIO_SETTINGS`**（旧一轮留下的，`processDebugMainManifest`
+  之前一直在警告）。
+
+### AI 推荐提速（用户原话：「大幅度优化 ai 推荐歌曲的速度更改提示词，但不要改变要求」）
+
+**要求一条没动**（R&B 规则 / 语种自由 / 四项选曲 / 随机性 / 老歌+新歌 / 短描述也返回 / 歌手名请求 /
+只输出 JSON）。改的只有输出形状与流程：
+
+1. `AiClient.generatePlaylist` 的 system+user 提示词重写：**单行紧凑 JSON**、`reason` 一律空串、
+   **恰好**目标数量（旧文案鼓励「尽量返回 15 首以上」，多给一首就多一次搜索与解析）、措辞去重后的更短文本。
+2. `PlayerController.generateAiPlaylist` 的匹配循环：**达到 `count` 立即 break**（模型多给的部分不再逐首
+   网易云搜索——`searchSongs` 走 `synchronized eapiCall`，慢的是这里）；`normalizeAiText(title)|artist`
+   去重，模型重复的同一对歌只搜一次。
+3. 输出与以前逐位相同：返回的仍是**模型顺序的前 count 首**，`bestAiSongMatch` 阈值一字未改。
+
+**验证**：`md3e :app:compileDebugKotlin` 与 `:app:assembleDebug` 绿；`android-shell :app:compileDebugKotlin` 绿；
+`player-core` 聚焦测试 25/25 绿（`SettingsCatalogTest`/`SettingsEqualizerTest`/`SettingsComposeFontsTest`/
+`AiReferenceTest`/`PlaylistMixerTest`）。APK 里用 `aapt2 dump permissions` + dex `strings` 核对过新权限
+（`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`）与新入口（`保后台运行`/`batteryStatus`）。
+
+**未做 / 待验**：设备离线，**保后台与提速都未装机实测**——申请对话框的实机路径、以及「同样描述出结果
+快多少」都要用户回报。若某 ROM 拒绝申请，状态行会留着「未加入白名单」并可在系统设置里手动加。
