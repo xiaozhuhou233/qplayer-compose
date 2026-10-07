@@ -11554,6 +11554,7 @@ public final class PlayerController {
                         }
                     }
                 }
+                long genStart = System.currentTimeMillis();
                 AiPlaylistResult rec = null;
                 IOException lastAiError = null;
                 for (int attempt = 1; attempt <= 3 && rec == null; attempt++) {
@@ -11583,6 +11584,7 @@ public final class PlayerController {
                 }
                 final String finalDetail = detail.toString();
                 postAiGeneration(generation, () -> { aiSummary.set(finalRec.summary == null ? "" : finalRec.summary); aiDetails.set(finalDetail); aiProgress.set("正在通过网易云搜索匹配真实歌曲…"); });
+                long matchedStart = System.currentTimeMillis();
                 List<NeteaseSong> resolved = new ArrayList<>();
                 // 2026-10-07 提速（「大幅度优化 AI 推荐歌曲的速度」）：这段匹配是耗时的大头之一
                 // —— 每首歌一次网易云搜索，而客户端自身的锁会把请求串行化，所以①匹配量达到
@@ -11594,17 +11596,23 @@ public final class PlayerController {
                     if (generation != aiRequestGeneration.get()) return;
                     if (resolved.size() >= matchTarget) break;
                     if (!matchedPairs.add(normalizeAiText(x.title) + '|' + normalizeAiText(x.artist))) continue;
-                    List<NeteaseSong> candidates = netease.searchSongs(x.title + " " + x.artist, 30, 0);
+                    // 10 条足够找出正确匹配，而客户端把搜索串行化，每条都要付
+                    // 网络 + 解析的成本（30 条的那份响应明显更大）。
+                    List<NeteaseSong> candidates = netease.searchSongs(x.title + " " + x.artist, 10, 0);
                     NeteaseSong match = bestAiSongMatch(candidates, x.title, x.artist);
                     if (match == null) {
                         // Artist spelling and collaboration separators vary a
                         // lot between AI output and NetEase search metadata.
-                        candidates = netease.searchSongs(x.title, 30, 0);
+                        candidates = netease.searchSongs(x.title, 10, 0);
                         match = bestAiSongMatch(candidates, x.title, x.artist);
                     }
                     if (match != null && !(excludeLiked && likedIds.contains(match.id))
                             && !containsId(resolved, match.id)) resolved.add(match);
                 }
+                // 耗时拆分进日志（用户按「秒」验收，下一轮据此再砍）。
+                Logger.info("ai playlist: generated {} song(s) in {} ms — matched {} real track(s) in {} ms",
+                        rec.songs.size(), matchedStart - genStart, resolved.size(),
+                        System.currentTimeMillis() - matchedStart);
                 if (resolved.isEmpty()) throw new IllegalStateException("网易云未找到推荐歌曲");
                 // ⚠️ Round 35 REMOVED the interleave step that round 34 put here — the user:
                 // 「也不用非要是中英文穿插」. The prompt still asks for a natural mix, but the order the
