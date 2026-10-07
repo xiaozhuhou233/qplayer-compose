@@ -27,6 +27,130 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class PlayerControllerPlaybackTest {
+    @Test
+    public void aiPreviewKeepsCurrentQueueUntilConfirmedAndCannotStartTwice() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        PlayerController controller = null;
+        try {
+            Path base = temporaryFolder.newFolder("ai-confirm").toPath();
+            AppDirs.setBase(base.toString());
+            AppDirs.setCacheBase(base.resolve("cache").toString());
+            FakeAudioBackend backend = new FakeAudioBackend();
+            controller = new PlayerController(backend, track -> { }, NeteaseClient.INSTANCE);
+            java.util.Queue<Runnable> main = new java.util.concurrent.ConcurrentLinkedQueue<>();
+            controller.setMainExecutor(main::add);
+            java.lang.reflect.Method playQueue = PlayerController.class.getDeclaredMethod(
+                    "playQueue", java.util.List.class, int.class);
+            playQueue.setAccessible(true);
+            Track current = new Track();
+            current.title = "current music";
+            current.filePath = base.resolve("current.mp3").toString();
+            playQueue.invoke(controller, java.util.Collections.singletonList(current), 0);
+            main.remove().run();
+            assertEquals(1, backend.playCalls);
+
+            java.lang.reflect.Field generationField = PlayerController.class.getDeclaredField("aiRequestGeneration");
+            generationField.setAccessible(true);
+            java.util.concurrent.atomic.AtomicLong generation =
+                    (java.util.concurrent.atomic.AtomicLong) generationField.get(controller);
+            long request = generation.incrementAndGet();
+            Class<?> continuationClass = Class.forName(PlayerController.class.getName() + "$AiContinuation");
+            java.lang.reflect.Constructor<?> constructor = continuationClass.getDeclaredConstructor(
+                    String.class, String.class, String.class, String.class, int.class, boolean.class);
+            constructor.setAccessible(true);
+            Object continuation = constructor.newInstance("https://example.invalid", "", "model", "request", 10, false);
+            java.lang.reflect.Method finish = PlayerController.class.getDeclaredMethod("finishAiPlaylist",
+                    long.class, java.util.List.class, String.class, continuationClass, boolean.class);
+            finish.setAccessible(true);
+            NeteaseSong song = new NeteaseSong();
+            song.id = 456L;
+            song.name = "preview song";
+            controller.aiLoading.set(false);
+            finish.invoke(controller, request, java.util.Collections.singletonList(song), "preview", continuation, true);
+            assertEquals(456L, controller.aiSongs.peek().get(0).id);
+            assertEquals(current, controller.queueTracks.peek().get(0));
+            assertEquals(1, backend.playCalls);
+            assertFalse(controller.confirmAiPlaylistPlayback(request - 1));
+            int pendingBeforeConfirmation = main.size();
+            assertTrue(controller.confirmAiPlaylistPlayback(request));
+            assertEquals(456L, controller.queueTracks.peek().get(0).neteaseId);
+            assertEquals(pendingBeforeConfirmation + 1, main.size());
+            assertFalse(controller.confirmAiPlaylistPlayback(request));
+            assertEquals(pendingBeforeConfirmation + 1, main.size());
+            java.lang.reflect.Field remembered = PlayerController.class.getDeclaredField("aiContinuation");
+            remembered.setAccessible(true);
+            assertEquals(continuation, remembered.get(controller));
+
+            // Cancelling a displayed result (including during text reveal) invalidates it.
+            request = generation.incrementAndGet();
+            finish.invoke(controller, request, java.util.Collections.singletonList(song), "cancelled", continuation, true);
+            controller.cancelAiPlaylistGeneration();
+            assertFalse(controller.confirmAiPlaylistPlayback(request));
+            // A late response from that request must not publish another playable preview.
+            finish.invoke(controller, request, java.util.Collections.singletonList(song), "stale", continuation, true);
+            assertFalse(controller.confirmAiPlaylistPlayback(request));
+        } finally {
+            if (controller != null) controller.shutdown();
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
+
+    @Test
+    public void cancelledAiCallbacksCannotReplaceQueueOrFinishANewerRequest() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        PlayerController controller = null;
+        try {
+            Path base = temporaryFolder.newFolder("ai-cancel").toPath();
+            AppDirs.setBase(base.toString());
+            AppDirs.setCacheBase(base.resolve("cache").toString());
+            controller = new PlayerController(new FakeAudioBackend(), track -> { }, NeteaseClient.INSTANCE);
+            java.lang.reflect.Field pendingUi = PlayerController.class.getDeclaredField("uiQueue");
+            pendingUi.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            java.util.Queue<Runnable> main = (java.util.Queue<Runnable>) pendingUi.get(controller);
+            main.clear();
+            java.lang.reflect.Field generation = PlayerController.class.getDeclaredField("aiRequestGeneration");
+            generation.setAccessible(true);
+            java.util.concurrent.atomic.AtomicLong token = (java.util.concurrent.atomic.AtomicLong) generation.get(controller);
+            java.lang.reflect.Method post = PlayerController.class.getDeclaredMethod("postAiGeneration", long.class, Runnable.class);
+            post.setAccessible(true);
+            java.lang.reflect.Field taskField = PlayerController.class.getDeclaredField("aiRequestTask");
+            taskField.setAccessible(true);
+            java.util.concurrent.FutureTask<Void> request = new java.util.concurrent.FutureTask<>(() -> null);
+            taskField.set(controller, request);
+            controller.aiLoading.set(true);
+            java.util.concurrent.atomic.AtomicInteger queueWrites = new java.util.concurrent.atomic.AtomicInteger();
+            final PlayerController current = controller;
+            post.invoke(controller, token.get(), (Runnable) queueWrites::incrementAndGet);
+            post.invoke(controller, token.get(), (Runnable) () -> {
+                current.aiLoading.set(false);
+                current.aiError.set("obsolete failure");
+            });
+            controller.cancelAiPlaylistGeneration();
+            assertFalse(controller.aiLoading.peek());
+            assertTrue(request.isCancelled());
+            // A fresh request can start before the old network response is drained.
+            token.incrementAndGet();
+            controller.aiLoading.set(true);
+            while (!main.isEmpty()) main.remove().run();
+            assertEquals(0, queueWrites.get());
+            assertTrue(controller.aiLoading.peek());
+            assertEquals("", controller.aiError.peek());
+            post.invoke(controller, token.get(), (Runnable) queueWrites::incrementAndGet);
+            main.remove().run();
+            assertEquals(1, queueWrites.get());
+        } finally {
+            if (controller != null) controller.shutdown();
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
+
 
     private static final long ASYNC_FADE_TIMEOUT_MS = 3000L;
 
@@ -322,6 +446,105 @@ public class PlayerControllerPlaybackTest {
 
             waitForVolume(backend, 0.8f, ASYNC_FADE_TIMEOUT_MS);
             assertEquals(resumesBeforeMediaCommand + 1, backend.resumeCalls);
+        } finally {
+            if (controller != null) controller.shutdown();
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
+    @Test
+    public void disconnectedOutputStopsAnInFlightPauseFadeAndWaitsForManualResume() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        PlayerController controller = null;
+        try {
+            Path base = temporaryFolder.newFolder("output-disconnect").toPath();
+            AppDirs.setBase(base.toString());
+            AppDirs.setCacheBase(base.resolve("cache").toString());
+            String queue = "{\"playIndex\":0,\"positionMs\":0,\"playMode\":0,\"tracks\":["
+                    + "{\"source\":\"LOCAL\",\"title\":\"track\",\"durationMs\":120000,\"filePath\":\"track.mp3\"}]}";
+            Files.write(base.resolve("queue.json"), queue.getBytes(StandardCharsets.UTF_8));
+            FakeAudioBackend backend = new FakeAudioBackend();
+            controller = new PlayerController(backend, track -> { }, NeteaseClient.INSTANCE);
+            controller.setFadeEnabled(true);
+            controller.playQueueIndex(0);
+            backend.fireStarted();
+            waitForVolume(backend, 0.8f, ASYNC_FADE_TIMEOUT_MS);
+
+            // A normal pause flips intent before the backend has stopped. Output
+            // removal must still silence/pause it immediately, without that guard.
+            controller.mediaPause();
+            assertFalse(controller.isPlaying());
+            assertTrue(backend.playing);
+            int pauses = backend.pauseCalls;
+            int resumes = backend.resumeCalls;
+            int autoResumesCancelled = backend.cancelAutoResumeCalls;
+            controller.mediaPauseForDisconnectedOutput();
+            assertFalse(backend.playing);
+            assertFalse(controller.isPlaying());
+            assertEquals(pauses + 1, backend.pauseCalls);
+            assertEquals(0f, backend.volume, 0.001f);
+
+            // Bluetooth removal and noisy broadcasts can both arrive for one
+            // disconnect, including after focus has already paused the backend.
+            controller.mediaPauseForDisconnectedOutput();
+            assertFalse(backend.playing);
+            assertEquals(resumes, backend.resumeCalls);
+            assertEquals(autoResumesCancelled + 2, backend.cancelAutoResumeCalls);
+
+            controller.mediaResume();
+            assertTrue(controller.isPlaying());
+            assertTrue(backend.playing);
+            waitForVolume(backend, 0.8f, ASYNC_FADE_TIMEOUT_MS);
+            // The superseded 900 ms pause must not land after the manual resume.
+            Thread.sleep(1000L);
+            assertTrue(backend.playing);
+            assertEquals(pauses + 2, backend.pauseCalls);
+            assertEquals(resumes + 1, backend.resumeCalls);
+        } finally {
+            if (controller != null) controller.shutdown();
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
+    @Test
+    public void disconnectedOutputRejectsALateBiliResolutionUntilManualResume() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        PlayerController controller = null;
+        try {
+            Path base = temporaryFolder.newFolder("output-disconnect-resolving").toPath();
+            AppDirs.setBase(base.toString());
+            AppDirs.setCacheBase(base.resolve("cache").toString());
+            String queue = "{\"playIndex\":0,\"positionMs\":0,\"playMode\":0,\"tracks\":["
+                    + "{\"source\":\"LOCAL\",\"title\":\"track\",\"durationMs\":120000,\"filePath\":\"track.mp3\"}]}";
+            Files.write(base.resolve("queue.json"), queue.getBytes(StandardCharsets.UTF_8));
+            FakeAudioBackend backend = new FakeAudioBackend();
+            controller = new PlayerController(backend, track -> { }, NeteaseClient.INSTANCE);
+            controller.playQueueIndex(0);
+            // No onStarted yet: the source is still resolving/preparing.
+            Track track = controller.currentTrack();
+            java.lang.reflect.Field revisionField = PlayerController.class.getDeclaredField("coverRevision");
+            revisionField.setAccessible(true);
+            long oldRequest = ((java.util.concurrent.atomic.AtomicLong) revisionField.get(controller)).get();
+            int plays = backend.playCalls;
+            controller.mediaPauseForDisconnectedOutput();
+            assertFalse(backend.playing);
+
+            java.lang.reflect.Method resolved = PlayerController.class.getDeclaredMethod("startBiliStream",
+                    Track.class, String.class, int.class, long.class, long.class);
+            resolved.setAccessible(true);
+            resolved.invoke(controller, track, "https://example.invalid/stale-bili.mp4", 0, 0L, oldRequest);
+            assertEquals(plays, backend.playCalls);
+            assertFalse(controller.isPlaying());
+
+            controller.mediaResume();
+            assertEquals(plays + 1, backend.playCalls);
+            assertTrue(backend.playing);
+            backend.fireStarted();
+            assertTrue(controller.isPlaying());
         } finally {
             if (controller != null) controller.shutdown();
             AppDirs.setBase(oldBase);
@@ -1113,6 +1336,7 @@ public class PlayerControllerPlaybackTest {
         volatile int playCalls;
         volatile int pauseCalls;
         volatile int resumeCalls;
+        volatile int cancelAutoResumeCalls;
         volatile boolean playing;
         long position;
         Runnable onStarted;
@@ -1136,6 +1360,7 @@ public class PlayerControllerPlaybackTest {
         }
 
         @Override public void pause() { pauseCalls++; playing = false; }
+        @Override public void cancelAutoResume() { cancelAutoResumeCalls++; }
 
         @Override public void resume() {
             resumeCalls++;

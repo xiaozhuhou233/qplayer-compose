@@ -4,6 +4,8 @@ import android.os.Build
 import android.graphics.Color as AndroidColor
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.EnterExitState
+import androidx.compose.animation.core.animateDp
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.ExperimentalSharedTransitionApi
@@ -97,6 +99,13 @@ internal fun Modifier.md3eSharedCollection(key: String, corner: Dp = 0.dp): Modi
     val animated = LocalPageAnimatedScope.current
     val enabled = !LocalLowSpecMode.current && LocalActiveCoverKey.current == key &&
         shared != null && animated != null
+    val animatedCorner = if (enabled) {
+        val radius by animated!!.transition.animateDp(
+            transitionSpec = { tween(400, easing = emphasizedDecelerate) },
+            label = "collection_corner",
+        ) { if (it == EnterExitState.Visible) corner else 0.dp }
+        radius
+    } else corner
     val container = if (enabled) with(shared!!) {
         sharedBounds(
             sharedContentState = rememberSharedContentState("collection:$key"),
@@ -105,11 +114,11 @@ internal fun Modifier.md3eSharedCollection(key: String, corner: Dp = 0.dp): Modi
             enter = fadeIn(tween(180, delayMillis = 100)),
             exit = fadeOut(tween(140)),
             resizeMode = SharedTransitionScope.ResizeMode.ScaleToBounds(),
-            clipInOverlayDuringTransition = OverlayClip(RoundedCornerShape(corner)),
+            clipInOverlayDuringTransition = OverlayClip(RoundedCornerShape(animatedCorner)),
             zIndexInOverlay = 0f,
         )
     } else Modifier
-    return this.then(container).background(MaterialTheme.colorScheme.background, RoundedCornerShape(corner))
+    return this.then(container).background(MaterialTheme.colorScheme.background, RoundedCornerShape(animatedCorner))
 }
 
 internal object Md3eMotion {

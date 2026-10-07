@@ -85,6 +85,7 @@ internal val Md3eLowSpecMode get() = LocalLowSpecMode
 @Composable
 internal fun Modifier.md3eSharedCover(key: String): Modifier {
     if (LocalLowSpecMode.current) return this
+    val claude = LocalClaudeDesign.current
     val shared = LocalPageSharedScope.current ?: return this
     val animated = LocalPageAnimatedScope.current ?: return this
     return with(shared) {
@@ -98,7 +99,7 @@ internal fun Modifier.md3eSharedCover(key: String): Modifier {
             resizeMode = SharedTransitionScope.ResizeMode.ScaleToBounds(
                 androidx.compose.ui.layout.ContentScale.Crop),
             animatedVisibilityScope = animated,
-            boundsTransform = { _, _ -> tween(400, easing = emphasizedDecelerate) },
+            boundsTransform = { _, _ -> tween(if (claude) ClaudeOneTake.COLLECTION else 400, easing = if (claude) ClaudeOneTake.ExpoOut else emphasizedDecelerate) },
             zIndexInOverlay = 1f,
         ).graphicsLayer {
             // Only the incoming endpoint paints the matched image. Both endpoint
@@ -119,6 +120,7 @@ internal fun Md3eCollectionContainer(
     detail: Boolean = false,
     content: @Composable () -> Unit,
 ) {
+    val claude = LocalClaudeDesign.current
     val shared = LocalPageSharedScope.current
     val animated = LocalPageAnimatedScope.current
     if (key == null || LocalLowSpecMode.current || shared == null || animated == null) {
@@ -133,7 +135,7 @@ internal fun Md3eCollectionContainer(
         return
     }
     val radius = animated.transition.animateDp(
-        transitionSpec = { tween(400, easing = emphasizedDecelerate) },
+        transitionSpec = { tween(if (claude) ClaudeOneTake.COLLECTION else 400, easing = if (claude) ClaudeOneTake.ExpoOut else emphasizedDecelerate) },
         label = "collection_corner",
     ) {
         if (detail) { if (it == EnterExitState.Visible) 0.dp else 16.dp }
@@ -142,7 +144,7 @@ internal fun Md3eCollectionContainer(
     val contentAlpha = animated.transition.animateFloat(
         transitionSpec = {
             if (targetState == EnterExitState.Visible)
-                tween(400, easing = emphasizedDecelerate)
+                tween(if (claude) ClaudeOneTake.COLLECTION else 400, easing = if (claude) ClaudeOneTake.ExpoOut else emphasizedDecelerate)
             else tween(120)
         },
         label = "collection_content",
@@ -171,7 +173,7 @@ internal fun Md3eCollectionContainer(
             Modifier.matchParentSize().sharedElement(
                 sharedContentState = collectionState,
                 animatedVisibilityScope = animated,
-                boundsTransform = { _, _ -> tween(400, easing = emphasizedDecelerate) },
+                boundsTransform = { _, _ -> tween(if (claude) ClaudeOneTake.COLLECTION else 400, easing = if (claude) ClaudeOneTake.ExpoOut else emphasizedDecelerate) },
                 zIndexInOverlay = 0f,
                 clipInOverlayDuringTransition = overlayClip,
             )
@@ -190,7 +192,7 @@ internal fun Md3eCollectionContainer(
         }
         val opacity = Modifier.graphicsLayer {
             compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.ModulateAlpha
-            alpha = contentAlpha.value
+            alpha = if (claude && animated.transition.targetState == EnterExitState.Visible) 1f else contentAlpha.value
         }
         Box(reveal.then(opacity)) { content() }
     }

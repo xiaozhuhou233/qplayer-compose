@@ -1,0 +1,351 @@
+package dev.t1m3.qplayer.bridge;
+
+import dev.t1m3.qplayer.audio.AudioBackend;
+import dev.t1m3.qplayer.bili.BiliClient;
+import dev.t1m3.qplayer.model.Track;
+import dev.t1m3.qplayer.netease.NeteaseClient;
+import dev.t1m3.qplayer.store.AppDirs;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
+
+import static org.junit.Assert.*;
+
+public class PlayerControllerBiliQueueTest {
+    @Rule public TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+    @Test
+    public void ordinaryVideoStartsBeforeRelatedAndAppendsWithoutRestartingOrResuming() throws Exception {
+        try (Fixture f = fixture()) {
+            f.bili.relatedGate = new CountDownLatch(1);
+            f.bili.related.put("seed", Arrays.asList(video("seed", 1), video("next", 0),
+                    video("next", 2), video("last", 3)));
+            f.controller.playBiliCollection(video("seed", 1));
+            f.until(() -> f.backend.plays == 1 && f.bili.relatedCalls.get() == 1);
+            assertQueue(f, "seed");
+            Track seed = f.controller.currentTrack();
+            f.backend.position = 27000L;
+            f.controller.mediaPause();
+            Track manual = new Track();
+            manual.title = "manual";
+            manual.filePath = "manual.mp3";
+            f.controller.enqueueTrack(manual);
+            f.bili.relatedGate.countDown();
+            f.until(() -> f.controller.queueTracks.peek().size() == 4);
+            assertSame(seed, f.controller.currentTrack());
+            assertEquals(1, f.backend.plays);
+            assertEquals(27000L, f.backend.position);
+            assertFalse(f.backend.playing);
+            assertSame(manual, f.controller.queueTracks.peek().get(1));
+            assertEquals("next", f.controller.queueTracks.peek().get(2).biliBvid);
+            assertEquals("last", f.controller.queueTracks.peek().get(3).biliBvid);
+            f.controller.saveSessionState();
+            assertTrue(new String(Files.readAllBytes(AppDirs.stateFile("queue.json")),
+                    StandardCharsets.UTF_8).contains("last"));
+
+            // A recommendation without a cid is resolved only when it is played.
+            f.controller.playQueueIndex(2);
+            f.until(() -> f.backend.plays == 2);
+            assertEquals("next:99", f.backend.source);
+            assertEquals(1, f.bili.partCalls.get());
+            f.backend.complete.run();
+            f.until(() -> f.backend.plays == 3);
+            assertEquals("last:3", f.backend.source);
+        }
+    }
+
+    @Test
+    public void multipartQueueKeepsPartOrderAndNeverRequestsRelated() throws Exception {
+        try (Fixture f = fixture()) {
+            BiliClient.BiliVideoDetails details = details("multi", 11);
+            details.parts.add(part(11, "first"));
+            details.parts.add(part(22, "second"));
+            details.episodes.add(video("other-collection-video", 33));
+            f.bili.details.put("multi", details);
+            f.controller.playBiliCollection(video("multi", 11));
+            f.until(() -> f.backend.plays == 1);
+            assertEquals(2, f.controller.queueTracks.peek().size());
+            assertEquals("multi · first", f.controller.queueTracks.peek().get(0).title);
+            assertEquals(22L, f.controller.queueTracks.peek().get(1).biliCid);
+            f.backend.complete.run();
+            f.until(() -> f.backend.plays == 2);
+            assertEquals("multi:22", f.backend.source);
+            assertEquals(0, f.bili.relatedCalls.get());
+        }
+    }
+
+    @Test
+    public void ugcCollectionStartsClickedEpisodeAndKeepsCollectionQueue() throws Exception {
+        try (Fixture f = fixture()) {
+            BiliClient.BiliVideoDetails details = details("middle", 2);
+            details.parts.add(part(2, "single page"));
+            details.episodes.addAll(Arrays.asList(video("first", 1), video("middle", 2), video("last", 3)));
+            f.bili.details.put("middle", details);
+            f.controller.playBiliCollection(video("middle", 2));
+            f.until(() -> f.backend.plays == 1);
+            assertQueue(f, "first", "middle", "last");
+            assertEquals("middle:2", f.backend.source);
+            f.controller.next();
+            f.until(() -> f.backend.plays == 2);
+            assertEquals("last:3", f.backend.source);
+            assertEquals(0, f.bili.relatedCalls.get());
+        }
+    }
+
+    @Test
+    public void staleDetailsCannotReplaceANewerVideo() throws Exception {
+        try (Fixture f = fixture()) {
+            f.bili.blockedDetail = "old";
+            f.bili.detailGate = new CountDownLatch(1);
+            f.controller.playBiliCollection(video("old", 1));
+            assertTrue(f.bili.detailEntered.await(3L, TimeUnit.SECONDS));
+            f.controller.playBiliCollection(video("new", 2));
+            f.until(() -> f.backend.plays == 1);
+            assertEquals("new:2", f.backend.source);
+            f.bili.detailGate.countDown();
+            f.flushWorkers();
+            assertQueue(f, "new");
+            assertEquals(1, f.backend.plays);
+        }
+    }
+
+    @Test
+    public void newTapCancelsAQueueStartAlreadyWaitingOnMainThread() throws Exception {
+        try (Fixture f = fixture()) {
+            f.controller.playBiliCollection(video("old", 1));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
+            while (f.controller.queueTracks.peek().isEmpty() && System.nanoTime() < deadline) {
+                Runnable task = f.main.poll();
+                if (task != null) task.run();
+                else Thread.sleep(5L);
+            }
+            assertQueue(f, "old");
+            assertEquals(0, f.backend.plays); // playQueue's start is still posted.
+            f.controller.playBiliCollection(video("new", 2));
+            f.until(() -> f.backend.plays == 1);
+            f.flushWorkers();
+            assertQueue(f, "new");
+            assertEquals("new:2", f.backend.source);
+            assertEquals(1, f.backend.plays);
+        }
+    }
+
+    @Test
+    public void lateRecommendationsCannotAppendToNewQueueEvenForSameBvid() throws Exception {
+        try (Fixture f = fixture()) {
+            f.bili.relatedGate = new CountDownLatch(1);
+            f.bili.related.put("seed", Collections.singletonList(video("obsolete", 9)));
+            f.controller.playBiliCollection(video("seed", 1));
+            f.until(() -> f.backend.plays == 1 && f.bili.relatedCalls.get() == 1);
+            Track replacement = new Track();
+            replacement.source = Track.Source.BILI;
+            replacement.biliBvid = "seed";
+            replacement.biliCid = 8;
+            replacement.title = "different queue";
+            f.replaceQueue(Collections.singletonList(replacement));
+            f.until(() -> f.backend.plays == 2);
+            f.bili.relatedGate.countDown();
+            f.flushWorkers();
+            assertSame(replacement, f.controller.currentTrack());
+            assertQueue(f, "seed");
+            assertEquals("seed:8", f.backend.source);
+        }
+    }
+
+    @Test
+    public void recommendationFailureAndEmptyResultLeaveCurrentPlaybackIntact() throws Exception {
+        try (Fixture f = fixture()) {
+            f.bili.relatedFailure = true;
+            f.controller.playBiliCollection(video("seed", 1));
+            f.until(() -> f.backend.plays == 1 && f.bili.relatedCalls.get() == 1);
+            f.flushWorkers();
+            assertQueue(f, "seed");
+            assertTrue(f.backend.playing);
+            f.bili.relatedFailure = false;
+            f.controller.playBiliCollection(video("empty", 2));
+            f.until(() -> f.backend.plays == 2 && f.bili.relatedCalls.get() == 2);
+            f.flushWorkers();
+            assertQueue(f, "empty");
+            assertTrue(f.backend.playing);
+        }
+    }
+
+    @Test
+    public void failedDetailsFallBackToPartsWithoutGuessingRelatedQueue() throws Exception {
+        try (Fixture f = fixture()) {
+            f.bili.detailsFailure = true;
+            f.controller.playBiliCollection(video("seed", 1));
+            f.until(() -> f.backend.plays == 1);
+            assertQueue(f, "seed");
+            assertEquals("seed:99", f.backend.source);
+            assertEquals(0, f.bili.relatedCalls.get());
+        }
+    }
+
+    @Test
+    public void bluetoothPauseCancelsPendingOpenAndFavoriteFolderKeepsItsOwnQueue() throws Exception {
+        try (Fixture f = fixture()) {
+            f.bili.blockedDetail = "pending";
+            f.bili.detailGate = new CountDownLatch(1);
+            f.controller.playBiliCollection(video("pending", 1));
+            assertTrue(f.bili.detailEntered.await(3L, TimeUnit.SECONDS));
+            f.controller.mediaPauseForDisconnectedOutput();
+            f.bili.detailGate.countDown();
+            f.flushWorkers();
+            assertEquals(0, f.backend.plays);
+            assertTrue(f.controller.queueTracks.peek().isEmpty());
+
+            BiliClient.BiliFavItem first = new BiliClient.BiliFavItem();
+            first.bvid = "favorite1"; first.firstCid = 10;
+            BiliClient.BiliFavItem second = new BiliClient.BiliFavItem();
+            second.bvid = "favorite2"; second.firstCid = 20;
+            f.controller.biliFavItems.set(Arrays.asList(first, second));
+            f.controller.playBiliFavItemAt(1);
+            f.until(() -> f.backend.plays == 1);
+            assertQueue(f, "favorite1", "favorite2");
+            assertEquals("favorite2:20", f.backend.source);
+            assertEquals(0, f.bili.relatedCalls.get());
+        }
+    }
+
+    private Fixture fixture() throws Exception { return new Fixture(temporaryFolder.newFolder().toPath()); }
+
+    private static BiliClient.BiliVideo video(String bvid, long cid) {
+        BiliClient.BiliVideo video = new BiliClient.BiliVideo();
+        video.bvid = bvid; video.cid = cid; video.title = bvid; video.durationSeconds = 120L;
+        return video;
+    }
+
+    private static BiliClient.BiliVideoDetails details(String bvid, long cid) {
+        BiliClient.BiliVideoDetails details = new BiliClient.BiliVideoDetails();
+        details.video = video(bvid, cid);
+        return details;
+    }
+
+    private static BiliClient.BiliPart part(long cid, String title) {
+        BiliClient.BiliPart part = new BiliClient.BiliPart();
+        part.cid = cid; part.title = title; part.durationSeconds = 120L;
+        return part;
+    }
+
+    private static void assertQueue(Fixture f, String... ids) {
+        List<String> actual = new ArrayList<>();
+        for (Track track : f.controller.queueTracks.peek()) actual.add(track.biliBvid);
+        assertEquals(Arrays.asList(ids), actual);
+    }
+
+    private static final class Fixture implements AutoCloseable {
+        final String oldBase = AppDirs.base(), oldCache = AppDirs.cacheBase();
+        final Path base;
+        final FakeBili bili = new FakeBili();
+        final Backend backend = new Backend();
+        final Queue<Runnable> main = new ConcurrentLinkedQueue<>();
+        final PlayerController controller;
+        Fixture(Path base) {
+            this.base = base;
+            AppDirs.setBase(base.toString());
+            AppDirs.setCacheBase(base.resolve("cache").toString());
+            controller = new PlayerController(backend, track -> { }, NeteaseClient.INSTANCE, bili);
+            controller.setMainExecutor(main::add);
+            controller.setFadeEnabled(false);
+        }
+        void drain() {
+            for (Runnable task; (task = main.poll()) != null;) task.run();
+            controller.pump();
+        }
+        void until(BooleanSupplier condition) throws Exception {
+            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
+            do { drain(); if (condition.getAsBoolean()) return; Thread.sleep(5L); }
+            while (System.nanoTime() < end);
+            fail("Playback condition timed out");
+        }
+        void flushWorkers() throws Exception {
+            java.lang.reflect.Field field = PlayerController.class.getDeclaredField("biliQueueWorker");
+            field.setAccessible(true);
+            ThreadPoolExecutor worker = (ThreadPoolExecutor) field.get(controller);
+            until(() -> worker.getActiveCount() == 0 && worker.getQueue().isEmpty());
+            drain();
+        }
+        void replaceQueue(List<Track> tracks) throws Exception {
+            java.lang.reflect.Method method = PlayerController.class.getDeclaredMethod("playQueue", List.class, int.class);
+            method.setAccessible(true);
+            method.invoke(controller, tracks, 0);
+        }
+        @Override public void close() {
+            if (bili.relatedGate != null) bili.relatedGate.countDown();
+            if (bili.detailGate != null) bili.detailGate.countDown();
+            controller.shutdown();
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCache);
+        }
+    }
+
+    private static final class FakeBili extends BiliClient {
+        final Map<String, BiliVideoDetails> details = new ConcurrentHashMap<>();
+        final Map<String, List<BiliVideo>> related = new ConcurrentHashMap<>();
+        final AtomicInteger relatedCalls = new AtomicInteger(), partCalls = new AtomicInteger();
+        final CountDownLatch detailEntered = new CountDownLatch(1);
+        volatile CountDownLatch relatedGate, detailGate;
+        volatile String blockedDetail;
+        volatile boolean detailsFailure, relatedFailure;
+        FakeBili() { super(5000); }
+        @Override public BiliVideoDetails videoDetails(String bvid) throws IOException {
+            if (bvid.equals(blockedDetail)) { detailEntered.countDown(); await(detailGate); }
+            if (detailsFailure) throw new IOException("detail unavailable");
+            BiliVideoDetails result = details.get(bvid);
+            return result != null ? result : details(bvid, bvid.equals("seed") ? 1L : 2L);
+        }
+        @Override public List<BiliVideo> relatedVideos(String bvid) throws IOException {
+            relatedCalls.incrementAndGet();
+            await(relatedGate);
+            if (relatedFailure) throw new IOException("recommendations unavailable");
+            return related.getOrDefault(bvid, Collections.emptyList());
+        }
+        @Override public List<BiliPart> parts(String bvid) {
+            partCalls.incrementAndGet();
+            return Collections.singletonList(part(99L, "resolved"));
+        }
+        @Override public String progressiveUrl(String bvid, long cid, int quality) { return bvid + ":" + cid; }
+        @Override public List<BiliChapter> chapters(String bvid, long cid) { return Collections.emptyList(); }
+        private static void await(CountDownLatch latch) throws IOException {
+            if (latch == null) return;
+            try {
+                if (!latch.await(5L, TimeUnit.SECONDS)) throw new IOException("fixture gate timed out");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException(e);
+            }
+        }
+    }
+
+    private static final class Backend implements AudioBackend {
+        volatile int plays;
+        volatile String source;
+        volatile boolean playing;
+        volatile long position;
+        Runnable complete, started;
+        @Override public void play(String source, long startMs) {
+            this.source = source; position = startMs; playing = true; plays++;
+            if (started != null) started.run();
+        }
+        @Override public void pause() { playing = false; }
+        @Override public void resume() { playing = true; }
+        @Override public boolean isPlaying() { return playing; }
+        @Override public void seek(long ms) { position = ms; }
+        @Override public long position() { return position; }
+        @Override public long duration() { return 120000L; }
+        @Override public void setVolume(float value) { }
+        @Override public void setOnComplete(Runnable callback) { complete = callback; }
+        @Override public void setOnStarted(Runnable callback) { started = callback; }
+        @Override public void release() { playing = false; }
+    }
+}

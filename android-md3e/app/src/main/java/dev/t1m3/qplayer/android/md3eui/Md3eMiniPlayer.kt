@@ -15,7 +15,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
-import androidx.compose.foundation.clickable
+import dev.t1m3.qplayer.android.md3eui.claudeClickable as clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -42,8 +42,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
@@ -106,8 +109,8 @@ internal fun Md3eMiniPlayerDock(
     AnimatedVisibility(
         visible = visible && runtime.playback.hasTrack,
         modifier = modifier,
-        enter = if (Md3eLowSpecMode.current) androidx.compose.animation.EnterTransition.None else Md3eMotion.sheetIn(),
-        exit = if (Md3eLowSpecMode.current) androidx.compose.animation.ExitTransition.None else Md3eMotion.sheetOut(),
+        enter = if (Md3eLowSpecMode.current) androidx.compose.animation.EnterTransition.None else if (LocalClaudeDesign.current) ClaudeOneTake.sheetIn() else Md3eMotion.sheetIn(),
+        exit = if (Md3eLowSpecMode.current) androidx.compose.animation.ExitTransition.None else if (LocalClaudeDesign.current) ClaudeOneTake.sheetOut() else Md3eMotion.sheetOut(),
     ) {
         if (LocalClaudeDesign.current) {
             Md3eMiniPlayer(runtime, onOpen,
@@ -152,6 +155,7 @@ internal fun Md3eMiniPlayer(
     playerExpansion: Md3ePlayerExpansionState? = null,
     onRoam: () -> Unit = {},
 ) {
+    val dj = LocalClaudeAiDj.current
     val state = runtime.playback
     val claude = LocalClaudeDesign.current
     val view = LocalView.current
@@ -163,14 +167,24 @@ internal fun Md3eMiniPlayer(
     Surface(
         modifier = modifier.height(if (claude) 52.dp else 64.dp)
             .then(if (playerExpansion != null) Modifier.md3ePlayerExpansionSource(playerExpansion) else Modifier)
+            .graphicsLayer {
+                if (claude) {
+                    transformOrigin = TransformOrigin(.5f, 1f)
+                    val pull = dj?.dockStretch ?: 0f
+                    scaleY = 1f + .32f * pull
+                    scaleX = 1f - .035f * pull
+                }
+            }
             .clickable {
             view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
             onOpen()
         },
         shape = RoundedCornerShape(32.dp),
         tonalElevation = 1.dp,
-        shadowElevation = if (claude) 4.dp else 7.dp,
-        color = if (claude) MaterialTheme.colorScheme.surfaceContainerLow else androidx.compose.ui.graphics.Color.Transparent,
+        // The expansion host owns the moving surface/shadow. Its snapshot carries only controls.
+        shadowElevation = if (claude) { if (playerExpansion?.active == true) 0.dp else 4.dp } else 7.dp,
+        color = if (claude && playerExpansion?.active != true) MaterialTheme.colorScheme.surfaceContainerLow
+            else androidx.compose.ui.graphics.Color.Transparent,
     ) {
         Box(Modifier.fillMaxSize()) {
             if (!claude && state.cover.isNotBlank()) {
@@ -193,7 +207,11 @@ internal fun Md3eMiniPlayer(
                     }
                 }, contentAlignment = Alignment.Center) {
                     MiniCoverProgress(state)
-                    if (lowSpec) MiniCover(state.cover)
+                    if (claude) {
+                        ClaudeMovingDisc(state.cover, Modifier.size(40.dp)
+                            .onGloballyPositioned { playerExpansion?.miniDiscBounds = it.boundsInRoot() }
+                            .graphicsLayer { alpha = if (playerExpansion?.active == true) 0f else 1f })
+                    } else if (lowSpec) MiniCover(state.cover)
                     else AnimatedContent(
                         targetState = state.cover,
                         transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(140)) },
@@ -250,7 +268,7 @@ private fun MiniPlayPause(playing: Boolean, claude: Boolean, lowSpec: Boolean, o
     val view = LocalView.current
     val playCorner = animateDpAsState(
         targetValue = if (playing) 16.dp else 20.dp,
-        animationSpec = tween(if (lowSpec) 0 else 255),
+        animationSpec = if (claude && !lowSpec) ClaudeOneTake.snappy() else tween(if (lowSpec) 0 else 255),
         label = "mini_play_corner",
     )
     Box(

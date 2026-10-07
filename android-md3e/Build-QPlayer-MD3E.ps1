@@ -7,9 +7,8 @@ $ErrorActionPreference = 'Stop'
 
 $candidates = @(
     $env:QPLAYER_MD3E_ROOT,
-    'C:\Users\xiaoz\.codex\worktrees\888a\qplayer',
-    $env:QPLAYER_HOME,
-    'C:\Users\xiaoz\Desktop\SkidTime\qplayer'
+    (Split-Path -Parent $PSScriptRoot),
+    $env:QPLAYER_HOME
 ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 $projectRoot = $candidates | Where-Object {
     Test-Path -LiteralPath (Join-Path $_ 'android-md3e/settings.gradle.kts')

@@ -29,6 +29,10 @@ internal fun PlayerTransportButtons(
     onPrevious: () -> Unit, onToggle: () -> Unit, onNext: () -> Unit,
     onMotionChanged: (Any, Boolean) -> Unit,
 ) {
+    if (LocalClaudeDesign.current) {
+        ClaudeTransportButtons(playing, hasTrack, privateFm, onPrevious, onToggle, onNext)
+        return
+    }
     val previous = rememberUpdatedState(onPrevious)
     val toggle = rememberUpdatedState(onToggle)
     val next = rememberUpdatedState(onNext)

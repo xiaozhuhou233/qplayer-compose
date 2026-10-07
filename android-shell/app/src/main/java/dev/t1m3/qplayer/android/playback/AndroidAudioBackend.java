@@ -376,6 +376,10 @@ public final class AndroidAudioBackend implements AudioBackend {
         mp.setOnErrorListener(this::onPlayerError);
         mp.setOnVideoSizeChangedListener(this::onVideoSizeChanged);
         player = mp;
+        java.util.function.IntConsumer sessionListener = audioSessionListener;
+        if (sessionListener != null) {
+            try { sessionListener.accept(mp.getAudioSessionId()); } catch (Throwable ignored) { }
+        }
         try {
             // The requested offset is part of the line on purpose: "the track started
             // from its beginning again" is a claim about this number, and without it
@@ -400,6 +404,13 @@ public final class AndroidAudioBackend implements AudioBackend {
      *  and prepareAsync then fails async with extra=MEDIA_ERROR_SYSTEM (0x80000000).
      *  http(s) urls and plain file paths take the string overload. */
     private android.view.Surface videoSurface;
+    // Retain the view's surface while hidden, but never give it to MediaPlayer.
+    // NuPlayer shuts down its video decoder on setSurface(null), leaving audio
+    // running, and recreates video at the audio clock when the surface returns.
+    private boolean videoPlaybackVisible = true;
+    private boolean videoForeground = true;
+    private MediaPlayer videoSurfacePlayer;
+    private android.view.Surface appliedVideoSurface;
     /** Source picture size as the player last reported it; 0 until a stream reports
      *  one. The UI frames the video box from this so a 4:3 source keeps its 4:3 (and
      *  full-screen fits rather than crops it). */
@@ -437,13 +448,36 @@ public final class AndroidAudioBackend implements AudioBackend {
      *  scaling mode), never cropped: the source's own aspect ratio is what the UI
      *  frames, so a 4:3 video has to keep its 4:3. */
     public synchronized void attachVideoSurface(android.view.Surface surface) {
-        if (surface == videoSurface) return;
         videoSurface = surface;
+        applyVideoSurface();
+    }
+
+    /** Whether the UI is actually showing the picture, independently of whether
+     *  its parked SurfaceView still exists. Does not pause or reopen the source. */
+    public synchronized void setVideoPlaybackVisible(boolean visible) {
+        videoPlaybackVisible = visible;
+        applyVideoSurface();
+    }
+
+    /** Lifecycle gate: a late UI/surface callback cannot enable background video. */
+    public synchronized void setVideoForeground(boolean foreground) {
+        videoForeground = foreground;
+        applyVideoSurface();
+    }
+
+    private void applyVideoSurface() {
         MediaPlayer mp = player;
         if (mp == null) return;
+        android.view.Surface surface = videoPlaybackVisible && videoForeground
+                && videoSurface != null && videoSurface.isValid() ? videoSurface : null;
+        if (mp == videoSurfacePlayer && surface == appliedVideoSurface) return;
         try {
             mp.setSurface(surface);
-        } catch (Throwable ignored) { }
+            videoSurfacePlayer = mp;
+            appliedVideoSurface = surface;
+        } catch (RuntimeException e) {
+            Logger.warn("MediaPlayer: video surface update failed: {}", e.toString());
+        }
     }
 
     /** Hand the surface back only if it is still the live one. A surface being torn
@@ -454,16 +488,11 @@ public final class AndroidAudioBackend implements AudioBackend {
     public synchronized void detachVideoSurface(android.view.Surface surface) {
         if (surface == null || videoSurface != surface) return;
         videoSurface = null;
-        MediaPlayer mp = player;
-        if (mp != null) {
-            try {
-                mp.setSurface(null);
-            } catch (Throwable ignored) { }
-        }
+        applyVideoSurface();
     }
 
-    private void onVideoSizeChanged(MediaPlayer mp, int width, int height) {
-        if (width <= 0 || height <= 0) return;
+    private synchronized void onVideoSizeChanged(MediaPlayer mp, int width, int height) {
+        if (mp != player || width <= 0 || height <= 0) return;
         videoWidth = width;
         videoHeight = height;
         VideoSizeListener l = videoSizeListener;
@@ -487,6 +516,19 @@ public final class AndroidAudioBackend implements AudioBackend {
         }
     }
 
+    /** The live player's audio session id, or 0 when nothing is prepared. */
+    public synchronized int currentAudioSessionId() {
+        try {
+            return player != null ? player.getAudioSessionId() : 0;
+        } catch (Throwable e) {
+            return 0;
+        }
+    }
+
+    /** Fired on every new MediaPlayer with its audio session id (the MD3E
+     *  equalizer attaches its audiofx chain to this). */
+    public volatile java.util.function.IntConsumer audioSessionListener;
+
     /** Hosts the bilibili streams are served from (upos mirrors + akamai). */
     private static boolean isBiliCdn(String url) {
         return url != null && (url.contains("bilivideo") || url.contains("bilibili")
@@ -499,9 +541,7 @@ public final class AndroidAudioBackend implements AudioBackend {
         // state to the replacement MediaPlayer after a rapid track switch.
         if (player != preparedPlayer) return;
         // The surface may have been attached before prepare finished.
-        if (videoSurface != null) {
-            try { preparedPlayer.setSurface(videoSurface); } catch (Throwable ignored) { }
-        }
+        applyVideoSurface();
         prepared = true;
         Logger.info("MediaPlayer: prepared, duration={}ms", preparedPlayer.getDuration());
         applyVolume();
@@ -2574,11 +2614,7 @@ public final class AndroidAudioBackend implements AudioBackend {
         // a source that has a picture needs it. The queue is free by the time this
         // runs because the outgoing player released it a line earlier; an audio-only
         // promotion never touches the surface at all.
-        if (videoSurface != null && isBiliCdn(source)) {
-            try {
-                in.setSurface(videoSurface);
-            } catch (Throwable ignored) { }
-        }
+        if (isBiliCdn(source)) applyVideoSurface();
         // Settle exactly on the user's level: the ramp's last sample was already
         // there, and this re-applies the duck factor if focus was lost mid-ramp.
         applyVolume();
@@ -2886,6 +2922,8 @@ public final class AndroidAudioBackend implements AudioBackend {
         finishRestoreNow();
         releaseOne(player);
         player = null;
+        videoSurfacePlayer = null;
+        appliedVideoSurface = null;
         prepared = false;
         releaseIncoming();
         // The next stream reports its own picture size; until then the UI must not

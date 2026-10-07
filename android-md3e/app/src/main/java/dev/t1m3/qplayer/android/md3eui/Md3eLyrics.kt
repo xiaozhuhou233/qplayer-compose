@@ -100,6 +100,7 @@ internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier
     val clock = remember(state.songId) { Md3eLyricClock() }
     val listState = rememberLazyListState()
     val lowSpec = runtime.settings.bool("lowSpecMode")
+    val claude = LocalClaudeDesign.current
     val springEnabled = runtime.settings.bool("lyricSpring") && !lowSpec
     // Playback samples are frame-rate data. Keying this effect by position
     // restarts the coroutine on every sample while paused/playing metadata is
@@ -215,7 +216,7 @@ internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier
                     stiffness = (4.60517f / maxOf(remaining - .40f, .30f)).let { it * it }
                 }
             }
-            val rowSpring = spring<Float>(dampingRatio = damping, stiffness = stiffness)
+            val rowSpring = if (claude) ClaudeOneTake.snappy<Float>() else spring<Float>(dampingRatio = damping, stiffness = stiffness)
             coroutineScope {
                 motions.toMap().forEach { (rowIndex, motion) ->
                     val alpha = if (rowIndex == index) .85f else .175f

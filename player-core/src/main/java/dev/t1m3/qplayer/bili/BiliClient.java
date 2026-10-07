@@ -40,7 +40,7 @@ import dev.t1m3.qplayer.util.Logger;
  *       which is what the platform player can actually open (no DASH muxer here).</li>
  * </ul>
  */
-public final class BiliClient {
+public class BiliClient {
 
     private static final Gson GSON = new Gson();
     private static final String UA =
@@ -409,6 +409,106 @@ public final class BiliClient {
         return v;
     }
 
+    /** The video page's recommendations, in server ranking order. Endpoint/schema
+     *  verified against PiliPlus lib/http/video.dart (relatedVideoList). */
+    public List<BiliVideo> relatedVideos(String bvid) throws IOException {
+        Map<String, Object> q = new LinkedHashMap<>();
+        q.put("bvid", bvid);
+        return parseRelatedVideos(request(
+                "https://api.bilibili.com/x/web-interface/archive/related", q, false), bvid);
+    }
+
+    static List<BiliVideo> parseRelatedVideos(JsonObject response, String seedBvid) {
+        Map<String, BiliVideo> videos = new LinkedHashMap<>();
+        for (JsonElement entry : array(response, "data")) {
+            if (!entry.isJsonObject()) continue;
+            JsonObject item = entry.getAsJsonObject();
+            if (number(item, "state") < 0L) continue;
+            BiliVideo video = parseArchiveVideo(item);
+            if (video.bvid.isEmpty() || video.bvid.equals(seedBvid)) continue;
+            if (!videos.containsKey(video.bvid)) videos.put(video.bvid, video);
+        }
+        return new ArrayList<>(videos.values());
+    }
+
+    private static BiliVideo parseArchiveVideo(JsonObject item) {
+        BiliVideo video = new BiliVideo();
+        video.bvid = string(item, "bvid");
+        video.aid = number(item, "aid");
+        video.cid = number(item, "cid");
+        video.title = stripTags(string(item, "title"));
+        video.coverUrl = https(string(item, "pic"));
+        video.author = string(object(item, "owner"), "name");
+        if (video.author.isEmpty()) video.author = string(object(item, "author"), "name");
+        video.durationSeconds = durationSeconds(item, "duration");
+        video.playCount = number(object(item, "stat"), "view");
+        video.danmakuCount = number(object(item, "stat"), "danmaku");
+        return video;
+    }
+
+    public static final class BiliVideoDetails {
+        public BiliVideo video;
+        public final List<BiliPart> parts = new ArrayList<>();
+        public final List<BiliVideo> episodes = new ArrayList<>();
+    }
+
+    /** View supplies both pages (multi-P) and ugc_season.sections[].episodes
+     *  (different BV videos in one collection). A pagelist alone misses the latter. */
+    public BiliVideoDetails videoDetails(String bvid) throws IOException {
+        Map<String, Object> q = new LinkedHashMap<>();
+        q.put("bvid", bvid);
+        JsonObject response = request("https://api.bilibili.com/x/web-interface/view", q, false);
+        if (!response.has("data") || !response.get("data").isJsonObject()) {
+            throw new IOException("B站视频详情为空");
+        }
+        return parseVideoDetails(response.getAsJsonObject("data"), bvid);
+    }
+
+    static BiliVideoDetails parseVideoDetails(JsonObject data, String bvid) {
+        BiliVideoDetails details = new BiliVideoDetails();
+        details.video = parseArchiveVideo(data);
+        if (details.video.bvid.isEmpty()) details.video.bvid = bvid;
+        for (JsonElement entry : array(data, "pages")) {
+            if (!entry.isJsonObject()) continue;
+            JsonObject page = entry.getAsJsonObject();
+            BiliPart part = new BiliPart();
+            part.cid = number(page, "cid");
+            if (part.cid <= 0L) continue;
+            part.title = string(page, "part");
+            part.durationSeconds = durationSeconds(page, "duration");
+            details.parts.add(part);
+        }
+        if (details.video.cid <= 0L && !details.parts.isEmpty()) {
+            details.video.cid = details.parts.get(0).cid;
+        }
+        Map<String, BiliVideo> episodes = new LinkedHashMap<>();
+        for (JsonElement section : array(object(data, "ugc_season"), "sections")) {
+            if (!section.isJsonObject()) continue;
+            for (JsonElement entry : array(section.getAsJsonObject(), "episodes")) {
+                if (!entry.isJsonObject()) continue;
+                JsonObject episode = entry.getAsJsonObject();
+                JsonObject archive = object(episode, "arc");
+                if (number(archive, "state") < 0L) continue;
+                BiliVideo video = parseArchiveVideo(archive);
+                video.bvid = string(episode, "bvid");
+                if (video.bvid.isEmpty()) continue;
+                video.cid = number(episode, "cid");
+                if (video.cid <= 0L) video.cid = number(object(episode, "page"), "cid");
+                if (video.aid <= 0L) video.aid = number(episode, "aid");
+                if (video.title.isEmpty()) video.title = stripTags(string(episode, "title"));
+                if (video.author.isEmpty()) video.author = details.video.author;
+                if (video.coverUrl.isEmpty()) video.coverUrl = details.video.coverUrl;
+                if (video.durationSeconds <= 0L) {
+                    video.durationSeconds = durationSeconds(object(episode, "page"), "duration");
+                }
+                String key = video.bvid + ":" + video.cid;
+                if (!episodes.containsKey(key)) episodes.put(key, video);
+            }
+        }
+        details.episodes.addAll(episodes.values());
+        return details;
+    }
+
     // ------------------------------------------------------- 分P / 合集 / 取流
 
     /** One part of a multi-part video (P1, P2 …) or one item of a collection. */
@@ -695,6 +795,29 @@ public final class BiliClient {
     }
 
     // --------------------------------------------------------------- helpers
+
+    private static JsonObject object(JsonObject parent, String key) {
+        JsonElement value = parent.get(key);
+        return value != null && value.isJsonObject() ? value.getAsJsonObject() : new JsonObject();
+    }
+
+    private static JsonArray array(JsonObject parent, String key) {
+        JsonElement value = parent.get(key);
+        return value != null && value.isJsonArray() ? value.getAsJsonArray() : new JsonArray();
+    }
+
+    private static long durationSeconds(JsonObject object, String key) {
+        JsonElement value = object.get(key);
+        if (value == null || value.isJsonNull()) return 0L;
+        try {
+            if (value.isJsonPrimitive() && value.getAsJsonPrimitive().isNumber()) {
+                return value.getAsLong();
+            }
+            return parseDuration(value.getAsString());
+        } catch (RuntimeException ignored) {
+            return 0L;
+        }
+    }
 
     private static String string(JsonObject o, String key) {
         return o.has(key) && !o.get(key).isJsonNull() ? o.get(key).getAsString() : "";

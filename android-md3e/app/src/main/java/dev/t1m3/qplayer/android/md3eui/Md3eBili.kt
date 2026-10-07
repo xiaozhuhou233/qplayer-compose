@@ -224,12 +224,16 @@ internal fun Md3eVideoSlot(runtime: Md3eRuntime, modifier: Modifier = Modifier, 
 
 /** Keep this as the final, always-composed child of the root Box, including audio pages.
  * Resizing and parking the original SurfaceView reproduces the old player's no-replay
- * handoff between mini player, details and immersive fullscreen. */
+ * handoff between details and immersive fullscreen. A parked view retains its
+ * surface for reuse, while the backend detaches it to stop hidden video decoding. */
 @Composable
 internal fun Md3eVideoLayer(runtime: Md3eRuntime, obscured: Boolean = false) {
     val density = LocalDensity.current
     val activity = biliActivity(LocalContext.current)
     val fullscreen = runtime.videoFullscreen && runtime.bili.playing && !obscured
+    DisposableEffect(runtime) {
+        onDispose { runtime.audioBackend.setVideoPlaybackVisible(false) }
+    }
     LaunchedEffect(obscured) { if (obscured) runtime.videoFullscreen = false }
     var origin by remember { mutableStateOf(Offset.Zero) }
     BackHandler(fullscreen) { runtime.videoFullscreen = false }
@@ -253,7 +257,9 @@ internal fun Md3eVideoLayer(runtime: Md3eRuntime, obscured: Boolean = false) {
         val height = with(density) { maxHeight.toPx() }
         val aspect = if (runtime.videoHeight > 0) runtime.videoWidth.toFloat() / runtime.videoHeight else 16f / 9f
         val slot = runtime.videoSlots.maxByOrNull { it.key }?.value
-        val wanted = runtime.bili.playing && runtime.videoVisible && !obscured && (fullscreen || slot != null)
+        val wanted = runtime.uiVisible && runtime.bili.playing && runtime.videoVisible &&
+            !obscured && (fullscreen || slot != null)
+        SideEffect { runtime.audioBackend.setVideoPlaybackVisible(wanted) }
         val target = when {
             !wanted -> Rect(-width - 64f, 0f, -width - 63f, 1f)
             fullscreen -> {

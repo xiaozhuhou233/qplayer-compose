@@ -54,10 +54,11 @@ internal fun Md3eSealStage(
     modifier: Modifier = Modifier,
     content: @Composable (String) -> Unit,
 ) {
+    val claude = LocalClaudeDesign.current
     AnimatedContent(
         targetState = stateKey,
         modifier = modifier,
-        transitionSpec = { Md3eSealSharedAxis.x({ it / 4 }, { -it / 4 }) },
+        transitionSpec = { if (claude) ClaudeOneTake.page(true) else Md3eSealSharedAxis.x({ it / 4 }, { -it / 4 }) },
         label = "seal_dialog_stage",
     ) { content(it) }
 }
@@ -75,7 +76,7 @@ internal fun Md3eSealSelectionItem(
     val scheme = MaterialTheme.colorScheme
     val corner by animateDpAsState(
         if (selected) 32.dp else 20.dp,
-        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+        animationSpec = if (LocalClaudeDesign.current) ClaudeOneTake.snappy() else spring(stiffness = Spring.StiffnessMediumLow),
         label = "seal_selection_shape",
     )
     val container by animateColorAsState(
@@ -115,10 +116,11 @@ internal fun Md3eSealStatusText(
     showIndicator: Boolean = false,
     progress: Float = -1f,
 ) {
+    val claude = LocalClaudeDesign.current
     AnimatedContent(
         targetState = stateKey to text,
         modifier = modifier,
-        transitionSpec = { Md3eSealSharedAxis.y({ it / 5 }, { -it / 5 }) },
+        transitionSpec = { if (claude) ClaudeOneTake.page(true) else Md3eSealSharedAxis.y({ it / 5 }, { -it / 5 }) },
         contentKey = { it.first },
         label = "seal_status",
     ) { (visibleState, visibleText) ->

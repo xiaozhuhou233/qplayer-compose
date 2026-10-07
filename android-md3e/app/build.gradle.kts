@@ -25,7 +25,22 @@ android {
     }
     kotlinOptions { jvmTarget = "1.8" }
     buildFeatures { compose = true }
+    // Release credentials come from the environment, never from this tracked
+    // file -- same QPLAYER_* contract android-shell/app/build.gradle.kts uses.
+    // Without them the release build stays unsigned rather than silently
+    // falling back to the debug key (which would ship a debug-signed APK).
+    val releaseKeystore = System.getenv("QPLAYER_KEYSTORE")
+    val hasReleaseSigning = releaseKeystore != null && file(releaseKeystore).exists()
+
     signingConfigs {
+        if (hasReleaseSigning) create("release") {
+            storeFile = file(releaseKeystore!!)
+            storePassword = System.getenv("QPLAYER_STORE_PASSWORD")
+            keyAlias = System.getenv("QPLAYER_KEY_ALIAS")
+            // PKCS12 stores usually reuse the store password for the key.
+            keyPassword = System.getenv("QPLAYER_KEY_PASSWORD")
+                ?: System.getenv("QPLAYER_STORE_PASSWORD")
+        }
         val existing = rootProject.file("../android-shell/local-debug.keystore")
         if (existing.exists()) create("workspaceDebug") {
             storeFile = existing
@@ -39,7 +54,7 @@ android {
     }
     buildTypes.named("release") {
         isDebuggable = false
-        signingConfigs.findByName("workspaceDebug")?.let { signingConfig = it }
+        if (hasReleaseSigning) signingConfig = signingConfigs.getByName("release")
     }
     packaging.resources.excludes += setOf("META-INF/AL2.0", "META-INF/LGPL2.1", "META-INF/*.kotlin_module")
 }

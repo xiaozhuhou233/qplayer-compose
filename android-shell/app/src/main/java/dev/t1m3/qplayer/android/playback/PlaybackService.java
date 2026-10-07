@@ -8,9 +8,14 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
+import android.content.BroadcastReceiver;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.media.AudioDeviceCallback;
+import android.media.AudioDeviceInfo;
+import android.media.AudioManager;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.Handler;
@@ -20,6 +25,7 @@ import android.support.v4.media.session.MediaSessionCompat;
 import android.support.v4.media.session.PlaybackStateCompat;
 
 import androidx.core.app.NotificationCompat;
+import androidx.core.content.ContextCompat;
 import androidx.media.session.MediaButtonReceiver;
 
 import dev.t1m3.qplayer.bridge.PlayerController;
@@ -74,11 +80,82 @@ public final class PlaybackService extends Service {
     private String metadataTitle, metadataArtist, metadataAlbum;
     private long metadataDuration = -1L;
     private Bitmap metadataArt;
+    private AudioManager outputAudioManager;
+    private boolean noisyReceiverRegistered;
+    private final BroadcastReceiver noisyReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            if (AudioManager.ACTION_AUDIO_BECOMING_NOISY.equals(intent.getAction())) {
+                pauseForDisconnectedOutput();
+            }
+        }
+    };
+    private final AudioDeviceCallback outputDeviceCallback = new AudioDeviceCallback() {
+        @Override public void onAudioDevicesRemoved(AudioDeviceInfo[] removedDevices) {
+            // Some ROMs omit AUDIO_BECOMING_NOISY on Bluetooth power-off. The
+            // audio-device API also covers LE/hearing-aid outputs without asking
+            // for Bluetooth scan/connect permissions or reacting to non-audio ACLs.
+            for (AudioDeviceInfo device : removedDevices) {
+                if (!device.isSink()) continue;
+                // Ending a Bluetooth call can remove SCO while the headset's
+                // music output remains connected. That is not a disconnect.
+                if (device.getType() == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+                        && hasBluetoothMediaOutput()) continue;
+                switch (device.getType()) {
+                    case AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
+                    case AudioDeviceInfo.TYPE_BLUETOOTH_SCO:
+                    case AudioDeviceInfo.TYPE_HEARING_AID:
+                    case AudioDeviceInfo.TYPE_BLE_HEADSET:
+                    case AudioDeviceInfo.TYPE_BLE_SPEAKER:
+                    case AudioDeviceInfo.TYPE_BLE_BROADCAST:
+                        pauseForDisconnectedOutput();
+                        return;
+                    default:
+                        break;
+                }
+            }
+        }
+    };
+
+    private boolean hasBluetoothMediaOutput() {
+        if (outputAudioManager == null) return false;
+        for (AudioDeviceInfo device : outputAudioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+            switch (device.getType()) {
+                case AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
+                case AudioDeviceInfo.TYPE_HEARING_AID:
+                case AudioDeviceInfo.TYPE_BLE_HEADSET:
+                case AudioDeviceInfo.TYPE_BLE_SPEAKER:
+                case AudioDeviceInfo.TYPE_BLE_BROADCAST:
+                    return true;
+                default:
+                    break;
+            }
+        }
+        return false;
+    }
+
+    private void pauseForDisconnectedOutput() {
+        if (stopping) return;
+        PlayerController c = controller;
+        // Also clear pending focus auto-resume if focus already paused playback.
+        // Repeated system signals must never toggle playback back on.
+        if (c != null) {
+            Logger.info("PlaybackService: audio output disconnected, pausing");
+            c.mediaPauseForDisconnectedOutput();
+        }
+    }
 
     @Override
     public void onCreate() {
         super.onCreate();
         instance = this;
+        ContextCompat.registerReceiver(this, noisyReceiver,
+                new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),
+                ContextCompat.RECEIVER_NOT_EXPORTED);
+        noisyReceiverRegistered = true;
+        outputAudioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+        if (outputAudioManager != null) {
+            outputAudioManager.registerAudioDeviceCallback(outputDeviceCallback, refreshHandler);
+        }
         artworkWorker = Executors.newSingleThreadExecutor(r -> {
             Thread thread = new Thread(r, "notification-artwork");
             thread.setDaemon(true);
@@ -176,6 +253,14 @@ public final class PlaybackService extends Service {
         // Stop playback and release audio backend — called when the task is
         // swiped away (stopWithTask="true") or explicitly stopped.
         stopVisualRefreshes();
+        if (noisyReceiverRegistered) {
+            unregisterReceiver(noisyReceiver);
+            noisyReceiverRegistered = false;
+        }
+        if (outputAudioManager != null) {
+            outputAudioManager.unregisterAudioDeviceCallback(outputDeviceCallback);
+            outputAudioManager = null;
+        }
         if (instance == this) instance = null;
         if (checkpointWorker != null) {
             checkpointWorker.shutdownNow();

@@ -74,10 +74,7 @@ internal fun Md3eMainTopBar(tab: String, detail: String, title: String, loggedIn
         }
     }
     TopAppBar(title = {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(displayTitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (LocalClaudeDesign.current) ClaudeUnderline()
-        }
+        Text(displayTitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
     },
         colors = TopAppBarDefaults.topAppBarColors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
         navigationIcon = {
@@ -173,29 +170,23 @@ internal fun Md3eHomePage(runtime: Md3eRuntime, onLogin: () -> Unit, onPlay: Pla
         LazyColumn(Modifier.weight(1f), state = listState,
         contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 16.dp + dockInset),
         verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        item(key = "greeting") {
-            if (claude) ClaudeGreeting(state.userName, dailyPhrase)
-            else Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (claude) item(key = "opening") {
+            ClaudeOpening(state.userName, dailyPhrase, aiInput = { ClaudeAiDjInput(runtime) },
+                onPrivateFm = { if (state.loggedIn) onPlay { startPrivateFm() } else onLogin() })
+        }
+        if (!claude) item(key = "greeting") {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(if (state.userName.isBlank()) "你好" else "你好，${state.userName}",
                 fontSize = 27.sp, fontWeight = FontWeight.SemiBold)
                 Text(dailyPhrase, style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        if (claude) item(key = "claude_fm") {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                ClaudeBadge("TODAY’S ACOUSTIC MOOD")
-                TextButton(onClick = { if (state.loggedIn) onPlay { startPrivateFm() } else onLogin() }) {
-                    Icon(Md3eIcons.AutoAwesome, null, Modifier.size(16.dp))
-                    Spacer(Modifier.width(5.dp)); Text("私人 FM")
-                }
-            }
-        }
-        item(key = "ai") {
+        if (!claude) item(key = "ai") {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(aiPrompt, { aiPrompt = it }, Modifier.weight(1f),
                     placeholder = { Text("想听什么？") },
-                    singleLine = true, shape = RoundedCornerShape(if (claude) 50 else 18))
+                    singleLine = true, shape = RoundedCornerShape(18.dp))
                 Box(Modifier.size(48.dp).clip(CircleShape).combinedClickable(
                     onClick = { if (aiPrompt.isNotBlank()) {
                         aiPreference = false; aiMode = null; aiLoading = false
@@ -213,14 +204,12 @@ internal fun Md3eHomePage(runtime: Md3eRuntime, onLogin: () -> Unit, onPlay: Pla
                         aiOpen = true
                     }
                 ), contentAlignment = Alignment.Center) {
-                    if (claude) Image(painterResource(R.drawable.ic_claude_ai_dj),
-                        contentDescription = "打开 AI DJ", modifier = Modifier.size(44.dp))
-                    else Icon(Md3eIcons.AutoAwesome, "打开 AI DJ")
+                    Icon(Md3eIcons.AutoAwesome, "打开 AI DJ")
                 }
             }
         }
         if (firstPlaylists.isEmpty() && state.loading) item(key = "playlist_loading") {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.claudeEntrance(2), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 HomeTitle("推荐歌单")
                 LinearProgressIndicator(Modifier.fillMaxWidth())
             }
@@ -367,15 +356,15 @@ private fun extractHomeAiCount(request: String): Int =
         .find(request)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 10).coerceIn(1, 100)
 
 @Composable
-private fun HomeTitle(title: String) {
-    if (LocalClaudeDesign.current) ClaudeSectionTitle(title)
+private fun HomeTitle(title: String, count: String? = null) {
+    if (LocalClaudeDesign.current) ClaudeShelfHeader(title, count)
     else Text(title, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
 }
 
 @Composable
 private fun HomePlaylistShelf(title: String, playlists: List<NeteasePlaylist>, onOpen: (Long) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        HomeTitle(title)
+        HomeTitle(title, "${playlists.size} 个")
         LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(vertical = 8.dp)) {
             items(playlists, key = { it.id }) { playlist ->
@@ -398,12 +387,13 @@ Column(Modifier.width(164.dp).clip(RoundedCornerShape(16.dp))
 
 @Composable
 private fun HomeAlbumCard(album: NeteaseAlbum, onOpen: () -> Unit) {
-    Md3eCollectionContainer("cover:album:${album.id}", corner = if (LocalClaudeDesign.current) 14.dp else 22.dp) {
-Column(Modifier.width(132.dp).clip(RoundedCornerShape(if (LocalClaudeDesign.current) 14.dp else 22.dp)).clickable(onClick = onOpen),
+    if (LocalClaudeDesign.current) { ClaudeAlbumCover(album, onOpen); return }
+    Md3eCollectionContainer("cover:album:${album.id}", corner = 22.dp) {
+Column(Modifier.width(132.dp).clip(RoundedCornerShape(22.dp)).clickable(onClick = onOpen),
         verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Artwork(album.coverThumbPath ?: album.coverUrl.orEmpty(),
             Modifier.fillMaxWidth().aspectRatio(1f).md3eSharedCover("cover:album:${album.id}"),
-            corner = if (LocalClaudeDesign.current) 14.dp else 24.dp)
+            corner = 24.dp)
         Text(album.name ?: "未知专辑", maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(album.artistName.orEmpty(), maxLines = 1, overflow = TextOverflow.Ellipsis,
             fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -415,7 +405,7 @@ Column(Modifier.width(132.dp).clip(RoundedCornerShape(if (LocalClaudeDesign.curr
 private fun HomeSongPager(title: String, songs: List<NeteaseSong>, onPlay: (Int) -> Unit,
     onEnqueue: (NeteaseSong) -> Unit) {
     val claude = LocalClaudeDesign.current
-    if (claude) { ClaudeSongShelf(title, songs, onPlay, onEnqueue); return }
+    if (claude) { ClaudeSongList(title, songs, onPlay, onEnqueue); return }
     if (songs.isEmpty()) return
     val pageCount = (songs.size + 2) / 3
     val pager = rememberPagerState(pageCount = { pageCount })
@@ -429,15 +419,13 @@ private fun HomeSongPager(title: String, songs: List<NeteaseSong>, onPlay: (Int)
         HorizontalPager(pager, modifier = Modifier.fillMaxWidth(),
             contentPadding = PaddingValues(end = if (pageCount > 1) 16.dp else 0.dp),
             pageSpacing = 12.dp, key = { page -> "${songs.getOrNull(page * 3)?.id}_$page" }) { page ->
-            Surface(shape = RoundedCornerShape(if (claude) 24.dp else 0.dp),
-                color = if (claude) MaterialTheme.colorScheme.surfaceContainerLow else Color.Transparent,
-                border = if (LocalClaudeDesign.current) BorderStroke(.8.dp, MaterialTheme.colorScheme.outlineVariant) else null) {
-            Column(Modifier.padding(if (claude) 6.dp else 0.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Surface(color = Color.Transparent) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 repeat(3) { slot ->
                     val index = page * 3 + slot
                     val song = songs.getOrNull(index)
                     if (song == null) Spacer(Modifier.height(64.dp)) else {
-                        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(if (claude) 24.dp else 16.dp))
+                        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
                             .combinedClickable(onClick = { onPlay(index) }, onLongClick = { onEnqueue(song) })
                             .heightIn(min = 64.dp).padding(8.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -448,16 +436,6 @@ private fun HomeSongPager(title: String, songs: List<NeteaseSong>, onPlay: (Int)
                                 Text(song.artist ?: "未知歌手", maxLines = 1, overflow = TextOverflow.Ellipsis,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            val label = song.recommendReason.orEmpty().ifBlank { song.genre.orEmpty() }.trim()
-                            val darkBadge = MaterialTheme.colorScheme.surface.luminance() < .5f
-                            if (claude && label.isNotBlank()) Surface(shape = RoundedCornerShape(8.dp),
-                                color = if (darkBadge) Color(0xFF493027) else Color(0xFFFBF3EE),
-                                contentColor = if (darkBadge) Color(0xFFFFCDBB) else Color(0xFF8B402B),
-                                border = BorderStroke(1.dp, Color(0xFFD97757).copy(alpha = .45f))) {
-                                Text(label, Modifier.widthIn(max = 104.dp).padding(horizontal = 10.dp, vertical = 6.dp),
-                                    fontFamily = RecommendationHandwriting, fontSize = 14.sp, maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis)
                             }
                         }
                     }

@@ -232,7 +232,7 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                                 CompositionLocalProvider(Md3eAnimatedScope provides this) {
                                     val pageModifier = when (visibleRoute.detail) {
                                         "playlist", "album" -> Modifier.fillMaxSize().md3eSharedCollection(
-                                            "cover:{visibleRoute.detail}:{visibleRoute.id}")
+                                            "cover:${visibleRoute.detail}:${visibleRoute.id}")
                                         else -> Modifier.fillMaxSize()
                                     }
                                     when {
