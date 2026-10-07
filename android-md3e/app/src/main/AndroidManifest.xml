@@ -9,10 +9,9 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- 听歌识曲的麦克风采集：没有这条声明，运行时权限对话框会直接拒绝。 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <!-- Attaching android.media.audiofx.Equalizer/BassBoost to an audio session
-         needs this normal permission; without it the constructor throws and the
-         equalizer silently does nothing. -->
-    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- 保后台：向用户申请「忽略电池优化」的系统对话框必须声明这条权限，
+         否则 ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 会被系统直接拒绝。 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Attaching android.media.audiofx.Equalizer/BassBoost to an audio session
          needs this normal permission; without it the constructor throws and the
          equalizer silently does nothing. -->

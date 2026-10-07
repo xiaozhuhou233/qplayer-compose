@@ -265,6 +265,10 @@ internal class Md3eRuntime private constructor(context: Context) {
         settings.registerAction("openRepo") {
             controller.openExternalUrl("https://github.com/TIMER-err/qplayer")
         }
+        // 保后台（「像用户发送申请保后台」）：打开系统的「忽略电池优化」申请对话框；
+        // 状态行读 PowerManager 的真实结果，from 系统页返回时（onVisible）会刷新。
+        settings.registerInfo("batteryStatus") { batteryOptimizationStatus() }
+        settings.registerAction("backgroundKeepAlive") { requestIgnoreBatteryOptimizations() }
         // The log system: export copies the newest session file out, and the
         // flag is applied at startup and on every settings change (idempotent).
         settings.registerAction("logExport") {
@@ -526,10 +530,43 @@ internal class Md3eRuntime private constructor(context: Context) {
         }
     }
 
+    private fun batteryOptimizationStatus(): String {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return "系统无需设置"
+        val power = app.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+            ?: return "无法读取电池优化状态"
+        return if (power.isIgnoringBatteryOptimizations(app.packageName)) "已加入电池优化白名单"
+        else "未加入白名单，后台播放可能被系统冻结"
+    }
+
+    private fun requestIgnoreBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val power = app.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+        if (power != null && power.isIgnoringBatteryOptimizations(app.packageName)) {
+            notice = "已加入电池优化白名单，无需重复申请"
+            return
+        }
+        val request = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+            .setData(android.net.Uri.parse("package:${app.packageName}"))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            app.startActivity(request)
+        } catch (ignored: Exception) {
+            // 少数 ROM 没有这个对话框，退回电池优化列表页。
+            try {
+                app.startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (ignored2: Exception) {
+                notice = "系统没有提供电池优化设置页面"
+            }
+        }
+    }
+
     fun onVisible() {
         visibleHosts++
         uiVisible = true
         attachService()
+        // 从系统页面（电池优化申请等）返回时刷新设置行的状态文本。
+        settingsRevision++
         handler.removeCallbacks(tick)
         handler.post(tick)
     }

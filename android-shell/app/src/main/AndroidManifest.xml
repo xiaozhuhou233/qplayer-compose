@@ -18,6 +18,8 @@
     <!-- Needed by the audiofx chains (the stem renderer hand-over and the EQ). -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- 保后台：申请「忽略电池优化」的系统对话框需要这条权限（与 MD3E 同名功能一致）。 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
         android:name="dev.t1m3.qplayer.android.app.QPlayerApplication"

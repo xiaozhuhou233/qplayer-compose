@@ -241,6 +241,13 @@ public final class SettingsCatalog {
         out.add(SettingSpec.toggle("highQuality", PLAYBACK, "高音质播放", true)
                 .desc("关闭后使用低音质播放以节省流量")
                 .build());
+        // 保后台：请求系统把本应用排除在电池优化之外；没有白名单时，部分 ROM 会在
+        // 息屏后冻结进程或直接清理正在播放的前台服务。状态文本读自 PowerManager，
+        // 回到应用（onVisible / onStart）时刷新。
+        out.add(SettingSpec.action("backgroundKeepAlive", PLAYBACK, "保后台运行", "去申请")
+                .provider("batteryStatus").inlineProvider()
+                .desc("请求系统不要因省电策略冻结或清理后台播放；部分机型还需在系统设置里允许自启动")
+                .build());
 
         // Custom API source: one card, the switch plus the field block it gates.
         out.add(SettingSpec.toggle("customApiEnabled", PLAYBACK, "启用自定义 API 源", false)
