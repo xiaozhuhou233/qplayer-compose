@@ -2,7 +2,7 @@
 
 package dev.t1m3.qplayer.android.md3eui
 
-import androidx.compose.foundation.clickable
+import dev.t1m3.qplayer.android.md3eui.claudeClickable as clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -19,6 +19,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.text.font.FontStyle
@@ -47,12 +48,13 @@ internal fun Md3eNavigationBar(selected: String, showLocalTab: Boolean = true,
                     Triple("search", Md3eIcons.Search, "搜索"))
                     .filter { it.first != "local" || showLocalTab }.forEach { (route, icon, title) ->
                         val active = route == selected
+                        val lift by androidx.compose.animation.core.animateFloatAsState(if (active) -2f else 0f, ClaudeOneTake.bouncy(), label = "tab landing")
                         val ink = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                         Column(Modifier.weight(1f).clip(RoundedCornerShape(24.dp))
                             .clickable(role = Role.Tab) { onSelect(route) }.padding(vertical = 8.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Icon(icon, null, Modifier.size(23.dp), tint = ink)
+                            Icon(icon, null, Modifier.size(23.dp).graphicsLayer { translationY = lift.dp.toPx() }, tint = ink)
                             Text(title, color = ink, style = MaterialTheme.typography.labelMedium)
                         }
                     }
@@ -144,7 +146,9 @@ private fun ClaudePlaylistsPage(state: PlaylistState, onLogin: () -> Unit, onRef
                     fontFamily = ClaudeSerif, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(vertical = 28.dp))
             }
-            items(shown, key = { it.id }) { playlist -> ClaudePlaylistRow(playlist) { onOpen(playlist.id) } }
+            itemsIndexed(shown, key = { _, it -> it.id }) { index, playlist ->
+                Box(Modifier.claudeEntrance(index).animateItem(placementSpec = ClaudeOneTake.snappy())) { ClaudePlaylistRow(playlist) { onOpen(playlist.id) } }
+            }
         }
     }
 }
@@ -228,9 +232,10 @@ internal fun Md3ePlaylistDetail(state: PlaylistState, id: Long, onBack: () -> Un
 @Composable
 private fun ClaudePlaylistDetail(state: PlaylistState, id: Long, onRefresh: () -> Unit,
     onPlay: PlayAction, modifier: Modifier) {
-    LazyColumn(modifier, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp)) {
+    val songListState = androidx.compose.foundation.lazy.rememberLazyListState()
+    LazyColumn(modifier, state = songListState, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp)) {
         item {
-            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+            Column(Modifier.fillMaxWidth().claudeEntrance(), horizontalAlignment = Alignment.CenterHorizontally) {
                 Box(Modifier.fillMaxWidth().aspectRatio(1f).padding(vertical = 8.dp)) {
                     Artwork(state.cover, Modifier.fillMaxSize().md3eSharedCover("cover:playlist:$id"), corner = 8.dp)
                     Text("PLAYLIST ARCHIVE", Modifier.align(Alignment.TopStart).padding(start = 10.dp).rotate(-3f)
@@ -254,7 +259,9 @@ private fun ClaudePlaylistDetail(state: PlaylistState, id: Long, onRefresh: () -
         if (state.loading) item { CenterLoading("正在加载歌单") }
         if (!state.loading && state.tracks.isEmpty()) item { Text("歌单中还没有歌曲", color = MaterialTheme.colorScheme.onSurfaceVariant) }
         itemsIndexed(state.tracks, key = { index, song -> "$index-${song.id}" }) { index, song ->
-            Row(Modifier.fillMaxWidth().clickable { onPlay { playPlaylistTrack(index) } }.padding(vertical = 7.dp),
+            Row(Modifier.fillMaxWidth().claudeEntrance(index, replayOnVisit = true,
+                songListState = songListState, songKey = "$index-${song.id}")
+                .animateItem(placementSpec = ClaudeOneTake.snappy()).clickable { onPlay { playPlaylistTrack(index) } }.padding(vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Artwork(song.coverThumbPath ?: song.coverUrl.orEmpty(), Modifier.size(48.dp), corner = 6.dp)
                 Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
@@ -524,7 +531,7 @@ internal fun Md3eAlbumDetail(state: AlbumDetailState, id: Long, onBack: () -> Un
 private fun ClaudeAlbumCollection(state: AlbumDetailState, id: Long, onPlay: PlayAction, modifier: Modifier) {
     LazyColumn(modifier, contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
-            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+            Column(Modifier.fillMaxWidth().claudeEntrance(), horizontalAlignment = Alignment.CenterHorizontally) {
                 Box(Modifier.fillMaxWidth().aspectRatio(1f).padding(vertical = 8.dp)) {
                     Artwork(state.cover, Modifier.fillMaxSize().md3eSharedCover("cover:album:$id"), corner = 8.dp)
                     Text("ALBUM ARCHIVE", Modifier.align(Alignment.TopStart).padding(start = 10.dp).rotate(-3f)
@@ -550,7 +557,7 @@ private fun ClaudeAlbumCollection(state: AlbumDetailState, id: Long, onPlay: Pla
             LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 16.dp))
         }
         itemsIndexed(state.tracks, key = { index, song -> "${song.id}_$index" }) { index, song ->
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.claudeEntrance(index).animateItem(placementSpec = ClaudeOneTake.snappy()), verticalAlignment = Alignment.CenterVertically) {
                 Text((index + 1).toString().padStart(2, '0'), Modifier.width(25.dp),
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Row(Modifier.weight(1f).clickable { onPlay { playAlbumTrack(index) } }
@@ -579,7 +586,7 @@ private fun ClaudeAlbumCollection(state: AlbumDetailState, id: Long, onPlay: Pla
 
 @Composable
 private fun PageHeading(title: String, subtitle: String, onRefresh: () -> Unit, enabled: Boolean = true) {
-    Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 16.dp, bottom = 12.dp),
+    Row(Modifier.fillMaxWidth().claudeEntrance().padding(start = 20.dp, end = 12.dp, top = 16.dp, bottom = 12.dp),
         verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
@@ -620,7 +627,7 @@ private fun SongResultRow(cover: String, title: String, artist: String, number: 
     onLongClick: (() -> Unit)? = null) {
     val interaction = if (onLongClick == null) Modifier.clickable(onClick = onPlay)
         else Modifier.combinedClickable(onClick = onPlay, onLongClick = onLongClick, onLongClickLabel = "歌曲选项")
-    Row(Modifier.fillMaxWidth().then(interaction).heightIn(min = 64.dp)
+    Row(Modifier.fillMaxWidth().claudeEntrance((number ?: 1) - 1).then(interaction).heightIn(min = 64.dp)
         .padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         if (number != null) Text(number.toString(), Modifier.width(24.dp), style = MaterialTheme.typography.labelMedium,
@@ -638,7 +645,7 @@ private fun SongResultRow(cover: String, title: String, artist: String, number: 
 @Composable
 private fun AlbumRow(album: NeteaseAlbum, onOpen: () -> Unit) {
     Md3eCollectionContainer("cover:album:${album.id}", Modifier.fillMaxWidth(), corner = 16.dp) {
-Row(Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(horizontal = 20.dp, vertical = 8.dp),
+Row(Modifier.fillMaxWidth().claudeEntrance().clickable(onClick = onOpen).padding(horizontal = 20.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
         Artwork(album.coverThumbPath ?: album.coverUrl.orEmpty(),
             Modifier.size(60.dp).md3eSharedCover("cover:album:${album.id}"))
@@ -654,7 +661,7 @@ Row(Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(horizontal = 20.
 
 @Composable
 private fun ArtistRow(artist: NeteaseArtist, onOpen: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(horizontal = 20.dp, vertical = 8.dp),
+    Row(Modifier.fillMaxWidth().claudeEntrance().clickable(onClick = onOpen).padding(horizontal = 20.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
         Artwork(artist.coverThumbPath ?: artist.coverUrl.orEmpty(), Modifier.size(60.dp))
         Text(artist.name.orEmpty(), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
@@ -667,7 +674,8 @@ private fun ArtistRow(artist: NeteaseArtist, onOpen: () -> Unit) {
 private fun CenterLoading(text: String) {
     Row(Modifier.fillMaxWidth().padding(28.dp), horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically) {
-        CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
+        if (LocalClaudeDesign.current) Md3eLoadingIndicator(Modifier.size(24.dp))
+        else CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
         Spacer(Modifier.width(12.dp))
         Text(text, style = MaterialTheme.typography.bodyMedium)
     }

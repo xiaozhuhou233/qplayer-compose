@@ -192,7 +192,7 @@ internal fun Md3eHomePage(runtime: Md3eRuntime, onLogin: () -> Unit, onPlay: Pla
             }
         }
         item(key = "ai") {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            if (claude) ClaudeAiDjInput(runtime) else Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(aiPrompt, { aiPrompt = it }, Modifier.weight(1f),
                     placeholder = { Text("想听什么？") },
                     singleLine = true, shape = RoundedCornerShape(if (claude) 50 else 18))
@@ -220,7 +220,7 @@ internal fun Md3eHomePage(runtime: Md3eRuntime, onLogin: () -> Unit, onPlay: Pla
             }
         }
         if (firstPlaylists.isEmpty() && state.loading) item(key = "playlist_loading") {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.claudeEntrance(2), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 HomeTitle("推荐歌单")
                 LinearProgressIndicator(Modifier.fillMaxWidth())
             }
@@ -399,7 +399,7 @@ Column(Modifier.width(164.dp).clip(RoundedCornerShape(16.dp))
 @Composable
 private fun HomeAlbumCard(album: NeteaseAlbum, onOpen: () -> Unit) {
     Md3eCollectionContainer("cover:album:${album.id}", corner = if (LocalClaudeDesign.current) 14.dp else 22.dp) {
-Column(Modifier.width(132.dp).clip(RoundedCornerShape(if (LocalClaudeDesign.current) 14.dp else 22.dp)).clickable(onClick = onOpen),
+Column(Modifier.width(132.dp).claudeEntrance(2).clip(RoundedCornerShape(if (LocalClaudeDesign.current) 14.dp else 22.dp)).clickable(onClick = onOpen),
         verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Artwork(album.coverThumbPath ?: album.coverUrl.orEmpty(),
             Modifier.fillMaxWidth().aspectRatio(1f).md3eSharedCover("cover:album:${album.id}"),

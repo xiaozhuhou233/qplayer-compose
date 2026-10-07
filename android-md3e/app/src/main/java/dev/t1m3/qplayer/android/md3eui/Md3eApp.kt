@@ -51,6 +51,7 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
     var pageMotionActive by remember { mutableStateOf(false) }
     val playerExpansion = rememberMd3ePlayerExpansionState()
     val claudeDesign = runtime.settings.bool("claudeDesign")
+    val aiDj = remember { ClaudeAiDjState() }
     val dynamicScheme = rememberMd3eColorScheme(
         seed = runtime.playback.coverSeed,
         dark = dark,
@@ -61,12 +62,18 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
         paused = pageMotionActive || playerExpansion.moving || runtime.transportMotionActive || !runtime.uiVisible,
     )
     val scheme = if (claudeDesign) claudeColorScheme(dark) else dynamicScheme
-    MaterialExpressiveTheme(colorScheme = scheme, typography = if (claudeDesign) ClaudeTypography else Md3eTypography, shapes = ClaudeShapes) {
+    MaterialExpressiveTheme(colorScheme = scheme,
+        motionScheme = if (claudeDesign) ClaudeOneTakeScheme else MotionScheme.expressive(), typography = if (claudeDesign) ClaudeTypography else Md3eTypography, shapes = ClaudeShapes) {
         CompositionLocalProvider(LocalContentColor provides scheme.onSurface,
             LocalClaudeDesign provides claudeDesign,
+            LocalClaudeAiDj provides aiDj,
+            LocalClaudePlayerExpansion provides playerExpansion,
+            Md3eLowSpecMode provides runtime.settings.bool(SettingsCatalog.LOW_SPEC_MODE_KEY),
             LocalMd3eReducedEffects provides runtime.reducedRendering,
             LocalMd3eRenderingActive provides runtime.uiVisible,
             LocalMd3eMotionActive provides (pageMotionActive || playerExpansion.moving || runtime.transportMotionActive)) {
+        val discRotation = rememberClaudeVinylRotation(runtime.playback.playing && claudeDesign)
+        CompositionLocalProvider(LocalClaudeDiscRotation provides discRotation) {
         var tab by rememberSaveable { mutableStateOf("home") }
         var detail by rememberSaveable { mutableStateOf("") }
         var detailId by rememberSaveable { mutableLongStateOf(0L) }
@@ -87,13 +94,23 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
         var miniPlayerVisible by remember { mutableStateOf(true) }
         val miniScrollConnection = rememberMd3eMiniScrollConnection { miniPlayerVisible = it }
         val route = Md3ePageRoute(tab, detail, detailId)
+        val entranceVisit = remember(route) {
+            ClaudeEntranceVisit(returning = navigatingBack,
+                collection = detail in setOf("playlist", "album"))
+        }
         val pageTransition = updateTransition(route, label = "page_transition")
+        val sharedBackdrop = remember { androidx.compose.animation.core.Animatable(0f) }
         val pageTransitionActive = pageTransition.isRunning ||
             pageTransition.currentState != pageTransition.targetState
         SideEffect { pageMotionActive = pageTransitionActive }
         val routeStateHolder = rememberSaveableStateHolder()
         val lowSpec = runtime.settings.bool(SettingsCatalog.LOW_SPEC_MODE_KEY)
-        LaunchedEffect(tab, detail, runtime.playback.playbackRevision) { miniPlayerVisible = true }
+        LaunchedEffect(tab, detail, detailId) {
+            miniPlayerVisible = !(claudeDesign && detail == "playlist")
+        }
+        LaunchedEffect(runtime.playback.playbackRevision) {
+            if (!(claudeDesign && detail == "playlist")) miniPlayerVisible = true
+        }
         val pageTransitionPreset = runtime.settings.intOf(SettingsCatalog.PAGE_TRANSITION_KEY).let {
             if (it < SettingsCatalog.PAGE_TRANSITION_ZOOM || it > SettingsCatalog.PAGE_TRANSITION_NONE)
                 SettingsCatalog.PAGE_TRANSITION_ZOOM else it
@@ -102,6 +119,7 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
             if (kind == detail && id == detailId) return
             navigatingBack = false
             if (detail.isNotEmpty()) detailStack = detailStack + "$detail:$detailId"
+            if (claudeDesign && kind == "playlist") { miniPlayerVisible = false; overlay = "" }
             detail = kind
             detailId = id
             activeSharedCoverKey = when (kind) {
@@ -187,11 +205,14 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                 expanded = overlay == "player" || (overlay == "queue" && queueFromPlayer),
                 state = playerExpansion,
                 durationMillis = if (lowSpec) 0 else 400,
-                simpleSlide = lowSpec,
+                claude = claudeDesign,
+                cover = runtime.playback.cover,
+                simpleSlide = lowSpec && !claudeDesign,
                 base = {
             Scaffold(
                 containerColor = MaterialTheme.colorScheme.background,
                 topBar = {
+                    Box(Modifier.claudeTransitionBackdrop { sharedBackdrop.value }) {
                     Md3eMainTopBar(tab, detail, when (detail) {
                         "playlist" -> runtime.playlistFor(detailId).title
                         "album" -> runtime.albumFor(detailId).name
@@ -204,8 +225,10 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                         onSettings = { openDetail("settings", 0L) },
                         onAccount = { neteaseLoginOpen = true },
                         onBiliAccount = { biliAccountOpen = true })
+                    }
                 },
                 bottomBar = {
+                    Box(Modifier.claudeTransitionBackdrop { sharedBackdrop.value }) {
                     if (detail != "settings") {
                         if (detail.isEmpty()) {
                             Md3eNavigationBar(tab, showLocalTab = runtime.settings.bool("showLocalTab")) { selected ->
@@ -221,10 +244,12 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                             }
                         }
                     }
+                    }
                 },
             ) { insets ->
                 Box(Modifier.fillMaxSize().padding(insets).nestedScroll(miniScrollConnection)) {
                 SharedTransitionLayout(Modifier.fillMaxSize()) {
+                    ClaudeSharedBackdropFocus(isTransitionActive, route, sharedBackdrop, ClaudeOneTake.COLLECTION)
                     CompositionLocalProvider(
                         Md3eSharedScope provides this,
                         Md3eActiveCoverKey provides activeSharedCoverKey,
@@ -233,22 +258,28 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                             detail != "settings") 68.dp else 0.dp,
                     ) {
                         pageTransition.AnimatedContent(
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier.fillMaxSize().claudeTransitionBackdrop { sharedBackdrop.value },
                             transitionSpec = {
                                 val detailInvolved = initialState.detail.isNotEmpty() || targetState.detail.isNotEmpty()
                                 when {
                                     lowSpec -> Md3eMotion.lowSpecPage(!navigatingBack)
+                                    claudeDesign && !detailInvolved -> ClaudeOneTake.page(
+                                        listOf("home", "playlists", "local", "search").indexOf(targetState.tab) >
+                                            listOf("home", "playlists", "local", "search").indexOf(initialState.tab))
                                     activeSharedCoverKey != null &&
                                         (initialState.detail in setOf("playlist", "album") ||
                                             targetState.detail in setOf("playlist", "album")) ->
                                         Md3eMotion.collectionPage().using(null)
+                                    claudeDesign -> ClaudeOneTake.page(!navigatingBack)
                                     detailInvolved -> Md3eMotion.sealDetail(!navigatingBack)
                                     else -> Md3eMotion.page(!navigatingBack, pageTransitionPreset)
                                 }
                             },
                         ) { visibleRoute ->
+                            var visit by remember { mutableStateOf(entranceVisit) }
+                            if (visibleRoute == route && visit !== entranceVisit) visit = entranceVisit
                             routeStateHolder.SaveableStateProvider("${visibleRoute.tab}:${visibleRoute.detail}:${visibleRoute.id}") {
-                                CompositionLocalProvider(Md3eAnimatedScope provides this) {
+                                CompositionLocalProvider(Md3eAnimatedScope provides this, LocalClaudeEntranceVisit provides visit) {
                                     val pageModifier = Modifier.fillMaxSize()
                                     val collectionKey = if (visibleRoute.detail in setOf("playlist", "album"))
                                         "cover:${visibleRoute.detail}:${visibleRoute.id}" else null
@@ -306,7 +337,7 @@ when {
                 }
                 CompositionLocalProvider(Md3eLowSpecMode provides lowSpec) {
                     Md3eMiniPlayerDock(runtime,
-                        visible = miniPlayerVisible && detail != "settings" &&
+                        visible = (miniPlayerVisible || aiDj.shown) && detail != "settings" &&
                             (overlay.isEmpty() || playerExpansion.active || overlay == "player"),
                         onOpen = {
                             if (!lowSpec) playerExpansion.prepareOpen()
@@ -321,7 +352,8 @@ when {
                             overlay = "player"
                         },
                         onLogin = { neteaseLoginOpen = true },
-                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp)
+                            .claudeTransitionBackdrop { sharedBackdrop.value },
                         playerExpansion = playerExpansion)
                 }
                 }
@@ -338,8 +370,8 @@ when {
                 targetState = overlay == "queue",
                 modifier = Modifier.fillMaxSize(),
                 transitionSpec = {
-                    if (targetState) Md3eMotion.sheetIn() togetherWith ExitTransition.None
-                    else EnterTransition.None togetherWith Md3eMotion.sheetOut()
+                    if (targetState) (if (claudeDesign) ClaudeOneTake.sheetIn() else Md3eMotion.sheetIn()) togetherWith ExitTransition.None
+                    else EnterTransition.None togetherWith (if (claudeDesign) ClaudeOneTake.sheetOut() else Md3eMotion.sheetOut())
                 },
             ) { visibleOverlay ->
                 if (visibleOverlay) Box(Modifier.fillMaxSize().padding(WindowInsets.statusBars.asPaddingValues())
@@ -349,7 +381,8 @@ when {
                     }
                 else Box(Modifier.fillMaxSize())
             }
-            Md3eVideoLayer(runtime, obscured = overlay != "player" || biliAccountOpen || neteaseLoginOpen)
+            Md3eVideoLayer(runtime, obscured = overlay != "player" || biliAccountOpen || neteaseLoginOpen || aiDj.shown)
+            if (claudeDesign) ClaudeAiDjHost(runtime, aiDj, playerExpansion) { miniPlayerVisible = true }
             SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
                 .padding(bottom = if (overlay.isEmpty()) {
                     (if (detail.isEmpty()) 88.dp else 12.dp) +
@@ -376,6 +409,8 @@ when {
         }
     }
 }
+}
+
 @Composable
 private fun HomeContent(
     state: HomeState, onLogin: () -> Unit, onPlay: PlayAction,

@@ -28,6 +28,128 @@ import static org.junit.Assert.assertTrue;
 
 public class PlayerControllerPlaybackTest {
 
+    @Test
+    public void aiPreviewKeepsCurrentQueueUntilConfirmedAndCannotStartTwice() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        PlayerController controller = null;
+        try {
+            Path base = temporaryFolder.newFolder("ai-confirm").toPath();
+            AppDirs.setBase(base.toString());
+            AppDirs.setCacheBase(base.resolve("cache").toString());
+            FakeAudioBackend backend = new FakeAudioBackend();
+            controller = new PlayerController(backend, track -> { }, NeteaseClient.INSTANCE);
+            java.util.Queue<Runnable> main = new java.util.concurrent.ConcurrentLinkedQueue<>();
+            controller.setMainExecutor(main::add);
+            java.lang.reflect.Method playQueue = PlayerController.class.getDeclaredMethod(
+                    "playQueue", java.util.List.class, int.class);
+            playQueue.setAccessible(true);
+            Track current = new Track();
+            current.title = "current music";
+            current.filePath = base.resolve("current.mp3").toString();
+            playQueue.invoke(controller, java.util.Collections.singletonList(current), 0);
+            main.remove().run();
+            assertEquals(1, backend.playCalls);
+
+            java.lang.reflect.Field generationField = PlayerController.class.getDeclaredField("aiRequestGeneration");
+            generationField.setAccessible(true);
+            java.util.concurrent.atomic.AtomicLong generation =
+                    (java.util.concurrent.atomic.AtomicLong) generationField.get(controller);
+            long request = generation.incrementAndGet();
+            Class<?> continuationClass = Class.forName(PlayerController.class.getName() + "$AiContinuation");
+            java.lang.reflect.Constructor<?> constructor = continuationClass.getDeclaredConstructor(
+                    String.class, String.class, String.class, String.class, int.class, boolean.class);
+            constructor.setAccessible(true);
+            Object continuation = constructor.newInstance("https://example.invalid", "", "model", "request", 10, false);
+            java.lang.reflect.Method finish = PlayerController.class.getDeclaredMethod("finishAiPlaylist",
+                    long.class, java.util.List.class, String.class, continuationClass, boolean.class);
+            finish.setAccessible(true);
+            NeteaseSong song = new NeteaseSong();
+            song.id = 456L;
+            song.name = "preview song";
+            controller.aiLoading.set(false);
+            finish.invoke(controller, request, java.util.Collections.singletonList(song), "preview", continuation, true);
+            assertEquals(456L, controller.aiSongs.peek().get(0).id);
+            assertEquals(current, controller.queueTracks.peek().get(0));
+            assertEquals(1, backend.playCalls);
+            assertFalse(controller.confirmAiPlaylistPlayback(request - 1));
+            int pendingBeforeConfirmation = main.size();
+            assertTrue(controller.confirmAiPlaylistPlayback(request));
+            assertEquals(456L, controller.queueTracks.peek().get(0).neteaseId);
+            assertEquals(pendingBeforeConfirmation + 1, main.size());
+            assertFalse(controller.confirmAiPlaylistPlayback(request));
+            assertEquals(pendingBeforeConfirmation + 1, main.size());
+            java.lang.reflect.Field remembered = PlayerController.class.getDeclaredField("aiContinuation");
+            remembered.setAccessible(true);
+            assertEquals(continuation, remembered.get(controller));
+
+            // Cancelling a displayed result (including during text reveal) invalidates it.
+            request = generation.incrementAndGet();
+            finish.invoke(controller, request, java.util.Collections.singletonList(song), "cancelled", continuation, true);
+            controller.cancelAiPlaylistGeneration();
+            assertFalse(controller.confirmAiPlaylistPlayback(request));
+            // A late response from that request must not publish another playable preview.
+            finish.invoke(controller, request, java.util.Collections.singletonList(song), "stale", continuation, true);
+            assertFalse(controller.confirmAiPlaylistPlayback(request));
+        } finally {
+            if (controller != null) controller.shutdown();
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
+
+    @Test
+    public void cancelledAiCallbacksCannotReplaceQueueOrFinishANewerRequest() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        PlayerController controller = null;
+        try {
+            Path base = temporaryFolder.newFolder("ai-cancel").toPath();
+            AppDirs.setBase(base.toString());
+            AppDirs.setCacheBase(base.resolve("cache").toString());
+            controller = new PlayerController(new FakeAudioBackend(), track -> { }, NeteaseClient.INSTANCE);
+            java.lang.reflect.Field pendingUi = PlayerController.class.getDeclaredField("uiQueue");
+            pendingUi.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            java.util.Queue<Runnable> main = (java.util.Queue<Runnable>) pendingUi.get(controller);
+            main.clear();
+            java.lang.reflect.Field generation = PlayerController.class.getDeclaredField("aiRequestGeneration");
+            generation.setAccessible(true);
+            java.util.concurrent.atomic.AtomicLong token = (java.util.concurrent.atomic.AtomicLong) generation.get(controller);
+            java.lang.reflect.Method post = PlayerController.class.getDeclaredMethod("postAiGeneration", long.class, Runnable.class);
+            post.setAccessible(true);
+            java.lang.reflect.Field taskField = PlayerController.class.getDeclaredField("aiRequestTask");
+            taskField.setAccessible(true);
+            java.util.concurrent.FutureTask<Void> request = new java.util.concurrent.FutureTask<>(() -> null);
+            taskField.set(controller, request);
+            controller.aiLoading.set(true);
+            java.util.concurrent.atomic.AtomicInteger queueWrites = new java.util.concurrent.atomic.AtomicInteger();
+            final PlayerController current = controller;
+            post.invoke(controller, token.get(), (Runnable) queueWrites::incrementAndGet);
+            post.invoke(controller, token.get(), (Runnable) () -> {
+                current.aiLoading.set(false);
+                current.aiError.set("obsolete failure");
+            });
+            controller.cancelAiPlaylistGeneration();
+            assertFalse(controller.aiLoading.peek());
+            assertTrue(request.isCancelled());
+            // A fresh request can start before the old network response is drained.
+            token.incrementAndGet();
+            controller.aiLoading.set(true);
+            while (!main.isEmpty()) main.remove().run();
+            assertEquals(0, queueWrites.get());
+            assertTrue(controller.aiLoading.peek());
+            assertEquals("", controller.aiError.peek());
+            post.invoke(controller, token.get(), (Runnable) queueWrites::incrementAndGet);
+            main.remove().run();
+            assertEquals(1, queueWrites.get());
+        } finally {
+            if (controller != null) controller.shutdown();
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
 
     @Test
     public void rapidQueueSelectionsOnlyStartTheNewestSong() throws Exception {
@@ -60,6 +182,47 @@ public class PlayerControllerPlaybackTest {
             main.remove().run();
             assertEquals(1, backend.playCalls);
             assertEquals(last.filePath, backend.lastSource);
+        } finally {
+            if (controller != null) controller.shutdown();
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
+
+    @Test
+    public void biliCollectionCannotReplaceANewerVideoOrMusicSelection() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        PlayerController controller = null;
+        try {
+            Path base = temporaryFolder.newFolder("bili-selection").toPath();
+            AppDirs.setBase(base.toString());
+            AppDirs.setCacheBase(base.resolve("cache").toString());
+            controller = new PlayerController(new FakeAudioBackend(), track -> { }, NeteaseClient.INSTANCE);
+            java.lang.reflect.Field generation = PlayerController.class.getDeclaredField("biliResolveGeneration");
+            java.lang.reflect.Field selection = PlayerController.class.getDeclaredField("queueSelectionGeneration");
+            generation.setAccessible(true);
+            selection.setAccessible(true);
+            java.util.concurrent.atomic.AtomicInteger g =
+                    (java.util.concurrent.atomic.AtomicInteger) generation.get(controller);
+            java.util.concurrent.atomic.AtomicLong s =
+                    (java.util.concurrent.atomic.AtomicLong) selection.get(controller);
+            java.lang.reflect.Method current = PlayerController.class.getDeclaredMethod(
+                    "isCurrentBiliCollection", int.class, long.class);
+            current.setAccessible(true);
+            g.set(1); s.set(1);
+            assertEquals(true, current.invoke(controller, 1, 1L));
+            g.incrementAndGet(); s.incrementAndGet();
+            assertEquals(false, current.invoke(controller, 1, 1L));
+            assertEquals(true, current.invoke(controller, 2, 2L));
+            // A music queue also invalidates an in-flight video collection.
+            java.lang.reflect.Method queue = PlayerController.class.getDeclaredMethod(
+                    "playQueue", java.util.List.class, int.class);
+            queue.setAccessible(true);
+            controller.setMainExecutor(task -> { });
+            queue.invoke(controller, java.util.Collections.emptyList(), 0);
+            assertEquals(false, current.invoke(controller, 2, 2L));
         } finally {
             if (controller != null) controller.shutdown();
             AppDirs.setBase(oldBase);

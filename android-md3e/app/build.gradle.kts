@@ -8,6 +8,16 @@ configurations.configureEach {
     exclude(group = "org.jetbrains.kotlin", module = "kotlin-stdlib-jdk7")
     exclude(group = "org.jetbrains.kotlin", module = "kotlin-stdlib-jdk8")
 }
+val releaseStore = providers.environmentVariable("QPLAYER_RELEASE_STORE_FILE").orNull
+val releaseStorePassword = providers.environmentVariable("QPLAYER_RELEASE_STORE_PASSWORD").orNull
+val releaseAlias = providers.environmentVariable("QPLAYER_RELEASE_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("QPLAYER_RELEASE_KEY_PASSWORD").orNull
+val releaseSigningRequested = listOf(releaseStore, releaseStorePassword, releaseAlias, releaseKeyPassword)
+    .any { it != null }
+if (releaseSigningRequested) {
+    require(listOf(releaseStore, releaseStorePassword, releaseAlias, releaseKeyPassword)
+        .all { !it.isNullOrBlank() }) { "Set all four QPLAYER_RELEASE signing environment variables." }
+}
 android {
     namespace = "dev.t1m3.qplayer.android.md3eui"
     compileSdk = 35
@@ -26,6 +36,12 @@ android {
     kotlinOptions { jvmTarget = "1.8" }
     buildFeatures { compose = true }
     signingConfigs {
+        if (releaseSigningRequested) create("production") {
+            storeFile = file(requireNotNull(releaseStore))
+            storePassword = releaseStorePassword
+            keyAlias = releaseAlias
+            keyPassword = releaseKeyPassword
+        }
         val existing = rootProject.file("../android-shell/local-debug.keystore")
         if (existing.exists()) create("workspaceDebug") {
             storeFile = existing
@@ -39,7 +55,7 @@ android {
     }
     buildTypes.named("release") {
         isDebuggable = false
-        signingConfigs.findByName("workspaceDebug")?.let { signingConfig = it }
+        signingConfig = signingConfigs.findByName("production")
     }
     packaging.resources.excludes += setOf("META-INF/AL2.0", "META-INF/LGPL2.1", "META-INF/*.kotlin_module")
 }

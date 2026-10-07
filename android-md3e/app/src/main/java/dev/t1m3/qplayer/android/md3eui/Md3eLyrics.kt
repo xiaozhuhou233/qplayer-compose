@@ -27,6 +27,10 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import kotlinx.coroutines.flow.collectLatest
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -98,7 +102,21 @@ internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier
     val clock = remember(state.songId) { Md3eLyricClock() }
     val listState = rememberLazyListState()
     var pointerHeld by remember { mutableStateOf(false) }
+    // Manual browsing persists across lyric ticks and finger release. Only an
+    // explicit return, seek, or new song restores automatic following.
+    val browsing = remember(state.songId, state.seekRevision) { mutableStateOf(false) }
+    val browseConnection = remember(browsing) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput && available.y != 0f) {
+                    browsing.value = true
+                }
+                return Offset.Zero
+            }
+        }
+    }
     val lowSpec = runtime.settings.bool("lowSpecMode")
+    val claude = LocalClaudeDesign.current
     val springEnabled = runtime.settings.bool("lyricSpring") && !lowSpec
     // Playback samples are frame-rate data. Keying this effect by position
     // restarts the coroutine on every sample while paused/playing metadata is
@@ -122,20 +140,49 @@ internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier
     val active by remember(indexLookup, smooth) {
         derivedStateOf { indexLookup.at(smooth.longValue) }
     }
+    val latestActive by rememberUpdatedState(active)
+    val latestSong by rememberUpdatedState(state.songId)
+    val latestLyricRevision by rememberUpdatedState(lyrics.revision)
+    val latestBrowsing by rememberUpdatedState(browsing.value)
     val initial = active.takeIf { it in rows.indices } ?: rows.indices.firstOrNull() ?: -1
     val motions = remember(state.songId, lyrics.revision, rows.size) {
         mutableMapOf<Int, LyricRowMotion>()
     }
     var previous by remember(state.songId, lyrics.revision) { mutableIntStateOf(-1) }
+    val focusTolerance = with(LocalDensity.current) { 24.dp.toPx() }
+    LaunchedEffect(listState, browsing, state.songId, lyrics.revision) {
+        snapshotFlow {
+            val info = listState.layoutInfo
+            val current = info.visibleItemsInfo.firstOrNull { it.index == active }
+            val anchor = info.viewportStartOffset +
+                (info.viewportEndOffset - info.viewportStartOffset) * LYRIC_ANCHOR
+            browsing.value && !pointerHeld && !listState.isScrollInProgress &&
+                current != null && abs(current.offset + current.size / 2f - anchor) <=
+                    maxOf(focusTolerance, current.size * .35f)
+        }.collectLatest { focused ->
+            if (focused) {
+                // Require a settled viewport; passing the line during a fling
+                // must not steal the user's scroll.
+                delay(300)
+                previous = -1
+                browsing.value = false
+            }
+        }
+    }
 
     BoxWithConstraints(modifier) {
         val centerPadding = (maxHeight * .42f).coerceAtLeast(32.dp)
         val fontSize = runtime.settings.intOf("lyricFontSize").coerceIn(14, 40)
         val spacing = (runtime.settings.intOf("lyricLineSpacing").coerceIn(100, 250) * 24f / 200f)
             .dp.coerceAtLeast(10.dp)
-        LaunchedEffect(state.songId, lyrics.revision, active, springEnabled, pointerHeld) {
-            if (pointerHeld) return@LaunchedEffect
-            runLyricScroll(motions) {
+        LaunchedEffect(state.songId, lyrics.revision, active, springEnabled, pointerHeld, browsing.value) {
+            if (pointerHeld || browsing.value) return@LaunchedEffect
+            val scrollingActive = active
+            var scrollApplied = false
+            runLyricScroll(motions, handoff = {
+                scrollApplied && latestActive != scrollingActive && !pointerHeld && !latestBrowsing &&
+                    latestSong == state.songId && latestLyricRevision == lyrics.revision
+            }) {
                 val index = initial
                 if (index !in rows.indices || index == previous) return@runLyricScroll
                 val old = previous
@@ -175,6 +222,10 @@ internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier
                         }
                     }
                 }
+                // Commit the logical anchor as soon as the list moves. A short
+                // line may finish while its spring is still settling.
+                previous = index
+                scrollApplied = true
                 val row = rows[index]
                 val prior = rows.getOrNull((index - 1).coerceAtLeast(0))
                 val gap = ((row.start - (prior?.end ?: row.start)).coerceAtLeast(0L)) / 1000f
@@ -195,7 +246,7 @@ internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier
                         stiffness = (4.60517f / maxOf(remaining - .40f, .30f)).let { it * it }
                     }
                 }
-                val rowSpring = spring<Float>(dampingRatio = damping, stiffness = stiffness)
+                val rowSpring = if (claude) ClaudeOneTake.snappy<Float>() else spring<Float>(dampingRatio = damping, stiffness = stiffness)
                 coroutineScope {
                     motions.toMap().forEach { (rowIndex, motion) ->
                         val alpha = if (rowIndex == index) .85f else .175f
@@ -207,23 +258,23 @@ internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier
                         }
                         val delayMs = if (springEnabled && !listState.isScrollInProgress)
                             (abs(rowIndex - first) - 1).coerceAtLeast(0) * 50L else 0L
-                        launch { motion.alpha.animateTo(alpha, tween(120, easing = lyricOpacityEasing)) }
+                        launch { motion.alpha.animateTo(alpha, tween(120, easing = if (claude) ClaudeOneTake.ExpoOut else lyricOpacityEasing)) }
                         launch {
                             if (delayMs > 0) delay(delayMs)
                             motion.offset.animateTo(0f,
-                                if (springEnabled) rowSpring else tween(320, easing = FastOutSlowInEasing))
+                                if (springEnabled) rowSpring else tween(320, easing = if (claude) ClaudeOneTake.ExpoOut else FastOutSlowInEasing))
                         }
                         launch {
                             if (delayMs > 0) delay(delayMs)
                             motion.scale.animateTo(scale,
-                                if (springEnabled) rowSpring else tween(320, easing = FastOutSlowInEasing))
+                                if (springEnabled) rowSpring else tween(320, easing = if (claude) ClaudeOneTake.ExpoOut else FastOutSlowInEasing))
                         }
                     }
                 }
                 previous = index
             }
         }
-        LazyColumn(Modifier.fillMaxSize().pointerInput(Unit) {
+        LazyColumn(Modifier.fillMaxSize().nestedScroll(browseConnection).pointerInput(Unit) {
             awaitEachGesture {
                 awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                 pointerHeld = true
@@ -243,15 +294,28 @@ internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier
                     motions[index] = motion
                     onDispose { if (motions[index] === motion) motions.remove(index) }
                 }
+                LaunchedEffect(motion, browsing.value, active) {
+                    if (browsing.value) {
+                        // Continue highlighting without moving the viewport.
+                        motion.scale.snapTo(if (index == active) 1f else .98f)
+                        motion.alpha.snapTo(if (index == active) .85f else .175f)
+                    }
+                }
                 when (row) {
                     is DisplayLyricRow.Intro -> Md3eLyricIndicator(row, smooth, state.playing,
                         index == active, fontSize, motion, false, null)
                     is DisplayLyricRow.Break -> Md3eLyricIndicator(row, smooth, state.playing,
                         index == active, fontSize, motion, true) {
+                        previous = -1
+                        browsing.value = false
                         runtime.seekDisplayed(state, row.start)
                     }
                     is DisplayLyricRow.Line -> Md3eLyricText(row, smooth, index, active, motion,
-                        fontSize, runtime) { runtime.seekDisplayed(state, row.start) }
+                        fontSize, runtime) {
+                            previous = -1
+                            browsing.value = false
+                            runtime.seekDisplayed(state, row.start)
+                        }
                 }
             }
             if (rows.isEmpty()) item {
@@ -391,17 +455,6 @@ private fun lyricActiveK(position: Long, start: Long, end: Long): Float {
     return 1f - smooth((position - end - 100L) / 350f)
 }
 
-private fun lyricBackgroundScale(position: Long, start: Long, end: Long): Float {
-    val popStart = start + 150L
-    if (position < popStart) return 0f
-    if (position < popStart + 460L) {
-        val shifted = ((position - popStart) / 460f).coerceIn(0f, 1f) - 1f
-        return 1f + 2.7f * shifted * shifted * shifted + 1.7f * shifted * shifted
-    }
-    if (position < end) return 1f
-    val out = ((position - end) / 280f).coerceIn(0f, 1f)
-    return 1f - out * out * (3f - 2f * out)
-}
 
 @Composable
 private fun Md3eLyricText(row: DisplayLyricRow.Line, position: State<Long>, index: Int,
@@ -798,7 +851,7 @@ internal fun Md3eLyricDynamicBackdrop(runtime: Md3eRuntime, cover: String,
     }
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
         Box(modifier.background(fallback)) {
-            Md3eSoftArtworkBackdrop(cover, Modifier.fillMaxSize(), 64.dp)
+            Md3eSoftArtworkBackdrop(cover, Modifier.fillMaxSize(), 118.dp)
             Box(Modifier.fillMaxSize().background(fallback.copy(alpha = if (dark) .39f else .10f)))
         }
         return
@@ -836,8 +889,8 @@ private class Md3eLyricBackdropView(context: android.content.Context) : View(con
     }
 
     init {
-        // 18 px at quarter resolution preserves the previous 72 px softness.
-        setRenderEffect(RenderEffect.createBlurEffect(18f, 18f, Shader.TileMode.MIRROR))
+        // Match the pre-MD3E 150 px glow at quarter resolution.
+        setRenderEffect(RenderEffect.createBlurEffect(37.5f, 37.5f, Shader.TileMode.MIRROR))
     }
 
     fun update(image: Bitmap?, dark: Boolean, active: Boolean) {

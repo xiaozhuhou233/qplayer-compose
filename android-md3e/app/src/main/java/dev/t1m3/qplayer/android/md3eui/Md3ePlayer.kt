@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.animation.ExperimentalSharedTransitionApi::class)
+
 package dev.t1m3.qplayer.android.md3eui
 
 import android.content.ClipData
@@ -6,6 +8,12 @@ import android.content.Context
 import android.view.HapticFeedbackConstants
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.EnterExitState
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
@@ -21,7 +29,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import dev.t1m3.qplayer.android.md3eui.claudeClickable as clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -35,7 +43,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
@@ -81,12 +92,64 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.PI
 import kotlin.math.sin
 
+
+private class PlayerCoverTransition(
+    val shared: SharedTransitionScope,
+    val animated: AnimatedVisibilityScope
+)
+private val LocalPlayerCoverTransition = staticCompositionLocalOf<PlayerCoverTransition?> { null }
+
+// This scope only joins the two player tabs, independent of page navigation.
+@Composable
+private fun Modifier.playerTabCover(restingAngle: Float = 0f): Modifier {
+    val transition = LocalPlayerCoverTransition.current ?: return rotate(restingAngle)
+    val claude = LocalClaudeDesign.current
+    val otherAngle = if (claude && restingAngle == 0f) -5f else 0f
+    val angle = transition.animated.transition.animateFloat(
+        transitionSpec = { tween(if (claude) ClaudeOneTake.PLAYER_TAB else 360, easing = if (claude) ClaudeOneTake.ExpoOut else FastOutSlowInEasing) },
+        label = "player_cover_rotation"
+    ) { visibility -> if (visibility == EnterExitState.Visible) restingAngle else otherAngle }
+    return with(transition.shared) {
+        this@playerTabCover.sharedElement(
+            rememberSharedContentState("player-tab-cover"),
+            animatedVisibilityScope = transition.animated,
+            boundsTransform = { _, _ -> tween(if (claude) ClaudeOneTake.PLAYER_TAB else 360, easing = if (claude) ClaudeOneTake.ExpoOut else FastOutSlowInEasing) },
+            zIndexInOverlay = 0f
+        ).graphicsLayer { rotationZ = angle.value }
+    }
+}
+
+// Normal zIndex cannot occlude a shared element drawn in the root overlay.
+// Lift the entire disc (including its label and shadow) into that SAME overlay,
+// above the cover, and restore both to their normal order when it finishes.
+@Composable
+private fun Modifier.playerTabForeground(): Modifier {
+    val transition = LocalPlayerCoverTransition.current ?: return zIndex(2f)
+    val claude = LocalClaudeDesign.current
+    val opacity = transition.animated.transition.animateFloat(
+        transitionSpec = {
+            if (claude) tween(ClaudeOneTake.PLAYER_TAB, easing = ClaudeOneTake.ExpoOut)
+            else if (targetState == EnterExitState.Visible) tween(360) else tween(220)
+        }, label = "vinyl_overlay_opacity"
+    ) { visibility -> if (visibility == EnterExitState.Visible) 1f else 0f }
+    return with(transition.shared) {
+        this@playerTabForeground.zIndex(2f).renderInSharedTransitionScopeOverlay(
+            renderInOverlay = { isTransitionActive },
+            zIndexInOverlay = 2f
+        ).graphicsLayer {
+            // The overlay escapes the page's fade layer, so carry its fade here.
+            alpha = if (isTransitionActive) opacity.value else 1f
+        }
+    }
+}
 @Composable
 internal fun Md3ePlayerScreen(runtime: Md3eRuntime, onBack: () -> Unit,
     initialLyrics: Boolean = false, onQueue: () -> Unit,
     onOpenAlbum: (Long) -> Unit = {}, onOpenArtist: (Long) -> Unit = {}) {
     val state = runtime.playback
     var tab by remember(initialLyrics) { mutableIntStateOf(if (initialLyrics) 1 else 0) }
+    val expansion = LocalClaudePlayerExpansion.current
+    SideEffect { expansion?.detailShowsDisc = tab == 0 && !runtime.bili.playing }
     LaunchedEffect(runtime.bili.playing) { if (runtime.bili.playing) tab = 0 }
     var dragX by remember { mutableFloatStateOf(0f) }
     var dragY by remember { mutableFloatStateOf(0f) }
@@ -118,14 +181,19 @@ internal fun Md3ePlayerScreen(runtime: Md3eRuntime, onBack: () -> Unit,
             )
         }
         .background(MaterialTheme.colorScheme.surfaceContainer)) {
-        if (!LocalClaudeDesign.current && runtime.settings.bool("lyricCoverBackground") && state.cover.isNotBlank()) {
-            if (tab == 1) Md3eLyricDynamicBackdrop(runtime, state.cover, Modifier.fillMaxSize())
-            else Md3eSoftArtworkBackdrop(state.cover, Modifier.fillMaxSize())
-            if (tab == 0) Box(Modifier.fillMaxSize().background(
-                MaterialTheme.colorScheme.surface.copy(alpha = .76f)))
+        val claude = LocalClaudeDesign.current
+        val coverBackground = runtime.settings.bool("lyricCoverBackground") && state.cover.isNotBlank()
+        if (coverBackground) {
+            Crossfade(tab, animationSpec = tween(if (claude) ClaudeOneTake.PLAYER_TAB else 360, easing = if (claude) ClaudeOneTake.ExpoOut else FastOutSlowInEasing), label = "player_background") { backgroundTab ->
+                if (backgroundTab == 1) {
+                    Md3eLyricDynamicBackdrop(runtime, state.cover, Modifier.fillMaxSize())
+                } else if (!claude) {
+                    Md3eSoftArtworkBackdrop(state.cover, Modifier.fillMaxSize())
+                    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface.copy(alpha = .76f)))
+                }
+            }
         }
-        val dynamicLyrics = !LocalClaudeDesign.current && tab == 1 && runtime.settings.bool("lyricCoverBackground") &&
-            !runtime.settings.bool("lowSpecMode") && state.cover.isNotBlank()
+        val dynamicLyrics = tab == 1 && coverBackground && !runtime.settings.bool("lowSpecMode")
         val scheme = MaterialTheme.colorScheme
         val displayScheme = if (dynamicLyrics) scheme.copy(
             onSurface = Color.White,
@@ -170,15 +238,27 @@ internal fun Md3ePlayerScreen(runtime: Md3eRuntime, onBack: () -> Unit,
                 }
             }
             Spacer(Modifier.height(12.dp))
-            AnimatedContent(
-                targetState = tab,
-                modifier = Modifier.fillMaxWidth().weight(1f),
-                transitionSpec = { Md3eMotion.tab(targetState > initialState) },
-                label = "player_detail_tab",
-            ) { page ->
-                if (page == 0) PlayerDetailTab(runtime, onLyrics = { tab = 1 },
-                    onOpenAlbum = onOpenAlbum, onOpenArtist = onOpenArtist)
-                else PlayerLyricsTab(runtime, onDetail = { tab = 0 })
+            SharedTransitionLayout(Modifier.fillMaxWidth().weight(1f)) {
+                val coverScope = this
+                val sharedBackdrop = remember { androidx.compose.animation.core.Animatable(0f) }
+                ClaudeSharedBackdropFocus(isTransitionActive, tab, sharedBackdrop, ClaudeOneTake.PLAYER_TAB)
+                AnimatedContent(
+                    targetState = tab,
+                    modifier = Modifier.fillMaxSize().claudeTransitionBackdrop { sharedBackdrop.value },
+                    transitionSpec = {
+                        (if (claude) (fadeIn(tween(ClaudeOneTake.PLAYER_TAB, easing = ClaudeOneTake.ExpoOut)) togetherWith
+                            fadeOut(tween(ClaudeOneTake.PLAYER_TAB, easing = ClaudeOneTake.ExpoOut)))
+                        else (fadeIn(tween(360)) togetherWith fadeOut(tween(220)))).using(null)
+                    },
+                    label = "player_detail_tab",
+                ) { page ->
+                    CompositionLocalProvider(LocalPlayerCoverTransition provides
+                        PlayerCoverTransition(coverScope, this)) {
+                        if (page == 0) PlayerDetailTab(runtime, onLyrics = { tab = 1 },
+                            onOpenAlbum = onOpenAlbum, onOpenArtist = onOpenArtist)
+                        else PlayerLyricsTab(runtime, onDetail = { tab = 0 })
+                    }
+                }
             }
         }
         }
@@ -223,7 +303,7 @@ private fun PlayerDetailTab(runtime: Md3eRuntime, onLyrics: () -> Unit,
                 val aspect = if (runtime.videoHeight > 0) runtime.videoWidth.toFloat() / runtime.videoHeight else 16f / 9f
                 val videoWidth = minOf(maxWidth, maxHeight * aspect)
                 Md3eVideoSlot(runtime, Modifier.width(videoWidth).height(videoWidth / aspect))
-            } else Artwork(state.cover, Modifier.size(coverSize).graphicsLayer {
+            } else Artwork(state.cover, Modifier.size(coverSize).playerTabCover().graphicsLayer {
                 scaleX = scale.value; scaleY = scale.value
             }.clickable {
                 if (runtime.bili.playing) runtime.videoVisible = true else onLyrics()
@@ -309,30 +389,49 @@ private fun ClaudePlayerDetail(runtime: Md3eRuntime, onLyrics: () -> Unit,
 
 @Composable
 private fun ClaudeVinylStageMd3e(cover: String, album: String, playing: Boolean, modifier: Modifier) {
+    val expansion = LocalClaudePlayerExpansion.current
+    val coverTransition = LocalPlayerCoverTransition.current
+    // Move the disc concurrently with the cover; no delayed sleeve return.
+    // Joining the visibility transition also supports reversal without a timer
+    // from a previous navigation completing against the new page.
+    val separation = coverTransition?.animated?.transition?.animateFloat(
+        transitionSpec = { tween(ClaudeOneTake.VINYL_MOVE, easing = ClaudeOneTake.ExpoOut) },
+        label = "vinyl_sleeve_separation"
+    ) { visibility -> if (visibility == EnterExitState.Visible) 0f else 1f }
     BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
         val edge = minOf(maxWidth * .66f, maxHeight * .82f, 270.dp)
         val accent = MaterialTheme.colorScheme.primary
         Box(Modifier.width(edge * 1.36f).height(edge * 1.08f)) {
-            Column(Modifier.size(edge).align(Alignment.CenterStart).rotate(-5f)
+            // Keep the tilted sleeve decoration separate from the shared image:
+            // ancestor rotation is not carried into the shared-element overlay.
+            Box(Modifier.size(edge).align(Alignment.CenterStart).rotate(-5f)
+                .shadow(18.dp, RoundedCornerShape(8.dp), clip = false,
+                    ambientColor = Color.Black.copy(alpha = .22f),
+                    spotColor = Color.Black.copy(alpha = .38f))
                 .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(8.dp))
-                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp)).padding(12.dp)) {
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp)))
+            Column(Modifier.size(edge).align(Alignment.CenterStart).padding(12.dp)) {
                 Text("VINYL ARCHIVE", fontFamily = ClaudeMono, fontSize = 8.sp, letterSpacing = 1.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(8.dp))
-                Artwork(cover, Modifier.fillMaxWidth().weight(1f), corner = 4.dp)
+                Artwork(cover, Modifier.fillMaxWidth().weight(1f).playerTabCover(restingAngle = -5f), corner = 4.dp)
                 Text(album, Modifier.padding(top = 8.dp), fontFamily = ClaudeSerif, fontSize = 12.sp,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             Box(Modifier.size(edge * .9f).align(Alignment.CenterEnd)
-                .shadow(14.dp, CircleShape, clip = false), contentAlignment = Alignment.Center) {
-                Canvas(Modifier.fillMaxSize()) {
-                    val radius = size.minDimension / 2f
-                    drawCircle(Color(0xFF171715))
-                    repeat(12) { i -> drawCircle(Color.White.copy(alpha = .08f), radius * (.44f + i * .04f),
-                        style = Stroke(.6.dp.toPx())) }
-                    drawCircle(accent, radius * .36f)
+                .onGloballyPositioned { expansion?.targetDiscBounds = it.boundsInRoot() }
+                .playerTabForeground()
+                .graphicsLayer {
+                    val open = separation?.value ?: 0f
+                    translationX = edge.toPx() * .54f * open
+                    rotationZ = 12f * open
+                    scaleX = 1f - .08f * open
+                    scaleY = 1f - .08f * open
                 }
-                Artwork(cover, Modifier.fillMaxSize(.29f), corner = 100.dp)
+                .shadow(14.dp, CircleShape, clip = false), contentAlignment = Alignment.Center) {
+                ClaudeMovingDisc(cover, Modifier.fillMaxSize().graphicsLayer {
+                    alpha = if (expansion?.moving == true) 0f else 1f
+                })
             }
         }
     }
@@ -453,7 +552,7 @@ private fun PlayerLyricsTab(runtime: Md3eRuntime, onDetail: () -> Unit) {
     Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
         Row(Modifier.fillMaxWidth().height(72.dp).padding(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            Artwork(state.cover, Modifier.size(56.dp).clickable(onClick = onDetail))
+            Artwork(state.cover, Modifier.size(56.dp).playerTabCover().clickable(onClick = onDetail))
             Column(Modifier.weight(1f).padding(start = 14.dp)) {
                 Text(state.title, fontSize = 19.sp, fontWeight = FontWeight.Bold,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -549,7 +648,7 @@ private fun ClaudeLyricsTab(runtime: Md3eRuntime, onDetail: () -> Unit) {
     val state = runtime.playback
     Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
         Row(Modifier.fillMaxWidth().height(72.dp), verticalAlignment = Alignment.CenterVertically) {
-            Artwork(state.cover, Modifier.size(56.dp).clickable(onClick = onDetail), corner = 6.dp)
+            Artwork(state.cover, Modifier.size(56.dp).playerTabCover().clickable(onClick = onDetail), corner = 6.dp)
             Column(Modifier.weight(1f).padding(start = 14.dp)) {
                 Text(state.title, fontFamily = ClaudeSerif, fontSize = 19.sp, fontWeight = FontWeight.SemiBold,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -558,7 +657,7 @@ private fun ClaudeLyricsTab(runtime: Md3eRuntime, onDetail: () -> Unit) {
             IconButton(onClick = onDetail) { Icon(PlayerIcons.Album, "返回唱片") }
         }
         Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-            if (runtime.lyricState.loading) CircularProgressIndicator(Modifier.size(36.dp))
+            if (runtime.lyricState.loading) Md3eLoadingIndicator(Modifier.size(36.dp))
             else if (runtime.lyricState.lines.isEmpty()) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("此刻，听音乐就好", fontFamily = ClaudeSerif, fontSize = 22.sp)
@@ -568,8 +667,6 @@ private fun ClaudeLyricsTab(runtime: Md3eRuntime, onDetail: () -> Unit) {
             }
             else Md3eLyricColumn(runtime)
         }
-        PlayerProgress(state, wavy = false, onSeek = { runtime.seekDisplayed(state, it) }, modifier = Modifier.fillMaxWidth())
-        PlayerTransport(runtime)
     }
 }
 
@@ -919,7 +1016,7 @@ internal fun Md3eQueueScreen(runtime: Md3eRuntime, onBack: () -> Unit) {
                     ReorderableItem(reorderState, key = entry.id,
                         animateItemModifier = Modifier.animateItem()) { dragging ->
                         val scale by animateFloatAsState(if (dragging) 1.02f else 1f,
-                            animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+                            animationSpec = if (LocalClaudeDesign.current) ClaudeOneTake.snappy() else spring(stiffness = Spring.StiffnessMediumLow),
                             label = "queue_drag_scale")
                         QueueRow(entry.track, selected = entry.id == playingEntryId,
                             dragging = dragging,

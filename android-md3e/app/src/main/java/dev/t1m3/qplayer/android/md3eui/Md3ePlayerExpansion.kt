@@ -9,6 +9,9 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.offset
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
@@ -23,6 +26,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -44,6 +48,8 @@ import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
@@ -63,6 +69,9 @@ internal class Md3ePlayerExpansionState(val miniLayer: GraphicsLayer) {
     val settle = Animatable(0f)
     var expanded by mutableStateOf(false)
     var miniBounds by mutableStateOf(Rect.Zero)
+    var miniDiscBounds by mutableStateOf(Rect.Zero)
+    var targetDiscBounds by mutableStateOf(Rect.Zero)
+    var detailShowsDisc by mutableStateOf(true)
     var flightBounds by mutableStateOf(Rect.Zero)
     var hostOrigin by mutableStateOf(Offset.Zero)
     var hostSize by mutableStateOf(IntSize.Zero)
@@ -138,6 +147,8 @@ internal fun Md3ePlayerExpansionHost(
     state: Md3ePlayerExpansionState,
     durationMillis: Int,
     simpleSlide: Boolean = false,
+    claude: Boolean = false,
+    cover: String = "",
     base: @Composable () -> Unit,
     detail: @Composable () -> Unit,
 ) {
@@ -159,8 +170,10 @@ internal fun Md3ePlayerExpansionHost(
     }
 
     val density = LocalDensity.current
+    val miniColor = MaterialTheme.colorScheme.surfaceContainerLow
+    val playerColor = MaterialTheme.colorScheme.background
     val rendering = LocalMd3eRenderingActive.current
-    LaunchedEffect(expanded, durationMillis) {
+    LaunchedEffect(expanded, durationMillis, claude) {
         state.settle.snapTo(0f)
         if (expanded) {
             if (!state.expanded) state.prepareOpen()
@@ -172,8 +185,9 @@ internal fun Md3ePlayerExpansionHost(
             state.progress.snapTo(if (expanded) 1f else 0f)
         } else {
             state.progress.animateTo(if (expanded) 1f else 0f,
-                tween(durationMillis, easing = playerExpandEasing))
-            if (expanded) state.settle.animateTo(0f,
+                tween(if (claude) { if (expanded) ClaudeOneTake.CARRY else ClaudeOneTake.TRAVEL } else durationMillis,
+                    easing = if (claude) ClaudeOneTake.ExpoOut else playerExpandEasing))
+            if (expanded && !claude) state.settle.animateTo(0f,
                 spring(dampingRatio = .68f, stiffness = 500f), initialVelocity = 38f)
         }
     }
@@ -181,6 +195,11 @@ internal fun Md3ePlayerExpansionHost(
     Box(Modifier.fillMaxSize().onSizeChanged { state.hostSize = it }
         .onGloballyPositioned { state.hostOrigin = it.positionInRoot() }) {
         Box(Modifier.fillMaxSize()
+            .claudeTransitionBackdrop {
+                // One geometric clock for opening, closing and reversals; both endpoints are clear.
+                val p = state.progress.value.coerceIn(0f, 1f)
+                if (claude && durationMillis > 0) ClaudeOneTake.ExpoOut.transform(2f * minOf(p, 1f - p)) else 0f
+            }
             .then(if (expanded || state.active) Modifier.clearAndSetSemantics {} else Modifier)) {
             val baseRendering by remember(state, rendering) {
                 derivedStateOf { rendering && (state.refreshSnapshot || !state.active) }
@@ -193,8 +212,10 @@ internal fun Md3ePlayerExpansionHost(
                     val p = state.progress.value
                     shape = if (p >= 1f) androidx.compose.ui.graphics.RectangleShape else
                         Md3ePlayerRevealShape(state.bounds(size, density.density),
-                            state.source(size, density.density).height * .5f * (1f - p))
+                            (if (claude) minOf(32.dp.toPx(), state.source(size, density.density).height * .5f)
+                                else state.source(size, density.density).height * .5f) * (1f - p))
                     clip = true
+                    if (claude) shadowElevation = 4.dp.toPx() * (1f - p)
                     val settlePx = state.settle.value.dp.toPx()
                     transformOrigin = TransformOrigin(.5f, 1f)
                     scaleX = 1f + settlePx / size.width.coerceAtLeast(1f)
@@ -207,14 +228,17 @@ internal fun Md3ePlayerExpansionHost(
                         } while (event.changes.any { it.pressed })
                     }
                 }) {
+                if (claude) Box(Modifier.fillMaxSize().drawBehind {
+                    drawRect(androidx.compose.ui.graphics.lerp(miniColor, playerColor, state.progress.value))
+                })
                 Box(Modifier.fillMaxSize().graphicsLayer {
                     val bounds = state.bounds(size, density.density)
                     transformOrigin = TransformOrigin(0f, 0f)
-                    translationX = bounds.left
-                    translationY = bounds.top
-                    scaleX = if (size.width > 0f) bounds.width / size.width else 1f
-                    scaleY = if (size.height > 0f) bounds.height / size.height else 1f
-                    alpha = ((state.progress.value - .06f) / .48f).coerceIn(0f, 1f)
+                    translationX = if (claude) 0f else bounds.left
+                    translationY = if (claude) 0f else bounds.top
+                    scaleX = if (claude) 1f else if (size.width > 0f) bounds.width / size.width else 1f
+                    scaleY = if (claude) 1f else if (size.height > 0f) bounds.height / size.height else 1f
+                    alpha = if (claude) ((state.progress.value - .35f) / .65f).coerceIn(0f, 1f) else ((state.progress.value - .06f) / .48f).coerceIn(0f, 1f)
                 }) {
                     CompositionLocalProvider(LocalMd3eRenderingActive provides (rendering && !state.moving)) { detail() }
                 }
@@ -228,12 +252,25 @@ internal fun Md3ePlayerExpansionHost(
                             val bounds = state.bounds(hostSize, density.density)
                             transformOrigin = TransformOrigin(0f, 0f)
                             translationX = bounds.left
-                            scaleX = bounds.width / sourceWidth
+                            scaleX = if (claude) 1f + (bounds.width / sourceWidth - 1f) * .18f else bounds.width / sourceWidth
                             scaleY = scaleX
                             translationY = bounds.center.y - sourceHeight * scaleY * .5f
-                            alpha = (1f - (state.progress.value - .06f) / .48f).coerceIn(0f, 1f)
+                            // Claude's labels begin returning at 70% expansion, well before the final landing.
+                            alpha = if (claude) ((.70f - state.progress.value) / .70f).coerceIn(0f, 1f)
+                                else (1f - (state.progress.value - .06f) / .48f).coerceIn(0f, 1f)
                         }.drawWithContent { drawLayer(state.miniLayer) })
                 }
+            }
+            if (claude && state.moving && state.miniDiscBounds.width > 0f) {
+                val p = state.progress.value.coerceIn(0f, 1f)
+                val start = state.miniDiscBounds.translate(-state.hostOrigin)
+                val end = if (state.targetDiscBounds.width > 0f) state.targetDiscBounds.translate(-state.hostOrigin) else
+                    Rect(state.hostSize.width * .45f, state.hostSize.height * .24f,
+                        state.hostSize.width * .9f, state.hostSize.height * .24f + state.hostSize.width * .45f)
+                val edge = with(density) { lerp(start.width, end.width, p).toDp() }
+                ClaudeMovingDisc(cover, Modifier.offset {
+                    IntOffset(lerp(start.left, end.left, p).roundToInt(), lerp(start.top, end.top, p).roundToInt())
+                }.size(edge).graphicsLayer { alpha = if (state.detailShowsDisc) 1f else 1f - p }.clearAndSetSemantics {})
             }
         }
     }

@@ -94,7 +94,7 @@ internal fun Artwork(url: String, modifier: Modifier = Modifier, corner: android
     } else {
         animateFloatAsState(
             targetValue = targetAlpha,
-            animationSpec = tween(100),
+            animationSpec = tween(100, easing = if (LocalClaudeDesign.current) ClaudeOneTake.ExpoOut else androidx.compose.animation.core.LinearEasing),
             label = "seal_artwork_crossfade"
         ).value
     }

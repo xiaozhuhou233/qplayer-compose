@@ -1,6 +1,7 @@
 @file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 package dev.t1m3.qplayer.android.md3eui
 import androidx.compose.foundation.*
+import dev.t1m3.qplayer.android.md3eui.claudeClickable as clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.*
 import androidx.compose.foundation.pager.*
@@ -55,7 +56,7 @@ internal fun ClaudeBadge(text: String, modifier: Modifier = Modifier) {
 
 @Composable
 internal fun ClaudeGreeting(name: String, dailyPhrase: String) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(Modifier.claudeEntrance(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("YOUR DAILY SOUNDTRACK", style = MaterialTheme.typography.labelSmall,
             letterSpacing = 1.5.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(if (name.isBlank()) "你好，今天想听什么？" else "你好，$name", style = MaterialTheme.typography.headlineMedium)
@@ -67,7 +68,7 @@ internal fun ClaudeGreeting(name: String, dailyPhrase: String) {
 @Composable
 internal fun ClaudePlaylistCard(playlist: NeteasePlaylist, onClick: () -> Unit) {
     Md3eCollectionContainer("cover:playlist:${playlist.id}", corner = 12.dp) {
-Surface(Modifier.width(166.dp).clickable(onClick = onClick), shape = RoundedCornerShape(12.dp),
+Surface(Modifier.width(166.dp).claudeEntrance(2).clickable(onClick = onClick), shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         border = BorderStroke(.8.dp, MaterialTheme.colorScheme.outlineVariant)) {
         Column(Modifier.padding(9.dp)) {
@@ -96,7 +97,7 @@ internal fun ClaudeSongShelf(title: String, songs: List<NeteaseSong>, play: (Int
     if (songs.isEmpty()) return
     val count = (songs.size + 2) / 3
     val pager = rememberPagerState(pageCount = { count })
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(Modifier.claudeEntrance(3), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.weight(1f)) { ClaudeSectionTitle(title) }
             Text("${pager.currentPage + 1} / $count", style = MaterialTheme.typography.labelSmall,
@@ -109,7 +110,7 @@ internal fun ClaudeSongShelf(title: String, songs: List<NeteaseSong>, play: (Int
                     repeat(3) { slot ->
                         val index = page * 3 + slot
                         songs.getOrNull(index)?.let { song ->
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Row(Modifier.claudeEntrance(slot), verticalAlignment = Alignment.CenterVertically) {
                                 Text((index + 1).toString().padStart(2, '0'), Modifier.width(24.dp),
                                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Column(Modifier.weight(1f)) {
