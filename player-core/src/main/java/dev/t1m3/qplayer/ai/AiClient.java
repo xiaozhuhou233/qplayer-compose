@@ -68,6 +68,85 @@ public final class AiClient {
         return chatOnce(system, user, false, 0.2d);
     }
 
+    /**
+     * The playlist path's one turn: a caller-chosen output budget and, for models that
+     * reason before answering, the lowest reasoning effort — the single biggest lever on
+     * their time-to-answer（「争取五秒出结果」）. A provider that rejects the field is
+     * retried without it before anything else is given up on.
+     */
+    public String chat(String system, String user, double temperature, int maxTokens,
+                       String reasoningEffort) throws IOException {
+        try {
+            return chatOnce(system, user, true, temperature, maxTokens, reasoningEffort);
+        } catch (IOException e) {
+            String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase();
+            if (reasoningEffort != null && (message.contains("reasoning") || message.contains("argument")
+                    || message.contains("unknown") || message.contains("unrecognized")
+                    || message.contains("invalid"))) {
+                try {
+                    return chatOnce(system, user, true, temperature, maxTokens, null);
+                } catch (IOException retry) {
+                    e = retry;
+                    message = e.getMessage() == null ? "" : e.getMessage().toLowerCase();
+                }
+            }
+            // Some OpenAI-compatible gateways reject response_format while
+            // accepting the rest of /chat/completions. Retry once without it.
+            if (message.contains("response_format") || message.contains("json_object")
+                    || message.contains("unsupported") || message.contains("不支持")) {
+                return chatOnce(system, user, false, temperature, maxTokens, null);
+            }
+            throw e;
+        }
+    }
+
+    /** Reasoning-style models: they answer slowly unless told to think less. */
+    private static boolean looksLikeReasoner(String m) {
+        if (m == null) return false;
+        String s = m.toLowerCase(java.util.Locale.ROOT);
+        return s.contains("gpt-5") || s.contains("gpt5") || s.startsWith("o1") || s.startsWith("o3")
+                || s.startsWith("o4") || s.contains("thinking") || s.contains("reason")
+                || s.contains("deepseek-r") || s.contains("qwq");
+    }
+
+    /**
+     * The playlist JSON, tolerant of both the compact pair-array shape the prompt now
+     * asks for ({@code {"name":…,"songs":[["title","artist"]]}}) and the older object
+     * shape — a model may answer in either, and the older shape costs nothing to accept.
+     */
+    private static AiPlaylistResult parseResult(String raw) {
+        AiPlaylistResult result = new AiPlaylistResult();
+        if (raw == null) return result;
+        int start = raw.indexOf('{');
+        int end = raw.lastIndexOf('}');
+        if (start < 0 || end <= start) return result;
+        try {
+            JsonObject obj = JsonParser.parseString(raw.substring(start, end + 1)).getAsJsonObject();
+            com.google.gson.JsonElement name = obj.has("name") ? obj.get("name") : obj.get("playlistName");
+            if (name != null && name.isJsonPrimitive()) result.playlistName = name.getAsString();
+            if (obj.has("summary") && obj.get("summary").isJsonPrimitive()) {
+                result.summary = obj.get("summary").getAsString();
+            }
+            if (!obj.has("songs") || !obj.get("songs").isJsonArray()) return result;
+            for (com.google.gson.JsonElement el : obj.getAsJsonArray("songs")) {
+                if (el == null || el.isJsonNull()) continue;
+                AiPlaylistResult.Song song = new AiPlaylistResult.Song();
+                if (el.isJsonArray()) {
+                    com.google.gson.JsonArray pair = el.getAsJsonArray();
+                    if (pair.size() > 0 && pair.get(0).isJsonPrimitive()) song.title = pair.get(0).getAsString();
+                    if (pair.size() > 1 && pair.get(1).isJsonPrimitive()) song.artist = pair.get(1).getAsString();
+                } else if (el.isJsonObject()) {
+                    com.google.gson.JsonObject o = el.getAsJsonObject();
+                    if (o.has("title") && o.get("title").isJsonPrimitive()) song.title = o.get("title").getAsString();
+                    if (o.has("artist") && o.get("artist").isJsonPrimitive()) song.artist = o.get("artist").getAsString();
+                    if (o.has("reason") && o.get("reason").isJsonPrimitive()) song.reason = o.get("reason").getAsString();
+                }
+                if (!song.title.trim().isEmpty() && !song.artist.trim().isEmpty()) result.songs.add(song);
+            }
+        } catch (RuntimeException ignored) { }
+        return result;
+    }
+
     /** A small plain-text answer, without paying the playlist's full output budget. */
     public String chatPlain(String system, String user, int maxTokens) throws IOException {
         return chatOnce(system, user, false, 0.7d, Math.max(32, Math.min(8192, maxTokens)));
@@ -84,6 +163,11 @@ public final class AiClient {
 
     private String chatOnce(String system, String user, boolean requestJson, double temperature,
                             int maxTokens) throws IOException {
+        return chatOnce(system, user, requestJson, temperature, maxTokens, null);
+    }
+
+    private String chatOnce(String system, String user, boolean requestJson, double temperature,
+                            int maxTokens, String reasoningEffort) throws IOException {
         JsonObject root = new JsonObject();
         root.addProperty("model", model);
         root.addProperty("temperature", Math.max(0d, Math.min(2d, temperature)));
@@ -93,6 +177,9 @@ public final class AiClient {
         // One compact item is roughly 25-35 tokens.  A fixed 1400-token cap
         // truncates larger requests and leaves an invalid JSON document.
         root.addProperty("max_tokens", maxTokens);
+        if (reasoningEffort != null && !reasoningEffort.isEmpty()) {
+            root.addProperty("reasoning_effort", reasoningEffort);
+        }
         // Ask OpenAI-compatible providers to enforce a JSON object response.
         // Providers that do not support this field are handled by the caller's
         // Markdown fallback parser.
@@ -165,15 +252,14 @@ public final class AiClient {
                 "③ 其中某些歌手的新歌或新发行；④ 几首稍微小众/冷门的，不要整张都是榜单热歌。" +
                 "每次生成都要有随机性：即使要求一模一样，也不要每次都给出同一批歌，换一些角度、换一些歌手、换一些年代。" +
                 "如果给了「上一张歌单」，新歌单里既要有其中的一部分（老歌，延续同一风格），也要有新的歌（新歌），并且风格与上一张相对一致。" +
-                "输出规则（仅为速度收紧，要求不变）：只返回一个合法 JSON 对象，单行紧凑，不换行、不缩进、不加多余空格，JSON 前后没有任何其他字符；不要 Markdown、解释、思考过程或代码围栏。" +
-                "JSON 格式必须是：{\"playlistName\":\"歌单名\",\"summary\":\"简短说明\",\"songs\":[{\"title\":\"歌名\",\"artist\":\"歌手\",\"reason\":\"\"}]}。" +
+                "输出（越快越好）：不要任何思考过程、解释或前言，直接输出最终 JSON。格式固定为 {\"name\":\"歌单名(不超过10个字)\",\"songs\":[[\"歌名\",\"歌手\"],...]}；每首歌只有歌名和歌手两个值，没有理由、没有其他字段；单行、无空格、无换行、无 Markdown。" +
                 "即使请求很短，也必须返回歌曲；不要因为描述简短、组合条件或语言混合而拒绝。" +
-                "songs 数组必须达到目标数量，不要多于目标数量；确实凑不够时给出尽可能多的真实歌曲，不要编造，也不要缩减为三四首。reason 一律为空字符串。";
+                "songs 数组必须达到目标数量，不要多于目标数量；确实凑不够时给出尽可能多的真实歌曲，不要编造，也不要缩减为三四首。";
         if (webContext != null && webContext.contains("KNOWLEDGE_BASE_ONLY")) {
             system += "当前已开启强制使用知识库：无论用户提出什么问题，都禁止联网、禁止调用搜索工具、禁止要求搜索资料，只能使用你已有的模型知识完成推荐。";
         }
-        String user = "仅输出 JSON（单行紧凑，前后无其他字符）。不要拒绝简短描述、组合条件或混合语言，直接给出歌曲。" +
-                "songs 恰好 " + count + " 首不同歌曲：不要多给（多给会被丢弃）；确实凑不够时给出尽可能多的真实歌曲，不要编造；reason 一律空字符串。用户要求：" + normalizedRequest +
+        String user = "仅输出那个 JSON（单行紧凑，前后无其他字符，不要解释）。不要拒绝简短描述、组合条件或混合语言，直接给出歌曲。" +
+                "songs 恰好 " + count + " 首不同歌曲：不要多给（多给会被丢弃）；确实凑不够时给出尽可能多的真实歌曲，不要编造。用户要求：" + normalizedRequest +
                 "\n推荐数量：" + count +
                 "\n收藏歌曲样本（仅用于判断风格）：\n" + sampleSongs;
         if (references != null && !references.trim().isEmpty()) {
@@ -188,8 +274,16 @@ public final class AiClient {
         }
         // Warm, and a fresh draw for every attempt: 「ai 算法生成的歌曲要有随机性」. A retry after an
         // unusable answer therefore comes back with different songs rather than the same ones again.
+        // 2026-10-07 第二轮提速（「争取五秒出结果」）：输出预算按数量收紧（会缩减模型
+        // 的啰嗦输出），推理型模型显式降到最低思考档 —— 那是它们延迟的最大头。
+        int budget = Math.max(256, Math.min(4096, 80 + count * 40));
+        String reasoningEffort = looksLikeReasoner(model) ? "low" : null;
+        // 推理模型的隐藏思考也计入这份预算：不留余量时 JSON 会被截断，
+        // 于是重试三次 —— 那是最慢的路径。余量只加给推理模型。
+        if (reasoningEffort != null) budget = Math.min(8192, budget + 2048);
         String raw = chat(system, user,
-                AiReference.temperature(java.util.concurrent.ThreadLocalRandom.current())).trim();
+                AiReference.temperature(java.util.concurrent.ThreadLocalRandom.current()),
+                budget, reasoningEffort).trim();
         String originalResponse = raw;
         // Gateways often wrap valid JSON in Markdown or a short preamble.
         // Extract the JSON object before parsing instead of rejecting the
@@ -197,20 +291,8 @@ public final class AiClient {
         int objectStart = raw.indexOf('{');
         int objectEnd = raw.lastIndexOf('}');
         if (objectStart >= 0 && objectEnd > objectStart) raw = raw.substring(objectStart, objectEnd + 1);
-        AiPlaylistResult result;
-        try {
-            result = GSON.fromJson(raw, AiPlaylistResult.class);
-        } catch (RuntimeException e) {
-            result = null;
-        }
-        if (result != null && result.songs != null) {
-            java.util.ArrayList<AiPlaylistResult.Song> valid = new java.util.ArrayList<>();
-            for (AiPlaylistResult.Song song : result.songs) {
-                if (song != null && song.title != null && !song.title.trim().isEmpty()
-                        && song.artist != null && !song.artist.trim().isEmpty()) valid.add(song);
-            }
-            result.songs = valid;
-        }
+        AiPlaylistResult result = parseResult(raw);
+        if (result.songs.isEmpty()) result = null;
         // Be tolerant of providers that return fewer/more items than requested.
         // The resolver will use every valid item instead of discarding an
         // otherwise useful recommendation set.
@@ -223,14 +305,14 @@ public final class AiClient {
             // Second pass: complex chart/trend questions are often answered as
             // prose. Ask the model to normalize that prose into song objects.
             String normalizeSystem = "你是歌曲信息提取器。只从输入文本中提取真实歌曲的歌名和歌手，" +
-                    "然后只返回合法 JSON 对象，不要 Markdown、不要解释、不要思考过程。" +
-                    "格式必须是 {playlistName:string,summary:string,songs:[{title:string,artist:string,reason:string}]}。" +
+                    "只返回一个 JSON 对象，不要 Markdown、不要解释、不要思考过程。" +
+                    "格式固定为 {\"name\":\"\",\"songs\":[[\"歌名\",\"歌手\"]]}。" +
                     "无法确认的内容跳过，不要编造。";
             String normalized = chat(normalizeSystem, "将下面 AI 回答转换为歌曲 JSON，最多提取 " + count + " 首：\n" + originalResponse);
             int s = normalized.indexOf('{'), e = normalized.lastIndexOf('}');
             if (s >= 0 && e > s) normalized = normalized.substring(s, e + 1);
-            try { result = GSON.fromJson(normalized, AiPlaylistResult.class); }
-            catch (RuntimeException ignored) { result = null; }
+            result = parseResult(normalized);
+            if (result.songs.isEmpty()) result = null;
             if (result == null || result.songs == null || result.songs.isEmpty()) {
                 // The second pass can also ignore JSON mode. Reuse the same
                 // local extractor instead of reporting a false empty result.

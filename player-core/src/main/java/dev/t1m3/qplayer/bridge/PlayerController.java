@@ -1503,6 +1503,12 @@ public final class PlayerController {
     private volatile long currentAlbumId;
     /** Snapshot of the live play queue for the queue page; current track is {@link #index}. */
     public final Property<List<Track>> queueTracks = new Property<>(Collections.<Track>emptyList());
+    public final Property<String> biliQueueMode = new Property<>("RELATED");
+    public final Property<String> biliQueueTargetMode = new Property<>("");
+    public final Property<Boolean> biliQueueHasCollection = new Property<>(false);
+    public final Property<Boolean> biliQueueSwitching = new Property<>(false);
+    private final java.util.concurrent.atomic.AtomicInteger biliQueueSwitchGeneration =
+            new java.util.concurrent.atomic.AtomicInteger();
     public final Property<Boolean> queueOpen = new Property<>(false);
     /** Snapshot of {@link #customPlaylist} for the queue page's second tab. */
     public final Property<List<Track>> customPlaylistTracks = new Property<>(Collections.<Track>emptyList());
@@ -9271,6 +9277,7 @@ public final class PlayerController {
 
     public void playBiliCollection(BiliClient.BiliVideo video) {
         if (video == null || video.bvid == null || video.bvid.isEmpty()) return;
+        biliQueueSwitchGeneration.incrementAndGet();
         final long request = biliOpenGeneration.incrementAndGet();
         final long selection = coverRevision.get();
         biliRelatedSeed = null;
@@ -9279,6 +9286,8 @@ public final class PlayerController {
             if (!isCurrentBiliOpen(request, selection)) return;
             loading.set(true);
             biliError.set("");
+            biliQueueSwitching.set(false);
+            biliQueueTargetMode.set("");
         });
         biliQueueWorker.submit(() -> {
             try {
@@ -9297,8 +9306,12 @@ public final class PlayerController {
                     verifiedDetails = false;
                 }
                 BiliQueuePlan plan = biliQueuePlan(video, details, verifiedDetails);
+                final boolean hasCollection = details.parts.size() > 1 || details.episodes.size() > 1;
                 onMain(() -> {
                     if (!isCurrentBiliOpen(request, selection)) return;
+                    biliQueueMode.set(plan.related ? "RELATED" : "COLLECTION");
+                    biliQueueHasCollection.set(hasCollection);
+                    biliQueueSwitching.set(false);
                     playQueue(plan.tracks, plan.start);
                     if (plan.related) {
                         Track seed = plan.tracks.get(plan.start);
@@ -9403,6 +9416,108 @@ public final class PlayerController {
                 });
             }
         });
+    }
+
+    /** Change the B站 queue source while leaving the active stream and its clock untouched. */
+    public void switchBiliQueueMode(String requestedMode) {
+        final String mode = "COLLECTION".equalsIgnoreCase(requestedMode) ? "COLLECTION" : "RELATED";
+        final Track seed = currentTrack();
+        if (seed == null || seed.source != Track.Source.BILI || seed.biliBvid == null) return;
+        if (mode.equals(biliQueueMode.peek()) || Boolean.TRUE.equals(biliQueueSwitching.peek())) return;
+        if ("COLLECTION".equals(mode) && !Boolean.TRUE.equals(biliQueueHasCollection.peek())) return;
+        final long request = biliOpenGeneration.get();
+        final long selection = coverRevision.get();
+        final int switchGeneration = biliQueueSwitchGeneration.incrementAndGet();
+        biliQueueSwitching.set(true);
+        biliQueueTargetMode.set(mode);
+        biliQueueWorker.submit(() -> {
+            try {
+                List<Track> replacement = new ArrayList<>();
+                BiliClient.BiliVideoDetails details = null;
+                if ("COLLECTION".equals(mode)) {
+                    details = bili.videoDetails(seed.biliBvid);
+                    if (details.episodes.size() > 1) {
+                        for (BiliClient.BiliVideo episode : details.episodes) {
+                            replacement.add(matchesBiliTrack(seed, episode.bvid, episode.cid)
+                                    ? seed : toTrackBili(episode, episode.cid, null));
+                        }
+                    } else if (details.parts.size() > 1) {
+                        for (int i = 0; i < details.parts.size(); i++) {
+                            BiliClient.BiliPart part = details.parts.get(i);
+                            String label = part.title == null || part.title.isEmpty() ? "P" + (i + 1) : part.title;
+                            Track track = matchesBiliTrack(seed, details.video.bvid, part.cid)
+                                    ? seed : toTrackBili(details.video, part.cid, label);
+                            if (part.durationSeconds > 0L) track.durationMs = part.durationSeconds * 1000L;
+                            replacement.add(track);
+                        }
+                    } else {
+                        throw new IOException("当前视频没有可播放的合集");
+                    }
+                    if (!replacement.contains(seed)) replacement.add(0, seed);
+                } else {
+                    replacement.add(seed);
+                    Set<String> seen = new HashSet<>();
+                    seen.add(seed.biliBvid);
+                    for (BiliClient.BiliVideo video : bili.relatedVideos(seed.biliBvid)) {
+                        if (video == null || video.bvid == null || video.bvid.isEmpty() || !seen.add(video.bvid)) continue;
+                        replacement.add(toTrackBili(video, video.cid, null));
+                    }
+                }
+                final BiliClient.BiliVideoDetails resolvedDetails = details;
+                onMain(() -> {
+                    synchronized (queueMoveLock) {
+                        if (!isCurrentBiliQueueSwitch(request, selection, seed, switchGeneration)) {
+                            if (biliQueueSwitchGeneration.get() == switchGeneration) {
+                                biliQueueSwitching.set(false);
+                                biliQueueTargetMode.set("");
+                            }
+                            return;
+                        }
+                        int active = replacement.indexOf(seed);
+                        if (active < 0) active = 0;
+                        queue.clear();
+                        queue.addAll(replacement);
+                        playIndex = active;
+                        index.set(active);
+                        unshuffledBackup = null;
+                        biliRelatedSeed = "RELATED".equals(mode) ? seed : null;
+                        queueTracks.set(new ArrayList<>(queue));
+                        biliQueueMode.set(mode);
+                        if (resolvedDetails != null) {
+                            biliQueueHasCollection.set(resolvedDetails.parts.size() > 1
+                                    || resolvedDetails.episodes.size() > 1);
+                        }
+                        biliQueueSwitching.set(false);
+                        biliQueueTargetMode.set("");
+                    }
+                    worker.submit(this::saveQueue);
+                });
+            } catch (Throwable error) {
+                Logger.warn("bili queue switch to {} failed: {}", mode, error.toString());
+                post(() -> {
+                    if (isCurrentBiliQueueSwitch(request, selection, seed, switchGeneration)) {
+                        biliQueueSwitching.set(false);
+                        biliQueueTargetMode.set("");
+                        if ("COLLECTION".equals(mode)) {
+                            biliQueueHasCollection.set(false);
+                            showToast(error.getMessage() != null && error.getMessage().contains("当前视频没有")
+                                    ? error.getMessage() : "合集列表加载失败");
+                        } else {
+                            showToast("相关推荐加载失败");
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    private boolean isCurrentBiliQueueSwitch(long request, long selection, Track seed, int switchGeneration) {
+        return biliOpenGeneration.get() == request && coverRevision.get() == selection
+                && biliQueueSwitchGeneration.get() == switchGeneration && currentTrack() == seed;
+    }
+
+    private static boolean matchesBiliTrack(Track seed, String bvid, long cid) {
+        return seed.biliBvid.equals(bvid) && (seed.biliCid <= 0L || cid <= 0L || seed.biliCid == cid);
     }
 
     /** BILI counterpart of resolveAndPlayNetease: ask for the progressive stream,
@@ -11664,6 +11779,7 @@ public final class PlayerController {
                         }
                     }
                 }
+                long genStart = System.currentTimeMillis();
                 AiPlaylistResult rec = null;
                 IOException lastAiError = null;
                 for (int attempt = 1; attempt <= 3 && rec == null; attempt++) {
@@ -11693,6 +11809,7 @@ public final class PlayerController {
                 }
                 final String finalDetail = detail.toString();
                 postAiGeneration(generation, () -> { aiSummary.set(finalRec.summary == null ? "" : finalRec.summary); aiDetails.set(finalDetail); aiProgress.set("正在通过网易云搜索匹配真实歌曲…"); });
+                long matchedStart = System.currentTimeMillis();
                 List<NeteaseSong> resolved = new ArrayList<>();
                 // 2026-10-07 提速（「大幅度优化 AI 推荐歌曲的速度」）：这段匹配是耗时的大头之一
                 // —— 每首歌一次网易云搜索，而客户端自身的锁会把请求串行化，所以①匹配量达到
@@ -11704,17 +11821,23 @@ public final class PlayerController {
                     if (generation != aiRequestGeneration.get()) return;
                     if (resolved.size() >= matchTarget) break;
                     if (!matchedPairs.add(normalizeAiText(x.title) + '|' + normalizeAiText(x.artist))) continue;
-                    List<NeteaseSong> candidates = netease.searchSongs(x.title + " " + x.artist, 30, 0);
+                    // 10 条足够找出正确匹配，而客户端把搜索串行化，每条都要付
+                    // 网络 + 解析的成本（30 条的那份响应明显更大）。
+                    List<NeteaseSong> candidates = netease.searchSongs(x.title + " " + x.artist, 10, 0);
                     NeteaseSong match = bestAiSongMatch(candidates, x.title, x.artist);
                     if (match == null) {
                         // Artist spelling and collaboration separators vary a
                         // lot between AI output and NetEase search metadata.
-                        candidates = netease.searchSongs(x.title, 30, 0);
+                        candidates = netease.searchSongs(x.title, 10, 0);
                         match = bestAiSongMatch(candidates, x.title, x.artist);
                     }
                     if (match != null && !(excludeLiked && likedIds.contains(match.id))
                             && !containsId(resolved, match.id)) resolved.add(match);
                 }
+                // 耗时拆分进日志（用户按「秒」验收，下一轮据此再砍）。
+                Logger.info("ai playlist: generated {} song(s) in {} ms — matched {} real track(s) in {} ms",
+                        rec.songs.size(), matchedStart - genStart, resolved.size(),
+                        System.currentTimeMillis() - matchedStart);
                 if (resolved.isEmpty()) throw new IllegalStateException("网易云未找到推荐歌曲");
                 // ⚠️ Round 35 REMOVED the interleave step that round 34 put here — the user:
                 // 「也不用非要是中英文穿插」. The prompt still asks for a natural mix, but the order the
