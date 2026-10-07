@@ -673,23 +673,34 @@ public final class BiliClient {
         q.put("fnver", "0");
         q.put("fourk", "1");
         JsonObject obj = request("https://api.bilibili.com/x/player/wbi/playurl", q, true);
-        if (!obj.has("data") || !obj.get("data").isJsonObject()) return null;
-        JsonObject data = obj.getAsJsonObject("data");
-        if (data.has("durl") && data.get("durl").isJsonArray()) {
-            JsonArray arr = data.getAsJsonArray("durl");
-            if (arr.size() > 0) {
-                JsonObject first = arr.get(0).getAsJsonObject();
-                String base = string(first, "url");
-                if (!base.isEmpty()) return base;
-            }
+        String url = muxedUrl(obj);
+        if (url != null) return url;
+        // MediaPlayer cannot combine DASH audio/video tracks. Retry a lower
+        // progressive quality instead of feeding it a silent video-only stream.
+        if (quality != 32) {
+            q.put("qn", "32");
+            q.put("fourk", "0");
+            return muxedUrl(request("https://api.bilibili.com/x/player/wbi/playurl", q, true));
         }
-        // Fall back to the DASH video track: video only, but at least it plays.
-        if (data.has("dash") && data.get("dash").isJsonObject()) {
-            JsonObject video = data.getAsJsonObject("dash").getAsJsonArray("video").get(0)
-                    .getAsJsonObject();
-            String url = string(video, "baseUrl");
-            if (url.isEmpty()) url = string(video, "base_url");
-            return url.isEmpty() ? null : url;
+        return null;
+    }
+
+    static String muxedUrl(JsonObject response) {
+        if (!response.has("data") || !response.get("data").isJsonObject()) return null;
+        JsonObject data = response.getAsJsonObject("data");
+        if (!data.has("durl") || !data.get("durl").isJsonArray()) return null;
+        JsonArray urls = data.getAsJsonArray("durl");
+        // Multiple segments need a concatenating player; opening only the first
+        // silently truncates the video. Let the lower-quality retry handle it.
+        if (urls.size() != 1 || !urls.get(0).isJsonObject()) return null;
+        JsonObject stream = urls.get(0).getAsJsonObject();
+        String url = string(stream, "url");
+        if (!url.isEmpty()) return url;
+        if (stream.has("backup_url") && stream.get("backup_url").isJsonArray()) {
+            for (JsonElement backup : stream.getAsJsonArray("backup_url")) {
+                if (backup.isJsonPrimitive() && backup.getAsJsonPrimitive().isString()
+                        && !backup.getAsString().isEmpty()) return backup.getAsString();
+            }
         }
         return null;
     }
