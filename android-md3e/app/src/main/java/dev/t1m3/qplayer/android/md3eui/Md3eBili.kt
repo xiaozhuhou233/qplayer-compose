@@ -50,6 +50,11 @@ internal data class BiliState(
     val loggedIn: Boolean = false,
     val playing: Boolean = false,
     val bvid: String = "",
+    val queueVideo: Boolean = false,
+    val queueMode: String = "RELATED",
+    val queueTargetMode: String = "",
+    val queueHasCollection: Boolean = false,
+    val queueSwitching: Boolean = false,
     val qrUrl: String = "",
     val qrStatus: Int = 0,
     val error: String = "",
@@ -225,7 +230,7 @@ internal fun Md3eVideoSlot(runtime: Md3eRuntime, modifier: Modifier = Modifier, 
 /** Keep this as the final, always-composed child of the root Box, including audio pages.
  * Resizing and parking the original SurfaceView reproduces the old player's no-replay
  * handoff between details and immersive fullscreen. A parked view retains its
- * surface for reuse, while the backend detaches it to stop hidden video decoding. */
+ * surface for foreground navigation; the backend detaches it in the background. */
 @Composable
 internal fun Md3eVideoLayer(runtime: Md3eRuntime, obscured: Boolean = false) {
     val density = LocalDensity.current
@@ -259,7 +264,11 @@ internal fun Md3eVideoLayer(runtime: Md3eRuntime, obscured: Boolean = false) {
         val slot = runtime.videoSlots.maxByOrNull { it.key }?.value
         val wanted = runtime.uiVisible && runtime.bili.playing && runtime.videoVisible &&
             !obscured && (fullscreen || slot != null)
-        SideEffect { runtime.audioBackend.setVideoPlaybackVisible(wanted) }
+        // Foreground navigation parks the surface without detaching it: NuPlayer
+        // can replay the previous keyframe's audio after setSurface(null)/reattach.
+        // `wanted` only controls layout; the lifecycle gate still detaches in background.
+        val keepPlaybackSurface = runtime.uiVisible && runtime.bili.playing
+        SideEffect { runtime.audioBackend.setVideoPlaybackVisible(keepPlaybackSurface) }
         val target = when {
             !wanted -> Rect(-width - 64f, 0f, -width - 63f, 1f)
             fullscreen -> {

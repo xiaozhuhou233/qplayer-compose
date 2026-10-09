@@ -38,6 +38,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -106,6 +108,8 @@ internal fun Md3eMiniPlayerDock(
     modifier: Modifier = Modifier,
     playerExpansion: Md3ePlayerExpansionState? = null,
 ) {
+    val privateRoam = LocalClaudePrivateRoam.current
+    var roamBounds by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
     AnimatedVisibility(
         visible = visible && runtime.playback.hasTrack,
         modifier = modifier,
@@ -117,8 +121,8 @@ internal fun Md3eMiniPlayerDock(
                 Modifier.fillMaxWidth().padding(horizontal = 24.dp), playerExpansion,
                 onRoam = {
                     if (runtime.home.loggedIn) {
-                        runtime.play { startPrivateFm() }
-                        onOpenLyrics()
+                        privateRoam?.source = playerExpansion?.miniBounds ?: androidx.compose.ui.geometry.Rect.Zero
+                        privateRoam?.open()
                     } else onLogin()
                 })
         } else {
@@ -127,11 +131,12 @@ internal fun Md3eMiniPlayerDock(
                     SmallFloatingActionButton(
                         onClick = {
                             if (runtime.home.loggedIn) {
-                                runtime.play { startPrivateFm() }
-                                onOpenLyrics()
+                                privateRoam?.source = roamBounds
+                                privateRoam?.open()
                             } else onLogin()
                         },
                         modifier = Modifier.align(Alignment.TopEnd)
+                            .onGloballyPositioned { roamBounds = it.boundsInRoot() }
                             .then(if (playerExpansion != null) Modifier.md3ePlayerChromeExit(playerExpansion) else Modifier),
                         shape = CircleShape,
                         containerColor = MaterialTheme.colorScheme.primaryContainer,

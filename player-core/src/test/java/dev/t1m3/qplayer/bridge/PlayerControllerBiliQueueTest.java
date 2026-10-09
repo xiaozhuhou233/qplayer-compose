@@ -102,6 +102,45 @@ public class PlayerControllerBiliQueueTest {
     }
 
     @Test
+    public void switchingBiliQueueSourceKeepsCurrentStreamPositionAndPauseState() throws Exception {
+        try (Fixture f = fixture()) {
+            BiliClient.BiliVideoDetails details = details("middle", 2);
+            details.parts.add(part(1, "first"));
+            details.parts.add(part(2, "middle"));
+            details.parts.add(part(3, "last"));
+            details.episodes.addAll(Arrays.asList(video("first", 1), video("middle", 2), video("last", 3)));
+            f.bili.details.put("middle", details);
+            f.bili.related.put("middle", Arrays.asList(video("related", 4), video("middle", 2)));
+            f.controller.playBiliCollection(video("middle", 2));
+            f.until(() -> f.backend.plays == 1);
+            Track playing = f.controller.currentTrack();
+            f.backend.position = 42000L;
+            f.controller.mediaPause();
+
+            f.bili.detailsFailure = true;
+            f.controller.switchBiliQueueMode("RELATED");
+            f.until(() -> "RELATED".equals(f.controller.biliQueueMode.peek())
+                    && !Boolean.TRUE.equals(f.controller.biliQueueSwitching.peek()));
+            assertSame(playing, f.controller.currentTrack());
+            assertQueue(f, "middle", "related");
+            assertEquals(42000L, f.backend.position);
+            assertFalse(f.backend.playing);
+            assertEquals(1, f.backend.plays);
+
+            f.bili.detailsFailure = false;
+            f.controller.switchBiliQueueMode("COLLECTION");
+            f.until(() -> "COLLECTION".equals(f.controller.biliQueueMode.peek())
+                    && !Boolean.TRUE.equals(f.controller.biliQueueSwitching.peek()));
+            assertSame(playing, f.controller.currentTrack());
+            assertQueue(f, "first", "middle", "last");
+            assertEquals(1, f.controller.index.peek().intValue());
+            assertEquals(42000L, f.backend.position);
+            assertFalse(f.backend.playing);
+            assertEquals(1, f.backend.plays);
+        }
+    }
+
+    @Test
     public void staleDetailsCannotReplaceANewerVideo() throws Exception {
         try (Fixture f = fixture()) {
             f.bili.blockedDetail = "old";

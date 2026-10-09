@@ -2,6 +2,7 @@ package dev.t1m3.qplayer.android.md3eui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -189,12 +190,17 @@ internal fun ClaudeAiDjHost(runtime: Md3eRuntime, dj: ClaudeAiDjState,
                 // OM.flyThrough tilt establishes depth, then morphRect carries the card to the dock.
                 tilt.animateTo(1f, ClaudeOneTake.snappy())
                 try {
-                    gather.animateTo(1f, tween(ClaudeOneTake.CARRY, easing = ClaudeOneTake.ExpoOut)) {
-                        // Contact begins only within 3/4 of the measured dock height.
-                        // Both halves use OM.expoOut and end with the card, without an independent timer.
-                        val contact = ((value - contactStart) / (1f - contactStart).coerceAtLeast(.001f)).coerceIn(0f, 1f)
-                        dj.dockStretch = if (contact < .4f) ClaudeOneTake.ExpoOut.transform(contact / .4f)
-                            else 1f - ClaudeOneTake.ExpoOut.transform((contact - .4f) / .6f)
+                    val contactThreshold = contactStart
+                    var contactTime = -1f
+                    gather.animateTo(1f, tween(ClaudeOneTake.CARRY, easing = LinearEasing)) {
+                        // Geometry keeps its ease-out; deformation uses elapsed
+                        // time so the return lasts until the card is fully gone.
+                        val travel = ClaudeOneTake.ExpoOut.transform(value)
+                        if (contactTime < 0f && travel >= contactThreshold) contactTime = value
+                        val contact = if (contactTime < 0f) 0f else
+                            ((value - contactTime) / (1f - contactTime).coerceAtLeast(.001f)).coerceIn(0f, 1f)
+                        val phase = if (contact < .4f) contact / .4f else (1f - contact) / .6f
+                        dj.dockStretch = phase * phase * (3f - 2f * phase)
                     }
                 } finally {
                     dj.dockStretch = 0f
@@ -231,12 +237,13 @@ internal fun ClaudeAiDjHost(runtime: Md3eRuntime, dj: ClaudeAiDjState,
         }
         fun mix(a: Rect, b: Rect, t: Float) = Rect(lerp(a.left,b.left,t), lerp(a.top,b.top,t), lerp(a.right,b.right,t), lerp(a.bottom,b.bottom,t))
         Box(Modifier.fillMaxSize().drawBehind {
-            drawRect(Color(0xFF29251F).copy(alpha = .24f * reveal.value * (1f - gather.value)))
+            drawRect(Color(0xFF29251F).copy(alpha = .24f * reveal.value *
+                (1f - ClaudeOneTake.ExpoOut.transform(gather.value))))
         }
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { /* Modal scrim consumes taps without dismissing results. */ })
         Surface(Modifier.width(with(density) { cardWidth.toDp() }).height(with(density) { cardHeight.toDp() })
             .graphicsLayer {
-                val g = gather.value
+                val g = ClaudeOneTake.ExpoOut.transform(gather.value)
                 val frame = mix(mix(start, target, reveal.value), dock, g)
                 shape = RoundedCornerShape(28.dp)
                 clip = true
@@ -249,11 +256,13 @@ internal fun ClaudeAiDjHost(runtime: Md3eRuntime, dj: ClaudeAiDjState,
                 alpha = 1f - ((g - .88f) / .12f).coerceIn(0f, 1f)
             }.drawBehind {
                 drawRect(androidx.compose.ui.graphics.lerp(
-                    androidx.compose.ui.graphics.lerp(paper, DjOrange, reveal.value), paper, gather.value))
+                    androidx.compose.ui.graphics.lerp(paper, DjOrange, reveal.value), paper,
+                    ClaudeOneTake.ExpoOut.transform(gather.value)))
             }, shape = RoundedCornerShape(28.dp), color = Color.Transparent,
             contentColor = DjCream) {
             Column(Modifier.fillMaxSize().padding(22.dp).graphicsLayer {
-                alpha = ((reveal.value - .2f) / .65f).coerceIn(0f, 1f) * (1f - gather.value)
+                alpha = ((reveal.value - .2f) / .65f).coerceIn(0f, 1f) *
+                    (1f - ClaudeOneTake.ExpoOut.transform(gather.value))
             }, verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Box(Modifier.align(Alignment.CenterHorizontally).width(30.dp).height(3.dp).background(DjCream.copy(alpha = .5f), RoundedCornerShape(2.dp)))
                 Row(verticalAlignment = Alignment.CenterVertically) {

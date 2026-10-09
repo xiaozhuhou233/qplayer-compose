@@ -69,47 +69,6 @@ public final class AiClient {
     }
 
     /**
-     * The playlist path's one turn: a caller-chosen output budget and, for models that
-     * reason before answering, the lowest reasoning effort — the single biggest lever on
-     * their time-to-answer（「争取五秒出结果」）. A provider that rejects the field is
-     * retried without it before anything else is given up on.
-     */
-    public String chat(String system, String user, double temperature, int maxTokens,
-                       String reasoningEffort) throws IOException {
-        try {
-            return chatOnce(system, user, true, temperature, maxTokens, reasoningEffort);
-        } catch (IOException e) {
-            String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase();
-            if (reasoningEffort != null && (message.contains("reasoning") || message.contains("argument")
-                    || message.contains("unknown") || message.contains("unrecognized")
-                    || message.contains("invalid"))) {
-                try {
-                    return chatOnce(system, user, true, temperature, maxTokens, null);
-                } catch (IOException retry) {
-                    e = retry;
-                    message = e.getMessage() == null ? "" : e.getMessage().toLowerCase();
-                }
-            }
-            // Some OpenAI-compatible gateways reject response_format while
-            // accepting the rest of /chat/completions. Retry once without it.
-            if (message.contains("response_format") || message.contains("json_object")
-                    || message.contains("unsupported") || message.contains("不支持")) {
-                return chatOnce(system, user, false, temperature, maxTokens, null);
-            }
-            throw e;
-        }
-    }
-
-    /** Reasoning-style models: they answer slowly unless told to think less. */
-    private static boolean looksLikeReasoner(String m) {
-        if (m == null) return false;
-        String s = m.toLowerCase(java.util.Locale.ROOT);
-        return s.contains("gpt-5") || s.contains("gpt5") || s.startsWith("o1") || s.startsWith("o3")
-                || s.startsWith("o4") || s.contains("thinking") || s.contains("reason")
-                || s.contains("deepseek-r") || s.contains("qwq");
-    }
-
-    /**
      * The playlist JSON, tolerant of both the compact pair-array shape the prompt now
      * asks for ({@code {"name":…,"songs":[["title","artist"]]}}) and the older object
      * shape — a model may answer in either, and the older shape costs nothing to accept.
@@ -163,11 +122,6 @@ public final class AiClient {
 
     private String chatOnce(String system, String user, boolean requestJson, double temperature,
                             int maxTokens) throws IOException {
-        return chatOnce(system, user, requestJson, temperature, maxTokens, null);
-    }
-
-    private String chatOnce(String system, String user, boolean requestJson, double temperature,
-                            int maxTokens, String reasoningEffort) throws IOException {
         JsonObject root = new JsonObject();
         root.addProperty("model", model);
         root.addProperty("temperature", Math.max(0d, Math.min(2d, temperature)));
@@ -176,10 +130,10 @@ public final class AiClient {
         // hidden-style explanations from compatible gateways.
         // One compact item is roughly 25-35 tokens.  A fixed 1400-token cap
         // truncates larger requests and leaves an invalid JSON document.
+        // ⚠️ 这里只放应用一直以来的字段（model / temperature / max_tokens /
+        // response_format / messages）。不要再加 reasoning_effort 之类的硬性限制：
+        // 真实的兼容网关可能因此完全拿不到结果（2026-10-07 的教训）。
         root.addProperty("max_tokens", maxTokens);
-        if (reasoningEffort != null && !reasoningEffort.isEmpty()) {
-            root.addProperty("reasoning_effort", reasoningEffort);
-        }
         // Ask OpenAI-compatible providers to enforce a JSON object response.
         // Providers that do not support this field are handled by the caller's
         // Markdown fallback parser.
@@ -274,16 +228,12 @@ public final class AiClient {
         }
         // Warm, and a fresh draw for every attempt: 「ai 算法生成的歌曲要有随机性」. A retry after an
         // unusable answer therefore comes back with different songs rather than the same ones again.
-        // 2026-10-07 第二轮提速（「争取五秒出结果」）：输出预算按数量收紧（会缩减模型
-        // 的啰嗦输出），推理型模型显式降到最低思考档 —— 那是它们延迟的最大头。
-        int budget = Math.max(256, Math.min(4096, 80 + count * 40));
-        String reasoningEffort = looksLikeReasoner(model) ? "low" : null;
-        // 推理模型的隐藏思考也计入这份预算：不留余量时 JSON 会被截断，
-        // 于是重试三次 —— 那是最慢的路径。余量只加给推理模型。
-        if (reasoningEffort != null) budget = Math.min(8192, budget + 2048);
+        // ⚠️ 不要给这个请求加硬性限制（用户 2026-10-07：「你这个版本ai根本无法返回任何结果，
+        // 不要给ai加硬性限制」）。第二轮试过的 reasoning_effort=low 与「按数量收紧的
+        // max_tokens」都会让真实网关拿不到结果，已全部撤掉；这里保持应用一直以来的请求形态：
+        // 默认温度、完整 8192 预算、不带任何额外字段。提速只能靠提示词本身。
         String raw = chat(system, user,
-                AiReference.temperature(java.util.concurrent.ThreadLocalRandom.current()),
-                budget, reasoningEffort).trim();
+                AiReference.temperature(java.util.concurrent.ThreadLocalRandom.current())).trim();
         String originalResponse = raw;
         // Gateways often wrap valid JSON in Markdown or a short preamble.
         // Extract the JSON object before parsing instead of rejecting the

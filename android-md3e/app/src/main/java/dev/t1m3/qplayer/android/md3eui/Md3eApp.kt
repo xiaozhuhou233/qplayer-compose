@@ -49,9 +49,13 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
     val dark = when (runtime.settings.intOf("darkMode")) { 1 -> false; 2 -> true; else -> systemDark }
     SideEffect { onDarkAppearance(dark) }
     var pageMotionActive by remember { mutableStateOf(false) }
+    // 定时停止播放：状态在根组合里，离开队列页也继续倒数（见 Md3eSleepTimer.kt）。
+    val sleepTimer = rememberMd3eSleepTimerState()
+    Md3eSleepCountdown(runtime, sleepTimer)
     val playerExpansion = rememberMd3ePlayerExpansionState()
     val claudeDesign = runtime.settings.bool("claudeDesign")
     val aiDj = remember { ClaudeAiDjState() }
+    val privateRoam = remember { ClaudePrivateRoamState() }
     val dynamicScheme = rememberMd3eColorScheme(
         seed = runtime.playback.coverSeed,
         dark = dark,
@@ -67,6 +71,7 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
         CompositionLocalProvider(LocalContentColor provides scheme.onSurface,
             LocalClaudeDesign provides claudeDesign,
             LocalClaudeAiDj provides aiDj,
+            LocalClaudePrivateRoam provides privateRoam,
             LocalClaudePlayerExpansion provides playerExpansion,
             Md3eLowSpecMode provides runtime.settings.bool(SettingsCatalog.LOW_SPEC_MODE_KEY),
             LocalMd3eReducedEffects provides runtime.reducedRendering,
@@ -361,12 +366,32 @@ when {
                 if (visibleOverlay) Box(Modifier.fillMaxSize().padding(WindowInsets.statusBars.asPaddingValues())
                         .padding(WindowInsets.navigationBars.asPaddingValues())
                         .background(MaterialTheme.colorScheme.background)) {
-                        Md3eQueueScreen(runtime, onBack = closeTop)
+                        Md3eQueueScreen(runtime, onBack = closeTop, timer = sleepTimer)
                     }
                 else Box(Modifier.fillMaxSize())
             }
-            Md3eVideoLayer(runtime, obscured = overlay != "player" || biliAccountOpen || neteaseLoginOpen || aiDj.shown)
+            Md3eVideoLayer(runtime, obscured = overlay != "player" || biliAccountOpen || neteaseLoginOpen || aiDj.shown || privateRoam.shown)
             if (claudeDesign) ClaudeAiDjHost(runtime, aiDj, playerExpansion) { miniPlayerVisible = true }
+            ClaudePrivateRoamHost(runtime, privateRoam,
+                onStart = { onPlay { startPrivateFm() } },
+                onComplete = {
+                    // The radio has already expanded to full-screen. Hand off
+                    // without starting another flight from the mini-player.
+                    playerExpansion.prepareOpen()
+                    playerExpansion.hasSnapshot = false
+                    playerExpansion.refreshSnapshot = false
+                    playerExpansion.progress.snapTo(1f)
+                    queueFromPlayer = false
+                    playerOpenLyrics = false
+                    overlay = "player"
+                    privateRoam.shown = false
+                },
+                detail = {
+                    Md3ePlayerScreen(runtime, onBack = closeTop, initialLyrics = false,
+                        onQueue = { queueFromPlayer = true; overlay = "queue" },
+                        onOpenAlbum = runtime::openAlbum,
+                        onOpenArtist = runtime::openArtist)
+                })
             SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
                 .padding(bottom = if (overlay.isEmpty()) {
                     (if (detail.isEmpty()) 88.dp else 12.dp) +

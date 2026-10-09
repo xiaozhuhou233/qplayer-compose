@@ -162,8 +162,10 @@ internal fun Md3ePlayerExpansionHost(
             base()
             AnimatedVisibility(
                 visible = expanded,
-                enter = slideInVertically(tween(250), initialOffsetY = { it }) + fadeIn(tween(180)),
-                exit = slideOutVertically(tween(250), targetOffsetY = { it }) + fadeOut(tween(180)),
+                enter = if (durationMillis == 0) androidx.compose.animation.EnterTransition.None else
+                    slideInVertically(tween(250), initialOffsetY = { it }) + fadeIn(tween(180)),
+                exit = if (durationMillis == 0) androidx.compose.animation.ExitTransition.None else
+                    slideOutVertically(tween(250), targetOffsetY = { it }) + fadeOut(tween(180)),
             ) { detail() }
         }
         return
@@ -181,7 +183,10 @@ internal fun Md3ePlayerExpansionHost(
             if (state.active) state.refreshSnapshot = true
             state.expanded = false
         }
-        if (durationMillis == 0) {
+        val target = if (expanded) 1f else 0f
+        if (state.progress.value == target) {
+            // A full-screen modal may have completed the opening itself.
+        } else if (durationMillis == 0) {
             state.progress.snapTo(if (expanded) 1f else 0f)
         } else {
             state.progress.animateTo(if (expanded) 1f else 0f,

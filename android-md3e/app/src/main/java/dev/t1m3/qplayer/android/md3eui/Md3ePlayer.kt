@@ -921,7 +921,8 @@ private fun PlayerElapsedTime(state: PlaybackState, draggedPosition: Long?) {
 
 @Composable
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
-internal fun Md3eQueueScreen(runtime: Md3eRuntime, onBack: () -> Unit) {
+internal fun Md3eQueueScreen(runtime: Md3eRuntime, onBack: () -> Unit,
+    timer: Md3eSleepTimerState) {
     val state = runtime.playback
     val queue = runtime.queue
     val entryIds = remember(runtime) { AtomicLong() }
@@ -964,12 +965,38 @@ internal fun Md3eQueueScreen(runtime: Md3eRuntime, onBack: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.width(12.dp))
         }
+        if (runtime.bili.queueVideo) {
+            Row(Modifier.fillMaxWidth().padding(start = 64.dp, end = 16.dp, bottom = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                FilterChip(
+                    selected = runtime.bili.queueMode == "RELATED",
+                    onClick = { runtime.play { switchBiliQueueMode("RELATED") } },
+                    enabled = !runtime.bili.queueSwitching,
+                    label = { Text("相关推荐") },
+                    modifier = Modifier.weight(1f),
+                    leadingIcon = if (runtime.bili.queueSwitching && runtime.bili.queueTargetMode == "RELATED") ({
+                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    }) else null,
+                )
+                FilterChip(
+                    selected = runtime.bili.queueMode == "COLLECTION",
+                    onClick = { runtime.play { switchBiliQueueMode("COLLECTION") } },
+                    enabled = !runtime.bili.queueSwitching,
+                    label = { Text("当前合集") },
+                    modifier = Modifier.weight(1f),
+                    leadingIcon = if (runtime.bili.queueSwitching && runtime.bili.queueTargetMode == "COLLECTION") ({
+                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    }) else null,
+                )
+            }
+        }
         if (queue.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Text("队列中还没有歌曲", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
             LazyColumn(state = listState,
+                modifier = Modifier.weight(1f),
                 contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 itemsIndexed(entries, key = { _, entry -> entry.id }) { _, entry ->
@@ -1020,6 +1047,8 @@ internal fun Md3eQueueScreen(runtime: Md3eRuntime, onBack: () -> Unit) {
                 }
             }
         }
+        // 定时停止播放（老版本的「定时播放」）—— 与老 app 一样放在列表下方。
+        Md3eSleepTimerControl(timer)
     }
 }
 

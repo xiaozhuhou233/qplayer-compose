@@ -23,6 +23,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -55,7 +56,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import dev.t1m3.qplayer.lyric.LyricLine
 import dev.t1m3.qplayer.lyric.LyricTiming
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.PI
 import kotlin.math.abs
@@ -79,7 +79,6 @@ private sealed interface DisplayLyricRow {
 }
 
 private class LyricRowMotion(active: Boolean) {
-    val offset = Animatable(0f)
     val scale = Animatable(if (active) 1f else .98f)
     val alpha = Animatable(if (active) .85f else .175f)
 }
@@ -163,14 +162,13 @@ internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier
             val retained = ((visible.firstOrNull()?.index ?: index) - 2).coerceAtLeast(0)..
                 ((visible.lastOrNull()?.index ?: index) + 2).coerceAtMost(rows.lastIndex)
             motions.keys.retainAll(retained.toSet() + index)
-            if (target == null || abs(index - old) > 4 || lowSpec) {
+            if (target == null || abs(index - old) > 4) {
                 listState.scrollToItem(index)
                 withFrameNanos { }
                 listState.centerLyricRow(index)
                 coroutineScope {
                     motions.toMap().forEach { (rowIndex, motion) ->
                         launch {
-                            motion.offset.snapTo(0f)
                             motion.scale.snapTo(if (rowIndex == index) 1f else .98f)
                             motion.alpha.snapTo(if (rowIndex == index) .85f else .175f)
                         }
@@ -185,17 +183,6 @@ internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier
             val first = visible.firstOrNull()?.index ?: old
             val affected = (minOf(first, index) - 2).coerceAtLeast(0)..
                 (maxOf(visible.lastOrNull()?.index ?: index, index) + 2).coerceAtMost(rows.lastIndex)
-            motions.toMap().forEach { (rowIndex, motion) ->
-                motion.offset.snapTo(if (rowIndex in affected) motion.offset.value + delta else 0f)
-            }
-            val consumed = listState.scrollBy(delta)
-            if (abs(consumed - delta) > .01f) {
-                affected.forEach { rowIndex ->
-                    motions[rowIndex]?.let { motion ->
-                        motion.offset.snapTo(motion.offset.value + consumed - delta)
-                    }
-                }
-            }
             val row = rows[index]
             val prior = rows.getOrNull((index - 1).coerceAtLeast(0))
             val gap = ((row.start - (prior?.end ?: row.start)).coerceAtLeast(0L)) / 1000f
@@ -218,6 +205,12 @@ internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier
             }
             val rowSpring = if (claude) ClaudeOneTake.snappy<Float>() else spring<Float>(dampingRatio = damping, stiffness = stiffness)
             coroutineScope {
+                // One scroll animation keeps existing and newly composed rows in
+                // sync, including when the next lyric interrupts this transition.
+                launch {
+                    listState.animateScrollBy(delta,
+                        if (springEnabled) rowSpring else tween(320, easing = FastOutSlowInEasing))
+                }
                 motions.toMap().forEach { (rowIndex, motion) ->
                     val alpha = if (rowIndex == index) .85f else .175f
                     val scale = if (rowIndex == index) 1f else .98f
@@ -226,16 +219,8 @@ internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier
                         motion.scale.snapTo(scale)
                         return@forEach
                     }
-                    val delayMs = if (springEnabled && !listState.isScrollInProgress)
-                        (abs(rowIndex - first) - 1).coerceAtLeast(0) * 50L else 0L
                     launch { motion.alpha.animateTo(alpha, tween(120, easing = lyricOpacityEasing)) }
                     launch {
-                        if (delayMs > 0) delay(delayMs)
-                        motion.offset.animateTo(0f,
-                            if (springEnabled) rowSpring else tween(320, easing = FastOutSlowInEasing))
-                    }
-                    launch {
-                        if (delayMs > 0) delay(delayMs)
                         motion.scale.animateTo(scale,
                             if (springEnabled) rowSpring else tween(320, easing = FastOutSlowInEasing))
                     }
@@ -322,7 +307,6 @@ private fun Md3eLyricIndicator(row: DisplayLyricRow, position: State<Long>, play
     val size = with(LocalDensity.current) { (fontSize * if (compact) 1.04f else 1.6f).sp.toDp() }
     Row(Modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
         .graphicsLayer {
-            translationY = motion.offset.value
             scaleX = motion.scale.value; scaleY = motion.scale.value; alpha = motion.alpha.value
             transformOrigin = TransformOrigin(0f, .5f)
         }.padding(horizontal = 8.dp, vertical = 6.dp),
@@ -427,7 +411,9 @@ private fun Md3eLyricText(row: DisplayLyricRow.Line, position: State<Long>, inde
     val focused = index == active
     val played = active >= 0 && index < active
     val lowSpec = runtime.settings.bool("lowSpecMode")
-    val useSweep = !lowSpec && (LyricTiming.hasWordTiming(line) || runtime.settings.bool("lyricLinearAnim"))
+    // Plain LRC follows the whole-line highlight/lift path even when linear
+    // animation is enabled; inferred character timings are not word adaptation.
+    val useSweep = !lowSpec && LyricTiming.hasWordTiming(line)
     val textScale = if (runtime.settings.bool("lyricScale") && !background) 1.12f else 1f
     val springEnabled = runtime.settings.bool("lyricSpring") && !lowSpec
     // Outside the pop/fade interval, layer parameters are constant. Keep those
@@ -441,7 +427,7 @@ private fun Md3eLyricText(row: DisplayLyricRow.Line, position: State<Long>, inde
             // in the layer phase. It avoids one coroutine and an Animatable per
             // visible lyric row, while retaining the lift envelope.
             val lift = if (springEnabled) lyricActiveK(layerPosition.value, row.start, row.end) else 0f
-            translationY = motion.offset.value - lift * 2.5.dp.toPx()
+            translationY = -lift * 2.5.dp.toPx()
             val scale = if (background) lyricBackgroundScale(layerPosition.value, row.start, row.end) else 1f
             scaleX = motion.scale.value * scale
             scaleY = motion.scale.value * scale

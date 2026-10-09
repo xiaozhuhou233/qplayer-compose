@@ -9,6 +9,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.res.painterResource
@@ -91,6 +94,8 @@ internal fun ClaudeOpening(
     onPrivateFm: () -> Unit,
 ) {
     val hour = remember { LocalTime.now().hour }
+    val roam = LocalClaudePrivateRoam.current
+    var roamBounds by remember { mutableStateOf(Rect.Zero) }
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Text(
             if (name.isBlank()) greetingFor(hour) else "${greetingFor(hour)}，$name",
@@ -103,7 +108,11 @@ internal fun ClaudeOpening(
         aiInput()
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("私人 FM", Modifier.clip(RoundedCornerShape(6.dp))
-                .clickable(onClick = onPrivateFm).padding(vertical = 4.dp, horizontal = 2.dp),
+                .onGloballyPositioned { roamBounds = it.boundsInRoot() }
+                .clickable {
+                    roam?.source = roamBounds
+                    onPrivateFm()
+                }.padding(vertical = 4.dp, horizontal = 2.dp),
                 fontSize = 14.sp, fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.primary)
             Text("  由网易云按你的口味续播", fontSize = 12.sp,

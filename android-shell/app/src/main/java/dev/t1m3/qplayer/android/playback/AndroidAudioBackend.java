@@ -472,9 +472,15 @@ public final class AndroidAudioBackend implements AudioBackend {
                 && videoSurface != null && videoSurface.isValid() ? videoSurface : null;
         if (mp == videoSurfacePlayer && surface == appliedVideoSurface) return;
         try {
+            // Recreating the video decoder can rewind the shared A/V clock to a
+            // sync frame. Restore the exact position, without reopening playback.
+            boolean reconnecting = surface != null && mp == videoSurfacePlayer
+                    && prepared && videoWidth > 0;
+            long resumePosition = reconnecting ? mp.getCurrentPosition() : 0L;
             mp.setSurface(surface);
             videoSurfacePlayer = mp;
             appliedVideoSurface = surface;
+            if (reconnecting) mp.seekTo(resumePosition, MediaPlayer.SEEK_CLOSEST);
         } catch (RuntimeException e) {
             Logger.warn("MediaPlayer: video surface update failed: {}", e.toString());
         }

@@ -142,6 +142,7 @@ internal fun Md3eHomePage(runtime: Md3eRuntime, onLogin: () -> Unit, onPlay: Pla
     val albumShelves = remember(albums) { albums.chunked(HOME_ALBUM_CHUNK) }
     val playlistHead = remember(firstPlaylists) { firstPlaylists.take(HOME_HEAD_SHELF) }
     val playlistTail = remember(firstPlaylists) { firstPlaylists.drop(HOME_HEAD_SHELF).chunked(HOME_PLAYLIST_CHUNK) }
+    val privateRoam = LocalClaudePrivateRoam.current
     var aiPrompt by remember { mutableStateOf("") }
     var aiOpen by remember { mutableStateOf(false) }
     var aiMode by remember { mutableStateOf<Boolean?>(null) }
@@ -172,7 +173,7 @@ internal fun Md3eHomePage(runtime: Md3eRuntime, onLogin: () -> Unit, onPlay: Pla
         verticalArrangement = Arrangement.spacedBy(16.dp)) {
         if (claude) item(key = "opening") {
             ClaudeOpening(state.userName, dailyPhrase, aiInput = { ClaudeAiDjInput(runtime) },
-                onPrivateFm = { if (state.loggedIn) onPlay { startPrivateFm() } else onLogin() })
+                onPrivateFm = { if (state.loggedIn) privateRoam?.open() else onLogin() })
         }
         if (!claude) item(key = "greeting") {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
