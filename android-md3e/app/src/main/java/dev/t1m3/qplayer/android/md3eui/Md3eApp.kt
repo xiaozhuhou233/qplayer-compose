@@ -49,6 +49,9 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
     val dark = when (runtime.settings.intOf("darkMode")) { 1 -> false; 2 -> true; else -> systemDark }
     SideEffect { onDarkAppearance(dark) }
     var pageMotionActive by remember { mutableStateOf(false) }
+    // 定时停止播放：状态在根组合里，离开队列页也继续倒数（见 Md3eSleepTimer.kt）。
+    val sleepTimer = rememberMd3eSleepTimerState()
+    Md3eSleepCountdown(runtime, sleepTimer)
     val playerExpansion = rememberMd3ePlayerExpansionState()
     val claudeDesign = runtime.settings.bool("claudeDesign")
     val aiDj = remember { ClaudeAiDjState() }
@@ -377,7 +380,7 @@ when {
                 if (visibleOverlay) Box(Modifier.fillMaxSize().padding(WindowInsets.statusBars.asPaddingValues())
                         .padding(WindowInsets.navigationBars.asPaddingValues())
                         .background(MaterialTheme.colorScheme.background)) {
-                        Md3eQueueScreen(runtime, onBack = closeTop)
+                        Md3eQueueScreen(runtime, onBack = closeTop, timer = sleepTimer)
                     }
                 else Box(Modifier.fillMaxSize())
             }

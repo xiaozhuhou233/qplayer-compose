@@ -959,7 +959,8 @@ private fun PlayerElapsedTime(state: PlaybackState, draggedPosition: Long?) {
 
 @Composable
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
-internal fun Md3eQueueScreen(runtime: Md3eRuntime, onBack: () -> Unit) {
+internal fun Md3eQueueScreen(runtime: Md3eRuntime, onBack: () -> Unit,
+    timer: Md3eSleepTimerState) {
     val state = runtime.playback
     val queue = runtime.queue
     val entryIds = remember(runtime) { AtomicLong() }
@@ -1003,11 +1004,12 @@ internal fun Md3eQueueScreen(runtime: Md3eRuntime, onBack: () -> Unit) {
             Spacer(Modifier.width(12.dp))
         }
         if (queue.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Text("队列中还没有歌曲", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
             LazyColumn(state = listState,
+                modifier = Modifier.weight(1f),
                 contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 itemsIndexed(entries, key = { _, entry -> entry.id }) { _, entry ->
@@ -1058,6 +1060,8 @@ internal fun Md3eQueueScreen(runtime: Md3eRuntime, onBack: () -> Unit) {
                 }
             }
         }
+        // 定时停止播放（老版本的「定时播放」）—— 与老 app 一样放在列表下方。
+        Md3eSleepTimerControl(timer)
     }
 }
 

@@ -11596,14 +11596,14 @@ public final class PlayerController {
                     if (generation != aiRequestGeneration.get()) return;
                     if (resolved.size() >= matchTarget) break;
                     if (!matchedPairs.add(normalizeAiText(x.title) + '|' + normalizeAiText(x.artist))) continue;
-                    // 10 条足够找出正确匹配，而客户端把搜索串行化，每条都要付
-                    // 网络 + 解析的成本（30 条的那份响应明显更大）。
-                    List<NeteaseSong> candidates = netease.searchSongs(x.title + " " + x.artist, 10, 0);
+                    // 30 条是应用一直用的取数（10 条曾在本轮短暂试过，但用户要求不给
+                    // 任何硬性限制 —— 少取会漏掉匹配，多花的时间是买正确性）。
+                    List<NeteaseSong> candidates = netease.searchSongs(x.title + " " + x.artist, 30, 0);
                     NeteaseSong match = bestAiSongMatch(candidates, x.title, x.artist);
                     if (match == null) {
                         // Artist spelling and collaboration separators vary a
                         // lot between AI output and NetEase search metadata.
-                        candidates = netease.searchSongs(x.title, 10, 0);
+                        candidates = netease.searchSongs(x.title, 30, 0);
                         match = bestAiSongMatch(candidates, x.title, x.artist);
                     }
                     if (match != null && !(excludeLiked && likedIds.contains(match.id))
