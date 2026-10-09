@@ -214,6 +214,7 @@ public final class AiClient {
      */
     public AiPlaylistResult generatePlaylist(String sampleSongs, String request, int count,
                                              String webContext, String references) throws IOException {
+        boolean previousListProvided = references != null && references.contains("上一张歌单");
         String normalizedRequest = request == null ? "" : request
                 .replaceAll("(?i)r\\s*(?:and|&)\\s*b", "R&B")
                 .replaceAll("(?i)rhythm\\s*and\\s*blues", "R&B");
@@ -221,23 +222,27 @@ public final class AiClient {
         // 选曲要求逐条保留（R&B 规则 / 语种自由 / 四项选取 / 随机性 / 老歌+新歌 / 不拒绝短描述 /
         // 歌手名请求 / 只输出 JSON），提速来自更小的输出：单行紧凑 JSON、reason 一律空串、
         // 恰好目标数量（不再鼓励多给 —— 多给一首就多一次网易云搜索），措辞去掉重复后更短。
-        String system = "你是专业 DJ，负责按用户要求推荐歌曲：把任何请求（中文、欧美、R&B、r and b、混合语言、模糊风格）直接转换为歌曲列表；歌手名请求也要返回歌曲，不要介绍人物。" +
-                "中文 R&B 必须推荐华语歌手的真实 R&B 歌曲；欧美 R&B 必须推荐欧美歌手的真实 R&B 歌曲；同时要求中文和欧美时两类都要推荐。" +
-                "语种没有硬性要求：中文、英文都可以，哪首合适放哪首，不要为了凑语种比例牺牲选曲；用户明确只要某一语种时才以用户要求为准。" +
-                "选曲必须同时包含：① 当红/热门的歌；② 参考我给的历史记录，挑我口味里的歌（同风格、同歌手）；" +
-                "③ 其中某些歌手的新歌或新发行；④ 几首稍微小众/冷门的，不要整张都是榜单热歌。" +
-                "每次生成都要有随机性：即使要求一模一样，也不要每次都给出同一批歌，换一些角度、换一些歌手、换一些年代。" +
-                "如果给了「上一张歌单」，新歌单里既要有其中的一部分（老歌，延续同一风格），也要有新的歌（新歌），并且风格与上一张相对一致。" +
-                "输出（越快越好）：不要任何思考过程、解释或前言，直接输出最终 JSON。格式固定为 {\"name\":\"歌单名(不超过10个字)\",\"songs\":[[\"歌名\",\"歌手\"],...]}；每首歌只有歌名和歌手两个值，没有理由、没有其他字段；单行、无空格、无换行、无 Markdown。" +
-                "即使请求很短，也必须返回歌曲；不要因为描述简短、组合条件或语言混合而拒绝。" +
-                "songs 数组必须达到目标数量，不要多于目标数量；确实凑不够时给出尽可能多的真实歌曲，不要编造，也不要缩减为三四首。";
+        // 2026-10-09：用户直接给出了提示词规格（「现在改提示词」），逐字采用 —— 角色定义与
+        // 5 条规则就是权威文本。它要的 {"name":…,"songs":[["歌名","歌手"]]} 正是解析器已经在读
+        // 的形态，所以这只是一次提示词改写，**没有**改动请求本身（不加字段、不压预算 —— 见那条禁则）。
+        String system = "Role: Professional Music DJ. Output a high-taste playlist strictly in compact JSON.\n"
+                + "Rules:\n"
+                + "1. Genre: Pure R&B/Neo-Soul (Mandarin R&B must be authentic, no generic pop).\n"
+                + "2. Ratio: 1-2 hits, 1-2 recent tracks, 2 hidden gems. Keep it varied and random.\n"
+                + "3. Speed & Output: Output raw single-line JSON ONLY. No markdown block, no thinking, no prose.\n"
+                + "4. Schema: {\"name\":\"10字以内歌单名\",\"songs\":[[\"歌名\",\"歌手\"],...]}\n"
+                + "5. Default count: 10 songs if unspecified.";
+        // 「上一张歌单」延续只在续播时出现；规则里没有它，所以单独补一句，不复活旧的角色文本。
+        if (previousListProvided) {
+            system += "\nNote: a previous playlist is attached. The new list keeps the same style and includes some of those tracks alongside new ones.";
+        }
         if (webContext != null && webContext.contains("KNOWLEDGE_BASE_ONLY")) {
             system += "当前已开启强制使用知识库：无论用户提出什么问题，都禁止联网、禁止调用搜索工具、禁止要求搜索资料，只能使用你已有的模型知识完成推荐。";
         }
-        String user = "仅输出那个 JSON（单行紧凑，前后无其他字符，不要解释）。不要拒绝简短描述、组合条件或混合语言，直接给出歌曲。" +
-                "songs 恰好 " + count + " 首不同歌曲：不要多给（多给会被丢弃）；确实凑不够时给出尽可能多的真实歌曲，不要编造。用户要求：" + normalizedRequest +
-                "\n推荐数量：" + count +
-                "\n收藏歌曲样本（仅用于判断风格）：\n" + sampleSongs;
+        // 用户回合只放「输入」：请求本身、数量、参考块。规则已在 system 里，不重复。
+        String user = "Request: " + normalizedRequest +
+                "\nCount: " + count + "\n"
+                + "Taste sample (style reference only):\n" + sampleSongs;
         if (references != null && !references.trim().isEmpty()) {
             user += "\n\n" + references.trim();
         }
