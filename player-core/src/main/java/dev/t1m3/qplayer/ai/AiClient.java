@@ -96,14 +96,36 @@ public final class AiClient {
                     if (pair.size() > 1 && pair.get(1).isJsonPrimitive()) song.artist = pair.get(1).getAsString();
                 } else if (el.isJsonObject()) {
                     com.google.gson.JsonObject o = el.getAsJsonObject();
-                    if (o.has("title") && o.get("title").isJsonPrimitive()) song.title = o.get("title").getAsString();
-                    if (o.has("artist") && o.get("artist").isJsonPrimitive()) song.artist = o.get("artist").getAsString();
-                    if (o.has("reason") && o.get("reason").isJsonPrimitive()) song.reason = o.get("reason").getAsString();
+                    // 键名宽容：英文、中文、以及常见的变体都认（多认一种只会多出结果）。
+                    song.title = firstPrimitive(o, "title", "歌名", "name", "song");
+                    song.artist = firstPrimitive(o, "artist", "歌手", "singer", "artists", "by");
+                    song.reason = firstPrimitive(o, "reason", "理由", "note");
+                } else if (el.isJsonPrimitive()) {
+                    // 一条字符串（"歌名 - 歌手" 之类）：尽力拆开，不完整的按歌名收下。
+                    String text = el.getAsString().trim();
+                    for (String sep : new String[] { " - ", " – ", " — ", "—", "–", "-", "|", "·" }) {
+                        int at = text.indexOf(sep);
+                        if (at > 0 && at + sep.length() < text.length()) {
+                            song.title = text.substring(0, at).trim();
+                            song.artist = text.substring(at + sep.length()).trim();
+                            break;
+                        }
+                    }
+                    if (song.title.isEmpty()) song.title = text;
                 }
                 if (!song.title.trim().isEmpty() && !song.artist.trim().isEmpty()) result.songs.add(song);
             }
         } catch (RuntimeException ignored) { }
         return result;
+    }
+
+    /** The first of {@code keys} that the object carries as a string. */
+    private static String firstPrimitive(com.google.gson.JsonObject o, String... keys) {
+        for (String key : keys) {
+            com.google.gson.JsonElement el = o.get(key);
+            if (el != null && el.isJsonPrimitive()) return el.getAsString().trim();
+        }
+        return "";
     }
 
     /** A small plain-text answer, without paying the playlist's full output budget. */
