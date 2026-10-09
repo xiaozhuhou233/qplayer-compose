@@ -4849,3 +4849,24 @@ sha256 `f8a5aa06…`）与签名 release（10,692,627 bytes，sha256 `60d4e7d1�
 签名 release 校验（签名 `dd20d880…`、对齐、非 debuggable）；两个 dex 里都有
 「定时播放：未开启」「到时自动暂停播放」「保后台运行」，且 **`reasoning_effort` 已不在任何 dex 中**。
 **设备离线，未装机实测。**
+
+### 2026-10-09b（提示词换成用户给的 DJ 规格）
+
+用户直接给出规格（「现在改提示词」），**逐字采用，未加任何东西**（`AiClient.system`）：
+
+    Role: Professional Music DJ. Output a high-taste playlist strictly in compact JSON.
+    1. Pure R&B/Neo-Soul (Mandarin R&B authentic, no generic pop).
+    2. 1-2 hits, 1-2 recent tracks, 2 hidden gems; varied and random.
+    3. Raw single-line JSON ONLY, no markdown, no thinking, no prose.
+    4. {"name":"10字以内歌单名","songs":[["歌名","歌手"],...]}
+    5. Default 10 songs if unspecified.
+
+user 回合只放输入（请求 / 数量 / 口味样本 / 参考块）；「上一张歌单」的延续说明只在续播时追加
+（`previousListProvided`）。规则 4 的 schema **正是解析器已读的形态**，所以这是纯提示词改动：
+**请求体一字未动**（不加字段、不压预算 —— 禁则继续有效）。发布 tag `md3e-2026-10-09b`
+（debug sha256 `a0f61e3a…`；release 10,676,243 bytes，sha256 `e5c2d1b7…`）。
+验证：两棵树 player-core 编译绿、AI 测试通过、两端打包绿、签名 release 校验通过；
+dex 里有 `Professional Music DJ`/`hidden gems`/`10字以内歌单名`，旧文本 `你是专业 DJ` 已消失，定时器仍在。
+⚠️ 用户提示词是**英文**且角色是「Professional Music DJ」——如果之后仍慢，先问模型名（`deepseek-chat`
+还是 reasoner）与出歌数量，不要再从请求侧加压。
+
