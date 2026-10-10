@@ -4817,3 +4817,47 @@ sha256 `d0c0ad39fe9fdf91ace2e4c1e8e540057b23dea485a3faa72469d874e42efd5c`，证�
 **验证**：两棵树 player-core 编译绿、聚焦测试 24/24；MD3E 编译打包绿；签名 release 校验通过；
 两个 dex 里都有「定时播放：未开启」「到时自动暂停播放」「保后台运行」，`reasoning_effort` 已消失。
 **设备离线，未装机实测。**
+
+### 2026-10-09b（提示词换成用户给的 DJ 规格）
+
+用户直接给出规格（「现在改提示词」），**逐字采用，未加任何东西**（`AiClient.system`）：
+
+    Role: Professional Music DJ. Output a high-taste playlist strictly in compact JSON.
+    1. Pure R&B/Neo-Soul (Mandarin R&B authentic, no generic pop).
+    2. 1-2 hits, 1-2 recent tracks, 2 hidden gems; varied and random.
+    3. Raw single-line JSON ONLY, no markdown, no thinking, no prose.
+    4. {"name":"10字以内歌单名","songs":[["歌名","歌手"],...]}
+    5. Default 10 songs if unspecified.
+
+user 回合只放输入（请求 / 数量 / 口味样本 / 参考块）；「上一张歌单」的延续说明只在续播时追加
+（`previousListProvided`）。规则 4 的 schema **正是解析器已读的形态**，所以这是纯提示词改动：
+**请求体一字未动**（不加字段、不压预算 —— 禁则继续有效）。发布 tag `md3e-2026-10-09b`
+（debug sha256 `a0f61e3a…`；release 10,676,243 bytes，sha256 `e5c2d1b7…`）。
+验证：两棵树 player-core 编译绿、AI 测试通过、两端打包绿、签名 release 校验通过；
+dex 里有 `Professional Music DJ`/`hidden gems`/`10字以内歌单名`，旧文本 `你是专业 DJ` 已消失，定时器仍在。
+⚠️ 用户提示词是**英文**且角色是「Professional Music DJ」——如果之后仍慢，先问模型名（`deepseek-chat`
+还是 reasoner）与出歌数量，不要再从请求侧加压。
+
+
+### 2026-10-10a（设置 → AI 新增「AI 对话测试」）
+
+用户：「在设置单独给我开一个接入 api 的聊天 ai 接口，输入问题然后看到 api 的答复，我要调试」。
+新增两个文件 + 五处接线：
+
+- `player-core/.../ai/AiChatProbe.java`：**一次性**原始对话调用（一次请求、不重试、不改写问题、
+  不加 temperature、不带 response_format），返回 `text/httpStatus/elapsedMs/ok/model`。
+  刻意做成独立方法而不是给 `AiClient.chat` 加开关 —— **它不能影响 AI DJ 生成路径的请求形态**。
+- `android-md3e/.../md3eui/Md3eAiChatProbe.kt`：对话框。顶部显示生效的模型名/地址（Key 空则红字），
+  状态行 `成功/失败 · ms · HTTP`，正文是模型 `message.content` 的**原文**，失败时给出**原始响应体**
+  （中转把真实原因写在那里：模型名不存在 / Key 无效 / 字段不支持）。
+- 接线：`SettingsCatalog`（AI 分类 `action("aiChatProbe", …)`）、`Md3eRuntime.aiChatProbeRequested`、
+  `Md3eSettings` 的 ACTION 分支、`Md3eApp` 对话框宿主（888a 挂在均衡器旁，桌面挂在账号对话框旁）、
+  旧 app 里注册同名 action 只弹一句「在 MD3E 版」。
+
+发布 tag `md3e-2026-10-10a`（debug 14,531,838 bytes sha256 `6972ad87…`；release 10,692,627 bytes
+sha256 `022ab73c…`）。验证：两棵树 player-core 编译绿、聚焦测试 15/15、两端打包绿、签名 release 校验通过；
+dex 里有 `AI 对话测试`/`AiChatProbe`，提示词规格与定时器仍在。设备离线，未装机实测。
+
+⚠️ 这个对话框是**只读**的（只读设置、只发那一条问题）。要查「AI DJ 为什么不快」，先在这里确认
+模型名与几秒的往返，再回去看 `ai playlist: generated … ms — matched … ms` 那行日志。
+
