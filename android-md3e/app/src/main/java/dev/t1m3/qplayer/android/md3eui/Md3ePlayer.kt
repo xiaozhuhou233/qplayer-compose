@@ -145,6 +145,13 @@ private fun Modifier.playerTabForeground(): Modifier {
 internal fun Md3ePlayerScreen(runtime: Md3eRuntime, onBack: () -> Unit,
     initialLyrics: Boolean = false, onQueue: () -> Unit,
     onOpenAlbum: (Long) -> Unit = {}, onOpenArtist: (Long) -> Unit = {}) {
+    if (runtime.experimentalAiDjWaiting) {
+        val expansion = LocalClaudePlayerExpansion.current
+        SideEffect { expansion?.detailShowsDisc = false }
+        BackHandler(onBack = onBack)
+        ExperimentalAiDjPlaceholder(runtime, onBack)
+        return
+    }
     val state = runtime.playback
     var tab by remember(initialLyrics) { mutableIntStateOf(if (initialLyrics) 1 else 0) }
     val expansion = LocalClaudePlayerExpansion.current
@@ -438,6 +445,9 @@ private fun PlayerTransport(runtime: Md3eRuntime) {
     if (biliFavoriteOpen) Md3eBiliFavPickerDialog(runtime) { biliFavoriteOpen = false }
     if (biliLoginOpen) Md3eBiliLoginDialog(runtime) { biliLoginOpen = false }
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        if (runtime.experimentalAiDjActive) TextButton(onClick = {
+            runtime.play { stopExperimentalAiDj() }
+        }) { Text("AI DJ · 实验模式｜退出") }
         PlayerTransportButtons(
             playing = runtime.transportState.playing,
             hasTrack = runtime.transportState.hasTrack,
@@ -579,27 +589,8 @@ private fun PlayerLyricsTab(runtime: Md3eRuntime, onDetail: () -> Unit) {
                 }
             }
         }
-        Column(Modifier.fillMaxWidth().height(112.dp)) {
-            Spacer(Modifier.height(12.dp))
-            PlayerProgress(state, wavy = runtime.settings.intOf("lyricProgressStyle") == 0,
-                onSeek = { runtime.seekDisplayed(state, it) }, modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.weight(1f))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = runtime::previous, enabled = state.queueSize > 1) {
-                    Icon(Md3eIcons.SkipPrevious, "上一首")
-                }
-                FilledIconButton(onClick = runtime::toggle, enabled = state.hasTrack,
-                    modifier = Modifier.size(40.dp)) {
-                    Icon(if (state.playing) Md3eIcons.Pause else Md3eIcons.PlayArrow,
-                        "播放/暂停", Modifier.size(24.dp))
-                }
-                IconButton(onClick = runtime::next, enabled = state.queueSize > 1) {
-                    Icon(Md3eIcons.SkipNext, "下一首")
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-        }
+        // 2026-10-10：用户要求「歌词界面删除滑动条及下面按钮」——进度条与播放键整块移除，
+        // 歌词占满余下空间；播放控制回唱片页（点封面）。
     }
 }
 
@@ -627,8 +618,8 @@ private fun ClaudeLyricsTab(runtime: Md3eRuntime, onDetail: () -> Unit) {
             }
             else Md3eLyricColumn(runtime)
         }
-        PlayerProgress(state, wavy = false, onSeek = { runtime.seekDisplayed(state, it) }, modifier = Modifier.fillMaxWidth())
-        PlayerTransport(runtime)
+        // 2026-10-10：用户要求「歌词界面删除滑动条及下面按钮」——进度条与播放键移除，
+        // 歌词占满余下空间；播放控制回唱片页（点封面 / 返回唱片）。
     }
 }
 
