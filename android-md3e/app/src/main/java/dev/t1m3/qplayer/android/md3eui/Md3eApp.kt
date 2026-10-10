@@ -193,6 +193,9 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
             }
         }
         Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+            // 设置 → AI 的「AI 对话测试」：与均衡器同一个挂载位置。
+            if (runtime.aiChatProbeRequested) Md3eAiChatProbeDialog(runtime,
+                onDismiss = { runtime.aiChatProbeRequested = false })
             if (runtime.eqDialogRequested) Md3eEqualizerDialog(runtime,
                 onDismiss = { runtime.eqDialogRequested = false })
             Md3eRecognizeDialogHost(visible = recognizeOpen,

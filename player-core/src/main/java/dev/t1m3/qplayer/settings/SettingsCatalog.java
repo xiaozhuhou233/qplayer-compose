@@ -269,6 +269,12 @@ public final class SettingsCatalog {
                 .build());
         out.add(SettingSpec.slider("aiTimeoutMs", AI, "请求超时", 60000, 10000, 180000, 5000)
                 .unit(" ms").build());
+        // 调试入口（用户 2026-10-10：「单独给我开一个接入api的聊天ai接口，输入问题然后看到
+        // api 的答复，我要调试」）：一次请求、不重试、显示原始答复与耗时，用来分辨
+        // 模型名写错 / 网关拒绝 / 单纯很慢。它不参与 AI DJ 的生成路径。
+        out.add(SettingSpec.action("aiChatProbe", AI, "AI 对话测试", "打开")
+                .desc("输入一句话，看当前配置的原始答复与耗时（不重试、不加工），用于排查模型名、Key 与延迟")
+                .build());
         out.add(SettingSpec.toggle("aiDailyPhraseEnabled", AI, "每日音乐短句", true)
                 .desc("使用当前 AI 配置，每天为首页生成一句音乐寄语；未配置或离线时显示本地短句")
                 .onlyOn(ANDROID)

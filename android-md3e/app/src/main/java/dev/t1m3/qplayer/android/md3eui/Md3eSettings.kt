@@ -93,6 +93,7 @@ private fun Md3eSettingRow(spec: SettingSpec, runtime: Md3eRuntime,
                     SettingSpec.ACTION -> TextButton(onClick = {
                         // The equalizer editor needs UI state, not a plain runnable.
                         if (spec.action == "eqEditor") runtime.eqDialogRequested = true
+                        else if (spec.action == "aiChatProbe") runtime.aiChatProbeRequested = true
                         else runtime.invokeSetting(spec.action)
                     }) {
                         Text(spec.button.ifBlank { "打开" })

@@ -434,6 +434,11 @@ class ComposeQPlayerActivity : ComponentActivity() {
         settings.setSystemDark(isSystemDark())
         settings.registerAction("clearCache", controller::clearDiskCache)
         settings.registerAction("checkUpdate", controller::checkForUpdateManual)
+        // 「AI 对话测试」是 MD3E 的对话框；旧界面没有它，至少给一句去处的提示而不是静默无反应。
+        settings.registerAction("aiChatProbe") {
+            android.widget.Toast.makeText(this, "AI 对话测试在 MD3E 版（设置 → AI）",
+                android.widget.Toast.LENGTH_LONG).show()
+        }
         settings.registerAction("openRepo") {
             controller.openExternalUrl("https://github.com/TIMER-err/qplayer")
         }
