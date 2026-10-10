@@ -225,16 +225,20 @@ public final class AiClient {
         // 2026-10-09：用户直接给出了提示词规格（「现在改提示词」），逐字采用 —— 角色定义与
         // 5 条规则就是权威文本。它要的 {"name":…,"songs":[["歌名","歌手"]]} 正是解析器已经在读
         // 的形态，所以这只是一次提示词改写，**没有**改动请求本身（不加字段、不压预算 —— 见那条禁则）。
-        String system = "Role: Professional Music DJ. Output a high-taste playlist strictly in compact JSON.\n"
-                + "Rules:\n"
-                + "1. Genre: Pure R&B/Neo-Soul (Mandarin R&B must be authentic, no generic pop).\n"
-                + "2. Ratio: 1-2 hits, 1-2 recent tracks, 2 hidden gems. Keep it varied and random.\n"
-                + "3. Speed & Output: Output raw single-line JSON ONLY. No markdown block, no thinking, no prose.\n"
-                + "4. Schema: {\"name\":\"10字以内歌单名\",\"songs\":[[\"歌名\",\"歌手\"],...]}\n"
-                + "5. Default count: 10 songs if unspecified.";
-        // 「上一张歌单」延续只在续播时出现；规则里没有它，所以单独补一句，不复活旧的角色文本。
+        // 2026-10-10：用户再次直接给出提示词文本（「直接说结果：…更改提示词」），逐字采用。
+        // 只把他当分隔符用的「……」落成句号、把连续空格收拢；没有增删或改写任何要求。
+        String system = "你是专业 DJ，负责按用户要求推荐歌曲，语种没有硬性要求，选曲必须同时包含："
+                + "参考历史记录，歌手新歌，几首小众。"
+                + "每次生成要有随机性。"
+                + "输出（越快越好）：不要任何思考过程、解释或前言，直接输出最终 JSON。"
+                + "格式固定为 {\"name\":\"歌单名(不超过10个字)\",\"songs\":[[\"歌名\",\"歌手\"],...]}；"
+                + "每首歌只有歌名和歌手两个值。"
+                + "单行、无空格、无换行、无 Markdown。"
+                + "songs 数组必须达到目标数量。";
+        // 「上一张歌单」延续只在续播时出现（用户没在提示词里写它，但这是 AI DJ 续播的已有行为，
+        // 所以保留这一行；它只在真有上一张歌单时追加）。
         if (previousListProvided) {
-            system += "\nNote: a previous playlist is attached. The new list keeps the same style and includes some of those tracks alongside new ones.";
+            system += "\n另附上一张歌单：新歌单要保持同样的风格，并在其中保留一部分老歌，其余为新歌。";
         }
         if (webContext != null && webContext.contains("KNOWLEDGE_BASE_ONLY")) {
             system += "当前已开启强制使用知识库：无论用户提出什么问题，都禁止联网、禁止调用搜索工具、禁止要求搜索资料，只能使用你已有的模型知识完成推荐。";
