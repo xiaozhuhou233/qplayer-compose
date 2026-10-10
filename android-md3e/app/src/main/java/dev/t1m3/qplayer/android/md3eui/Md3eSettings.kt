@@ -90,7 +90,11 @@ private fun Md3eSettingRow(spec: SettingSpec, runtime: Md3eRuntime,
                             enabled = current < spec.max) { Text("+", fontSize = 22.sp) }
                     }
                     SettingSpec.SLIDER -> Text(formatMd3eSettingValue(spec, current), fontSize = 12.sp)
-                    SettingSpec.ACTION -> TextButton(onClick = { runtime.invokeSetting(spec.action) }) {
+                    SettingSpec.ACTION -> TextButton(onClick = {
+                        // Ⓜ The chat tester owns a dialog, not a plain action.
+                        if (spec.action == "aiChatProbe") runtime.aiChatProbeRequested = true
+                        else runtime.invokeSetting(spec.action)
+                    }) {
                         Text(spec.button.ifBlank { "打开" })
                     }
                 }

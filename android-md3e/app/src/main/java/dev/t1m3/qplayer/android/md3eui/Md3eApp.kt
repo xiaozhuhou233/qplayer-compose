@@ -398,6 +398,9 @@ when {
                         (if (runtime.playback.hasTrack && miniPlayerVisible && detail != "settings") 68.dp else 0.dp)
                 } else 12.dp))
         }
+        // 设置 → AI 的「AI 对话测试」：与均衡器同一个挂载位置。
+        if (runtime.aiChatProbeRequested) Md3eAiChatProbeDialog(runtime,
+            onDismiss = { runtime.aiChatProbeRequested = false })
         if (biliAccountOpen) {
             if (runtime.bili.loggedIn) AlertDialog(
                 onDismissRequest = { biliAccountOpen = false },

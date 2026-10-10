@@ -178,6 +178,9 @@ internal class Md3eRuntime private constructor(context: Context) {
     var neteaseLogin by mutableStateOf(NeteaseLoginState())
         private set
     var playback by mutableStateOf(PlaybackState())
+    var experimentalAiDjActive by mutableStateOf(false)
+    var experimentalAiDjWaiting by mutableStateOf(false)
+    var experimentalAiDjMessage by mutableStateOf("")
         private set
     var lyricState by mutableStateOf(LyricState())
         private set
@@ -200,6 +203,8 @@ internal class Md3eRuntime private constructor(context: Context) {
     var unblockEnabled by mutableStateOf(true)
         private set
     var notice by mutableStateOf<String?>(null)
+    /** 设置 → AI 的「AI 对话测试」对话框开关（Md3eAiChatProbe.kt）。 */
+    var aiChatProbeRequested by mutableStateOf(false)
     var bili by mutableStateOf(BiliState())
         private set
     val videoSlots = androidx.compose.runtime.mutableStateMapOf<Int, androidx.compose.ui.geometry.Rect>()
@@ -395,6 +400,9 @@ internal class Md3eRuntime private constructor(context: Context) {
                     successRevision = controller.webLoginSuccessRevision.peek(),
                 )
                 val currentTrack = controller.currentTrack()
+                experimentalAiDjActive = controller.experimentalAiDjActive.peek() == true
+                experimentalAiDjWaiting = controller.experimentalAiDjWaiting.peek() == true
+                experimentalAiDjMessage = controller.experimentalAiDjMessage.peek().orEmpty()
                 publishedPlaybackTrack = currentTrack
                 val hasTrack = currentTrack != null
                 val songId = currentTrack?.neteaseId ?: 0L
@@ -418,7 +426,12 @@ internal class Md3eRuntime private constructor(context: Context) {
                 // playback consumer at the sampling cadence when no metadata or
                 // control state changed; this keeps the 100 ms pump off the main
                 // composition path while lyric/progress draw code still sees time.
-                if (nextPlayback != playback) playback = nextPlayback
+                val displayed = if (experimentalAiDjWaiting) nextPlayback.copy(
+                    title = experimentalAiDjMessage, artist = "", cover = "", coverSeed = "",
+                    playing = false, loading = true, hasTrack = true, duration = 0,
+                    songId = 0L, albumId = 0L, artistId = 0L, liked = false, likeable = false,
+                    album = "", artistIdsCsv = "", artistNamesCsv = "") else nextPlayback
+                if (displayed != playback) playback = displayed
                 lyricState = LyricState(
                     lines = controller.lyrics.peek(),
                     revision = controller.lyricsRevision.peek(),
@@ -431,7 +444,7 @@ internal class Md3eRuntime private constructor(context: Context) {
                 queue = controller.queueTracks.peek()
                 bili = BiliState(
                     loggedIn = controller.biliLoggedIn.peek(),
-                    playing = controller.biliPlaying.peek(),
+                    playing = controller.biliPlaying.peek() && !experimentalAiDjWaiting,
                     bvid = controller.currentTrack()?.biliBvid.orEmpty(),
                     queueVideo = controller.currentTrack()?.source == Track.Source.BILI,
                     queueMode = controller.biliQueueMode.peek(),
