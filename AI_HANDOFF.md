@@ -4861,3 +4861,27 @@ dex 里有 `AI 对话测试`/`AiChatProbe`，提示词规格与定时器仍在�
 ⚠️ 这个对话框是**只读**的（只读设置、只发那一条问题）。要查「AI DJ 为什么不快」，先在这里确认
 模型名与几秒的往返，再回去看 `ai playlist: generated … ms — matched … ms` 那行日志。
 
+
+### 2026-10-11a（AI DJ 支持中转站接入）
+
+用户：「现在让aidj支持中转站接入ai」。查代码后找到**三个真因**，全部修掉（`AiEndpoint` 是新增工具类）：
+
+1. **URL 拼接**：旧代码 `baseUrl + "/chat/completions"` 对中转站的中转地址四种常见写法里
+   **三种都拼错**（裸域名 → 少 `/v1`；尾斜杠 → `//`；直接给完整端点 → 端点重复）。
+   `AiEndpoint.chatCompletions()` 统一归一（顺带丢弃误粘的 `?查询串`/`#锚点`、多余空格、多重斜杠），
+   已用 **9 种形态逐条验证**。`normalizeBase()` 给出 base 形态，`AiClient` 构造时就用它。
+2. **超时**：AI DJ 调用点**写死 60000**，设置里「请求超时」的滑条根本到不了它（中转站普遍更慢）。
+   发现控制器**已有**现成管道：`SettingsCore.pushTransition()` 在加载与每次 AI 行变更时会调
+   `setAiTransitionConfig(url, key, model, timeoutMs)`（原本只喂过渡选择器）。于是**不动任何签名**，
+   在该方法里把超时记成 `aiPlaylistTimeoutMs`，生成点改用它 —— 没有新增 UI 接线。
+3. **报错被吞**：失败只抛异常的文本，中转站响应体里写明的真实原因（模型名不存在/余额不足/Key 无效）
+   被丢掉。`AiEndpoint.describeFailure()` 抽 `error.message`（兼容 `message`/`msg`/`detail`），
+   保留原始响应体。**对话测试探针用同一套 URL 规则与同一份错误文本**，两者行为一致。
+
+**请求体一字未加**（禁则继续有效）。发布 tag `md3e-2026-10-11a`（debug 14,531,838 bytes
+sha256 `addb68b2…`；release 10,774,794 bytes sha256 `1199e837…`）。验证：两棵树 player-core 编译绿、
+聚焦测试 22/22、端点解析 9/9、两端打包绿、签名 release 校验通过。设备离线，未装机实测。
+
+⚠️ 用户填地址的**三种写法都合法**：`https://域名`、`https://域名/v1`、`https://域名/v1/chat/completions`。
+最省事的排查顺序仍是 **设置 → AI →「AI 对话测试」**：它现在会显示中转站的原话。
+
