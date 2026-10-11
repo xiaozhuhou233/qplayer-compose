@@ -79,9 +79,9 @@ public final class AiChatProbe {
             messages.add(u);
             root.add("messages", messages);
 
-            String endpoint = (baseUrl == null ? "" : baseUrl.replaceAll("/+$", "")) + "/chat/completions";
+            String endpoint = AiEndpoint.chatCompletions(baseUrl);
             HttpURLConnection c = (HttpURLConnection) new URL(endpoint).openConnection();
-            int timeout = Math.max(5_000, timeoutMs);
+            int timeout = AiEndpoint.timeoutOrDefault(timeoutMs, 60_000);
             c.setRequestMethod("POST");
             c.setDoOutput(true);
             c.setConnectTimeout(timeout);
@@ -101,7 +101,8 @@ public final class AiChatProbe {
             if (out.httpStatus < 200 || out.httpStatus >= 300) {
                 // The raw body is the most useful thing here: relay gateways put the real
                 // reason (unknown model, bad key, unsupported field) in it.
-                out.text = "HTTP " + out.httpStatus + "\n\n" + response;
+                out.text = AiEndpoint.describeFailure(out.httpStatus, response, "")
+                        + "\n\n原始响应：\n" + response;
                 out.ok = false;
                 return out;
             }

@@ -22,7 +22,9 @@ public final class AiClient {
     private final int timeoutMs;
 
     public AiClient(String baseUrl, String apiKey, String model, int timeoutMs) {
-        this.baseUrl = baseUrl.replaceAll("/+$", "");
+        // 中转站地址形态不唯一（裸域名 / 带 /v1 / 带尾斜杠 / 直接是完整端点）：
+        // 统一由 AiEndpoint 归一，避免拼出连不上的 URL —— 那是「AI 不出结果」的常见真因。
+        this.baseUrl = AiEndpoint.normalizeBase(baseUrl);
         this.apiKey = apiKey == null ? "" : apiKey;
         this.model = model == null ? "" : model;
         this.timeoutMs = Math.max(5_000, timeoutMs);
@@ -169,7 +171,7 @@ public final class AiClient {
         JsonObject u = new JsonObject(); u.addProperty("role", "user"); u.addProperty("content", user); messages.add(u);
         root.add("messages", messages);
         byte[] body = GSON.toJson(root).getBytes(StandardCharsets.UTF_8);
-        HttpURLConnection c = (HttpURLConnection) new URL(baseUrl + "/chat/completions").openConnection();
+        HttpURLConnection c = (HttpURLConnection) new URL(AiEndpoint.chatCompletions(baseUrl)).openConnection();
         c.setRequestMethod("POST"); c.setDoOutput(true); c.setConnectTimeout(timeoutMs); c.setReadTimeout(timeoutMs);
         c.setRequestProperty("Content-Type", "application/json");
         if (!apiKey.isEmpty()) c.setRequestProperty("Authorization", "Bearer " + apiKey);
@@ -178,12 +180,9 @@ public final class AiClient {
         InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream();
         String response = read(in);
         if (code < 200 || code >= 300) {
-            String message = response;
-            try {
-                JsonObject error = JsonParser.parseString(response).getAsJsonObject().getAsJsonObject("error");
-                if (error != null && error.has("message")) message = error.get("message").getAsString();
-            } catch (RuntimeException ignored) { }
-            throw new IOException("AI 请求失败（HTTP " + code + "）：" + message);
+            // 中转站把真实原因写在响应体里（模型名不存在 / 余额不足 / Key 无效），
+            // 用 AiEndpoint 统一抽取，别让它丢掉。
+            throw new IOException("AI 请求失败：" + AiEndpoint.describeFailure(code, response, ""));
         }
         JsonObject parsed = JsonParser.parseString(response).getAsJsonObject();
         return parsed.getAsJsonArray("choices").get(0).getAsJsonObject()

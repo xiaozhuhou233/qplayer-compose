@@ -14,6 +14,7 @@ import dev.t1m3.qplayer.ai.AiClient;
 import dev.t1m3.qplayer.bili.BiliClient;
 import dev.t1m3.qplayer.ai.AiPlaylistResult;
 import dev.t1m3.qplayer.ai.AiReference;
+import dev.t1m3.qplayer.ai.AiEndpoint;
 import dev.t1m3.qplayer.ai.WebSearchClient;
 import dev.t1m3.qplayer.audio.BeatProfile;
 import dev.t1m3.qplayer.audio.BeatProfiler;
@@ -1316,6 +1317,141 @@ public final class PlayerController {
     public final Property<Boolean> aiLoading = new Property<>(false);
     public final Property<String> aiError = new Property<>("");
     public final Property<List<NeteaseSong>> aiSongs = new Property<>(Collections.<NeteaseSong>emptyList());
+    public final Property<Boolean> experimentalAiDjActive = new Property<>(false);
+    public final Property<Boolean> experimentalAiDjWaiting = new Property<>(false);
+    public final Property<String> experimentalAiDjMessage = new Property<>("");
+    public final Property<String> experimentalAiDjReason = new Property<>("");
+    private boolean experimentalAiDjMode;
+    private boolean experimentalAiDjInstalling;
+    private long experimentalAiDjGeneration = -1L;
+    private int experimentalAiDjRetries;
+    private String experimentalAiDjBase, experimentalAiDjKey, experimentalAiDjModel;
+    private boolean experimentalAiDjKnowledge;
+    private boolean experimentalAiDjPrefetchStarted;
+    private PendingAiPlayback experimentalAiDjReady;
+    private String experimentalAiDjReadyReason = "";
+    private long experimentalAiDjTransitionDeadline = -1L;
+
+    public void startExperimentalAiDj(String base, String key, String model, boolean knowledge) {
+        if (base == null || base.trim().isEmpty() || key == null || key.trim().isEmpty()
+                || model == null || model.trim().isEmpty()) {
+            showToast("请先配置 AI API 地址、Key 和模型");
+            return;
+        }
+        cancelAiPlaylistGeneration();
+        privateFmMode = false;
+        privateFmGeneration.incrementAndGet();
+        privateFmRequestInFlight = false;
+        privateFmActive.set(false);
+        biliOpenGeneration.incrementAndGet();
+        experimentalAiDjMode = true;
+        experimentalAiDjBase = base; experimentalAiDjKey = key; experimentalAiDjModel = model;
+        experimentalAiDjKnowledge = knowledge;
+        experimentalAiDjActive.set(true);
+        experimentalAiDjRetries = 0;
+        experimentalAiDjPrefetchStarted = false;
+        experimentalAiDjReady = null;
+        experimentalAiDjTransitionDeadline = -1L;
+        generateExperimentalAiDjBatch();
+    }
+
+    public void stopExperimentalAiDj() {
+        if (!experimentalAiDjMode) return;
+        experimentalAiDjMode = false;
+        experimentalAiDjGeneration = -1L;
+        experimentalAiDjReady = null;
+        experimentalAiDjPrefetchStarted = false;
+        experimentalAiDjTransitionDeadline = -1L;
+        cancelAiPlaylistGeneration();
+        experimentalAiDjActive.set(false);
+        experimentalAiDjWaiting.set(false);
+        experimentalAiDjMessage.set("");
+        experimentalAiDjReason.set("");
+    }
+
+    private void generateExperimentalAiDjBatch() {
+        if (!experimentalAiDjMode) return;
+        mediaPause();
+        experimentalAiDjWaiting.set(true);
+        experimentalAiDjMessage.set("AI DJ 正在随机寻找下一批歌曲…");
+        if (experimentalAiDjReady != null) showExperimentalAiDjTransition();
+        else if (!experimentalAiDjPrefetchStarted) prefetchExperimentalAiDjBatch();
+    }
+
+    private void prefetchExperimentalAiDjBatch() {
+        if (!experimentalAiDjMode || experimentalAiDjReady != null) return;
+        experimentalAiDjPrefetchStarted = true;
+        int count = java.util.concurrent.ThreadLocalRandom.current().nextInt(3, 7);
+        String previous = queue.stream().map(t -> t.title).collect(java.util.stream.Collectors.joining("、"));
+        experimentalAiDjGeneration = prepareAiPlaylist(experimentalAiDjBase, experimentalAiDjKey,
+                experimentalAiDjModel, "随机推荐" + count + "首不同的真实歌曲，风格随机、多样化。说明本批推荐原因。"
+                        + "不要重复当前批次：" + previous,
+                count, false, experimentalAiDjKnowledge, true);
+    }
+
+    private void showExperimentalAiDjTransition() {
+        if (!experimentalAiDjWaiting.peek() || experimentalAiDjReady == null
+                || experimentalAiDjTransitionDeadline >= 0L) return;
+        experimentalAiDjMessage.set("AI DJ 已准备好下一组音乐");
+        experimentalAiDjReason.set(experimentalAiDjReadyReason);
+        experimentalAiDjTransitionDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+    }
+
+    private void tickExperimentalAiDjTransition() {
+        if (!experimentalAiDjMode || !experimentalAiDjWaiting.peek() || experimentalAiDjReady == null
+                || experimentalAiDjTransitionDeadline < 0L
+                || System.nanoTime() < experimentalAiDjTransitionDeadline) return;
+        onMain(() -> {
+            if (!experimentalAiDjMode || !experimentalAiDjWaiting.peek() || experimentalAiDjReady == null
+                    || experimentalAiDjTransitionDeadline < 0L
+                    || System.nanoTime() < experimentalAiDjTransitionDeadline) return;
+            PendingAiPlayback ready = experimentalAiDjReady;
+            experimentalAiDjReady = null;
+            experimentalAiDjTransitionDeadline = -1L;
+            experimentalAiDjGeneration = -1L;
+            experimentalAiDjPrefetchStarted = false;
+            experimentalAiDjInstalling = true;
+            try {
+                experimentalAiDjWaiting.set(false);
+                experimentalAiDjReason.set("");
+                experimentalAiDjRetries = 0;
+                startAiPlayback(ready.songs, null);
+            } finally { experimentalAiDjInstalling = false; }
+        });
+    }
+
+    private void finishExperimentalAiDjBatch(long generation) {
+        if (!experimentalAiDjMode || generation != experimentalAiDjGeneration) return;
+        PendingAiPlayback pending = pendingAiPlayback;
+        if (pending != null && pending.generation == generation && pending.songs.size() >= 3
+                && aiError.peek().isEmpty()) {
+            experimentalAiDjReady = new PendingAiPlayback(generation,
+                    new ArrayList<>(pending.songs.subList(0, Math.min(6, pending.songs.size()))), null);
+            experimentalAiDjReadyReason = aiSummary.peek().trim();
+            if (experimentalAiDjReadyReason.isEmpty()) experimentalAiDjReadyReason = aiDetails.peek().trim();
+            if (experimentalAiDjReadyReason.isEmpty())
+                experimentalAiDjReadyReason = "根据你的听歌偏好，随机搭配不同风格，为你带来下一组音乐。";
+            pendingAiPlayback = null;
+            awaitingAiConfirmation = false;
+            experimentalAiDjRetries = 0;
+            showExperimentalAiDjTransition();
+        } else if (++experimentalAiDjRetries <= 2) {
+            prefetchExperimentalAiDjBatch();
+        } else {
+            pendingAiPlayback = null;
+            awaitingAiConfirmation = false;
+            experimentalAiDjMessage.set("AI DJ 暂未找到至少三首歌曲，点击重试或退出模式");
+        }
+    }
+
+    public void retryExperimentalAiDj() {
+        if (experimentalAiDjMode && experimentalAiDjWaiting.peek() && !aiLoading.peek()
+                && experimentalAiDjReady == null) {
+            experimentalAiDjRetries = 0;
+            experimentalAiDjMessage.set("AI DJ 正在随机寻找下一批歌曲…");
+            prefetchExperimentalAiDjBatch();
+        }
+    }
 
     /**
      * <b>Whether the strongest mix this app can make for the boundary that is coming is already
@@ -1372,6 +1508,10 @@ public final class PlayerController {
      * playing. Cleared whenever a user-started queue takes over (see {@link #setQueueOrigin}).
      */
     private final AtomicLong aiRequestGeneration = new AtomicLong();
+    /** AI DJ 的超时（毫秒），来自设置里的「请求超时」。设置侧每次改动都会经
+     *  {@link #setAiTransitionConfig} 推过来；没推过时用 60 s。中转站常比一线端点慢，
+     *  这里以前是写死的 60000，设置里的滑条到不了。 */
+    private volatile int aiPlaylistTimeoutMs = 60_000;
     private volatile java.util.concurrent.Future<?> aiRequestTask;
     private volatile boolean awaitingAiConfirmation;
     private PendingAiPlayback pendingAiPlayback;
@@ -2166,6 +2306,8 @@ public final class PlayerController {
      * playback path, and never in a way that playback waits for.
      */
     public void setAiTransitionConfig(String baseUrl, String apiKey, String model, int timeoutMs) {
+        // 同一份配置也被 AI DJ 路径使用：设置里改「请求超时」时它就更新。
+        aiPlaylistTimeoutMs = AiEndpoint.timeoutOrDefault(timeoutMs, 60_000);
         AiTransitionChooser current = aiTransitionChooser;
         String url = baseUrl == null ? "" : baseUrl.trim();
         String name = model == null ? "" : model.trim();
@@ -2362,6 +2504,7 @@ public final class PlayerController {
         Integer mode = playMode.peek();
         if (mode != null && mode == 2) return "repeat-one replays this track";
         if (privateFmMode) return "private FM chooses the next track itself";
+        if (experimentalAiDjMode) return "experimental AI DJ owns batch boundaries";
         if (shouldWaitForTogetherLeader(togetherActive, togetherUserId, togetherLeaderUserId)) {
             return "listen-together follower does not choose the next track";
         }
@@ -5784,6 +5927,7 @@ public final class PlayerController {
         BudgetedTaskDrain.drain(uiQueue, budgetNanos, maxTasks, System::nanoTime, Logger::exception);
         long now = System.currentTimeMillis();
         tickFade();
+        tickExperimentalAiDjTransition();
         if (now - lastPositionPush >= 200L) {
             lastPositionPush = now;
             if (backend.isPlaying()) {
@@ -6291,6 +6435,7 @@ public final class PlayerController {
 
     /** Jump to a slot in the live queue (queue-page tap). */
     public void playQueueIndex(int i) {
+        stopExperimentalAiDj();
         playAt(i);
     }
 
@@ -6892,6 +7037,7 @@ public final class PlayerController {
 
     /** Start NetEase's server-driven Personal FM stream ("私人漫游"). */
     public void startPrivateFm() {
+        stopExperimentalAiDj();
         if (!loggedIn.peek()) {
             showToast("请先登录后使用私人漫游");
             return;
@@ -7112,6 +7258,7 @@ public final class PlayerController {
     }
 
     private void playQueue(List<Track> q, int start, long sourcePlaylistId) {
+        if (!experimentalAiDjInstalling) stopExperimentalAiDj();
         final long request = biliOpenGeneration.incrementAndGet();
         final long selection = coverRevision.get();
         biliRelatedSeed = null;
@@ -7955,6 +8102,10 @@ public final class PlayerController {
 
     public void toggle() {
         onMain(() -> {
+            if (experimentalAiDjMode && experimentalAiDjWaiting.peek()) {
+                retryExperimentalAiDj();
+                return;
+            }
             if (playIndex < 0 && !library.isEmpty()) {
                 play(0);
                 return;
@@ -8078,6 +8229,12 @@ public final class PlayerController {
     // auto-advance — a manual press still moves on.
     public void next() {
         onMain(() -> {
+            if (experimentalAiDjMode) {
+                if (experimentalAiDjWaiting.peek()) retryExperimentalAiDj();
+                else if (playIndex >= queue.size() - 1) generateExperimentalAiDjBatch();
+                else playAt(playIndex + 1);
+                return;
+            }
             if (queue.isEmpty()) return;
             if (privateFmMode) {
                 suppressNextFadeIn = true;
@@ -8091,6 +8248,7 @@ public final class PlayerController {
 
     public void prev() {
         onMain(() -> {
+            if (experimentalAiDjMode && experimentalAiDjWaiting.peek()) return;
             if (queue.isEmpty()) return;
             if (privateFmMode) {
                 showToast("私人漫游不提供上一首");
@@ -8108,6 +8266,12 @@ public final class PlayerController {
     // skip. Already on the main thread (onComplete).
     private void autoAdvance() {
         if (queue.isEmpty()) return;
+        if (experimentalAiDjMode) {
+            if (experimentalAiDjWaiting.peek()) return;
+            if (playIndex >= queue.size() - 1) generateExperimentalAiDjBatch();
+            else playAt(playIndex + 1);
+            return;
+        }
         pendingNaturalEnd = true;
         if (privateFmMode) {
             requestNextPrivateFm(true);
@@ -11785,7 +11949,7 @@ public final class PlayerController {
                 for (int attempt = 1; attempt <= 3 && rec == null; attempt++) {
                     if (generation != aiRequestGeneration.get()) return;
                     try {
-                        rec = new AiClient(baseUrl, apiKey, model, 60000)
+                        rec = new AiClient(baseUrl, apiKey, model, aiPlaylistTimeoutMs)
                                 .generatePlaylist(text, request, count,
                                         forceKnowledge
                                                 ? "[KNOWLEDGE_BASE_ONLY] 强制使用模型内置知识库，禁止联网搜索，输出真实可搜索歌曲。"
@@ -11875,7 +12039,10 @@ public final class PlayerController {
                     }
                 });
             }
-                finally { postAiGeneration(generation, () -> { aiLoading.set(false); aiProgress.set("处理完成"); }); }
+                finally { postAiGeneration(generation, () -> {
+                    aiLoading.set(false); aiProgress.set("处理完成");
+                    finishExperimentalAiDjBatch(generation);
+                }); }
         });
     }
 
@@ -11910,6 +12077,11 @@ public final class PlayerController {
      * the listener choosing their own music.
      */
     private void maybeContinueAiPlaylist() {
+        if (experimentalAiDjMode) {
+            if (playIndex == 0 && !experimentalAiDjWaiting.peek() && !experimentalAiDjPrefetchStarted)
+                prefetchExperimentalAiDjBatch();
+            return;
+        }
         // A background continuation must not supersede a result awaiting the dialog's Done button.
         if (awaitingAiConfirmation) return;
         final AiContinuation c = aiContinuation;
@@ -12367,6 +12539,10 @@ public final class PlayerController {
     /** Resume playback immediately — counterpart to {@link #mediaPause()} for
      *  MediaSession callbacks that may run off the main thread. */
     public void mediaResume() {
+        if (experimentalAiDjMode && experimentalAiDjWaiting.peek()) {
+            retryExperimentalAiDj();
+            return;
+        }
         if (playingIntent) return;
         if (needsReplay && playIndex >= 0) {
             needsReplay = false;
