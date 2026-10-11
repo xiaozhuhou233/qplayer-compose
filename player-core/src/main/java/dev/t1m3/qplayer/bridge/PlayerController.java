@@ -14,6 +14,7 @@ import dev.t1m3.qplayer.ai.AiClient;
 import dev.t1m3.qplayer.bili.BiliClient;
 import dev.t1m3.qplayer.ai.AiPlaylistResult;
 import dev.t1m3.qplayer.ai.AiReference;
+import dev.t1m3.qplayer.ai.AiEndpoint;
 import dev.t1m3.qplayer.ai.WebSearchClient;
 import dev.t1m3.qplayer.audio.BeatProfile;
 import dev.t1m3.qplayer.audio.BeatProfiler;
@@ -1362,6 +1363,10 @@ public final class PlayerController {
      * playing. Cleared whenever a user-started queue takes over (see {@link #setQueueOrigin}).
      */
     private final AtomicLong aiRequestGeneration = new AtomicLong();
+    /** AI DJ 的超时（毫秒），来自设置里的「请求超时」。设置侧每次改动都会经
+     *  {@link #setAiTransitionConfig} 推过来；没推过时用 60 s。中转站常比一线端点慢，
+     *  这里以前是写死的 60000，设置里的滑条到不了。 */
+    private volatile int aiPlaylistTimeoutMs = 60_000;
     private volatile java.util.concurrent.Future<?> aiRequestTask;
     private volatile boolean awaitingAiConfirmation;
     private PendingAiPlayback pendingAiPlayback;
@@ -2144,6 +2149,8 @@ public final class PlayerController {
      * playback path, and never in a way that playback waits for.
      */
     public void setAiTransitionConfig(String baseUrl, String apiKey, String model, int timeoutMs) {
+        // 同一份配置也被 AI DJ 路径使用：设置里改「请求超时」时它就更新。
+        aiPlaylistTimeoutMs = AiEndpoint.timeoutOrDefault(timeoutMs, 60_000);
         AiTransitionChooser current = aiTransitionChooser;
         String url = baseUrl == null ? "" : baseUrl.trim();
         String name = model == null ? "" : model.trim();
@@ -11560,7 +11567,7 @@ public final class PlayerController {
                 for (int attempt = 1; attempt <= 3 && rec == null; attempt++) {
                     if (generation != aiRequestGeneration.get()) return;
                     try {
-                        rec = new AiClient(baseUrl, apiKey, model, 60000)
+                        rec = new AiClient(baseUrl, apiKey, model, aiPlaylistTimeoutMs)
                                 .generatePlaylist(text, request, count,
                                         forceKnowledge
                                                 ? "[KNOWLEDGE_BASE_ONLY] 强制使用模型内置知识库，禁止联网搜索，输出真实可搜索歌曲。"
