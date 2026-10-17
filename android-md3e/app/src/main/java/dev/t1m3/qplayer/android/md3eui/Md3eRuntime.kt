@@ -169,6 +169,7 @@ internal class Md3eRuntime private constructor(context: Context) {
     val controller = PlayerController(audioBackend, AndroidMetadataReader(app), NeteaseClient.INSTANCE)
     val settings = SettingsCore()
     val dailyVibes = Md3eDailyVibes(app, controller, settings)
+    var eqDialogRequested by mutableStateOf(false)
     private val scanner = AndroidLibraryScanner(app.contentResolver, AndroidMetadataReader(app))
     private val scanWorker = Executors.newSingleThreadExecutor()
     private val playbackClock = PlaybackClock()
@@ -297,6 +298,11 @@ internal class Md3eRuntime private constructor(context: Context) {
         settings.registerInfo("cacheUsage") { "${controller.cacheSizeMB.peek()} MB" }
         settings.load(PrefsSettingsStore(app), SettingsCatalog.ANDROID)
         LogCapture.setEnabled(app, settings.bool("logCaptureEnabled"))
+        // The equalizer re-attaches to every new audio session and follows the
+        // 音效 settings live.
+        // The EQ lives in the backend: push the stored values once, and it applies
+        // them whenever a player session exists.
+        pushEqToBackend()
         unblockEnabled = settings.bool("unblock")
         attachService()
         controller.preloadHome()
@@ -650,11 +656,68 @@ internal class Md3eRuntime private constructor(context: Context) {
         settingsRevision++
     }
 
+    /** Parse "eqBands" (CSV of millibels per band). */
+    fun eqBandLevels(): List<Int> =
+        settings.str("eqBands").takeIf { it.isNotBlank() }
+            ?.split(",")?.map { it.trim().toIntOrNull() ?: 0 }.orEmpty()
+
+    fun eqBassStrength(): Int = (settings.str("eqBass").trim().toIntOrNull() ?: 0).coerceIn(0, 1000)
+
+    fun setEqBandLevel(index: Int, millibels: Int) {
+        if (index !in 0 until audioBackend.eqBandCount()) return
+        val levels = eqBandLevels().toMutableList()
+        while (levels.size <= index) levels.add(0)
+        val range = audioBackend.eqBandRange()
+        levels[index] = millibels.coerceIn(range[0], range[1])
+        settings.put("eqBands", levels.joinToString(","))
+        pushEqToBackend()
+    }
+
+    fun setEqBass(strength: Int) {
+        settings.put("eqBass", strength.coerceIn(0, 1000).toString())
+        pushEqToBackend()
+    }
+
+    fun resetEq() {
+        settings.put("eqBands", "")
+        settings.put("eqBass", "0")
+        pushEqToBackend()
+    }
+
+    /** Ⓜ Quick shapes so the EQ can be heard immediately（「这玩意咋调的」）: millibel
+     *  levels against a 5-band 60/230/910/3600/14000 layout, clipped per band by the
+     *  backend to the device's real range anyway. */
+    fun applyEqPreset(which: String) {
+        when (which) {
+            "bass" -> {
+                settings.put("eqBands", "900,600,150,-200,-300")
+                settings.put("eqBass", "700")
+            }
+            "vocal" -> {
+                settings.put("eqBands", "-300,-100,500,400,150")
+                settings.put("eqBass", "0")
+            }
+            else -> {
+                settings.put("eqBands", "")
+                settings.put("eqBass", "0")
+            }
+        }
+        pushEqToBackend()
+    }
+
+    private fun pushEqToBackend() {
+        audioBackend.setEqualizer(settings.bool("eqEnabled"),
+            eqBandLevels().toIntArray(), eqBassStrength())
+    }
+
     fun updateSetting(key: String, value: Any) {
         settings.put(key, value)
         unblockEnabled = settings.bool("unblock")
         settingsRevision++
         LogCapture.setEnabled(app, settings.bool("logCaptureEnabled"))
+        if (key == "eqEnabled" || key == "eqBands" || key == "eqBass") {
+            pushEqToBackend()
+        }
     }
 
     fun invokeSetting(action: String) {

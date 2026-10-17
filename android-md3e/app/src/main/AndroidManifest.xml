@@ -12,6 +12,10 @@
     <!-- 保后台：向用户申请「忽略电池优化」的系统对话框必须声明这条权限，
          否则 ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 会被系统直接拒绝。 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Attaching android.media.audiofx.Equalizer/BassBoost to an audio session
+         needs this normal permission; without it the constructor throws and the
+         equalizer silently does nothing. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <application android:name="dev.t1m3.qplayer.android.app.QPlayerApplication"
         android:label="QPlayer MD3E" android:theme="@style/Md3eTheme"
         android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:allowBackup="false"

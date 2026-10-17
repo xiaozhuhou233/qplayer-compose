@@ -109,9 +109,9 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
         var detailId by rememberSaveable { mutableLongStateOf(0L) }
         var biliFolderTitle by rememberSaveable { mutableStateOf("") }
         var biliAccountOpen by rememberSaveable { mutableStateOf(false) }
-        var neteaseLoginOpen by rememberSaveable { mutableStateOf(false) }
-        // 听歌识曲（2026-10-17 从旧版本恢复）：与其它对话框同一个挂载位置。
         var recognizeOpen by rememberSaveable { mutableStateOf(false) }
+        var autoBiliQuery by rememberSaveable { mutableStateOf("") }
+        var neteaseLoginOpen by rememberSaveable { mutableStateOf(false) }
         LaunchedEffect(runtime.home.loggedIn) {
             if (runtime.home.loggedIn) neteaseLoginOpen = false
         }
@@ -234,6 +234,8 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
             }
         }
         Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+            if (runtime.eqDialogRequested) Md3eEqualizerDialog(runtime,
+                onDismiss = { runtime.eqDialogRequested = false })
             Md3ePlayerExpansionHost(
                 expanded = overlay == "player" || (overlay == "queue" && queueFromPlayer),
                 state = playerExpansion,
@@ -386,6 +388,9 @@ when {
                                             onEnqueueTrack = runtime.controller::enqueueTrack,
                                             onEnqueueVideo = runtime.controller::enqueueBiliVideo,
                                             onPlay = onPlay, modifier = pageModifier,
+                                            recognizeOpen = recognizeOpen, onRecognize = { recognizeOpen = true },
+                                            autoBiliQuery = autoBiliQuery.ifBlank { null },
+                                            onAutoBiliConsumed = { autoBiliQuery = "" },
                                             onOpenPlayer = openVideoPlayer,
                                             onBiliLogin = { biliAccountOpen = true },
                                             onBiliFavorites = { openDetail("biliFolders", 0L) },
@@ -519,8 +524,9 @@ when {
             onPlayById = { runtime.playById(it) },
             onBiliSearch = { query ->
                 recognizeOpen = false
+                autoBiliQuery = query
+                detail = ""
                 tab = "search"
-                runtime.search(query, "bili")
             })
         if (biliAccountOpen) {
             if (runtime.bili.loggedIn) AlertDialog(

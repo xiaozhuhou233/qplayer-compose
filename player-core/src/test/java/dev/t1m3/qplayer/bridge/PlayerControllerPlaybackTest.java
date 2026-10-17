@@ -152,6 +152,45 @@ public class PlayerControllerPlaybackTest {
 
 
 
+
+    @Test
+    public void rapidQueueSelectionsOnlyStartTheNewestSong() throws Exception {
+        String oldBase = AppDirs.base();
+        String oldCacheBase = AppDirs.cacheBase();
+        PlayerController controller = null;
+        try {
+            Path base = temporaryFolder.newFolder("rapid-selection").toPath();
+            AppDirs.setBase(base.toString());
+            AppDirs.setCacheBase(base.resolve("cache").toString());
+            FakeAudioBackend backend = new FakeAudioBackend();
+            controller = new PlayerController(backend, track -> { }, NeteaseClient.INSTANCE);
+            java.util.Queue<Runnable> main = new java.util.concurrent.ConcurrentLinkedQueue<>();
+            controller.setMainExecutor(main::add);
+            java.lang.reflect.Method playQueue = PlayerController.class.getDeclaredMethod(
+                    "playQueue", java.util.List.class, int.class);
+            playQueue.setAccessible(true);
+            Track last = null;
+            for (int i = 0; i < 100; i++) {
+                Track song = new Track();
+                song.title = "song-" + i;
+                song.filePath = base.resolve("song-" + i + ".mp3").toString();
+                playQueue.invoke(controller, java.util.Collections.singletonList(song), 0);
+                last = song;
+            }
+            // Drain superseded main-thread selections before allowing the newest
+            // one to run: none may open the latest queue at an obsolete index.
+            for (int i = 0; i < 99; i++) main.remove().run();
+            assertEquals(0, backend.playCalls);
+            main.remove().run();
+            assertEquals(1, backend.playCalls);
+            assertEquals(last.filePath, backend.lastSource);
+        } finally {
+            if (controller != null) controller.shutdown();
+            AppDirs.setBase(oldBase);
+            AppDirs.setCacheBase(oldCacheBase);
+        }
+    }
+
     private static final long ASYNC_FADE_TIMEOUT_MS = 3000L;
 
     @Rule
@@ -1334,6 +1373,7 @@ public class PlayerControllerPlaybackTest {
         // only `volume` via waitForVolume could observe silence before the
         // deferred pause() had actually landed.
         volatile int playCalls;
+        volatile String lastSource;
         volatile int pauseCalls;
         volatile int resumeCalls;
         volatile int cancelAutoResumeCalls;
@@ -1354,6 +1394,7 @@ public class PlayerControllerPlaybackTest {
         volatile int crossfadeCalls;
 
         @Override public void play(String source, long startMs) {
+            lastSource = source;
             playCalls++;
             position = startMs;
             playing = true;

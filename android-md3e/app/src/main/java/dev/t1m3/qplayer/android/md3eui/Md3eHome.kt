@@ -358,4 +358,3 @@ private fun Md3eHomeHeaderSpacer(offsetProvider: () -> Float, headerHeight: Floa
         if (collapsed && divider) HorizontalDivider(thickness = Dp.Hairline)
     }
 }
-

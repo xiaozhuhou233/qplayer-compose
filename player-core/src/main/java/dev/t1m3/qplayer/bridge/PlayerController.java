@@ -467,12 +467,10 @@ public final class PlayerController {
         t.setDaemon(true);
         return t;
     });
-    // NetEase audio resolves get their own lane for the same head-of-line reason
-    // searchWorker/customWorker/cacheWorker above exist: `worker` also carries
-    // queue saves, home/playlist reads and scrobbles, so a tap on a search result
-    // could sit behind any of them before its URL was even requested. This is the
-    // path the user is waiting on with their finger on the screen, so nothing else
-    // may share its queue.
+    // Foreground selections are bounded and separate from transition prefetch.
+    // A slow stale URL request must not serialize every subsequent song tap.
+    private final ExecutorService playResolveWorker = LatestTaskExecutor.create("qplayer-play-resolve");
+
     private final ExecutorService resolveWorker = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "qplayer-resolve");
         t.setDaemon(true);
@@ -7811,7 +7809,9 @@ public final class PlayerController {
             applyCover(null, currentCoverRevision);
             coverPath.set("");
         });
-        worker.submit(this::saveQueue);
+        worker.submit(() -> {
+            if (isCurrentTrackRequest(t, currentCoverRevision)) saveQueue();
+        });
         // Round 34: the AI DJ's own continuation is decided here, where a track has just started —
         // see maybeContinueAiPlaylist().
         maybeContinueAiPlaylist();
@@ -8012,8 +8012,9 @@ public final class PlayerController {
         }
 
         worker.submit(() -> {
+            if (!isCurrentTrackRequest(t, revision)) return;
             byte[] data = downloadBytes(url);
-            if (data == null) return;
+            if (data == null || !isCurrentTrackRequest(t, revision)) return;
             t.coverBytes = data;
             // Cache cover image to disk (write already-downloaded bytes, no re-fetch).
             String imgPath = diskCache.imagePath(url);
@@ -8898,6 +8899,7 @@ public final class PlayerController {
             // that genuinely has no lyrics costs exactly one request.
             List<LyricLine> ly = Collections.emptyList();
             for (int attempt = 1; attempt <= LYRIC_FETCH_ATTEMPTS; attempt++) {
+                if (!isCurrentLyricRequest(t, requestGeneration)) return;
                 lyricFetchTransient = false;
                 try {
                     ly = fetchNeteaseLyrics(songId);
@@ -8905,6 +8907,7 @@ public final class PlayerController {
                     Logger.warn("lyric fetch failed for {}: {}", songId, e.getMessage());
                     lyricFetchTransient = true;
                 }
+                if (!isCurrentLyricRequest(t, requestGeneration)) return;
                 if (!ly.isEmpty()) break;
                 if (!lyricFetchTransient || attempt == LYRIC_FETCH_ATTEMPTS) break;
                 Logger.info("lyric fetch transient-empty for {} (attempt {}/{})",
@@ -9392,7 +9395,7 @@ public final class PlayerController {
         // isn't actually explained yet and unblock's per-source latency in
         // particular is worth watching across more real sessions.
         long tSubmit = System.currentTimeMillis();
-        resolveWorker.submit(() -> {
+        playResolveWorker.submit(() -> {
             long t0 = System.currentTimeMillis();
             long queueWaitMs = t0 - tSubmit;
             if (queueWaitMs > 50) Logger.info("netease: timing queued behind other resolve tasks for {}ms", queueWaitMs);
@@ -9413,6 +9416,7 @@ public final class PlayerController {
                 // a missing url, or a blocked/VIP song all fall through to the
                 // unblock sources; the trial clip is kept as a last-resort fallback.
                 String url = (info != null && !info.trial) ? info.url : null;
+                if (!isCurrentTrackRequest(t, expectedCoverRevision)) return;
                 boolean unblocked = false;
                 if (url == null && unblockEnabled) {
                     String un = SongUnblocker.resolve(songId, t.title, t.artist);
@@ -9553,8 +9557,9 @@ public final class PlayerController {
                                       long expectedCoverRevision) {
         String id = t.customId;
         CustomApiConfig cfg = customApiConfig;
-        customWorker.submit(() -> {
+        playResolveWorker.submit(() -> {
             try {
+                if (!isCurrentTrackRequest(t, expectedCoverRevision)) return;
                 String url = CustomApiClient.resolveUrl(cfg, id);
                 onMain(() -> {
                     if (!isCurrentTrackRequest(t, expectedCoverRevision)) return; // user moved on
@@ -10055,7 +10060,7 @@ public final class PlayerController {
     private void resolveAndPlayBili(Track t, int expectedIndex, long resumeMs,
                                     long expectedCoverRevision) {
         final int generation = biliResolveGeneration.get();
-        resolveWorker.submit(() -> {
+        playResolveWorker.submit(() -> {
             try {
                 if (generation != biliResolveGeneration.get()) return;
                 if (!isCurrentTrackRequest(t, expectedCoverRevision)) return;
@@ -14282,6 +14287,8 @@ public final class PlayerController {
         worker.shutdownNow();
         aiWorker.shutdownNow();
         aiMatcher.close();
+        playResolveWorker.shutdownNow();
+        resolveWorker.shutdownNow();
         homeLoadGeneration.incrementAndGet();
         homeWorker.shutdownNow();
         searchWorker.shutdownNow();

@@ -35,7 +35,7 @@ private val md3eSettingKeys = setOf(
     "lyricGlow", "lyricShadow", "lyricLinearAnim", "lyricMd3Color",
     "lyricProgressStyle", SettingsCatalog.COVER_BACKGROUND_KEY, SettingsCatalog.MV_BACKGROUND_KEY,
     "action:clearCache", "action:openRepo", "action:checkUpdate",
-    "logCaptureEnabled", "action:logExport",
+    "logCaptureEnabled", "action:logExport", "eqEnabled", "action:eqEditor",
 )
 
 private fun supportedSetting(spec: SettingSpec): Boolean = spec.key in md3eSettingKeys ||
@@ -144,6 +144,8 @@ private fun Md3eSettingRow(spec: SettingSpec, runtime: Md3eRuntime,
                     SettingSpec.ACTION -> TextButton(onClick = {
                         // Ⓜ The chat tester owns a dialog, not a plain action.
                         if (spec.action == "aiChatProbe") runtime.aiChatProbeRequested = true
+                        // The equalizer editor needs UI state, not a plain runnable.
+                        else if (spec.action == "eqEditor") runtime.eqDialogRequested = true
                         else runtime.invokeSetting(spec.action)
                     }) {
                         Text(spec.button.ifBlank { "打开" })
