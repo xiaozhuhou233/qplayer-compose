@@ -5,7 +5,24 @@
 
 package dev.t1m3.qplayer.android.md3eui
 
+import dev.t1m3.qplayer.android.md3eui.Md3eAdaptiveButton as Button
+
+import dev.t1m3.qplayer.android.ui.IosAwareAlertDialog as AlertDialog
+import dev.t1m3.qplayer.android.ui.IosAwareIconButton as IconButton
+import dev.t1m3.qplayer.android.ui.IosAwareTextButton as TextButton
+
+import com.kyant.backdrop.backdrops.LayerBackdrop
+import com.kyant.backdrop.backdrops.layerBackdrop
+import dev.t1m3.qplayer.android.ui.IosPlayerDock
+import dev.t1m3.qplayer.android.ui.IosNavigationDestination
+import dev.t1m3.qplayer.android.ui.IosTopBarAction
+import dev.t1m3.qplayer.android.ui.IosFloatingPageActions
+import dev.t1m3.qplayer.android.ui.LocalIosTopBarBackdrop
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.SharedTransitionLayout
@@ -25,6 +42,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -44,32 +62,39 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
     onPlay: PlayAction, onRequestAudioPermission: () -> Unit) {
     val systemDark = isSystemInDarkTheme()
     val settingsRevision = runtime.settingsRevision
+    Md3ePrewarmMv(runtime)
     SideEffect { runtime.settings.setSystemDark(systemDark) }
     // The existing theme preference remains the authority; system is its default.
     val dark = when (runtime.settings.intOf("darkMode")) { 1 -> false; 2 -> true; else -> systemDark }
-    SideEffect { onDarkAppearance(dark) }
     var pageMotionActive by remember { mutableStateOf(false) }
     // 定时停止播放：状态在根组合里，离开队列页也继续倒数（见 Md3eSleepTimer.kt）。
     val sleepTimer = rememberMd3eSleepTimerState()
     Md3eSleepCountdown(runtime, sleepTimer)
     val playerExpansion = rememberMd3ePlayerExpansionState()
-    val claudeDesign = runtime.settings.bool("claudeDesign")
+    SideEffect { onDarkAppearance(dark || (playerExpansion.active && playerExpansion.immersiveVideo)) }
+    val iosDesign = runtime.settings.bool("iosDesign")
+    val iosCollection = rememberIosCollectionTransition()
+    val claudeDesign = !iosDesign && runtime.settings.bool("claudeDesign")
     val aiDj = remember { ClaudeAiDjState() }
     val privateRoam = remember { ClaudePrivateRoamState() }
     val dynamicScheme = rememberMd3eColorScheme(
         seed = runtime.playback.coverSeed,
         dark = dark,
-        enabled = !claudeDesign && runtime.settings.bool("monet"),
+        enabled = !claudeDesign && !iosDesign && runtime.settings.bool("monet"),
         paletteStyle = runtime.settings.intOf("paletteStyle").coerceIn(0, 3),
         paletteChroma = runtime.settings.intOf("paletteChroma").coerceIn(0, 2),
         animate = !claudeDesign && !runtime.settings.bool(SettingsCatalog.LOW_SPEC_MODE_KEY),
         paused = pageMotionActive || playerExpansion.moving || runtime.transportMotionActive || !runtime.uiVisible,
     )
-    val scheme = if (claudeDesign) claudeColorScheme(dark) else dynamicScheme
+    val scheme = when { iosDesign -> iosColorScheme(dark); claudeDesign -> claudeColorScheme(dark); else -> dynamicScheme }
     MaterialExpressiveTheme(colorScheme = scheme,
         motionScheme = if (claudeDesign) ClaudeOneTakeScheme else MotionScheme.expressive(), typography = if (claudeDesign) ClaudeTypography else Md3eTypography, shapes = ClaudeShapes) {
+        Md3eIosChromeHost(iosDesign, pageMotionActive || playerExpansion.moving || runtime.transportMotionActive,
+            refraction = runtime.settings.bool("iosGlassRefraction")) {
         CompositionLocalProvider(LocalContentColor provides scheme.onSurface,
             LocalClaudeDesign provides claudeDesign,
+            LocalIosDesign provides iosDesign,
+            LocalIosCollectionTransition provides if (iosDesign) iosCollection else null,
             LocalClaudeAiDj provides aiDj,
             LocalClaudePrivateRoam provides privateRoam,
             LocalClaudePlayerExpansion provides playerExpansion,
@@ -85,6 +110,8 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
         var biliFolderTitle by rememberSaveable { mutableStateOf("") }
         var biliAccountOpen by rememberSaveable { mutableStateOf(false) }
         var neteaseLoginOpen by rememberSaveable { mutableStateOf(false) }
+        // 听歌识曲（2026-10-17 从旧版本恢复）：与其它对话框同一个挂载位置。
+        var recognizeOpen by rememberSaveable { mutableStateOf(false) }
         LaunchedEffect(runtime.home.loggedIn) {
             if (runtime.home.loggedIn) neteaseLoginOpen = false
         }
@@ -95,8 +122,17 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
         var navigatingBack by remember { mutableStateOf(false) }
         var activeSharedCoverKey by remember { mutableStateOf<String?>(null) }
         var miniPlayerVisible by remember { mutableStateOf(true) }
+        LaunchedEffect(runtime.experimentalAiDjActive, runtime.experimentalAiDjWaiting) {
+            if (runtime.experimentalAiDjActive && runtime.experimentalAiDjWaiting) {
+                miniPlayerVisible = true
+                queueFromPlayer = false
+                playerOpenLyrics = false
+                overlay = "player"
+            }
+        }
         val miniScrollConnection = rememberMd3eMiniScrollConnection { miniPlayerVisible = it }
         val route = Md3ePageRoute(tab, detail, detailId)
+        val (iosScroll, iosScrollConnection) = rememberIosPageScroll(route, tab == "home" && detail.isEmpty())
         val entranceVisit = remember(route) {
             ClaudeEntranceVisit(returning = navigatingBack,
                 collection = detail in setOf("playlist", "album"))
@@ -106,6 +142,9 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
         val pageTransitionActive = pageTransition.isRunning ||
             pageTransition.currentState != pageTransition.targetState
         SideEffect { pageMotionActive = pageTransitionActive }
+        RefreshIosDockMaterial(page = route,
+            settled = !pageTransitionActive && !iosCollection.motion.moving,
+            enabled = iosDesign)
         val routeStateHolder = rememberSaveableStateHolder()
         val lowSpec = runtime.settings.bool(SettingsCatalog.LOW_SPEC_MODE_KEY)
         LaunchedEffect(tab, detail, detailId) {
@@ -123,6 +162,7 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
             navigatingBack = false
             if (detail.isNotEmpty()) detailStack = detailStack + "$detail:$detailId"
             if (claudeDesign && kind == "playlist") { miniPlayerVisible = false; overlay = "" }
+            if (iosDesign && kind in setOf("playlist", "album")) iosCollection.open("cover:$kind:$id")
             detail = kind
             detailId = id
             activeSharedCoverKey = when (kind) {
@@ -161,6 +201,7 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                     if (detail == "playlist" || detail == "album") {
                         activeSharedCoverKey = "cover:$detail:$detailId"
                     }
+                    if (iosDesign && detail in setOf("playlist", "album")) iosCollection.close()
                     val previous = detailStack.lastOrNull()
                     detailStack = detailStack.dropLast(1)
                     detail = previous?.substringBeforeLast(':').orEmpty()
@@ -197,15 +238,17 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                 expanded = overlay == "player" || (overlay == "queue" && queueFromPlayer),
                 state = playerExpansion,
                 durationMillis = if (lowSpec) 0 else 400,
-                claude = claudeDesign,
+                claude = claudeDesign || iosDesign,
                 cover = runtime.playback.cover,
+                showDisc = !runtime.experimentalAiDjWaiting,
                 simpleSlide = lowSpec && !claudeDesign,
                 base = {
             Scaffold(
                 containerColor = MaterialTheme.colorScheme.background,
+                contentWindowInsets = if (iosDesign) WindowInsets(0, 0, 0, 0) else ScaffoldDefaults.contentWindowInsets,
                 topBar = {
                     Box(Modifier.claudeTransitionBackdrop { sharedBackdrop.value }) {
-                    Md3eMainTopBar(tab, detail, when (detail) {
+                    if (!iosDesign) Md3eMainTopBar(tab, detail, when (detail) {
                         "playlist" -> runtime.playlistFor(detailId).title
                         "album" -> runtime.albumFor(detailId).name
                         "artist" -> runtime.artistFor(detailId).name
@@ -220,10 +263,18 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                     }
                 },
                 bottomBar = {
-                    Box(Modifier.claudeTransitionBackdrop { sharedBackdrop.value }) {
-                    if (detail != "settings") {
-                        if (detail.isEmpty()) {
-                            Md3eNavigationBar(tab, showLocalTab = runtime.settings.bool("showLocalTab")) { selected ->
+                    if (!iosDesign) Box(Modifier.claudeTransitionBackdrop { sharedBackdrop.value }) {
+                    // Keep the system inset throughout navigation. Only the tab row's
+                    // footprint changes, carrying the dock and its disc in the same layout.
+                    Column(Modifier.fillMaxWidth().navigationBarsPadding()) {
+                        val navMotion = tween<androidx.compose.ui.unit.IntSize>(
+                            durationMillis = if (lowSpec) 0 else ClaudeOneTake.TRAVEL,
+                            easing = ClaudeOneTake.ExpoOut)
+                        AnimatedVisibility(visible = detail.isEmpty(),
+                            enter = expandVertically(navMotion, expandFrom = Alignment.Bottom, clip = false),
+                            exit = shrinkVertically(navMotion, shrinkTowards = Alignment.Bottom, clip = false)) {
+                            Md3eNavigationBar(tab, showLocalTab = runtime.settings.bool("showLocalTab"),
+                                includeSystemInset = false) { selected ->
                                 if (selected != tab) {
                                     navigatingBack = false
                                     activeSharedCoverKey = null
@@ -239,21 +290,30 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                     }
                 },
             ) { insets ->
-                Box(Modifier.fillMaxSize().padding(insets).nestedScroll(miniScrollConnection)) {
-                SharedTransitionLayout(Modifier.fillMaxSize()) {
+                Box(Modifier.fillMaxSize().padding(if (iosDesign) PaddingValues(0.dp) else insets)
+                    .nestedScroll(if (iosDesign) iosScrollConnection else miniScrollConnection)) {
+                SharedTransitionLayout(Modifier.fillMaxSize().then(
+                    if (iosDesign) Modifier.layerBackdrop(LocalIosPageBackdrop.current as LayerBackdrop) else Modifier)) {
+                    IosCollectionMotionHost(iosCollection) {
                     ClaudeSharedBackdropFocus(isTransitionActive, route, sharedBackdrop, ClaudeOneTake.COLLECTION)
                     CompositionLocalProvider(
                         Md3eSharedScope provides this,
                         Md3eActiveCoverKey provides activeSharedCoverKey,
                         Md3eLowSpecMode provides lowSpec,
-                        LocalMd3eDockInset provides if (runtime.playback.hasTrack &&
-                            detail != "settings") 68.dp else 0.dp,
+                        LocalMd3eDockInset provides if (iosDesign && detail != "settings") {
+                            if (runtime.playback.hasTrack) 144.dp else 96.dp
+                        } else if (runtime.playback.hasTrack && detail != "settings") 68.dp else 0.dp,
                     ) {
                         pageTransition.AnimatedContent(
                             modifier = Modifier.fillMaxSize().claudeTransitionBackdrop { sharedBackdrop.value },
                             transitionSpec = {
                                 val detailInvolved = initialState.detail.isNotEmpty() || targetState.detail.isNotEmpty()
                                 when {
+                                    iosDesign && activeSharedCoverKey != null ->
+                                        (androidx.compose.animation.fadeIn(tween(650), initialAlpha = 1f) togetherWith
+                                            androidx.compose.animation.fadeOut(tween(650), targetAlpha = 1f)).apply {
+                                            targetContentZIndex = if (navigatingBack) -1f else 1f
+                                        }.using(null)
                                     lowSpec -> Md3eMotion.lowSpecPage(!navigatingBack)
                                     claudeDesign && !detailInvolved -> ClaudeOneTake.page(
                                         listOf("home", "playlists", "local", "search").indexOf(targetState.tab) >
@@ -272,6 +332,8 @@ internal fun Md3eApp(runtime: Md3eRuntime, onDarkAppearance: (Boolean) -> Unit,
                             if (visibleRoute == route && visit !== entranceVisit) visit = entranceVisit
                             routeStateHolder.SaveableStateProvider("${visibleRoute.tab}:${visibleRoute.detail}:${visibleRoute.id}") {
                                 CompositionLocalProvider(Md3eAnimatedScope provides this, LocalClaudeEntranceVisit provides visit) {
+                                    // Each scrolling page owns its initial chrome clearance.
+                                    // A fixed outer inset would leave an empty strip after scrolling.
                                     val pageModifier = Modifier.fillMaxSize()
                                     val collectionKey = if (visibleRoute.detail in setOf("playlist", "album"))
                                         "cover:${visibleRoute.detail}:${visibleRoute.id}" else null
@@ -280,9 +342,11 @@ when {
                                         visibleRoute.detail == "playlist" -> Md3ePlaylistDetail(runtime.playlistFor(visibleRoute.id), visibleRoute.id,
                                             onBack = closeTop,
                                             onRefresh = { runtime.openPlaylist(visibleRoute.id) },
+                                            onEnqueue = runtime.controller::enqueueNeteaseSong,
                                             onPlay = onPlay, modifier = pageModifier)
                                         visibleRoute.detail == "album" -> Md3eAlbumDetail(runtime.albumFor(visibleRoute.id), visibleRoute.id,
-                                            onBack = closeTop, onPlay = onPlay, modifier = pageModifier)
+                                            onBack = closeTop, onPlay = onPlay,
+                                            onEnqueue = runtime.controller::enqueueNeteaseSong, modifier = pageModifier)
                                         visibleRoute.detail == "artist" -> Md3eArtistDetail(runtime.artistFor(visibleRoute.id),
                                             onBack = closeTop,
                                             onAlbum = runtime::openAlbum,
@@ -303,15 +367,24 @@ when {
                                         visibleRoute.tab == "playlists" -> Md3ePlaylistsPage(runtime.playlists, { neteaseLoginOpen = true },
                                             onRefresh = runtime::loadMyPlaylists,
                                             onOpen = { id -> runtime.openPlaylist(id); openDetail("playlist", id) },
+                                            onDelete = { p -> if (p.owned) runtime.controller.deletePlaylist(p.id) {
+                                                runtime.dailyVibes.forgetSavedPlaylist(p.id)
+                                            }
+                                                else runtime.controller.unsubscribePlaylist(p.id) },
+                                            canDelete = runtime.controller::canDeletePlaylist,
                                             modifier = pageModifier)
                                         visibleRoute.tab == "local" -> Md3eLocalPage(runtime.local, onRequestAudioPermission,
                                             onRefresh = runtime::scanLocal, onPlay = onPlay,
+                                            onEnqueue = runtime.controller::enqueueTrack,
                                             onPlayBili = runtime::playCachedBili, modifier = pageModifier)
                                         else -> Md3eSearchPage(runtime.search,
                                             onSearch = runtime::search, onLoadMore = runtime::loadMoreSearch,
                                             onClearHistory = { runtime.controller.clearSearchHistory() },
                                             onOpenAlbum = runtime::openAlbum,
                                             onOpenArtist = runtime::openArtist,
+                                            onEnqueueSong = runtime.controller::enqueueNeteaseSong,
+                                            onEnqueueTrack = runtime.controller::enqueueTrack,
+                                            onEnqueueVideo = runtime.controller::enqueueBiliVideo,
                                             onPlay = onPlay, modifier = pageModifier,
                                             onOpenPlayer = openVideoPlayer,
                                             onBiliLogin = { biliAccountOpen = true },
@@ -324,8 +397,58 @@ when {
                         }
                     }
                 }
+                }
+                if (iosDesign) CompositionLocalProvider(
+                    LocalIosTopBarBackdrop provides LocalIosPageBackdrop.current
+                ) {
+                    // A sibling of the recorded page: never capture controls into their own source.
+                    IosFloatingPageActions(
+                        canGoBack = detail.isNotEmpty() || tab != "home", onBack = closeTop,
+                        onRecognize = { recognizeOpen = true },
+                        onQueue = { queueFromPlayer = false; overlay = "queue" },
+                        onSettings = { openDetail("settings", 0L) },
+                        onAccount = { neteaseLoginOpen = true }, loggedIn = runtime.home.loggedIn,
+                        expanded = tab == "home" && detail.isEmpty(), routeKey = route,
+                        visible = iosScroll.actionsVisible, titleVisible = iosScroll.titleVisible,
+                        modifier = Modifier.align(Alignment.TopCenter).zIndex(4f))
+                }
                 CompositionLocalProvider(Md3eLowSpecMode provides lowSpec) {
-                    Md3eMiniPlayerDock(runtime,
+                    if (iosDesign && detail != "settings") {
+                        val destination = when (tab) {
+                            "playlists" -> IosNavigationDestination.LIBRARY
+                            "local" -> IosNavigationDestination.LOCAL
+                            "search" -> IosNavigationDestination.SEARCH
+                            else -> IosNavigationDestination.HOME
+                        }
+                        val select: (IosNavigationDestination) -> Unit = { selected ->
+                            navigatingBack = false; activeSharedCoverKey = null
+                            detail = ""; detailId = 0L; detailStack = emptyList()
+                            tab = when (selected) {
+                                IosNavigationDestination.LIBRARY -> "playlists"
+                                IosNavigationDestination.LOCAL -> "local"
+                                IosNavigationDestination.SEARCH -> "search"
+                                else -> "home"
+                            }
+                            miniPlayerVisible = true
+                        }
+                        CompositionLocalProvider(
+                            dev.t1m3.qplayer.android.ui.LocalGlassPerPageSampling provides true,
+                            dev.t1m3.qplayer.android.ui.LocalGlassAdaptiveColors provides detail.isNotEmpty()
+                        ) {
+                        IosPlayerDock(collapsed = iosScroll.homeCollapsed || !miniPlayerVisible || detail.isNotEmpty(),
+                            hasTrack = runtime.playback.hasTrack, destination = destination,
+                            showLocal = runtime.settings.bool("showLocalTab"), dark = dark,
+                            backdrop = requireNotNull(LocalIosDockBackdrop.current), playerExpansion = playerExpansion,
+                            onDestination = select, onHome = { select(IosNavigationDestination.HOME) },
+                            onSearch = { select(IosNavigationDestination.SEARCH) },
+                            player = { dockModifier, compact ->
+                                Md3eIosMiniPlayer(runtime, {
+                                    playerExpansion.prepareOpen(); queueFromPlayer = false
+                                    playerOpenLyrics = false; overlay = "player"
+                                }, playerExpansion, compact, dockModifier)
+                            })
+                        }
+                    } else if (!iosDesign) Md3eMiniPlayerDock(runtime,
                         visible = (miniPlayerVisible || aiDj.shown) && detail != "settings" &&
                             (overlay.isEmpty() || playerExpansion.active || overlay == "player"),
                         onOpen = {
@@ -355,23 +478,12 @@ when {
                         onOpenArtist = runtime::openArtist)
                 },
             )
-            AnimatedContent(
-                targetState = overlay == "queue",
-                modifier = Modifier.fillMaxSize(),
-                transitionSpec = {
-                    if (targetState) (if (claudeDesign) ClaudeOneTake.sheetIn() else Md3eMotion.sheetIn()) togetherWith ExitTransition.None
-                    else EnterTransition.None togetherWith (if (claudeDesign) ClaudeOneTake.sheetOut() else Md3eMotion.sheetOut())
-                },
-            ) { visibleOverlay ->
-                if (visibleOverlay) Box(Modifier.fillMaxSize().padding(WindowInsets.statusBars.asPaddingValues())
-                        .padding(WindowInsets.navigationBars.asPaddingValues())
-                        .background(MaterialTheme.colorScheme.background)) {
-                        Md3eQueueScreen(runtime, onBack = closeTop, timer = sleepTimer)
-                    }
-                else Box(Modifier.fillMaxSize())
+            // MusicOne's modal sheet owns its reveal/drag/dismiss animation in every design.
+            if (overlay == "queue") {
+                Md3eQueueScreen(runtime, onBack = closeTop, timer = sleepTimer)
             }
             Md3eVideoLayer(runtime, obscured = overlay != "player" || biliAccountOpen || neteaseLoginOpen || aiDj.shown || privateRoam.shown)
-            if (claudeDesign) ClaudeAiDjHost(runtime, aiDj, playerExpansion) { miniPlayerVisible = true }
+            ClaudeAiDjHost(runtime, aiDj, playerExpansion) { miniPlayerVisible = true }
             ClaudePrivateRoamHost(runtime, privateRoam,
                 onStart = { onPlay { startPrivateFm() } },
                 onComplete = {
@@ -401,6 +513,15 @@ when {
         // 设置 → AI 的「AI 对话测试」：与均衡器同一个挂载位置。
         if (runtime.aiChatProbeRequested) Md3eAiChatProbeDialog(runtime,
             onDismiss = { runtime.aiChatProbeRequested = false })
+        // 听歌识曲：识别 → 候选试听 → 就是这首 / 去B站搜索。
+        Md3eRecognizeDialogHost(visible = recognizeOpen,
+            onDismiss = { recognizeOpen = false },
+            onPlayById = { runtime.playById(it) },
+            onBiliSearch = { query ->
+                recognizeOpen = false
+                tab = "search"
+                runtime.search(query, "bili")
+            })
         if (biliAccountOpen) {
             if (runtime.bili.loggedIn) AlertDialog(
                 onDismissRequest = { biliAccountOpen = false },
@@ -422,11 +543,12 @@ when {
     }
 }
 }
+}
 
 @Composable
 private fun HomeContent(
     state: HomeState, onLogin: () -> Unit, onPlay: PlayAction,
-    onOpenPlaylist: (Long) -> Unit, onRefresh: () -> Unit, modifier: Modifier = Modifier,
+    onOpenPlaylist: (Long) -> Unit, onRefresh: () -> Unit, onEnqueue: (NeteaseSong) -> Unit, modifier: Modifier = Modifier,
 ) {
     LazyColumn(modifier, contentPadding = PaddingValues(bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
@@ -505,13 +627,13 @@ private fun HomeContent(
         if (state.daily.isNotEmpty()) {
             item { SectionTitle("每日推荐", "适合今天的你") }
             items(state.daily.withIndex().toList(), key = { "daily-${it.index}-${it.value.id}" }) { (index, song) ->
-                SongRow(song) { onPlay { playRecommendation(index) } }
+                SongRow(song, { onEnqueue(song) }) { onPlay { playRecommendation(index) } }
             }
         }
         state.sections.filter { it.id != "daily" || state.daily.isEmpty() }.forEach { section ->
             item(key = "section-${section.id}") { SectionTitle(section.title, "为你推荐") }
             items(section.songs.withIndex().toList(), key = { "${section.id}-${it.index}-${it.value.id}" }) { (_, song) ->
-                SongRow(song) { onPlay { playHomeRecommendation(section.id, song.id) } }
+                SongRow(song, { onEnqueue(song) }) { onPlay { playHomeRecommendation(section.id, song.id) } }
             }
         }
         if (!state.loading && state.daily.isEmpty() && state.sections.isEmpty() && state.playlists.isEmpty()) item {
@@ -529,8 +651,8 @@ private fun SectionTitle(title: String, subtitle: String) {
 }
 
 @Composable
-private fun SongRow(song: NeteaseSong, onPlay: () -> Unit) {
-    Surface(onClick = onPlay, modifier = Modifier.padding(horizontal = 16.dp).fillMaxWidth(),
+private fun SongRow(song: NeteaseSong, onEnqueue: () -> Unit, onPlay: () -> Unit) {
+    Surface(modifier = Modifier.padding(horizontal = 16.dp).fillMaxWidth().songQueueMenu(song.name.orEmpty(), onPlay, onEnqueue),
         shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)) {

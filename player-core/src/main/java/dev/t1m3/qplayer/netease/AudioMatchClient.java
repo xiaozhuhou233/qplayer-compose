@@ -62,8 +62,18 @@ public final class AudioMatchClient {
          *  negative. Reported because it is the only thing that says how confident the match is. */
         public final long startTimeMs;
 
+        /** Ⓜ The other candidates the endpoint answered with（「识别到之后几个歌备选」）:
+         *  the primary is this match, and these are the next-best results, capped at 4. */
+        public final java.util.List<Match> alternatives;
+
         Match(long id, String title, String artist, String album, String coverUrl, long durationMs,
               long startTimeMs) {
+            this(id, title, artist, album, coverUrl, durationMs, startTimeMs,
+                    java.util.Collections.<Match>emptyList());
+        }
+
+        Match(long id, String title, String artist, String album, String coverUrl, long durationMs,
+              long startTimeMs, java.util.List<Match> alternatives) {
             this.id = id;
             this.title = title;
             this.artist = artist;
@@ -71,6 +81,8 @@ public final class AudioMatchClient {
             this.coverUrl = coverUrl;
             this.durationMs = durationMs;
             this.startTimeMs = startTimeMs;
+            this.alternatives = alternatives == null
+                    ? java.util.Collections.<Match>emptyList() : alternatives;
         }
 
         @Override
@@ -138,6 +150,20 @@ public final class AudioMatchClient {
                 ? data.getAsJsonArray("result") : null;
         if (result == null || result.size() == 0) return null;
         JsonObject first = result.get(0).isJsonObject() ? result.get(0).getAsJsonObject() : null;
+        Match primary = parseOne(first);
+        if (primary == null) return null;
+        java.util.List<Match> alternatives = new java.util.ArrayList<>();
+        for (int i = 1; i < result.size() && alternatives.size() < 4; i++) {
+            JsonObject node = result.get(i).isJsonObject() ? result.get(i).getAsJsonObject() : null;
+            Match alternative = parseOne(node);
+            if (alternative != null) alternatives.add(alternative);
+        }
+        return new Match(primary.id, primary.title, primary.artist, primary.album,
+                primary.coverUrl, primary.durationMs, primary.startTimeMs, alternatives);
+    }
+
+    /** One result row → one Match, or null when the row is not a usable song. */
+    private static Match parseOne(JsonObject first) {
         if (first == null) return null;
         JsonObject song = obj(first, "song");
         if (song == null) return null;

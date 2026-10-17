@@ -91,6 +91,9 @@ internal data class PlaybackState(
     val album: String = "",
     val artistIdsCsv: String = "",
     val artistNamesCsv: String = "",
+    val autoMixStatus: String = "",
+    val autoMixRemainingSeconds: Long = -1,
+    val autoMixPlanSummary: String = "",
 ) {
     val position: Long get() = clock.position
     val sampledAtNanos: Long get() = clock.sampledAtNanos
@@ -165,6 +168,7 @@ internal class Md3eRuntime private constructor(context: Context) {
     }
     val controller = PlayerController(audioBackend, AndroidMetadataReader(app), NeteaseClient.INSTANCE)
     val settings = SettingsCore()
+    val dailyVibes = Md3eDailyVibes(app, controller, settings)
     private val scanner = AndroidLibraryScanner(app.contentResolver, AndroidMetadataReader(app))
     private val scanWorker = Executors.newSingleThreadExecutor()
     private val playbackClock = PlaybackClock()
@@ -181,6 +185,8 @@ internal class Md3eRuntime private constructor(context: Context) {
     var experimentalAiDjActive by mutableStateOf(false)
     var experimentalAiDjWaiting by mutableStateOf(false)
     var experimentalAiDjMessage by mutableStateOf("")
+    var experimentalAiDjStage by mutableStateOf(AiDjMascotStage.Random)
+    var experimentalAiDjReason by mutableStateOf("")
         private set
     var lyricState by mutableStateOf(LyricState())
         private set
@@ -403,6 +409,8 @@ internal class Md3eRuntime private constructor(context: Context) {
                 experimentalAiDjActive = controller.experimentalAiDjActive.peek() == true
                 experimentalAiDjWaiting = controller.experimentalAiDjWaiting.peek() == true
                 experimentalAiDjMessage = controller.experimentalAiDjMessage.peek().orEmpty()
+                experimentalAiDjStage = aiDjMascotStage(experimentalAiDjMessage, controller.aiProgress.peek().orEmpty())
+                experimentalAiDjReason = controller.experimentalAiDjReason.peek().orEmpty()
                 publishedPlaybackTrack = currentTrack
                 val hasTrack = currentTrack != null
                 val songId = currentTrack?.neteaseId ?: 0L
@@ -421,6 +429,9 @@ internal class Md3eRuntime private constructor(context: Context) {
                     controller.playbackRevision(), controller.seekRevision(), playbackClock,
                     currentTrack?.album.orEmpty(), currentTrack?.artistIdsCsv.orEmpty(),
                     currentTrack?.artistNamesCsv.orEmpty(),
+                    controller.autoMixStatus.peek().orEmpty(),
+                    controller.autoMixRemainingSeconds.peek(),
+                    controller.autoMixPlanSummary.peek().orEmpty(),
                 )
                 // The clock is observable on its own. Avoid invalidating every
                 // playback consumer at the sampling cadence when no metadata or
@@ -620,11 +631,23 @@ internal class Md3eRuntime private constructor(context: Context) {
     }
 
     fun toggle() = play { toggle() }
+
+    /** 听歌识曲的「试听」/「就是这首」：按网易云 id 播放一条候选。 */
+    fun playById(id: Long) {
+        controller.playNetease(id)
+    }
     fun previous() = play { prev() }
     fun next() = play { next() }
 
     fun updateUnblockEnabled(enabled: Boolean) {
         updateSetting("unblock", enabled)
+    }
+
+    fun updateDesignMode(mode: Int) {
+        require(mode in 0..2)
+        settings.put("claudeDesign", mode == 0)
+        settings.put("iosDesign", mode == 2)
+        settingsRevision++
     }
 
     fun updateSetting(key: String, value: Any) {
