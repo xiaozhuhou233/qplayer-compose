@@ -15,7 +15,8 @@ import dev.t1m3.qplayer.bili.BiliClient;
 import dev.t1m3.qplayer.ai.AiPlaylistResult;
 import dev.t1m3.qplayer.ai.AiReference;
 import dev.t1m3.qplayer.ai.AiEndpoint;
-import dev.t1m3.qplayer.ai.WebSearchClient;
+import dev.t1m3.qplayer.ai.AiSongMatcher;
+import dev.t1m3.qplayer.ai.DailyVibeCuration;
 import dev.t1m3.qplayer.audio.BeatProfile;
 import dev.t1m3.qplayer.audio.BeatProfiler;
 import dev.t1m3.qplayer.audio.DjEdit;
@@ -114,6 +115,254 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class PlayerController {
 
     private final AudioBackend backend;
+    private volatile dev.t1m3.qplayer.audio.automix.AutoMixConfig autoMixConfig;
+    private final java.util.concurrent.ExecutorService autoMixWorker =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "automix-render"); t.setDaemon(true); return t;
+            });
+    private java.util.concurrent.Future<?> autoMixJob;
+    private volatile long autoMixGeneration;
+    private Track autoMixFrom, autoMixTo;
+    private dev.t1m3.qplayer.audio.automix.AutoMixRender autoMixReady;
+    private boolean autoMixHanded;
+    private boolean autoMixSkipCue;
+    private long autoMixSeekMs = -1L;
+    public final Property<String> autoMixStatus = new Property<>("");
+    public final Property<Long> autoMixRemainingSeconds = new Property<>(-1L);
+    public final Property<String> autoMixPlanSummary = new Property<>("");
+    private volatile boolean precacheNextEnabled = true;
+
+    public void setPrecacheNextEnabled(boolean enabled) {
+        if (precacheNextEnabled == enabled) return;
+        precacheNextEnabled = enabled;
+        precacheGeneration.incrementAndGet();
+        if (enabled) onMain(this::preloadAdjacent);
+    }
+
+    private void publishAutoMixStatus(long generation, String message) {
+        onMain(() -> { if (generation == autoMixGeneration) autoMixStatus.set(message); });
+    }
+
+    static String autoMixFailureReason(Throwable error) {
+        Throwable detail = error;
+        for (int depth = 0; detail != null && depth < 8; depth++) {
+            String message = detail.getMessage() == null ? "" : detail.getMessage();
+            if (message.contains("requires known audio durations")) return "无法读取音频时长";
+            if (message.contains("five sevenths")) return "融合点早于歌曲的 5/7 位置";
+            if (message.contains("cue exceeds track length")) return "融合窗口超出歌曲长度";
+            if (message.contains("Incoming audio ended")) return "下一首解码长度不足";
+            if (message.contains("Outgoing audio ended")) return "当前歌曲解码长度不足";
+            if (message.contains("Missing AutoMix warmup prefix")) return "无法读取融合预热音频";
+            if (message.contains("cache budget") || message.contains("cache limit")) return "融合音频超出缓存大小";
+            if (message.contains("Unexpected decoded audio format")) return "解码采样率或声道发生变化";
+            if (message.contains("decoder timed out")) return "音频解码超时";
+            if (message.contains("Missing decoded PCM")) return "解码器没有返回音频数据";
+            if (message.contains("No audio track")) return "音源中没有音轨";
+            if (message.contains("Incomplete AutoMix block")) return "融合输出不完整";
+            if (message.contains("Invalid AutoMix material boundary")) return "融合分段长度异常";
+            if (detail.getCause() == null || detail.getCause() == detail) break;
+            detail = detail.getCause();
+        }
+        // Exception type is useful for diagnosis without exposing source URLs,
+        // account parameters or filesystem paths in the playback page.
+        return "音频处理异常（" + (detail == null ? "未知" : detail.getClass().getSimpleName()) + "）";
+    }
+
+    private dev.t1m3.qplayer.cache.DiskCache.AudioLease cacheAutoMixSource(
+            Track track, String source, java.util.function.BooleanSupplier valid) throws java.io.IOException {
+        if (track.source == Track.Source.LOCAL) return null;
+        if (source == null) throw new java.io.IOException("音源未就绪");
+        if (!source.startsWith("http://") && !source.startsWith("https://")
+                && track.source != Track.Source.NETEASE) return null;
+        return diskCache.prepareAudio(source, track.source == Track.Source.NETEASE ? track.neteaseId : 0,
+                TransitionPlan.trackKey(track) == null ? source : TransitionPlan.trackKey(track), valid);
+    }
+
+    public void setAutoMixConfig(dev.t1m3.qplayer.audio.automix.AutoMixConfig config) {
+        if (config.equals(autoMixConfig)) return;
+        clearCrossfade();
+        autoMixConfig = config;
+        // Disable the old LLM chooser, stem edits and speculative beat/silence jobs.
+        setTransitionEnabled(false);
+        resetTransitionDecision();
+    }
+
+    private void clearAutoMix() {
+        autoMixGeneration++;
+        precacheGeneration.incrementAndGet();
+        if (!autoMixStatus.peek().isEmpty()) publishAutoMixStatus(autoMixGeneration, "");
+        autoMixRemainingSeconds.set(-1L);
+        autoMixPlanSummary.set("");
+        if (autoMixJob != null) autoMixJob.cancel(true);
+        autoMixJob = null;
+        if (autoMixReady != null) autoMixReady.delete();
+        autoMixReady = null; autoMixHanded = false;
+        autoMixSkipCue = false;
+        autoMixSeekMs = -1L;
+        autoMixFrom = null; autoMixTo = null;
+    }
+
+    private static boolean autoMixTrack(Track t) {
+        return t != null && t.source != Track.Source.BILI && !t.trial;
+    }
+
+    private String autoMixSourceFor(Track t) {
+        if (t.source == Track.Source.LOCAL)
+            return t.contentUri != null && !t.contentUri.isEmpty() ? t.contentUri : t.filePath;
+        if (t.source == Track.Source.NETEASE) {
+            String cached = diskCache.getAudio(t.neteaseId);
+            if (cached != null) return cached;
+        }
+        if (t.streamUrl != null && !t.streamUrl.isEmpty()) return t.streamUrl;
+        return resolveProbeSource(t);
+    }
+
+    /** Start work early, but do not own the audible boundary until a verified file is parked. */
+    private void tickAutoMix() {
+        dev.t1m3.qplayer.audio.automix.AutoMixConfig config = autoMixConfig;
+        if (config == null || !config.enabled || !backend.supportsAutoMix()) return;
+        int count = queue.size();
+        Integer mode = playMode.peek();
+        if (count < 2 || playIndex < 0 || privateFmMode || (mode != null && mode == 2)
+                || shouldWaitForTogetherLeader(togetherActive, togetherUserId, togetherLeaderUserId)) {
+            if (autoMixFrom != null) clearCrossfade();
+            return;
+        }
+        int nextIndex = (playIndex + 1) % count;
+        if (nextIndex >= queue.size()) return;
+        Track from = currentTrack(), to = queue.get(nextIndex);
+        // AI DJ keeps its five-second mascot/recommendation boundary between batches.
+        if (!autoMixTrack(from) || !autoMixTrack(to) || (experimentalAiDjMode && nextIndex == 0)) {
+            if (autoMixFrom != null) clearCrossfade();
+            return;
+        }
+        if (from != autoMixFrom || to != autoMixTo) {
+            if (!playingIntent || !backend.isPlaying() || backend.duration() <= 0) return;
+            clearCrossfade();
+            autoMixFrom = from; autoMixTo = to;
+            long generation = autoMixGeneration;
+            String currentSource = backend.autoMixSource();
+            publishAutoMixStatus(generation, "正在缓存下一首 · " + to.title);
+            autoMixJob = autoMixWorker.submit(() -> {
+                dev.t1m3.qplayer.audio.automix.AutoMixRender result = null;
+                String failureStage = "下一首缓存失败";
+                try {
+                    String b = autoMixSourceFor(to);
+                    try (dev.t1m3.qplayer.cache.DiskCache.AudioLease nextAudio =
+                            cacheAutoMixSource(to, b, () -> generation == autoMixGeneration)) {
+                        publishAutoMixStatus(generation, "下一首已缓存 · 正在准备当前音源");
+                        String a = currentSource != null ? currentSource : autoMixSourceFor(from);
+                        if (a == null || b == null) throw new java.io.IOException("音源未就绪");
+                        failureStage = "当前音源缓存失败";
+                        try (dev.t1m3.qplayer.cache.DiskCache.AudioLease currentAudio =
+                                cacheAutoMixSource(from, a, () -> generation == autoMixGeneration)) {
+                            publishAutoMixStatus(generation, "正在制作本地融合 · " + to.title);
+                            failureStage = "本地融合制作失败";
+                            result = dev.t1m3.qplayer.audio.automix.AutoMixRender.prepare(
+                                    currentAudio == null ? a : currentAudio.path,
+                                    nextAudio == null ? b : nextAudio.path,
+                            java.util.Collections.emptyMap(), java.util.Collections.emptyMap(), config,
+                            AppDirs.cacheDir().resolve("automix"),
+                            () -> generation == autoMixGeneration);
+                            // The original stream remains a seek fallback if the cache is later evicted.
+                            dev.t1m3.qplayer.audio.automix.AutoMixRender rendered = result;
+                            result = rendered.withOriginal(b);
+                            rendered.delete();
+                        }
+                    }
+                    final dev.t1m3.qplayer.audio.automix.AutoMixRender completed = result;
+                    onMain(() -> {
+                        if (generation != autoMixGeneration || currentTrack() != from) {
+                            completed.delete(); return;
+                        }
+                        autoMixReady = completed;
+                        autoMixPlanSummary.set(String.format(java.util.Locale.ROOT,
+                                "融合 %.2f s · 出场 %s · 下一首入场 %s", completed.overlapMs / 1000d,
+                                autoMixTime(completed.exitMs), autoMixTime(completed.entryMs)));
+                        refreshAutoMixReadyStatus(autoMixPosition());
+                        Logger.info("AutoMix: {} → {}, cue={}ms, overlap={}ms", from.title,
+                                to.title, completed.exitMs, completed.overlapMs);
+                    });
+                } catch (Exception e) {
+                    if (result != null) result.delete();
+                    if (generation == autoMixGeneration) {
+                        publishAutoMixStatus(generation, failureStage + "：" + autoMixFailureReason(e) + " · 将正常切歌");
+                        Logger.warn("AutoMix: {} → {}, {} ({})", from.title, to.title, failureStage, e.getMessage());
+                        Logger.exception(e);
+                    }
+                }
+            });
+            return;
+        }
+        if (autoMixReady == null) return;
+        long position = autoMixPosition();
+        refreshAutoMixReadyStatus(position);
+        // Refresh the paused status/countdown too, but never start a deck for
+        // a pause intent (including the remaining fade-out before native pause).
+        if (!playingIntent || (!backend.isPlaying() && !backend.isSeeking())
+                || backend.duration() <= 0 || crossfadeRunning) return;
+        // Android's prepared deck can start its warmup independently of the UI
+        // pump. A delayed pump must not cancel a handoff already in progress.
+        if (autoMixHanded && backend.autoMixInProgress()) {
+            crossfadeRunning = true;
+            return;
+        }
+        long cue = autoMixReady.exitMs;
+        if (autoMixSkipCue) return; // A failed player load can be retried on the next seek.
+        if (autoMixSeekMs > cue || position > cue + dev.t1m3.qplayer.audio.automix.AutoMixHandoff.LATE_TOLERANCE_MS) {
+            // The render missed its cue: never replay A's tail to make up lost time.
+            if (autoMixHanded) cancelPreparedCrossfade();
+            return;
+        }
+        if (!autoMixHanded && position >= cue - Math.max(10000L, autoMixReady.leadInMs + 5000L)) {
+            if (!backend.prepareAutoMix(autoMixReady)) {
+                publishAutoMixStatus(autoMixGeneration, "融合音频加载失败 · 将正常切歌");
+                autoMixSkipCue = true; return;
+            }
+            autoMixHanded = true;
+            crossfadeIncomingStartMs = autoMixReady.entryMs;
+            crossfadeRampMs = 0L;
+            crossfadeIncomingSpeed = 1d;
+            synchronized (crossfadeLock) {
+                crossfadeGeneration++;
+                crossfadeFromIndex = playIndex; crossfadeTargetIndex = nextIndex;
+                crossfadeOutgoingMs = backend.duration(); crossfadeArmed = true;
+            }
+        }
+        if (!backend.isSeeking() && autoMixHanded && position >= cue - autoMixReady.leadInMs
+                && backend.incomingMix() != null) {
+            // The WAV already contains the full overlap. Only hand over the source here.
+            crossfadeRunning = true;
+            if (!backend.beginAutoMix())
+                crossfadeRunning = false;
+        }
+    }
+
+    private long autoMixPosition() {
+        return backend.isSeeking() && autoMixSeekMs >= 0 ? autoMixSeekMs : Math.max(0L, backend.position());
+    }
+
+    private static String autoMixTime(long ms) {
+        return String.format(java.util.Locale.ROOT, "%d:%05.2f", ms / 60000, ms % 60000 / 1000d);
+    }
+
+    /** Publishing a render or revisiting a paused page must use song time too. */
+    private void refreshAutoMixReadyStatus(long position) {
+        if (autoMixReady == null || currentTrack() != autoMixFrom || autoMixTo == null) return;
+        long cue = autoMixReady.exitMs;
+        boolean missed = autoMixSeekMs > cue || (position > cue
+                + dev.t1m3.qplayer.audio.automix.AutoMixHandoff.LATE_TOLERANCE_MS
+                && !backend.autoMixInProgress());
+        if (missed) {
+            autoMixRemainingSeconds.set(-1L);
+            autoMixStatus.set("已错过融合点位 · 将正常切歌");
+        } else if (autoMixSkipCue) {
+            autoMixRemainingSeconds.set(-1L);
+        } else {
+            autoMixRemainingSeconds.set((Math.max(0L, cue - position) + 999L) / 1000L);
+            autoMixStatus.set("本地融合制作成功 · " + autoMixTo.title);
+        }
+    }
     private final MetadataReader metadataReader;
     private final NeteaseClient netease;
     private volatile ColorExtractor colorExtractor;
@@ -126,6 +375,13 @@ public final class PlayerController {
         t.setDaemon(true);
         return t;
     });
+    // A slow AI endpoint must not queue behind covers, library scans or cache eviction.
+    private final ExecutorService aiWorker = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "qplayer-ai-dj");
+        t.setDaemon(true);
+        return t;
+    });
+    private final AiSongMatcher aiMatcher = new AiSongMatcher(this::searchAiRecommendation);
     // Home discovery has its own bounded queue too: refreshing it must not queue
     // several Radar previews ahead of an interactive playlist/playback request.
     private final ExecutorService homeWorker = new ThreadPoolExecutor(
@@ -1323,6 +1579,8 @@ public final class PlayerController {
     public final Property<String> experimentalAiDjReason = new Property<>("");
     private boolean experimentalAiDjMode;
     private boolean experimentalAiDjInstalling;
+    private boolean experimentalAiDjRequestStarting;
+    private boolean experimentalAiDjSuspended;
     private long experimentalAiDjGeneration = -1L;
     private int experimentalAiDjRetries;
     private String experimentalAiDjBase, experimentalAiDjKey, experimentalAiDjModel;
@@ -1345,6 +1603,7 @@ public final class PlayerController {
         privateFmActive.set(false);
         biliOpenGeneration.incrementAndGet();
         experimentalAiDjMode = true;
+        experimentalAiDjSuspended = false;
         experimentalAiDjBase = base; experimentalAiDjKey = key; experimentalAiDjModel = model;
         experimentalAiDjKnowledge = knowledge;
         experimentalAiDjActive.set(true);
@@ -1358,6 +1617,7 @@ public final class PlayerController {
     public void stopExperimentalAiDj() {
         if (!experimentalAiDjMode) return;
         experimentalAiDjMode = false;
+        experimentalAiDjSuspended = false;
         experimentalAiDjGeneration = -1L;
         experimentalAiDjReady = null;
         experimentalAiDjPrefetchStarted = false;
@@ -1379,14 +1639,33 @@ public final class PlayerController {
     }
 
     private void prefetchExperimentalAiDjBatch() {
-        if (!experimentalAiDjMode || experimentalAiDjReady != null) return;
+        if (!experimentalAiDjMode || experimentalAiDjSuspended || experimentalAiDjReady != null) return;
         experimentalAiDjPrefetchStarted = true;
-        int count = java.util.concurrent.ThreadLocalRandom.current().nextInt(3, 7);
+        int count = java.util.concurrent.ThreadLocalRandom.current().nextInt(5, 7);
         String previous = queue.stream().map(t -> t.title).collect(java.util.stream.Collectors.joining("、"));
-        experimentalAiDjGeneration = prepareAiPlaylist(experimentalAiDjBase, experimentalAiDjKey,
-                experimentalAiDjModel, "随机推荐" + count + "首不同的真实歌曲，风格随机、多样化。说明本批推荐原因。"
-                        + "不要重复当前批次：" + previous,
-                count, false, experimentalAiDjKnowledge, true);
+        experimentalAiDjRequestStarting = true;
+        try {
+            experimentalAiDjGeneration = prepareAiPlaylist(experimentalAiDjBase, experimentalAiDjKey,
+                    experimentalAiDjModel, "随机推荐" + count + "首不同的真实歌曲。以收藏歌单与听歌历史中的常听歌手、曲风为主，"
+                            + "在我的偏好范围内随机选曲，保留少量相近风格的新歌或新发现，不为多样化跳到无关流派。说明本批推荐原因。"
+                            + "不要重复当前批次：" + previous,
+                    count, false, experimentalAiDjKnowledge, true);
+        } finally { experimentalAiDjRequestStarting = false; }
+    }
+
+    /** A manual selection changes this batch, while the user's DJ mode stays on. */
+    private void resetExperimentalAiDjBatch() {
+        if (!experimentalAiDjMode || experimentalAiDjInstalling) return;
+        experimentalAiDjSuspended = false;
+        experimentalAiDjGeneration = -1L;
+        experimentalAiDjReady = null;
+        experimentalAiDjPrefetchStarted = false;
+        experimentalAiDjTransitionDeadline = -1L;
+        experimentalAiDjRetries = 0;
+        cancelAiPlaylistGeneration();
+        experimentalAiDjWaiting.set(false);
+        experimentalAiDjMessage.set("");
+        experimentalAiDjReason.set("");
     }
 
     private void showExperimentalAiDjTransition() {
@@ -1423,12 +1702,14 @@ public final class PlayerController {
     private void finishExperimentalAiDjBatch(long generation) {
         if (!experimentalAiDjMode || generation != experimentalAiDjGeneration) return;
         PendingAiPlayback pending = pendingAiPlayback;
-        if (pending != null && pending.generation == generation && pending.songs.size() >= 3
+        if (pending != null && pending.generation == generation && pending.songs.size() >= 5
                 && aiError.peek().isEmpty()) {
             experimentalAiDjReady = new PendingAiPlayback(generation,
                     new ArrayList<>(pending.songs.subList(0, Math.min(6, pending.songs.size()))), null);
             experimentalAiDjReadyReason = aiSummary.peek().trim();
-            if (experimentalAiDjReadyReason.isEmpty()) experimentalAiDjReadyReason = aiDetails.peek().trim();
+            String songReasons = aiDetails.peek().trim();
+            if (!songReasons.isEmpty()) experimentalAiDjReadyReason +=
+                    (experimentalAiDjReadyReason.isEmpty() ? "" : "\n\n") + songReasons;
             if (experimentalAiDjReadyReason.isEmpty())
                 experimentalAiDjReadyReason = "根据你的听歌偏好，随机搭配不同风格，为你带来下一组音乐。";
             pendingAiPlayback = null;
@@ -1440,7 +1721,7 @@ public final class PlayerController {
         } else {
             pendingAiPlayback = null;
             awaitingAiConfirmation = false;
-            experimentalAiDjMessage.set("AI DJ 暂未找到至少三首歌曲，点击重试或退出模式");
+            experimentalAiDjMessage.set("AI DJ 暂未找到至少五首歌曲，点击重试或退出模式");
         }
     }
 
@@ -1512,6 +1793,9 @@ public final class PlayerController {
      *  {@link #setAiTransitionConfig} 推过来；没推过时用 60 s。中转站常比一线端点慢，
      *  这里以前是写死的 60000，设置里的滑条到不了。 */
     private volatile int aiPlaylistTimeoutMs = 60_000;
+    private final Object aiTasteCacheLock = new Object();
+    private String aiTasteCacheIdentity = "", aiTasteCacheText = "";
+    private long aiTasteCacheTime;
     private volatile java.util.concurrent.Future<?> aiRequestTask;
     private volatile boolean awaitingAiConfirmation;
     private PendingAiPlayback pendingAiPlayback;
@@ -1831,8 +2115,22 @@ public final class PlayerController {
         // the safety net for everything that can go wrong after arming (incoming
         // player error, pause, seek, focus loss): the transition is forgotten and the
         // ordinary end-of-track path takes over at once.
-        backend.setOnCrossfadeComplete(() -> onMain(this::onCrossfadeComplete));
-        backend.setOnCrossfadeAbandoned(() -> onMain(this::onCrossfadeAbandoned));
+        backend.setOnCrossfadeComplete(() -> {
+            final long generation;
+            synchronized (crossfadeLock) { generation = crossfadeGeneration; }
+            onMain(() -> {
+                synchronized (crossfadeLock) { if (generation != crossfadeGeneration) return; }
+                onCrossfadeComplete();
+            });
+        });
+        backend.setOnCrossfadeAbandoned(() -> {
+            final long generation;
+            synchronized (crossfadeLock) { generation = crossfadeGeneration; }
+            onMain(() -> {
+                synchronized (crossfadeLock) { if (generation != crossfadeGeneration) return; }
+                onCrossfadeAbandoned();
+            });
+        });
         // This constructor runs on the host's main thread, before the first frame is
         // composed, so every step here is a cost the user watches: each one is timed and
         // they go out as a single line, which is the only way a startup hitch can be
@@ -2518,6 +2816,7 @@ public final class PlayerController {
      *  from then on is dispatched to its own performer. Any early return means "the
      *  ordinary path still owns this boundary". */
     private void tickCrossfade() {
+        if (autoMixConfig != null) { tickAutoMix(); return; }
         int target;
         int from;
         boolean armed;
@@ -4960,6 +5259,28 @@ public final class PlayerController {
      * </ul>
      */
     private void precacheNextAudio(Track t) {
+        if (autoMixConfig != null) {
+            // Active AutoMix owns the download→render ordering. Ordinary pre-cache
+            // remains available even with AutoMix disabled, including AI DJ batch edges.
+            if (autoMixConfig.enabled && backend.supportsAutoMix() && autoMixTrack(currentTrack()) && !privateFmMode
+                    && !(experimentalAiDjMode && playIndex == queue.size() - 1)) return;
+            if (!precacheNextEnabled || !autoMixTrack(t) || t.source == Track.Source.LOCAL) return;
+            final long generation = precacheGeneration.incrementAndGet();
+            runAfterStartup(() -> precacheWorker.submit(() -> {
+                if (generation != precacheGeneration.get()) return;
+                try {
+                    String source = autoMixSourceFor(t);
+                    try (dev.t1m3.qplayer.cache.DiskCache.AudioLease ignored =
+                            cacheAutoMixSource(t, source, () -> precacheNextEnabled
+                                    && generation == precacheGeneration.get())) {
+                        Logger.info("precache: next track ready ({})", t.title);
+                    }
+                } catch (Exception e) {
+                    Logger.warn("precache: next track unavailable ({})", e.getMessage());
+                }
+            }));
+            return;
+        }
         if (!transitionEnabled || lowSpecMode || t == null) return;
         // The three ways the ordinary case can be missed, each one line. The boundary
         // itself also prints where its source came from ("served from the audio cache,
@@ -5783,7 +6104,10 @@ public final class PlayerController {
         int idx;
         int from;
         synchronized (crossfadeLock) {
-            if (!crossfadeRunning) return;
+            // A native AutoMix deck may finish its short handoff between two
+            // UI pumps. Its completion is authoritative even before the pump
+            // observes warming; the prepared queue boundary is already known.
+            if (!crossfadeRunning && !(autoMixConfig != null && autoMixHanded && crossfadeArmed)) return;
             idx = crossfadeTargetIndex;
             from = crossfadeFromIndex;
             crossfadeRunning = false;
@@ -5801,7 +6125,7 @@ public final class PlayerController {
         outgoingEndedDuringRamp = false;
         deferredAdvanceDeadlineMs = 0L;
         Track t = queue.get(idx);
-        if (!crossfadeStreamable(t)) return;
+        if (!(autoMixConfig != null ? autoMixTrack(t) : crossfadeStreamable(t))) return;
         // The outgoing track did play to the end of its ramp, so its scrobble is a
         // natural end — and its length has to come from the capture at arm time,
         // because the live clock already belongs to the incoming track.
@@ -5825,6 +6149,8 @@ public final class PlayerController {
      *  trim starts the seam at the measured content end, so the scrobble has to
      *  report the music, not the silence after it). */
     private long outGoingPlayedMs() {
+        if (autoMixConfig != null && autoMixReady != null)
+            return autoMixReady.exitMs + autoMixReady.overlapMs;
         SilenceTrimPlan plan = trimPlan;
         long skipped = 0L;
         if (transitionKind == TransitionKind.SILENCE_TRIM && plan != null) {
@@ -5843,6 +6169,7 @@ public final class PlayerController {
         int target;
         synchronized (crossfadeLock) {
             if (crossfadeTargetIndex < 0 && !crossfadeArmed && !crossfadeRunning) return;
+            autoMixHanded = false;
             target = crossfadeTargetIndex;
             crossfadeGeneration++;
             crossfadeTargetIndex = -1;
@@ -5873,6 +6200,13 @@ public final class PlayerController {
     /** Drop any prepared/ramping incoming player and forget the transition. Safe to
      *  call when there is none (the usual case: it runs on every playAt). */
     private void clearCrossfade() {
+        clearAutoMix();
+        cancelPreparedCrossfade();
+    }
+
+    /** Drop only the playback deck. Keep the same pair's render/job across pause and seek. */
+    private void cancelPreparedCrossfade() {
+        autoMixHanded = false;
         boolean had;
         int target;
         synchronized (crossfadeLock) {
@@ -6435,7 +6769,8 @@ public final class PlayerController {
 
     /** Jump to a slot in the live queue (queue-page tap). */
     public void playQueueIndex(int i) {
-        stopExperimentalAiDj();
+        if (i < 0 || i >= queue.size()) return;
+        if (experimentalAiDjWaiting.peek()) resetExperimentalAiDjBatch();
         playAt(i);
     }
 
@@ -6444,6 +6779,18 @@ public final class PlayerController {
         if (track == null) return;
         queue.add(track);
         queueTracks.set(new ArrayList<>(queue));
+        showToast("已添加到播放列表");
+    }
+
+    /** Append one Bili result without fetching or starting its video. */
+    public void enqueueBiliVideo(BiliClient.BiliVideo video) {
+        if (video == null || video.bvid == null || video.bvid.trim().isEmpty()) return;
+        enqueueTrack(toTrackBili(video, video.cid, null));
+    }
+
+    public void enqueueBiliFavorite(BiliClient.BiliFavItem item) {
+        if (item == null || item.bvid == null || item.bvid.trim().isEmpty()) return;
+        enqueueTrack(toTrackFav(item));
     }
 
     /** Append a NetEase result without starting playback. */
@@ -7258,7 +7605,8 @@ public final class PlayerController {
     }
 
     private void playQueue(List<Track> q, int start, long sourcePlaylistId) {
-        if (!experimentalAiDjInstalling) stopExperimentalAiDj();
+        if (q == null || q.isEmpty() || start < 0 || start >= q.size()) return;
+        resetExperimentalAiDjBatch();
         final long request = biliOpenGeneration.incrementAndGet();
         final long selection = coverRevision.get();
         biliRelatedSeed = null;
@@ -8117,6 +8465,7 @@ public final class PlayerController {
                 // must not resume it behind the user's back because its fade-out was
                 // still running.
                 backend.cancelAutoResume();
+                if (autoMixConfig != null) cancelPreparedCrossfade();
                 post(() -> playing.set(false));
                 if (fadeEnabled) {
                     // UI reflects paused immediately; the actual backend.pause()
@@ -8375,10 +8724,14 @@ public final class PlayerController {
     public void seek(long ms) {
         final long t = Math.max(0L, ms);
         onMain(() -> {
+            prepareAutoMixSeek(t);
             resetNaturalEndFadeAfterSeek();
             seekRevision.incrementAndGet();
             stoppedLyricPositionMs = t;
             backend.seek(t);
+            // Prepare the cached WAV while the native seek settles; do not wait
+            // for the next UI pump when the user lands seconds before the cue.
+            tickAutoMix();
             post(() -> {
                 positionMs.set(t);
                 updateLyricIndex(t - LyricConfig.instance.offsetMs.getValue());
@@ -8391,16 +8744,27 @@ public final class PlayerController {
      *  bypasses the main-thread Handler to avoid OEM background throttling. */
     public void mediaSeek(long ms) {
         final long t = Math.max(0L, ms);
+        prepareAutoMixSeek(t);
         resetNaturalEndFadeAfterSeek();
         seekRevision.incrementAndGet();
         stoppedLyricPositionMs = t;
         backend.seek(t);
+        tickAutoMix();
         post(() -> positionMs.set(t));
         notifyPlayback();
     }
 
     public long seekRevision() {
         return seekRevision.get();
+    }
+
+    private void prepareAutoMixSeek(long target) {
+        if (autoMixConfig == null) return;
+        cancelPreparedCrossfade();
+        // An explicit seek past the cue skips the seam even inside the pump's 250ms tolerance.
+        autoMixSeekMs = target;
+        autoMixSkipCue = false;
+        refreshAutoMixReadyStatus(target);
     }
 
     private void resetNaturalEndFadeAfterSeek() {
@@ -11828,6 +12192,11 @@ public final class PlayerController {
         aiError.set("");
         aiContinuation = null;
         aiContinuationInFlight = false;
+        if (experimentalAiDjMode && experimentalAiDjSuspended) {
+            experimentalAiDjSuspended = false;
+            if (experimentalAiDjWaiting.peek()) generateExperimentalAiDjBatch();
+            else maybeContinueAiPlaylist();
+        }
     }
 
     private void postAiGeneration(long generation, Runnable action) {
@@ -11855,6 +12224,16 @@ public final class PlayerController {
             if (append) aiContinuationInFlight = false;
             return;
         }
+        final int desiredCount = Math.max(5, count);
+        // A foreground preview may borrow the generator, but never disables the
+        // user's special mode. Cancelling the preview resumes its next batch.
+        if (experimentalAiDjMode && !experimentalAiDjRequestStarting) {
+            experimentalAiDjSuspended = true;
+            experimentalAiDjGeneration = -1L;
+            experimentalAiDjReady = null;
+            experimentalAiDjPrefetchStarted = false;
+            experimentalAiDjTransitionDeadline = -1L;
+        }
         final long generation = aiRequestGeneration.incrementAndGet();
         pendingAiPlayback = null;
         awaitingAiConfirmation = deferPlayback;
@@ -11863,14 +12242,15 @@ public final class PlayerController {
         final AiContinuation continuationForAppend = append ? aiContinuation : null;
         aiLoading.set(true); aiError.set(""); aiProgress.set("正在准备 AI 推荐…"); aiSummary.set(""); aiDetails.set("");
         aiSongs.set(Collections.emptyList());
-        aiRequestTask = worker.submit(() -> {
+        aiRequestTask = aiWorker.submit(() -> {
             try {
+                long prepareStart = System.currentTimeMillis();
                 if (generation != aiRequestGeneration.get()) return;
-                // Normal requests deliberately do not read local playlists.
-                // The long-press taste shortcut opts into a bounded sample.
                 String text = "";
+                try { text = aiPersonalCollectionReferences(); }
+                catch (IOException ignored) { /* History and explicit requests still apply. */ }
                 Set<Long> likedIds = new HashSet<>();
-                if (useLikedPreferences) {
+                if (useLikedPreferences && excludeLiked) {
                     try {
                         long likedPlaylistId = favoritePid;
                         if (likedPlaylistId == 0L) {
@@ -11882,80 +12262,46 @@ public final class PlayerController {
                             List<NeteaseSong> taste = new ArrayList<>(netease.playlistTracks(likedPlaylistId, 200));
                             Collections.shuffle(taste);
                             if (taste.size() > 20) taste = new ArrayList<>(taste.subList(0, 20));
-                            StringBuilder tasteText = new StringBuilder();
                             for (NeteaseSong s : taste) {
                                 if (s == null) continue;
                                 likedIds.add(s.id);
-                                if (tasteText.length() > 0) tasteText.append('\n');
-                                tasteText.append(s.name).append(" - ").append(s.artist);
                             }
-                            text = tasteText.toString();
                         }
                     } catch (Throwable ignored) {
                         // Taste analysis is best effort; AI can still respond.
                     }
                 }
                 postAiGeneration(generation, () -> aiProgress.set("正在让 AI 分析音乐风格并生成推荐…"));
-                // Round 35: the listening history is a reference for EVERY generation — the user:
-                // 「推荐歌曲除了当红歌还需要我的历史记录参考」 — and it is a random DRAW of it rather than
-                // its newest page, because the same request must not come back with the same list
-                // twice (「ai 算法生成的歌曲要有随机性」). The list that is playing joins it for a
-                // continuation, and a random 切入角度 goes with both: the angles are what ask for the
-                // artists' new releases and for the slightly less-mainstream picks.
+                // A small representative history anchors frequent artists while
+                // rotating other tastes. Continuations also carry a few current
+                // tracks and discovery angles, without sending the whole queue.
                 final Random rnd = new Random();
                 List<String> historyLines = new ArrayList<>();
                 try {
                     List<NeteaseSong> history = recentSongs.peek();
-                    if (history == null || history.isEmpty()) history = netease.recentPlayed(100);
-                    List<String> all = new ArrayList<>();
-                    for (NeteaseSong s : history) {
-                        if (s == null || s.name == null || s.name.trim().isEmpty()) continue;
-                        String artist = s.artist == null ? "" : s.artist.trim();
-                        all.add(artist.isEmpty() ? s.name.trim() : s.name.trim() + " - " + artist);
-                    }
-                    historyLines = AiReference.sample(all, AiReference.HISTORY_SAMPLE, rnd);
+                    if (history == null || history.isEmpty()) history = netease.recentPlayed(AiReference.HISTORY_POOL);
+                    aiMatcher.remember(history);
+                    historyLines = AiReference.representativeSongs(history, AiReference.HISTORY_SAMPLE, rnd);
                 } catch (Throwable ignored) {
                     // The history is best effort: a generation without it is still a generation.
                 }
                 final String references = AiReference.block(historyLines,
                         oldSongs == null ? null : aiLines(oldSongs, AiReference.PREVIOUS_LIST_CAP),
                         AiReference.angles(rnd));
-                String webContext = "";
-                // Always use the provider knowledge base; ordinary prompts
-                // must not be blocked by optional web-search configuration.
-                boolean needsWebSearch = false;
-                if (webSearchEnabled && needsWebSearch) {
-                    if (webSearchKey == null || webSearchKey.trim().isEmpty()) {
-                        if (forceKnowledge) webContext = "[KNOWLEDGE_BASE_FALLBACK] 未提供联网资料，请使用模型内置音乐知识库，必须输出可搜索的真实歌名和歌手。";
-                        else throw new IllegalStateException("该问题需要联网搜索，请在设置 > AI 中填写 Tavily Search API Key");
-                    } else {
-                        postAiGeneration(generation, () -> aiProgress.set("正在联网查询榜单和热门歌曲…"));
-                        try {
-                            webContext = new WebSearchClient(webSearchUrl, webSearchKey, 30000)
-                                    .search(request, 5);
-                        } catch (java.io.IOException searchError) {
-                            if (forceKnowledge) webContext = "[KNOWLEDGE_BASE_FALLBACK] 联网搜索失败，请使用模型内置音乐知识库，必须输出可搜索的真实歌名和歌手。";
-                            else throw new IllegalStateException("联网搜索失败，请检查搜索 API 地址和 Key");
-                        }
-                        if (webContext.trim().isEmpty()) {
-                            if (forceKnowledge) webContext = "[KNOWLEDGE_BASE_FALLBACK] 搜索没有返回资料，请使用模型内置音乐知识库，必须输出可搜索的真实歌名和歌手。";
-                            else throw new IllegalStateException("联网搜索没有返回有效资料，请换一种描述");
-                        }
-                    }
-                }
+                // AI DJ always recommends from model knowledge. Keep the legacy
+                // search settings in the public signatures for older callers only.
                 long genStart = System.currentTimeMillis();
                 AiPlaylistResult rec = null;
                 IOException lastAiError = null;
+                AiClient client = new AiClient(baseUrl, apiKey, model, aiPlaylistTimeoutMs);
                 for (int attempt = 1; attempt <= 3 && rec == null; attempt++) {
-                    if (generation != aiRequestGeneration.get()) return;
+                    if (generation != aiRequestGeneration.get() || Thread.currentThread().isInterrupted()) return;
                     try {
-                        rec = new AiClient(baseUrl, apiKey, model, aiPlaylistTimeoutMs)
-                                .generatePlaylist(text, request, count,
-                                        forceKnowledge
-                                                ? "[KNOWLEDGE_BASE_ONLY] 强制使用模型内置知识库，禁止联网搜索，输出真实可搜索歌曲。"
-                                                : "",
-                                        references);
+                        rec = client.generatePlaylist(text, request, desiredCount, "", references);
                     } catch (IOException retryable) {
+                        if (generation != aiRequestGeneration.get() || Thread.currentThread().isInterrupted()) return;
+                        if (!AiEndpoint.isConnectionFailure(retryable) && !(retryable instanceof AiClient.ResponseFormatException))
+                            throw retryable;
                         lastAiError = retryable;
                         final int retryNo = attempt;
                         postAiGeneration(generation, () -> aiProgress.set("AI 未返回有效歌曲，正在重试（" + retryNo + "/3）…"));
@@ -11965,44 +12311,42 @@ public final class PlayerController {
                         lastAiError == null ? "AI 三次均未返回有效歌曲" : "AI 三次均未返回有效歌曲：" + lastAiError.getMessage());
                 final AiPlaylistResult finalRec = rec;
                 StringBuilder detail = new StringBuilder();
+                int recommendationIndex = 0;
                 for (AiPlaylistResult.Song x : rec.songs) {
                     if (generation != aiRequestGeneration.get()) return;
-                    detail.append(x.title).append(" — ").append(x.artist);
-                    if (x.reason != null && !x.reason.trim().isEmpty()) detail.append("\n  ").append(x.reason);
-                    detail.append('\n');
+                    detail.append(++recommendationIndex).append(". ").append(x.title).append(" — ").append(x.artist);
+                    detail.append("\n推荐原因：").append(x.reason == null || x.reason.trim().isEmpty()
+                            ? "AI 未提供这首歌的具体原因" : x.reason.trim());
+                    detail.append("\n\n");
                 }
                 final String finalDetail = detail.toString();
                 postAiGeneration(generation, () -> { aiSummary.set(finalRec.summary == null ? "" : finalRec.summary); aiDetails.set(finalDetail); aiProgress.set("正在通过网易云搜索匹配真实歌曲…"); });
                 long matchedStart = System.currentTimeMillis();
-                List<NeteaseSong> resolved = new ArrayList<>();
-                // 2026-10-07 提速（「大幅度优化 AI 推荐歌曲的速度」）：这段匹配是耗时的大头之一
-                // —— 每首歌一次网易云搜索，而客户端自身的锁会把请求串行化，所以①匹配量达到
-                // 目标数量立即停（模型多给的部分不再逐首搜索），②模型重复的同一对歌只搜一次。
-                // 输出与以前逐位相同：返回的仍是按模型顺序的前 count 首。
-                Set<String> matchedPairs = new HashSet<>();
-                int matchTarget = Math.max(1, count);
-                for (AiPlaylistResult.Song x : rec.songs) {
-                    if (generation != aiRequestGeneration.get()) return;
-                    if (resolved.size() >= matchTarget) break;
-                    if (!matchedPairs.add(normalizeAiText(x.title) + '|' + normalizeAiText(x.artist))) continue;
-                    // 30 条是应用一直用的取数（10 条曾在本轮短暂试过，但用户要求不给
-                    // 任何硬性限制 —— 少取会漏掉匹配，多花的时间是买正确性）。
-                    List<NeteaseSong> candidates = netease.searchSongs(x.title + " " + x.artist, 30, 0);
-                    NeteaseSong match = bestAiSongMatch(candidates, x.title, x.artist);
-                    if (match == null) {
-                        // Artist spelling and collaboration separators vary a
-                        // lot between AI output and NetEase search metadata.
-                        candidates = netease.searchSongs(x.title, 30, 0);
-                        match = bestAiSongMatch(candidates, x.title, x.artist);
-                    }
-                    if (match != null && !(excludeLiked && likedIds.contains(match.id))
-                            && !containsId(resolved, match.id)) resolved.add(match);
-                }
+                List<NeteaseSong> resolved = aiMatcher.match(rec.songs, desiredCount,
+                        excludeLiked ? likedIds : Collections.emptySet(),
+                        (matched, target) -> postAiGeneration(generation,
+                                () -> aiProgress.set("网易云已匹配 " + matched + "/" + target + " 首…")),
+                        () -> {
+                            if (generation != aiRequestGeneration.get())
+                                throw new java.util.concurrent.CancellationException("AI recommendation superseded");
+                        });
                 // 耗时拆分进日志（用户按「秒」验收，下一轮据此再砍）。
-                Logger.info("ai playlist: generated {} song(s) in {} ms — matched {} real track(s) in {} ms",
-                        rec.songs.size(), matchedStart - genStart, resolved.size(),
+                Logger.info("ai playlist: references {} ms — generated {} song(s) in {} ms — matched {} real track(s) in {} ms",
+                        genStart - prepareStart, rec.songs.size(), matchedStart - genStart, resolved.size(),
                         System.currentTimeMillis() - matchedStart);
-                if (resolved.isEmpty()) throw new IllegalStateException("网易云未找到推荐歌曲");
+                if (resolved.size() < 5) {
+                    // 兜底：严格规则配到的太少时，只放行「歌名精确、非翻唱/现场」的候选，
+                    // 目标是让歌单能出来，而不是把翻唱塞进来。
+                    for (AiPlaylistResult.Song x : rec.songs) {
+                        if (generation != aiRequestGeneration.get()) return;
+                        if (resolved.size() >= Math.min(desiredCount, 5)) break;
+                        List<NeteaseSong> loose = netease.searchAiSongs(x.title, 10);
+                        NeteaseSong match = bestAiSongMatchLoose(loose, x.title, x.artist);
+                        if (match != null && !(excludeLiked && likedIds.contains(match.id))
+                                && !containsId(resolved, match.id)) resolved.add(match);
+                    }
+                }
+                if (resolved.size() < 5) throw new IllegalStateException("网易云未匹配到至少五首推荐歌曲，请重试");
                 // ⚠️ Round 35 REMOVED the interleave step that round 34 put here — the user:
                 // 「也不用非要是中英文穿插」. The prompt still asks for a natural mix, but the order the
                 // model returned is the order the listener gets, and {@code PlaylistMixer} is kept (with
@@ -12028,7 +12372,7 @@ public final class PlayerController {
                     });
                 } else {
                     postAiGeneration(generation, () -> finishAiPlaylist(generation, ordered, name,
-                            new AiContinuation(baseUrl, apiKey, model, request, count, excludeLiked),
+                            new AiContinuation(baseUrl, apiKey, model, request, desiredCount, excludeLiked),
                             deferPlayback));
                 }
             } catch (Throwable e) {
@@ -12078,7 +12422,7 @@ public final class PlayerController {
      */
     private void maybeContinueAiPlaylist() {
         if (experimentalAiDjMode) {
-            if (playIndex == 0 && !experimentalAiDjWaiting.peek() && !experimentalAiDjPrefetchStarted)
+            if (!experimentalAiDjSuspended && !experimentalAiDjWaiting.peek() && !experimentalAiDjPrefetchStarted)
                 prefetchExperimentalAiDjBatch();
             return;
         }
@@ -12178,25 +12522,170 @@ public final class PlayerController {
 
     private static boolean containsId(List<NeteaseSong> list, long id) { for (NeteaseSong s : list) if (s.id == id) return true; return false; }
 
+    /** Shared bounded collection samples, cached so prefetch and home curation reuse the same reads. */
+    public String aiPersonalCollectionReferences() throws IOException {
+        List<NeteasePlaylist> collections = new ArrayList<>(myPlaylists.peek());
+        final long account = uid, favorite = favoritePid;
+        String identity = account + ":" + favorite + ":" + collections.stream()
+                .filter(p -> p != null).map(p -> Long.toString(p.id)).sorted()
+                .collect(java.util.stream.Collectors.joining(","));
+        synchronized (aiTasteCacheLock) {
+            long now = System.currentTimeMillis();
+            if (identity.equals(aiTasteCacheIdentity) && now - aiTasteCacheTime >= 0
+                    && now - aiTasteCacheTime < java.util.concurrent.TimeUnit.MINUTES.toMillis(15))
+                return aiTasteCacheText;
+            if (collections.isEmpty() && account > 0) collections = netease.userPlaylists(account, 100);
+            StringBuilder samples = new StringBuilder();
+            Random random = new Random();
+            for (NeteasePlaylist playlist : AiReference.tasteCollections(collections, favorite, random)) {
+                if (Thread.currentThread().isInterrupted()) throw new IOException("推荐样本读取已取消");
+                try {
+                    PlaylistCacheIndex.Cached cached = playlistCacheIndex.get(playlist.id);
+                    List<NeteaseSong> tracks = cached != null && !cached.songs.isEmpty()
+                            ? new ArrayList<>(cached.songs)
+                            : netease.playlistTasteSample(playlist.id, AiReference.COLLECTION_POOL, random);
+                    aiMatcher.remember(tracks);
+                    boolean liked = playlist.id == favorite || "我喜欢的音乐".equals(playlist.name);
+                    List<String> sample = AiReference.representativeSongs(tracks,
+                            liked ? AiReference.LIKED_SAMPLE : AiReference.COLLECTION_SAMPLE, random);
+                    if (sample.isEmpty()) continue;
+                    samples.append("收藏歌单「").append(playlist.name == null ? "收藏歌单" : playlist.name)
+                            .append("」代表样本：\n");
+                    for (String line : sample) samples.append(line).append('\n');
+                } catch (IOException error) {
+                    if (Thread.currentThread().isInterrupted()) throw error;
+                }
+            }
+            if (!samples.toString().isEmpty()) {
+                aiTasteCacheIdentity = identity; aiTasteCacheTime = now; aiTasteCacheText = samples.toString();
+            }
+            return samples.toString();
+        }
+    }
+
+    /** Background discovery resolves metadata only; it never starts playback or saves a playlist. */
+    public NeteaseSong resolveAiRecommendation(String title, String artist) throws IOException {
+        try { return aiMatcher.resolve(title, artist); }
+        catch (IOException failure) { throw failure; }
+        catch (Exception failure) { throw new IOException(failure); }
+    }
+
+    /** Both home curation and DJ share bounded matching workers and familiar-song metadata. */
+    public DailyVibeCuration.Resolver aiRecommendationResolver(Runnable check) {
+        aiMatcher.remember(recentSongs.peek());
+        return new DailyVibeCuration.Resolver() {
+            @Override public NeteaseSong resolve(String title, String artist) throws Exception {
+                check.run();
+                return aiMatcher.resolve(title, artist);
+            }
+            @Override public List<NeteaseSong> resolveBatch(List<AiPlaylistResult.Song> songs, int target,
+                    Set<Long> excluded, DailyVibeCuration.Progress progress) throws Exception {
+                return aiMatcher.match(songs, target, excluded, progress, check);
+            }
+        };
+    }
+
+    private NeteaseSong searchAiRecommendation(String title, String artist) throws IOException {
+        NeteaseSong match = bestAiSongMatch(netease.searchAiSongs(title + " " + artist, 30), title, artist);
+        // 首选缺失、或只找到翻唱/现场/伴奏这类版本时，再用纯歌名搜一次，给原版一次机会。
+        boolean preferClean = match == null
+                || (!isNonOriginalVersion(title) && isNonOriginalVersion(match.name));
+        if (preferClean && !Thread.currentThread().isInterrupted()) {
+            NeteaseSong clean = bestAiSongMatch(netease.searchAiSongs(title, 30), title, artist);
+            if (clean != null && (match == null || !isNonOriginalVersion(clean.name))) match = clean;
+        }
+        return match;
+    }
+
+    /** Stable account identity for per-account recommendation caches, without credentials. */
+    public long aiRecommendationAccountId() { return uid; }
+
+    /** Play a transient home recommendation with the same normal queue handling as other songs. */
+    public void playAiDailySongs(List<NeteaseSong> songs, int index) {
+        if (songs == null || songs.isEmpty() || index < 0 || index >= songs.size()) return;
+        playSongList(songs, index);
+    }
+
+    /**
+     * 版本标记：翻唱 / 现场 / 伴奏 / remix / DJ / 加速… 都表示「不是原版录音室版本」。
+     * 只在括号段或「 - 」后缀里认，避免把 “Live Forever” 这类正常歌名判错。
+     */
+    private static final java.util.regex.Pattern AI_VERSION_MARK =
+            java.util.regex.Pattern.compile(
+                    "(?i)[（(\\[【]\\s*[^）)\\]】]{0,24}?"
+                            + "(live|现场|演唱会|remix|混音|dj|翻唱|翻自|原唱|伴奏|instrumental|karaoke|ktv|纯音乐|试听|demo|加速|减速|降调|升调|sped\\s?up|slowed|nightcore|8d|女声|男声|童声|钢琴版|吉他版|0\\.\\d+x|1\\.\\d+x)"
+                            + "[^）)\\]】]{0,24}[）)\\]】]"
+                            + "|(?i)\\s[-–—]\\s*(live|remix|cover|instrumental|karaoke|sped\\s?up|slowed|nightcore)\\s*$");
+
+    /** 歌名点名了非原版（现场 / remix…）时，这类结果不该被惩罚。 */
+    private static boolean isNonOriginalVersion(String rawTitle) {
+        if (rawTitle == null || rawTitle.isEmpty()) return false;
+        return AI_VERSION_MARK.matcher(rawTitle).find();
+    }
+
+    /**
+     * 选出一首「确实是要的那首原版」。
+     *
+     * <p>用户 2026-10-17：「找到的很多都不是原版」——旧的打分把括号内容整段删掉，
+     * 于是 (Live) / （翻唱） / （伴奏） 与原版同分，谁排前面谁赢。这里改成：
+     * 歌名精确 &gt; 只是包含 &gt; 模糊；歌手完全相同加分更多；同名但带版本标记的候选
+     * 重罚（除非请求本身就点名了那个版本），所以原版永远排在翻唱前面。
+     */
     private static NeteaseSong bestAiSongMatch(List<NeteaseSong> candidates, String wantedTitle, String wantedArtist) {
         if (candidates == null || candidates.isEmpty() || wantedTitle == null) return null;
         String title = normalizeAiText(wantedTitle);
         String artist = normalizeAiText(wantedArtist);
+        boolean wantsVersion = isNonOriginalVersion(wantedTitle);
         NeteaseSong best = null;
-        int bestScore = 0;
+        int bestScore = Integer.MIN_VALUE;
         for (NeteaseSong candidate : candidates) {
             if (candidate == null || candidate.name == null) continue;
             String gotTitle = normalizeAiText(candidate.name);
-            int score = 0;
-            if (gotTitle.equals(title)) score += 100;
-            else if (gotTitle.contains(title) || title.contains(gotTitle)) score += 70;
-            else if (sharedTokenCount(gotTitle, title) >= 2) score += 45;
+            int score;
+            // 关键：歌名对上但歌手完全对不上时不能放行 —— 那正是「同名翻唱」的形状。
+            // 所以精确歌名只值 60，必须再有一条歌手证据（相同 +40 / 包含 +25）才过线。
+            if (gotTitle.equals(title)) score = 60;
+            else if (gotTitle.contains(title)) score = 40;
+            else if (title.contains(gotTitle) && gotTitle.length() >= 2) score = 30;
+            else if (sharedTokenCount(gotTitle, title) >= 2) score = 20;
+            else continue;                                  // 歌名都对不上，跳过
             String gotArtist = normalizeAiText(candidate.artist);
-            if (!artist.isEmpty() && !gotArtist.isEmpty()
+            boolean artistExact = !artist.isEmpty() && !gotArtist.isEmpty()
+                    && gotArtist.equals(artist);
+            if (artistExact) score += 40;
+            else if (!artist.isEmpty() && !gotArtist.isEmpty()
                     && (gotArtist.contains(artist) || artist.contains(gotArtist))) score += 25;
+            // 同名但不是原版：翻唱 / 现场 / 伴奏 / remix / DJ / 加速版，重罚。
+            if (!wantsVersion && isNonOriginalVersion(candidate.name)) score -= 70;
             if (score > bestScore) { bestScore = score; best = candidate; }
         }
         return bestScore >= 70 ? best : null;
+    }
+
+    /**
+     * 兜底匹配：只在严格规则配到的歌太少时使用。
+     *
+     * <p>严格规则要求「歌名 + 歌手证据」，歌手名在两种语言/两种写法之间对不上时（例如
+     * 译名），整张歌单可能一首都不剩。这时只放行**歌名完全一致且不是翻唱/现场/伴奏**的
+     * 候选；仍然拒绝任何带版本标记的结果，所以兜底也不会把翻唱塞进来。
+     */
+    private static NeteaseSong bestAiSongMatchLoose(List<NeteaseSong> candidates,
+            String wantedTitle, String wantedArtist) {
+        if (candidates == null || candidates.isEmpty() || wantedTitle == null) return null;
+        String title = normalizeAiText(wantedTitle);
+        String artist = normalizeAiText(wantedArtist);
+        boolean wantsVersion = isNonOriginalVersion(wantedTitle);
+        NeteaseSong best = null;
+        int bestScore = Integer.MIN_VALUE;
+        for (NeteaseSong candidate : candidates) {
+            if (candidate == null || candidate.name == null) continue;
+            if (!normalizeAiText(candidate.name).equals(title)) continue;
+            if (!wantsVersion && isNonOriginalVersion(candidate.name)) continue;
+            String gotArtist = normalizeAiText(candidate.artist);
+            int score = !artist.isEmpty() && gotArtist.equals(artist) ? 2 : 1;
+            if (score > bestScore) { bestScore = score; best = candidate; }
+        }
+        return best;
     }
 
     private static String normalizeAiText(String value) {
@@ -12310,21 +12799,63 @@ public final class PlayerController {
     }
 
     /** Delete a playlist owned by the user, then refresh 我的. */
+    public boolean canDeletePlaylist(long playlistId) {
+        if (uid == 0 || favoritePid == 0 || playlistId == favoritePid) return false;
+        return myPlaylists.peek().stream().anyMatch(p -> p.id == playlistId && p.owned);
+    }
+
     public void deletePlaylist(long playlistId) {
-        if (uid == 0 || playlistId == 0) return;
+        deletePlaylist(playlistId, null);
+    }
+
+    public void deletePlaylist(long playlistId, Runnable onDeleted) {
+        if (!canDeletePlaylist(playlistId)) { showToast("此歌单不能删除"); return; }
+        removeAccountPlaylist(playlistId, true, onDeleted);
+    }
+
+    /** Unsubscribe directly by row id, without opening it or touching playback. */
+    public void unsubscribePlaylist(long playlistId) {
+        if (uid == 0 || !myPlaylists.peek().stream().anyMatch(p -> p.id == playlistId && !p.owned)) return;
+        removeAccountPlaylist(playlistId, false, null);
+    }
+
+    private final Set<Long> playlistRemovals = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    private void removeAccountPlaylist(long playlistId, boolean owned, Runnable onDeleted) {
+        if (!playlistRemovals.add(playlistId)) return;
+        final long account = uid;
         worker.submit(() -> {
             try {
-                if (netease.deletePlaylist(playlistId)) {
+                if (uid != account) return;
+                if (owned ? netease.deletePlaylist(playlistId) : netease.playlistSubscribe(playlistId, false)) {
+                    if (uid != account) return;
+                    playlistCacheIndex.removeFromMine(playlistId);
+                    playlistCacheIndex.save();
                     post(() -> {
-                        showToast("歌单已删除");
+                        if (uid != account) return;
+                        List<NeteasePlaylist> remaining = new ArrayList<>(myPlaylists.peek());
+                        remaining.removeIf(p -> p.id == playlistId);
+                        myPlaylists.set(remaining); playlistCount.set(remaining.size());
+                        if (currentPlaylistId == playlistId) {
+                            if (owned) {
+                                playlistTracks.set(Collections.emptyList());
+                                playlistTitle.set(""); playlistCoverPath.set("");
+                                playlistOwned.set(false); playlistDeletable.set(false);
+                            }
+                            playlistSubscribed.set(false);
+                        }
+                        showToast(owned ? "歌单已删除" : "已取消收藏");
+                        if (onDeleted != null) onDeleted.run();
                         loadMyPlaylists();
                     });
                 } else {
-                    showToast("删除歌单失败");
+                    showToast(owned ? "删除歌单失败" : "取消收藏失败");
                 }
             } catch (Throwable e) {
                 Logger.warn("delete playlist {} failed: {}", playlistId, e.getMessage());
-                showToast("删除歌单失败");
+                showToast(owned ? "删除歌单失败" : "取消收藏失败");
+            } finally {
+                playlistRemovals.remove(playlistId);
             }
         });
     }
@@ -12490,6 +13021,7 @@ public final class PlayerController {
         // surface that still offers one). The intent is cleared here rather than when
         // the deferred backend.pause() runs.
         backend.cancelAutoResume();
+        if (autoMixConfig != null) cancelPreparedCrossfade();
         if (!playingIntent) return;
         playingIntent = false;
         post(() -> playing.set(false));
@@ -13727,6 +14259,8 @@ public final class PlayerController {
     }
 
     public void shutdown() {
+        clearAutoMix();
+        autoMixWorker.shutdownNow();
         biliOpenGeneration.incrementAndGet();
         biliRelatedSeed = null;
         biliQueueWorker.shutdownNow();
@@ -13746,6 +14280,8 @@ public final class PlayerController {
         fadeWorker.shutdownNow();
         backend.release();
         worker.shutdownNow();
+        aiWorker.shutdownNow();
+        aiMatcher.close();
         homeLoadGeneration.incrementAndGet();
         homeWorker.shutdownNow();
         searchWorker.shutdownNow();
