@@ -12,6 +12,9 @@ import com.kyant.backdrop.BackdropEffectScope
 import com.kyant.backdrop.effects.blur
 import com.kyant.backdrop.effects.biliPaiLens
 import com.kyant.backdrop.effects.colorControls
+import com.kyant.backdrop.effects.vibrancy
+import com.kyant.backdrop.effects.apkAdaptiveLens
+import com.kyant.backdrop.effects.lens
 import com.kyant.backdrop.shadow.Shadow
 
 private val BiliPaiLightShadow = Shadow(
@@ -42,7 +45,7 @@ internal fun iosGlassSurface(
     tint: Color,
     sampledLuminance: Float = 0.5f,
 ): Color = (if (dark) Color(BiliPaiGlassParameters.darkSurfaceArgb) else Color.White)
-    .copy(alpha = BiliPaiGlassParameters.surfaceAlpha)
+    .copy(alpha = .5f)
 
 internal fun DrawScope.drawBiliPaiReadabilityScrim(dark: Boolean) {
     drawRect((if (dark) Color.Black else Color.White)
@@ -51,7 +54,6 @@ internal fun DrawScope.drawBiliPaiReadabilityScrim(dark: Boolean) {
 
 internal fun DrawScope.drawBiliPaiGlassSurface(dark: Boolean) {
     drawRect(iosGlassSurface(dark, Color.Unspecified))
-    drawBiliPaiReadabilityScrim(dark)
 }
 
 /** BiliPai FloatingBottomBar shell: vibrancy -> 4dp blur -> scaled 24/24 lens. */
@@ -62,18 +64,14 @@ internal fun BackdropEffectScope.apiGlassEffects(
     refractionProgress: Float = 1f,
     shellHeightDp: Float = size.height / density,
     blurDp: Float = BiliPaiGlassParameters.blurDp,
+    strongRefraction: Boolean = false,
 ) {
-    val scale = BiliPaiGlassParameters.geometryScale(shellHeightDp)
-    padding = maxOf(padding, BiliPaiGlassParameters.effectPaddingDp(shellHeightDp) * density)
-    colorControls(brightness = BiliPaiGlassParameters.brightness,
-        contrast = BiliPaiGlassParameters.contrast, saturation = BiliPaiGlassParameters.saturation)
-    blur(blurDp * density)
-    if (refraction) biliPaiLens(
-        BiliPaiGlassParameters.shellLensHeightDp * scale * density * refractionProgress,
-        BiliPaiGlassParameters.shellLensAmountDp * scale * density * refractionProgress,
-        depthEffect = false,
-        chromaticAberration = BiliPaiGlassParameters.shellChromaticAberration,
-    )
+    vibrancy()
+    blur(4f * density)
+    if (refraction) {
+        if (strongRefraction) apkAdaptiveLens(refractionProgress)
+        else lens(16f * density * refractionProgress, 32f * density * refractionProgress)
+    }
 }
 
 /** The moving indicator refracts captured shell/content; it must not filter it twice. */
@@ -83,11 +81,5 @@ internal fun BackdropEffectScope.biliPaiIndicatorEffects(
     shellHeightDp: Float = BiliPaiGlassParameters.shellHeightDp,
 ) {
     if (!refraction) return
-    val scale = BiliPaiGlassParameters.geometryScale(shellHeightDp)
-    biliPaiLens(
-        BiliPaiGlassParameters.indicatorLensHeightDp * scale * density * progress,
-        BiliPaiGlassParameters.indicatorLensAmountDp * scale * density * progress,
-        depthEffect = true,
-        chromaticAberration = BiliPaiGlassParameters.indicatorChromaticAberration,
-    )
+    lens(16f * density * progress, 32f * density * progress)
 }

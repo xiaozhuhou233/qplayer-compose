@@ -57,12 +57,14 @@ internal fun IosLiquidSearchButton(
                 onClick = onClick,
             ),
         interaction = highlight,
+        strongRefraction = true,
+        surfaceTint = if (icon == Icons.Default.Search) Color(0xFF0088FF) else Color.Unspecified,
     ) {
         Icon(
             imageVector = icon,
             contentDescription = contentDescription,
             modifier = Modifier.size(28.dp),
-            tint = if (selected) Color(0xFF0088FF) else adaptiveGlassInk(),
+            tint = if (icon == Icons.Default.Search) Color.White else adaptiveGlassInk(),
         )
     }
 }

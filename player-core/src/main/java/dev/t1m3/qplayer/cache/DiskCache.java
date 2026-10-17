@@ -118,6 +118,96 @@ public final class DiskCache {
     private static final int DJEDIT_MAX_COUNT = 4;
 
     private volatile long maxSizeBytes;
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>
+            audioPins = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Object[] audioLocks = new Object[16];
+
+    private Object audioLock(String path) {
+        int slot = (path.hashCode() & Integer.MAX_VALUE) % audioLocks.length;
+        synchronized (audioLocks) {
+            if (audioLocks[slot] == null) audioLocks[slot] = new Object();
+            return audioLocks[slot];
+        }
+    }
+
+    /** A source being analysed cannot be evicted underneath the decoder. */
+    public final class AudioLease implements AutoCloseable {
+        public final String path;
+        private boolean closed;
+        private AudioLease(String path) {
+            this.path = path;
+            audioPins.compute(new File(path).getAbsolutePath(), (key, count) -> {
+                if (count == null) count = new java.util.concurrent.atomic.AtomicInteger();
+                count.incrementAndGet(); return count;
+            });
+        }
+        @Override public void close() {
+            if (closed) return;
+            closed = true;
+            audioPins.computeIfPresent(new File(path).getAbsolutePath(), (key, count) -> count.decrementAndGet() <= 0 ? null : count);
+        }
+    }
+
+    /** Download once, atomically publish, and pin until AutoMix has finished reading. */
+    public AudioLease prepareAudio(String url, long songId, String sourceKey,
+            java.util.function.BooleanSupplier valid) throws java.io.IOException {
+        String path = songId != 0 ? audioPath(songId)
+                : new File(new File(baseDir, AUDIO), "source-" + java.util.UUID.nameUUIDFromBytes(
+                        sourceKey.getBytes(java.nio.charset.StandardCharsets.UTF_8)) + ".audio").getPath();
+        synchronized (audioLock(path)) {
+            checkAudioJob(valid);
+            AudioLease lease = new AudioLease(path);
+            Path target = Paths.get(path), pending = null;
+            HttpURLConnection connection = null;
+            boolean success = false;
+            try {
+                if (Files.isRegularFile(target) && Files.size(target) > 0) {
+                    touch(path); success = true; return lease;
+                }
+                ensureParent(path);
+                pending = Files.createTempFile(target.getParent(), "precache-", ".part");
+                connection = (HttpURLConnection) new URL(url).openConnection();
+                connection.setConnectTimeout(15000); connection.setReadTimeout(15000);
+                connection.setRequestProperty("User-Agent", "qplayer/1.0");
+                int response = connection.getResponseCode();
+                if (response != 200) throw new java.io.IOException("音频下载失败 HTTP " + response);
+                String type = connection.getContentType();
+                if (type != null && (type.contains("text/") || type.contains("json")))
+                    throw new java.io.IOException("音源返回了非音频内容");
+                long expected = connection.getContentLengthLong();
+                long budget = maxSizeBytes > 0 ? Math.min(maxSizeBytes, 256L * 1024 * 1024) : 256L * 1024 * 1024;
+                if (expected > budget) throw new java.io.IOException("下一首超过音频缓存上限");
+                long bytes = 0;
+                try (InputStream in = connection.getInputStream();
+                     java.io.OutputStream out = Files.newOutputStream(pending)) {
+                    byte[] block = new byte[32768];
+                    int n;
+                    while ((n = in.read(block)) != -1) {
+                        checkAudioJob(valid);
+                        bytes += n;
+                        if (bytes > budget) throw new java.io.IOException("下一首超过音频缓存上限");
+                        out.write(block, 0, n);
+                    }
+                }
+                checkAudioJob(valid);
+                if (bytes == 0 || (expected >= 0 && bytes != expected))
+                    throw new java.io.IOException("音频未完整下载");
+                StorageFiles.replace(pending, target);
+                evictIfNeeded();
+                success = true;
+                return lease;
+            } finally {
+                if (connection != null) connection.disconnect();
+                if (!success) lease.close();
+                if (pending != null) Files.deleteIfExists(pending);
+            }
+        }
+    }
+
+    private static void checkAudioJob(java.util.function.BooleanSupplier valid) throws java.io.InterruptedIOException {
+        if (Thread.currentThread().isInterrupted() || !valid.getAsBoolean())
+            throw new java.io.InterruptedIOException("音频预缓存已取消");
+    }
 
     public DiskCache(long maxSizeMB) {
         this.maxSizeBytes = maxSizeMB * 1024L * 1024L;
@@ -367,7 +457,9 @@ public final class DiskCache {
      */
     public void cacheAudio(String url, long neteaseId) {
         String path = audioPath(neteaseId);
-        downloadToFile(url, path);
+        synchronized (audioLock(path)) {
+            if (getAudio(neteaseId) == null) downloadToFile(url, path);
+        }
     }
 
     /** Write raw bytes to the AMLL TTML lyric cache file. */
@@ -553,6 +645,7 @@ public final class DiskCache {
 
         for (File f : files) {
             if (total <= limit) break;
+            if (audioPins.containsKey(f.getAbsolutePath()) || f.getName().endsWith(".part")) continue;
             long sz = f.length();
             if (f.delete()) {
                 total -= sz;

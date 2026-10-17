@@ -51,7 +51,7 @@ public final class SettingsCatalog {
     public static final String ACE_STEP_BED_DB_KEY = "aceStepBedDb";
 
     public static final List<String> CATEGORIES = Collections.unmodifiableList(
-            Arrays.asList(APPEARANCE, PLAYBACK, LYRIC, LOCAL, AI, ACE_STEP, PALETTE, ABOUT));
+            Arrays.asList(APPEARANCE, PLAYBACK, LYRIC, LOCAL, AI, PALETTE, ABOUT));
 
     /** Fluid-background mode, 0 dynamic / 1 static. Stored under a new key
      *  because the same setting used to be a boolean ("lyricBgStatic") and a
@@ -65,6 +65,7 @@ public final class SettingsCatalog {
     /** When enabled, lyric/detail pages use the blurred album artwork. When
      *  disabled, they use a flat Monet/MD3 colour background instead. */
     public static final String COVER_BACKGROUND_KEY = "lyricCoverBackground";
+    public static final String MV_BACKGROUND_KEY = "playerMvBackground";
     public static final int BG_STYLE_PIXI_RENDERER = 0;
     public static final int BG_STYLE_MESH_GRADIENT = 1;
     public static final int BG_STYLE_CLASSIC = 2;
@@ -148,6 +149,10 @@ public final class SettingsCatalog {
                 .desc("切换到 MD3，关闭动态主题、封面模糊背景、共享元素动画及后台音频预处理，保留轻量页面转场")
                 .onlyOn(ANDROID)
                 .build());
+        out.add(SettingSpec.toggle(MV_BACKGROUND_KEY, APPEARANCE, "MV 动态背景（实验性）", false)
+                .desc("播放详情页隐藏封面，静音循环高清 MV 的中段片段，随音乐暂停；歌词页保持原背景。会使用网络流量，最低配模式下停用")
+                .onlyOn(ANDROID)
+                .build());
         out.add(SettingSpec.toggle("iosGlassRefraction", APPEARANCE, "玻璃折射", true)
                 .desc("iOS design：开启保留折射、色散与拖动弹性椭圆；关闭为低配模式，保留模糊玻璃和普通选中状态")
                 .onlyOn(ANDROID)
@@ -190,53 +195,45 @@ public final class SettingsCatalog {
         out.add(SettingSpec.toggle("fade", PLAYBACK, "淡入淡出", false)
                 .desc("切歌/播放结束时音量渐变，而不是直接切断")
                 .build());
-        // 「智能过渡」 and the two rows that refine it. Default ON: the borders are
-        // what this feature is for, and every kind falls back to the historical
-        // hard cut on its own whenever it cannot be carried out.
-        out.add(SettingSpec.toggle(SMART_TRANSITION_KEY, PLAYBACK, "智能过渡", true)
-                .desc("切歌时自动选择过渡方式；已配置 AI 时由 AI 挑选（它听不到音频，只是建议，"
-                        + "报错或用不上就用本地规则）。两首的节拍或调性测出来不搭时改为淡出淡入"
-                        + "（不重叠），无法完成时回退为硬切。")
+        // Keep the old master key so an existing on/off preference migrates unchanged.
+        out.add(SettingSpec.toggle(SMART_TRANSITION_KEY, PLAYBACK, "AutoMix", true)
+                .desc("原版 AutoMix 本地分析并混音；后台准备下一首。支持网易云、自定义音源与本地音频；视频保持普通切换。")
                 .build());
-        out.add(SettingSpec.segmented(TRANSITION_KIND_KEY, PLAYBACK, "过渡方式", 0,
-                        "自动",
-                        dev.t1m3.qplayer.audio.TransitionKind.CUT.label(),
-                        dev.t1m3.qplayer.audio.TransitionKind.CROSSFADE.label(),
-                        dev.t1m3.qplayer.audio.TransitionKind.QUICK_FADE.label(),
-                        dev.t1m3.qplayer.audio.TransitionKind.FADE_OUT_IN.label(),
-                        dev.t1m3.qplayer.audio.TransitionKind.SILENCE_TRIM.label())
-                .desc("自动：按歌曲信息挑选（已配置 AI 时由 AI 挑选）；其余为强制使用某一种。")
-                .dependsOn(SMART_TRANSITION_KEY)
+        out.add(SettingSpec.dropdown("autoMixMode", PLAYBACK, "AutoMix 模式", 2,
+                "交叉混音", "和声混音", "智能混音（本地 DSP）", "连续切换")
+                .dependsOn(SMART_TRANSITION_KEY).build());
+        out.add(SettingSpec.toggle("autoMixAutoCue", PLAYBACK, "自动点位", true)
+                .desc("有可能吃掉下一首歌一分钟")
+                .dependsOn(SMART_TRANSITION_KEY).build());
+        out.add(SettingSpec.toggle("autoMixPitchEnabled", PLAYBACK, "过渡降调", true)
+                .desc("允许融合时调整音高以匹配和声；关闭后两首歌均保持原调。")
+                .dependsOn(SMART_TRANSITION_KEY).build());
+        out.add(SettingSpec.toggle("precacheNextTrack", PLAYBACK, "提前缓存下一首", true)
+                .desc("提前下载播放列表下一首音频；AutoMix 开启时会先缓存所需音源，再制作本地融合。")
                 .build());
-        out.add(SettingSpec.segmented(TRANSITION_CURVE_KEY, PLAYBACK, "淡化曲线", 2,
-                        dev.t1m3.qplayer.audio.FadeCurve.LINEAR.label(),
-                        dev.t1m3.qplayer.audio.FadeCurve.EQUAL_POWER.label(),
-                        dev.t1m3.qplayer.audio.FadeCurve.DJ_BLEND.label())
-                .desc("DJ 式：大部分时间两首都听得到，像串烧；等功率/线性是对称的，"
-                        + "更像淡入淡出。8 秒以上的重叠自动用 DJ 式。")
-                .dependsOn(SMART_TRANSITION_KEY)
-                .build());
-        out.add(SettingSpec.toggle(BEAT_ALIGN_KEY, PLAYBACK, "节拍对齐", true)
-                .desc("把重叠对到整拍、让下一首从拍点进入，两首鼓点才对得上；"
-                        + "测不到可信的节拍就不参与，过渡照常。")
-                .dependsOn(SMART_TRANSITION_KEY)
-                .build());
-        out.add(SettingSpec.toggle(BASS_SWAP_KEY, PLAYBACK, "低频互换", true)
-                .desc("在拍点上把低频交给下一首，避免两条低频线打架；"
-                        + "设备不支持时不参与，过渡照常。")
-                .dependsOn(SMART_TRANSITION_KEY)
-                .build());
-        // The blend's length. One number for every ordinary pair, applied on the next
-        // boundary that is decided (the controller reads it, never a copy), and the
-        // floor under the chooser's own answer: a chooser that names 8s is raised to it.
-        out.add(SettingSpec.slider(TRANSITION_BLEND_KEY, PLAYBACK, "过渡时长", 15, 4, 30, 1)
-                .unit(" 秒").dots()
-                .desc("两首交叉淡化多久，4–30 秒。太短像淡入淡出，太长则两首不搭的歌"
-                        + "会同时很响。当前这首收尾很平淡时最多提前 "
-                        + dev.t1m3.qplayer.audio.TransitionPlan.PLAIN_EXTENSION_MS / 1000L
-                        + " 秒开始融合。")
-                .dependsOn(SMART_TRANSITION_KEY)
-                .build());
+        String[] styles = new String[dev.t1m3.qplayer.audio.mix.MixStyle.UI_ORDER.length];
+        for (int i = 0; i < styles.length; i++)
+            styles[i] = dev.t1m3.qplayer.audio.mix.MixStyle.UI_ORDER[i].label();
+        out.add(SettingSpec.dropdown("autoMixStyle", PLAYBACK, "智能混音风格", 0, styles)
+                .desc("智能混音模式使用；auto 根据相邻两首自动选择风格。无需 AI API。")
+                .dependsOn(SMART_TRANSITION_KEY).build());
+        out.add(SettingSpec.slider("autoMixWindow", PLAYBACK, "过渡时长", 6, 1, 30, 1)
+                .desc("调整秒数会启用固定过渡窗口，让各混音模式按此时长融合；过短歌曲受至少播放 5/7 的限制。")
+                .unit(" 秒").dependsOn(SMART_TRANSITION_KEY).build());
+        out.add(SettingSpec.toggle("autoMixForceWindow", PLAYBACK, "固定过渡窗口", true)
+                .desc("默认按上方秒数融合；关闭后允许风格、节拍、窗口缩放和自动搜索改变实际时长。")
+                .dependsOn(SMART_TRANSITION_KEY).build());
+        out.add(SettingSpec.slider("autoMixWidth", PLAYBACK, "混合宽度", 50, 0, 100, 5)
+                .unit("%").dependsOn(SMART_TRANSITION_KEY).build());
+        out.add(SettingSpec.slider("autoMixScale", PLAYBACK, "窗口缩放", 100, 50, 200, 10)
+                .desc("智能模式自动窗口按风格与节拍缩放；固定过渡窗口开启时不改变设定秒数。")
+                .unit("%").dependsOn(SMART_TRANSITION_KEY).build());
+        out.add(SettingSpec.toggle("autoMixStretch", PLAYBACK, "节奏伸缩", true)
+                .desc("允许原算法按两首歌曲的节奏调整过渡素材。")
+                .dependsOn(SMART_TRANSITION_KEY).build());
+        out.add(SettingSpec.text("autoMixTuning", PLAYBACK, "AutoMix 高级参数", "")
+                .desc("原版 key=value 参数，以逗号分隔，例如 max_shift=2；上方宽度、缩放与伸缩选项优先。")
+                .dependsOn(SMART_TRANSITION_KEY).build());
         out.add(SettingSpec.toggle("highQuality", PLAYBACK, "高音质播放", true)
                 .desc("关闭后使用低音质播放以节省流量")
                 .build());
@@ -291,30 +288,6 @@ public final class SettingsCatalog {
                 .desc("自行申请填写，仅保存在本机")
                 .build());
 
-        // ---- ACE-Step：由前后两首歌「生成」一段过渡素材 -----------------------
-        // 与上面 AI 音乐助手分开：那是 OpenAI 兼容的文本接口，这是音乐生成接口，
-        // 协议、key、模型名都不同，共用一个 key 是错的。
-        out.add(SettingSpec.toggle(SettingsCatalog.ACE_STEP_ENABLED_KEY, ACE_STEP, "启用 ACE-Step", false)
-                .desc("开启后：渲染过渡时把云端生成的素材垫在本地过渡的段落下面"
-                        + "（衔接仍由本地融合负责）。失败/超时/素材不合格都不会影响过渡本身，"
-                        + "只是这一层不出现。")
-                .build());
-        out.add(SettingSpec.text(SettingsCatalog.ACE_STEP_BASE_URL_KEY, ACE_STEP, "API 地址 *",
-                        "https://api.acemusic.ai")
-                .desc("官方云端；自托管时填自己的地址")
-                .build());
-        out.add(SettingSpec.text(SettingsCatalog.ACE_STEP_API_KEY_KEY, ACE_STEP, "API Key *", "")
-                .desc("只保存在本机：不写进 APK、不随 APK 分发、不上传")
-                .build());
-        out.add(SettingSpec.text(SettingsCatalog.ACE_STEP_MODEL_KEY, ACE_STEP, "模型名称 *",
-                        "acestep-v1.5-turbo")
-                .desc("云端 GET /v1/models 列出的唯一 id（不带斜杠时会自动补上 acemusic/ 前缀）")
-                .build());
-        out.add(SettingSpec.slider(SettingsCatalog.ACE_STEP_BED_DB_KEY, ACE_STEP,
-                        "垫层电平（比段落低）", 18, 6, 18, 1)
-                .desc("越大越轻。18 是听感判定的默认值，12 更明显。这一层是段落上的额外织体，"
-                        + "不改变原有过渡。")
-                .build());
         out.add(SettingSpec.toggle("aiForceKnowledge", AI, "强制使用知识库", false)
                 .desc("联网搜索失败时改用模型知识库继续生成")
                 .build());

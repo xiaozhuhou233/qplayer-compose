@@ -52,7 +52,7 @@ private fun PlayerGlass(modifier: Modifier, content: @Composable BoxScope.() -> 
             content = content,
         )
     } else {
-        Box(modifier.background(iosGlassSurface(LocalGlassDark.current,
+        Box(modifier.clip(CircleShape).background(iosGlassSurface(LocalGlassDark.current,
             LocalGlassTint.current, LocalGlassLuminance.current))) {
             content()
         }
@@ -77,7 +77,7 @@ internal fun IosTopBarAction(
 internal fun IosFloatingPageActions(
     canGoBack: Boolean,
     onBack: () -> Unit,
-    onRecognize: () -> Unit,
+    onRecognize: (() -> Unit)?,
     onQueue: () -> Unit,
     onSettings: () -> Unit,
     onAccount: () -> Unit,
@@ -144,7 +144,7 @@ internal fun IosFloatingPageActions(
                                 exit = shrinkHorizontally() + fadeOut()
                             ) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    PlayerAction(Icons.Default.GraphicEq, "听歌识曲", onRecognize)
+                                    if (onRecognize != null) PlayerAction(Icons.Default.GraphicEq, "听歌识曲", onRecognize)
                                     PlayerAction(Icons.Default.Settings, "设置", onSettings)
                                     PlayerAction(if (loggedIn) Icons.Default.AccountCircle else Icons.Default.Login,
                                         "账户", onAccount)
@@ -169,11 +169,8 @@ private fun PlayerAction(
     tint: Color = adaptiveGlassInk()
 ) {
     val view = LocalView.current
-    val activeColor by androidx.compose.animation.animateColorAsState(
-        if (selected) tint.copy(alpha = .1f) else Color.Transparent,
-        label = "player_action_selection"
-    )
-    Box(modifier.then(if (LocalGlassContentColor.current == null) rememberIosGlassInteraction() else Modifier).background(activeColor)
+    Box(modifier.clip(CircleShape)
+        .then(if (LocalGlassContentColor.current == null) rememberIosGlassInteraction() else Modifier)
         .combinedClickable(
             enabled = enabled, interactionSource = remember { MutableInteractionSource() }, indication = null,
             onClick = { view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); onClick() },
@@ -181,7 +178,10 @@ private fun PlayerAction(
                 view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); action()
             } }
         ), contentAlignment = Alignment.Center) {
-        Icon(icon, label, Modifier.size(iconSize), tint = tint.copy(alpha = if (enabled) 1f else .3f))
+        Icon(icon, label, Modifier.size(iconSize), tint = tint.copy(alpha =
+            if (!enabled) .3f else if (selected) 1f else .75f))
+        if (selected) Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 3.dp)
+            .size(3.dp).clip(CircleShape).background(tint))
     }
 }
 

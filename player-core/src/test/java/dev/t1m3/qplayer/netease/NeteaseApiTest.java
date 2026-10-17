@@ -28,6 +28,8 @@ public class NeteaseApiTest {
                 "/api/v6/playlist/detail", NeteaseApi.Transport.EAPI);
         assertEndpoint(NeteaseApi.SONG_DETAIL,
                 "/api/v3/song/detail", NeteaseApi.Transport.WEAPI);
+        assertEndpoint(NeteaseApi.MV_URL,
+                "/api/song/enhance/play/mv/url", NeteaseApi.Transport.WEAPI);
         assertEndpoint(NeteaseApi.LYRIC_NEW,
                 "/api/song/lyric/v1", NeteaseApi.Transport.EAPI);
         assertEndpoint(NeteaseApi.PLAYLIST_TRACKS,

@@ -23,7 +23,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.gestures.scrollBy
-import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -34,6 +33,8 @@ import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
@@ -56,6 +57,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import dev.t1m3.qplayer.lyric.LyricLine
 import dev.t1m3.qplayer.lyric.LyricTiming
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.PI
 import kotlin.math.abs
@@ -78,10 +80,6 @@ private sealed interface DisplayLyricRow {
     data class Break(override val start: Long, override val end: Long) : DisplayLyricRow
 }
 
-private class LyricRowMotion(active: Boolean) {
-    val scale = Animatable(if (active) 1f else .98f)
-    val alpha = Animatable(if (active) .85f else .175f)
-}
 
 @Composable
 internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier) {
@@ -169,6 +167,7 @@ internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier
                 coroutineScope {
                     motions.toMap().forEach { (rowIndex, motion) ->
                         launch {
+                            motion.offset.snapTo(-motion.scrollShift)
                             motion.scale.snapTo(if (rowIndex == index) 1f else .98f)
                             motion.alpha.snapTo(if (rowIndex == index) .85f else .175f)
                         }
@@ -183,6 +182,14 @@ internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier
             val first = visible.firstOrNull()?.index ?: old
             val affected = (minOf(first, index) - 2).coerceAtLeast(0)..
                 (maxOf(visible.lastOrNull()?.index ?: index, index) + 2).coerceAtMost(rows.lastIndex)
+            // ScrollScope.scrollBy is synchronous. Commit layout movement and
+            // all row compensation together, with no suspend/snapTo between them.
+            affected.forEach { rowIndex ->
+                motions.getOrPut(rowIndex) { LyricRowMotion(rowIndex == old) }
+            }
+            listState.scroll {
+                compensateLyricScroll(affected.map { motions.getValue(it) }) { scrollBy(delta) }
+            }
             val row = rows[index]
             val prior = rows.getOrNull((index - 1).coerceAtLeast(0))
             val gap = ((row.start - (prior?.end ?: row.start)).coerceAtLeast(0L)) / 1000f
@@ -205,22 +212,25 @@ internal fun Md3eLyricColumn(runtime: Md3eRuntime, modifier: Modifier = Modifier
             }
             val rowSpring = if (claude) ClaudeOneTake.snappy<Float>() else spring<Float>(dampingRatio = damping, stiffness = stiffness)
             coroutineScope {
-                // One scroll animation keeps existing and newly composed rows in
-                // sync, including when the next lyric interrupts this transition.
-                launch {
-                    listState.animateScrollBy(delta,
-                        if (springEnabled) rowSpring else tween(320, easing = FastOutSlowInEasing))
-                }
                 motions.toMap().forEach { (rowIndex, motion) ->
                     val alpha = if (rowIndex == index) .85f else .175f
                     val scale = if (rowIndex == index) 1f else .98f
                     if (rowIndex !in affected) {
+                        motion.offset.snapTo(-motion.scrollShift)
                         motion.alpha.snapTo(alpha)
                         motion.scale.snapTo(scale)
                         return@forEach
                     }
                     launch { motion.alpha.animateTo(alpha, tween(120, easing = lyricOpacityEasing)) }
+                    val delayMs = if (springEnabled)
+                        (abs(rowIndex - first) - 1).coerceAtLeast(0) * 50L else 0L
                     launch {
+                        if (delayMs > 0) delay(delayMs)
+                        motion.offset.animateTo(-motion.scrollShift,
+                            if (springEnabled) rowSpring else tween(320, easing = FastOutSlowInEasing))
+                    }
+                    launch {
+                        if (delayMs > 0) delay(delayMs)
                         motion.scale.animateTo(scale,
                             if (springEnabled) rowSpring else tween(320, easing = FastOutSlowInEasing))
                     }
@@ -307,6 +317,7 @@ private fun Md3eLyricIndicator(row: DisplayLyricRow, position: State<Long>, play
     val size = with(LocalDensity.current) { (fontSize * if (compact) 1.04f else 1.6f).sp.toDp() }
     Row(Modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
         .graphicsLayer {
+            translationY = motion.visualOffset
             scaleX = motion.scale.value; scaleY = motion.scale.value; alpha = motion.alpha.value
             transformOrigin = TransformOrigin(0f, .5f)
         }.padding(horizontal = 8.dp, vertical = 6.dp),
@@ -426,8 +437,10 @@ private fun Md3eLyricText(row: DisplayLyricRow.Line, position: State<Long>, inde
             // This is the same source curve as the old spring target, evaluated
             // in the layer phase. It avoids one coroutine and an Animatable per
             // visible lyric row, while retaining the lift envelope.
-            val lift = if (springEnabled) lyricActiveK(layerPosition.value, row.start, row.end) else 0f
-            translationY = -lift * 2.5.dp.toPx()
+            // Hold the lift after singing. Releasing it at line end moved the
+            // previous row DOWN while the cascade was still moving it upward.
+            val lift = if (springEnabled) md3eLyricRowLift(layerPosition.value, row.start) else 0f
+            translationY = motion.visualOffset - lift * 2.5.dp.toPx()
             val scale = if (background) lyricBackgroundScale(layerPosition.value, row.start, row.end) else 1f
             scaleX = motion.scale.value * scale
             scaleY = motion.scale.value * scale
@@ -467,7 +480,7 @@ private fun Md3eLyricText(row: DisplayLyricRow.Line, position: State<Long>, inde
 }
 
 private data class Md3eGlyphPlacement(val x: Float, val y: Float, val width: Float,
-    val offsetInGroup: Float)
+    val offsetInGroup: Float, val bottom: Float)
 
 @Composable
 private fun Md3eLyricGlyphs(glyphs: List<TimedGlyph>, position: State<Long>,
@@ -501,28 +514,11 @@ private fun Md3eLyricGlyphs(glyphs: List<TimedGlyph>, position: State<Long>,
         val drawPosition = remember(position, rangeStart, settledAt) {
             derivedStateOf { position.value.coerceIn(rangeStart - 1L, settledAt) }
         }
-        if (!sweep) {
-            Canvas(Modifier.fillMaxWidth().height(with(density) { textLayout.size.height.toDp() })) {
-                val raised = if (lift) md3eGlyphLift(drawPosition.value, rangeStart, rangeEnd) else 0f
-                val canvas = drawContext.canvas
-                canvas.save()
-                canvas.translate(0f, -raised * density.density)
-                drawText(textLayout, color = if (filled) active else idle)
-                canvas.restore()
-            }
-            return@BoxWithConstraints
-        }
-        val glyphStyle = remember(fontSize, lineHeight, weight, lyricTypeface) {
-            TextStyle(fontSize = fontSize.sp, lineHeight = lineHeight.sp, fontWeight = weight, fontFamily = lyricTypeface)
-        }
-        val glyphLayouts = remember(glyphs, glyphStyle, textMeasurer) {
-            glyphs.map { textMeasurer.measure(it.text, glyphStyle, softWrap = false) }
-        }
-        val placements = remember(glyphs, textLayout, glyphLayouts) {
+        val placements = remember(glyphs, textLayout) {
             var offset = 0
             val textLength = textLayout.layoutInput.text.length
             val groupCursor = FloatArray((glyphs.maxOfOrNull { it.group } ?: -1) + 1)
-            glyphs.mapIndexed { index, glyph ->
+            glyphs.map { glyph ->
                 val start = offset.coerceIn(0, textLength)
                 val end = (offset + glyph.text.length).coerceIn(start, textLength)
                 val probe = start.coerceAtMost((textLength - 1).coerceAtLeast(0))
@@ -530,21 +526,15 @@ private fun Md3eLyricGlyphs(glyphs: List<TimedGlyph>, position: State<Long>,
                 val startX = textLayout.getHorizontalPosition(start, true)
                 val endLine = textLayout.getLineForOffset(
                     end.coerceAtMost((textLength - 1).coerceAtLeast(0)))
-                val whole = if (start < textLength) textLayout.getBoundingBox(start) else null
-                val isolated = glyphLayouts[index].getBoundingBox(0)
-                val fallbackWidth = glyphLayouts[index].size.width.toFloat()
                 val endX = if (endLine != lineIndex) textLayout.getLineRight(lineIndex)
                     else textLayout.getHorizontalPosition(end, true)
-                val advance = abs(endX - startX).takeIf { it > .01f }
-                    ?: fallbackWidth.coerceAtLeast(.001f)
+                val advance = abs(endX - startX)
                 val groupOffset = groupCursor[glyph.group]
                 if (glyph.text.any { !it.isWhitespace() }) groupCursor[glyph.group] += advance
                 offset = end
-                Md3eGlyphPlacement(
-                    if (whole != null) whole.left - isolated.left else startX,
-                    if (whole != null) whole.top - isolated.top else textLayout.getLineTop(lineIndex),
+                Md3eGlyphPlacement(minOf(startX, endX), textLayout.getLineTop(lineIndex),
                     if (glyph.text.all { it.isWhitespace() }) 0f else advance,
-                    groupOffset)
+                    groupOffset, textLayout.getLineBottom(lineIndex))
             }
         }
         val groupWidths = remember(glyphs, placements) {
@@ -557,72 +547,59 @@ private fun Md3eLyricGlyphs(glyphs: List<TimedGlyph>, position: State<Long>,
                 for (index in 1 until starts.size) starts[index] = starts[index - 1] + groupWidths[index - 1]
             }
         }
-        Canvas(Modifier.fillMaxWidth().height(with(density) { textLayout.size.height.toDp() })) {
-            val now = drawPosition.value
-            // Most visible rows are before/after their sweep. Draw their cached
-            // paragraph once instead of issuing one text draw per glyph per frame.
-            if (now <= rangeStart) {
-                drawText(textLayout, color = if (filled) active else idle)
-                return@Canvas
-            }
-            if (now >= settledAt) {
-                val canvas = drawContext.canvas
-                canvas.save()
-                canvas.translate(0f, if (lift) -2f * density.density else 0f)
-                drawText(textLayout, color = active)
-                canvas.restore()
-                return@Canvas
-            }
-            val currentGroup = glyphs.lastOrNull { now >= it.groupStart }
-            val sungWidth = if (currentGroup == null) 0f else {
-                val progress = ((now - currentGroup.groupStart).toFloat() /
-                    (currentGroup.groupEnd - currentGroup.groupStart).coerceAtLeast(1L)).coerceIn(0f, 1f)
-                groupStarts[currentGroup.group] + groupWidths[currentGroup.group] * progress
-            }
-            glyphs.forEachIndexed { index, glyph ->
-                if (glyph.text.all { it.isWhitespace() }) return@forEachIndexed
-                val placement = placements[index]
-                val progress = if (filled) 1f else if (sweep)
-                    ((sungWidth - groupStarts[glyph.group] - placement.offsetInGroup) /
-                        placement.width.coerceAtLeast(.001f)).coerceIn(0f, 1f) else 0f
-                val liftStart = if (sweep) glyph.start else glyph.groupStart
-                val liftEnd = if (sweep) glyph.end else glyph.groupEnd
-                val raised = if (lift) md3eGlyphLift(now, liftStart, liftEnd) else 0f
-                val canvas = drawContext.canvas
-                canvas.save()
-                canvas.translate(placement.x, placement.y - raised * density.density)
-                val glyphLayout = glyphLayouts[index]
-                when {
-                    progress <= .001f -> drawText(glyphLayout, color = idle)
-                    progress >= .999f -> drawText(glyphLayout, color = active)
-                    else -> {
-                        drawText(glyphLayout, color = idle)
+        Box(Modifier.fillMaxWidth().height(with(density) { textLayout.size.height.toDp() })
+            .drawWithCache {
+                // Record shaped text only when font/width/colors change, not at
+                // every lyric frame. Both sweep and settled states reuse these
+                // SAME paragraphs, so kerning/baselines cannot jump at the end.
+                val idleLayer = obtainGraphicsLayer().apply {
+                    record(size = textLayout.size) { drawText(textLayout, color = idle) }
+                }
+                val activeLayer = obtainGraphicsLayer().apply {
+                    record(size = textLayout.size) { drawText(textLayout, color = active) }
+                }
+                onDrawBehind {
+                    val now = drawPosition.value
+                    val canvas = drawContext.canvas
+                    if (!sweep || now <= rangeStart || now >= settledAt) {
+                        val raised = if (!lift) 0f else if (sweep && now >= settledAt) 2f
+                            else if (!sweep) md3eGlyphLift(now, rangeStart, rangeEnd) else 0f
                         canvas.save()
-                        canvas.clipRect(0f, 0f,
-                            (placement.width * progress).coerceAtLeast(0f),
-                            glyphLayout.size.height.toFloat())
-                        drawText(glyphLayout, color = active)
+                        canvas.translate(0f, -raised * density.density)
+                        drawLayer(if (filled || now >= rangeEnd) activeLayer else idleLayer)
                         canvas.restore()
+                    } else {
+                        val currentGroup = glyphs.lastOrNull { now >= it.groupStart }
+                        val sungWidth = if (currentGroup == null) 0f else {
+                            val progress = ((now - currentGroup.groupStart).toFloat() /
+                                (currentGroup.groupEnd - currentGroup.groupStart).coerceAtLeast(1L)).coerceIn(0f, 1f)
+                            groupStarts[currentGroup.group] + groupWidths[currentGroup.group] * progress
+                        }
+                        glyphs.forEachIndexed { index, glyph ->
+                            val placement = placements[index]
+                            if (placement.width <= .001f) return@forEachIndexed
+                            val progress = if (filled) 1f else
+                                ((sungWidth - groupStarts[glyph.group] - placement.offsetInGroup) /
+                                    placement.width).coerceIn(0f, 1f)
+                            val raised = if (lift) md3eGlyphLift(now, glyph.start, glyph.end) else 0f
+                            canvas.save()
+                            canvas.translate(0f, -raised * density.density)
+                            canvas.clipRect(placement.x, placement.y,
+                                placement.x + placement.width, placement.bottom)
+                            if (progress < .999f) drawLayer(idleLayer)
+                            if (progress > .001f) {
+                                canvas.clipRect(placement.x, placement.y,
+                                    placement.x + placement.width * progress, placement.bottom)
+                                drawLayer(activeLayer)
+                            }
+                            canvas.restore()
+                        }
                     }
                 }
-                canvas.restore()
-            }
-        }
+            })
     }
 }
 
-private fun md3eGlyphLift(position: Long, start: Long, end: Long): Float {
-    if (position <= start) return 0f
-    val response = ((end - start) / 1000.0).coerceIn(.45, 3.0) * 1.25
-    val elapsedMs = position - start
-    // Once the response has settled, avoid exp() for every glyph on every
-    // frame. Long lyric lines otherwise spend a surprising amount of CPU in
-    // this curve even though their lift is already at its final value.
-    if (elapsedMs.toDouble() >= response * 3000.0) return 2f
-    val elapsed = (elapsedMs / 1000.0).coerceAtMost(response * 3.0)
-    val phase = 2.0 * PI * elapsed / response
-    return (2.0 * (1.0 - (1.0 + phase) * exp(-phase))).toFloat()
-}
 
 @Composable
 private fun Md3eLyricParticles(position: State<Long>, start: Long, end: Long,
@@ -788,7 +765,7 @@ internal fun Md3eLyricDynamicBackdrop(runtime: Md3eRuntime, cover: String,
     }
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
         Box(modifier.background(fallback)) {
-            Md3eSoftArtworkBackdrop(cover, Modifier.fillMaxSize(), 64.dp)
+            Md3eSoftArtworkBackdrop(cover, Modifier.fillMaxSize(), 128.dp)
             Box(Modifier.fillMaxSize().background(fallback.copy(alpha = if (dark) .39f else .10f)))
         }
         return
@@ -826,8 +803,8 @@ private class Md3eLyricBackdropView(context: android.content.Context) : View(con
     }
 
     init {
-        // 18 px at quarter resolution preserves the previous 72 px softness.
-        setRenderEffect(RenderEffect.createBlurEffect(18f, 18f, Shader.TileMode.MIRROR))
+        // Quarter-resolution layer: 36 px gives twice the previous blur radius.
+        setRenderEffect(RenderEffect.createBlurEffect(36f, 36f, Shader.TileMode.MIRROR))
     }
 
     fun update(image: Bitmap?, dark: Boolean, active: Boolean) {

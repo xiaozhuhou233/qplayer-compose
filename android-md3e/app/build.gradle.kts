@@ -8,6 +8,32 @@ configurations.configureEach {
     exclude(group = "org.jetbrains.kotlin", module = "kotlin-stdlib-jdk7")
     exclude(group = "org.jetbrains.kotlin", module = "kotlin-stdlib-jdk8")
 }
+// Compile only the old iOS chrome and its vendored glass renderer, never the legacy app.
+val stageIosChrome by tasks.registering(Sync::class) {
+    from("../../android-shell/app/src/main/java") {
+        include("com/kyant/backdrop/**")
+        include("dev/t1m3/qplayer/android/ui/IosDesignTheme.kt")
+        include("dev/t1m3/qplayer/android/ui/IosDesignNavigation.kt")
+        include("dev/t1m3/qplayer/android/ui/IosPlayerDock.kt")
+        include("dev/t1m3/qplayer/android/ui/IosPlayerControls.kt")
+        include("dev/t1m3/qplayer/android/ui/IosControls.kt")
+        include("dev/t1m3/qplayer/android/ui/IosDialogs.kt")
+        include("dev/t1m3/qplayer/android/ui/IosLiquidGlass.kt")
+        include("dev/t1m3/qplayer/android/ui/IosGlassPalette.kt")
+        include("dev/t1m3/qplayer/android/ui/IosGlassInteraction.kt")
+        include("dev/t1m3/qplayer/android/ui/IosAdaptiveGlass.kt")
+        include("dev/t1m3/qplayer/android/ui/IosLiquidSearchButton.kt")
+        include("dev/t1m3/qplayer/android/ui/RestoredIosDialogGlass.kt")
+        include("dev/t1m3/qplayer/android/ui/GlassSamplingPolicy.kt")
+        include("dev/t1m3/qplayer/android/ui/AndroidGlassColorModel.kt")
+        include("dev/t1m3/qplayer/android/ui/BiliPaiGlassParameters.kt")
+        include("dev/t1m3/qplayer/android/ui/BiliPaiGlassHighlight.kt")
+        include("dev/t1m3/qplayer/android/ui/BiliPaiDeviceTilt.kt")
+        include("dev/t1m3/qplayer/android/ui/SystemBarAppearance.kt")
+    }
+    into(layout.buildDirectory.dir("generated/iosChrome"))
+}
+tasks.named("preBuild") { dependsOn(stageIosChrome) }
 android {
     namespace = "dev.t1m3.qplayer.android.md3eui"
     compileSdk = 35
@@ -25,6 +51,7 @@ android {
     }
     kotlinOptions { jvmTarget = "1.8" }
     buildFeatures { compose = true }
+    sourceSets["main"].java.srcDir(layout.buildDirectory.dir("generated/iosChrome"))
     // Release credentials come from the environment, never from this tracked
     // file -- same QPLAYER_* contract android-shell/app/build.gradle.kts uses.
     // Without them the release build stays unsigned rather than silently
@@ -63,6 +90,9 @@ dependencies {
     implementation(platform("androidx.compose:compose-bom:2025.05.00"))
     implementation("androidx.activity:activity-compose:1.8.2")
     implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.graphics:graphics-shapes:1.0.1")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.compose.material3:material3:1.4.0-alpha18")
     implementation("androidx.media:media:1.7.0")
     implementation("sh.calvin.reorderable:reorderable:2.2.0")

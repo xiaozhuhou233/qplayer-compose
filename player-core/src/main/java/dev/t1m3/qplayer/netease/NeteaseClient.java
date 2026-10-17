@@ -313,14 +313,29 @@ public final class NeteaseClient {
     private synchronized String eapiCall(String apiPath, Map<String, Object> json, boolean checkToken)
             throws IOException {
         ensureDeviceCookies();
-        String csrf = cookies.getOrDefault("__csrf", "");
-        String musicU = cookies.getOrDefault("MUSIC_U", "");
+        return eapiCall(apiPath, json, checkToken, cookies, true);
+    }
+
+    /** Search-only requests use a session snapshot and cannot write back stale login cookies. */
+    private String eapiSearchCall(String apiPath, Map<String, Object> json) throws IOException {
+        Map<String, String> session;
+        synchronized (this) {
+            ensureDeviceCookies();
+            session = new LinkedHashMap<>(cookies);
+        }
+        return eapiCall(apiPath, json, false, session, false);
+    }
+
+    private String eapiCall(String apiPath, Map<String, Object> json, boolean checkToken,
+            Map<String, String> session, boolean persistSetCookies) throws IOException {
+        String csrf = session.getOrDefault("__csrf", "");
+        String musicU = session.getOrDefault("MUSIC_U", "");
 
         // Mobile-client header: signed into the body AND sent as the Cookie. The
         // device fields mimic the iPhone client (matching EAPI_UA).
         Map<String, Object> header = new LinkedHashMap<>();
         header.put("osver", "16.2");
-        header.put("deviceId", cookies.getOrDefault("deviceId", ""));
+        header.put("deviceId", session.getOrDefault("deviceId", ""));
         header.put("os", "iPhone OS");
         header.put("appver", "9.0.90");
         header.put("versioncode", "140");
@@ -379,7 +394,7 @@ public final class NeteaseClient {
             } finally {
                 if (is != null) { try { is.close(); } catch (IOException ignored) {} }
             }
-            captureSetCookies(conn.getHeaderFields().get("Set-Cookie"));
+            if (persistSetCookies) captureSetCookies(conn.getHeaderFields().get("Set-Cookie"));
 
             if (code >= 400) {
                 Logger.warn("Netease HTTP {} on /eapi/{}: {}", code, tail, truncate(resp, 200));
@@ -478,13 +493,21 @@ public final class NeteaseClient {
 
     private JsonObject apiJson(NeteaseApi.Endpoint endpoint, Map<String, Object> body,
             boolean reportErrors) throws IOException {
+        return apiJson(endpoint, body, reportErrors, false);
+    }
+
+    private JsonObject apiJson(NeteaseApi.Endpoint endpoint, Map<String, Object> body,
+            boolean reportErrors, boolean parallelSearch) throws IOException {
+        if (parallelSearch && endpoint != NeteaseApi.CLOUD_SEARCH)
+            throw new IllegalArgumentException("Only catalogue searches may bypass the session transport lock");
         String response;
         switch (endpoint.transport) {
             case WEAPI:
                 response = weapiCall(endpoint.weapiPath(), body);
                 break;
             case EAPI:
-                response = eapiCall(endpoint.path, body, endpoint.checkToken);
+                response = parallelSearch ? eapiSearchCall(endpoint.path, body)
+                        : eapiCall(endpoint.path, body, endpoint.checkToken);
                 break;
             case XEAPI:
                 response = xeapiCall(endpoint.path, xeapiForm(body));
@@ -506,6 +529,8 @@ public final class NeteaseClient {
             // without exposing request bodies, account cookies or credentials.
             Logger.warn("Netease API {} code {}: {}", endpoint.path, code, neteaseMessage(object));
         }
+        if (parallelSearch && code != 200)
+            throw new IOException("网易云搜索失败（" + code + "）：" + neteaseMessage(object));
         if (code == 301 && isLoggedIn() && !endpoint.loginFlow) {
             Logger.warn("Netease: session expired (code 301) on {} — clearing cookies",
                     endpoint.path);
@@ -1004,13 +1029,22 @@ public final class NeteaseClient {
     }
 
     public SongSearchPage searchSongsPage(String keyword, int limit, int offset) throws IOException {
+        return searchSongsPage(keyword, limit, offset, false);
+    }
+
+    /** AI lookups overlap network waits without serialising playback/collection writes. */
+    public List<NeteaseSong> searchAiSongs(String keyword, int limit) throws IOException {
+        return searchSongsPage(keyword, limit, 0, true).songs;
+    }
+
+    private SongSearchPage searchSongsPage(String keyword, int limit, int offset, boolean parallelSearch) throws IOException {
         Map<String, Object> body = new HashMap<>();
         body.put("s", keyword);
         body.put("type", 1);
         body.put("limit", limit);
         body.put("offset", offset);
         body.put("total", true);
-        JsonObject obj = apiJson(NeteaseApi.CLOUD_SEARCH, body);
+        JsonObject obj = apiJson(NeteaseApi.CLOUD_SEARCH, body, true, parallelSearch);
         List<NeteaseSong> out = new ArrayList<>();
         int total = -1;
         int consumed = 0;
@@ -1178,6 +1212,79 @@ public final class NeteaseClient {
             }
         }
         return out;
+    }
+
+    /** Lightweight taste read, separate from opening a complete playlist. */
+    public List<NeteaseSong> playlistTasteSample(long playlistId, int limit, java.util.Random random)
+            throws IOException {
+        if (limit <= 0) return Collections.emptyList();
+        Map<String, Object> body = new HashMap<>();
+        body.put("id", playlistId); body.put("n", limit); body.put("s", 0);
+        JsonObject detail = apiJson(NeteaseApi.PLAYLIST_DETAIL, body);
+        if (!detail.has("playlist") || !detail.get("playlist").isJsonObject())
+            return Collections.emptyList();
+        JsonObject playlist = detail.getAsJsonObject("playlist");
+        List<NeteaseSong> tracks = parseTasteTracks(playlist, limit, random);
+        if (!tracks.isEmpty()) return tracks;
+        // Some liked playlists expose IDs only. Resolve a small random batch,
+        // rather than fetching hundreds of details to discard most of them.
+        List<Long> ids = tasteTrackIds(playlist, limit, random);
+        // A few liked playlists hide IDs when n is small. Retry only that case;
+        // even then song/detail resolves at most the small sample batch.
+        if (ids.isEmpty() && playlist.has("trackCount") && playlist.get("trackCount").isJsonPrimitive()
+                && playlist.get("trackCount").getAsInt() > 0) {
+            body.put("n", 100000);
+            detail = apiJson(NeteaseApi.PLAYLIST_DETAIL, body);
+            if (detail.has("playlist") && detail.get("playlist").isJsonObject()) {
+                playlist = detail.getAsJsonObject("playlist");
+                tracks = parseTasteTracks(playlist, limit, random);
+                if (!tracks.isEmpty()) return tracks;
+                ids = tasteTrackIds(playlist, limit, random);
+            }
+        }
+        if (ids.isEmpty()) return tracks;
+        JsonArray rows = new JsonArray();
+        for (long id : ids) { JsonObject row = new JsonObject(); row.addProperty("id", id); rows.add(row); }
+        Map<String, Object> songBody = new HashMap<>();
+        songBody.put("c", rows.toString());
+        JsonObject response = apiJson(NeteaseApi.SONG_DETAIL, songBody);
+        if (response.has("songs")) {
+            JsonObject wrapper = new JsonObject(); wrapper.add("tracks", response.get("songs"));
+            tracks = parseTasteTracks(wrapper, limit, random);
+        }
+        return tracks;
+    }
+
+    static List<NeteaseSong> parseTasteTracks(JsonObject playlist, int limit, java.util.Random random) {
+        List<JsonObject> rows = new ArrayList<>();
+        if (playlist.has("tracks") && playlist.get("tracks").isJsonArray())
+            for (JsonElement row : playlist.getAsJsonArray("tracks"))
+                if (row.isJsonObject()) rows.add(row.getAsJsonObject());
+        Collections.shuffle(rows, random);
+        List<NeteaseSong> songs = new ArrayList<>();
+        java.util.Set<Long> seen = new java.util.HashSet<>();
+        for (JsonObject row : rows) {
+            if (songs.size() >= limit) break;
+            NeteaseSong song = parseSong(row);
+            if (song.id > 0 && song.name != null && !song.name.trim().isEmpty() && seen.add(song.id)) songs.add(song);
+        }
+        return songs;
+    }
+
+    static List<Long> tasteTrackIds(JsonObject playlist, int limit, java.util.Random random) {
+        java.util.Set<Long> unique = new java.util.LinkedHashSet<>();
+        if (playlist.has("trackIds") && playlist.get("trackIds").isJsonArray())
+            for (JsonElement row : playlist.getAsJsonArray("trackIds")) {
+                if (!row.isJsonObject()) continue;
+                JsonElement id = row.getAsJsonObject().get("id");
+                if (id != null && id.isJsonPrimitive()) {
+                    try { if (id.getAsLong() > 0) unique.add(id.getAsLong()); }
+                    catch (NumberFormatException ignored) { }
+                }
+            }
+        List<Long> ids = new ArrayList<>(unique);
+        Collections.shuffle(ids, random);
+        return new ArrayList<>(ids.subList(0, Math.min(Math.max(0, limit), ids.size())));
     }
 
     /** Common JSON decode for /cloudsearch songs[] / /song/detail songs[] / playlist tracks[]. */
@@ -1468,6 +1575,64 @@ public final class NeteaseClient {
             out.add(parseSong(el.getAsJsonObject()));
         }
         return out;
+    }
+
+    /** Optional, silent background lookup. No title search: only the song's own MV. */
+    public String songMvUrl(long songId) throws IOException {
+        if (songId <= 0) return "";
+        // These optional reads must not hold the session monitor while music
+        // URL resolution/login waits. Discard response cookies from this snapshot.
+        Map<String, String> session = new LinkedHashMap<>(cookies);
+        Map<String, Object> body = new HashMap<>();
+        body.put("c", "[{\"id\":" + songId + "}]");
+        JsonObject detail = mvBackgroundJson(NeteaseApi.SONG_DETAIL, body, session);
+        long mvId = songMvId(detail, songId);
+        if (mvId <= 0) return "";
+        body.clear();
+        body.put("id", mvId);
+        for (int resolution : new int[]{1080, 720}) {
+            body.put("r", resolution);
+            String url = mvPlaybackUrl(mvBackgroundJson(NeteaseApi.MV_URL, body, session));
+            if (!url.isEmpty()) return url;
+        }
+        return "";
+    }
+
+    private JsonObject mvBackgroundJson(NeteaseApi.Endpoint endpoint, Map<String, Object> body,
+            Map<String, String> session) throws IOException {
+        if (endpoint != NeteaseApi.SONG_DETAIL && endpoint != NeteaseApi.MV_URL)
+            throw new IllegalArgumentException("Only MV background reads may bypass the session lock");
+        JsonElement result = JsonParser.parseString(weapiCall(endpoint.weapiPath(), body, session, false));
+        if (!result.isJsonObject()) throw new IOException("MV background response unavailable");
+        return result.getAsJsonObject();
+    }
+
+    static long songMvId(JsonObject detail, long songId) throws IOException {
+        if (number(detail, "code", 200) != 200)
+            throw new IOException("MV song detail unavailable");
+        JsonArray songs = array(detail, "songs");
+        if (songs != null) for (JsonElement row : songs) {
+            if (!row.isJsonObject()) continue;
+            JsonObject song = row.getAsJsonObject();
+            if (number(song, "id", 0) == songId)
+                return Math.max(0, number(song, "mv", number(song, "mvid", 0)));
+        }
+        throw new IOException("MV song detail missing requested song");
+    }
+
+    static String mvPlaybackUrl(JsonObject response) throws IOException {
+        if (number(response, "code", 200) != 200)
+            throw new IOException("MV URL unavailable");
+        JsonObject data = object(response, "data");
+        if (data == null || number(data, "code", 200) != 200) return "";
+        String url = string(data, "url").trim();
+        if (url.startsWith("http://")) url = "https://" + url.substring(7);
+        try {
+            java.net.URI uri = java.net.URI.create(url);
+            return "https".equalsIgnoreCase(uri.getScheme()) && uri.getHost() != null ? url : "";
+        } catch (IllegalArgumentException invalid) {
+            return "";
+        }
     }
 
     // ---- User account / library (N6) ----
@@ -1876,6 +2041,55 @@ public final class NeteaseClient {
                     pid, songId, add, truncate(obj.toString(), 300));
         }
         return code == 200;
+    }
+
+    /** Batch editing keeps collection fast even for a full AI playlist. */
+    public boolean manipulatePlaylistTracks(long pid, List<Long> songIds, boolean add) throws IOException {
+        if (songIds.isEmpty()) return true;
+        List<Long> ids = new ArrayList<>(new java.util.LinkedHashSet<>(songIds));
+        JsonObject obj = manipulateTracksOnce(pid, new Gson().toJson(ids), add);
+        int code = obj.has("code") && !obj.get("code").isJsonNull() ? obj.get("code").getAsInt() : -1;
+        if (code == 512) {
+            // NetEase may de-duplicate an otherwise valid batch to one track.
+            for (long id : ids) if (!manipulatePlaylistTracks(pid, id, add)) return false;
+            return true;
+        }
+        return code == 200;
+    }
+
+    public boolean reorderPlaylistTracks(long playlistId, List<Long> songIds) throws IOException {
+        if (songIds.isEmpty()) return true;
+        Map<String, Object> body = new HashMap<>();
+        body.put("pid", playlistId);
+        body.put("trackIds", new Gson().toJson(songIds));
+        body.put("op", "update");
+        JsonObject obj = apiJson(NeteaseApi.PLAYLIST_TRACKS, body);
+        return obj.has("code") && !obj.get("code").isJsonNull() && obj.get("code").getAsInt() == 200;
+    }
+
+    /** Full authoritative ids for editing; a failed read must never look like an empty list. */
+    public List<Long> playlistTrackIds(long playlistId) throws IOException {
+        Map<String, Object> body = new HashMap<>();
+        body.put("id", playlistId); body.put("n", 100000); body.put("s", 8);
+        return parsePlaylistTrackIds(apiJson(NeteaseApi.PLAYLIST_DETAIL, body));
+    }
+
+    static List<Long> parsePlaylistTrackIds(JsonObject response) throws IOException {
+        if (!response.has("code") || response.get("code").isJsonNull() || response.get("code").getAsInt() != 200
+                || !response.has("playlist") || !response.get("playlist").isJsonObject())
+            throw new IOException("无法读取网易云歌单，请确认歌单仍存在且账号有权限");
+        JsonObject playlist = response.getAsJsonObject("playlist");
+        if (!playlist.has("trackIds") || !playlist.get("trackIds").isJsonArray())
+            throw new IOException("网易云未返回完整歌曲列表，请重试");
+        List<Long> ids = new ArrayList<>();
+        for (JsonElement row : playlist.getAsJsonArray("trackIds")) {
+            if (!row.isJsonObject() || !row.getAsJsonObject().has("id"))
+                throw new IOException("网易云歌曲列表不完整，请重试");
+            long id = row.getAsJsonObject().get("id").getAsLong();
+            if (id <= 0 || ids.contains(id)) throw new IOException("网易云歌曲列表无效，请重试");
+            ids.add(id);
+        }
+        return ids;
     }
 
     private JsonObject manipulateTracksOnce(long pid, String trackIdsJson, boolean add) throws IOException {

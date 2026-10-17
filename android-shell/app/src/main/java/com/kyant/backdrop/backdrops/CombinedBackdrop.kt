@@ -47,6 +47,12 @@ private class Combined2Backdrops(
     override val isCoordinatesDependent: Boolean =
         backdrop1.isCoordinatesDependent || backdrop2.isCoordinatesDependent
 
+    override fun observeChanges(onChanged: () -> Unit): () -> Unit {
+        val first = backdrop1.observeChanges(onChanged)
+        val second = backdrop2.observeChanges(onChanged)
+        return { first(); second() }
+    }
+
     override fun DrawScope.drawBackdrop(
         density: Density,
         coordinates: LayoutCoordinates?,
@@ -69,6 +75,11 @@ private class Combined3Backdrops(
                 backdrop2.isCoordinatesDependent ||
                 backdrop3.isCoordinatesDependent
 
+    override fun observeChanges(onChanged: () -> Unit): () -> Unit {
+        val stops = listOf(backdrop1, backdrop2, backdrop3).map { it.observeChanges(onChanged) }
+        return { stops.forEach { it() } }
+    }
+
     override fun DrawScope.drawBackdrop(
         density: Density,
         coordinates: LayoutCoordinates?,
@@ -87,6 +98,11 @@ private class CombinedBackdrops(
 
     override val isCoordinatesDependent: Boolean =
         backdrops.any { it.isCoordinatesDependent }
+
+    override fun observeChanges(onChanged: () -> Unit): () -> Unit {
+        val stops = backdrops.map { it.observeChanges(onChanged) }
+        return { stops.forEach { it() } }
+    }
 
     override fun DrawScope.drawBackdrop(
         density: Density,

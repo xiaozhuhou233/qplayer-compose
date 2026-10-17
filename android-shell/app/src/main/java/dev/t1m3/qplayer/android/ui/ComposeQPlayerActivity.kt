@@ -2109,14 +2109,6 @@ private fun QPlayerComposeApp(controller: PlayerController, settings: SettingsCo
                                 // bottom shadow; its inner chrome applies the
                                 // 20dp/12dp visual insets itself.
                                 modifier = Modifier.align(Alignment.BottomCenter).fillMaxSize(),
-                                topAction = {
-                                    PrivateFmFab(onClick = {
-                                        if (state.loggedIn) {
-                                            controller.startPrivateFm()
-                                            navigateTo(ComposeRoute(ComposeScreen.LYRICS))
-                                        } else loginOpen = true
-                                    })
-                                },
                                 player = { playerModifier, compactProgress ->
                                     MiniPlayer(
                                         glassBackdrop = liquidBackdrop,

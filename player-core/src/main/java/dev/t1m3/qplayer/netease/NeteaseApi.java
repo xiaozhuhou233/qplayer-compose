@@ -64,6 +64,8 @@ final class NeteaseApi {
             "/api/v6/playlist/detail", Transport.EAPI);
     static final Endpoint SONG_DETAIL = endpoint(
             "/api/v3/song/detail", Transport.WEAPI);
+    static final Endpoint MV_URL = endpoint(
+            "/api/song/enhance/play/mv/url", Transport.WEAPI);
     static final Endpoint PLAYLIST_SUBSCRIBE = checked(
             "/api/playlist/subscribe");
     static final Endpoint PLAYLIST_UNSUBSCRIBE = checked(

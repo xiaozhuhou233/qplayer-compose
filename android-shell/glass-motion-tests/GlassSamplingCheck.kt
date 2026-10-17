@@ -15,6 +15,20 @@ fun main() {
     check(!policy.shouldSample(GLASS_SAMPLE_IDLE_MS + 999, stamp.copy(revision = 3)))
     check(policy.shouldSample(GLASS_SAMPLE_IDLE_MS + 1000, stamp.copy(revision = 3)))
 
+    val perPage = GlassSamplingPolicy(perPage = true)
+    check(perPage.shouldSample(0, stamp))
+    perPage.completed(0, stamp, true)
+    // Long dwell, scrolling and dock collapse keep the page's single sample.
+    check(!perPage.shouldSample(60_000, stamp))
+    check(!perPage.shouldSample(60_000, stamp.copy(x = 40, width = 300)))
+    check(perPage.shouldSample(60_000, stamp.copy(revision = 2)))
+    perPage.completed(60_000, stamp.copy(revision = 2), false)
+    check(!perPage.shouldSample(60_999, stamp.copy(revision = 2)))
+    check(perPage.shouldSample(61_000, stamp.copy(revision = 2)))
+    perPage.completed(61_000, stamp.copy(revision = 2), true)
+    check(!perPage.shouldSample(120_000, stamp.copy(revision = 2)))
+    check(perPage.shouldSample(120_000, stamp.copy(revision = 3)))
+
     fun samplesOverTenSeconds(moving: Boolean): Int {
         val cadence = GlassSamplingPolicy()
         var samples = 0

@@ -1,5 +1,10 @@
 package dev.t1m3.qplayer.android.md3eui
 
+import dev.t1m3.qplayer.android.md3eui.Md3eAdaptiveButton as Button
+
+import dev.t1m3.qplayer.android.ui.IosAwareTextButton as TextButton
+import dev.t1m3.qplayer.android.ui.IosAwareSlider as Slider
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
@@ -15,11 +20,17 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.layer.GraphicsLayer
+import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -27,11 +38,11 @@ import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.util.lerp
 import dev.t1m3.qplayer.netease.dto.NeteaseSong
 import kotlinx.coroutines.delay
@@ -57,11 +68,16 @@ internal class ClaudeAiDjState {
     var source by mutableStateOf(Rect.Zero)
     var inputBounds by mutableStateOf(Rect.Zero)
     var logoBounds by mutableStateOf(Rect.Zero)
+    var inputLayer: GraphicsLayer? = null
+    var logoLayer: GraphicsLayer? = null
+    var sourceLayer: GraphicsLayer? = null
+    var mascotFrame: ImageBitmap? = null
     fun open(text: String, randomMode: Boolean, initialCount: Int) {
         if (phase == "running" || shown) return
         prompt = text.trim(); random = randomMode
-        count = initialCount.coerceIn(1, 40).toFloat()
+        count = initialCount.coerceIn(5, 40).toFloat()
         source = if (randomMode) logoBounds else inputBounds
+        sourceLayer = if (randomMode) logoLayer else inputLayer
         outputFinished = false; ownsRequest = false; error = ""; progress = ""; output = ""; songs = emptyList()
         phase = if (randomMode) "choosing" else "running"
         session++; dismissRequested = false; shown = true
@@ -71,12 +87,17 @@ internal val LocalClaudeAiDj = staticCompositionLocalOf<ClaudeAiDjState?> { null
 private val DjOrange = Color(0xFFE36038)
 private val DjCream = Color(0xFFFBF1E1)
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun ClaudeAiDjInput(runtime: Md3eRuntime, modifier: Modifier = Modifier) {
     val dj = LocalClaudeAiDj.current ?: return
     var prompt by remember { mutableStateOf("") }
     val keyboard = LocalSoftwareKeyboardController.current
     val focus = LocalFocusManager.current
+    val inputLayer = rememberGraphicsLayer()
+    val logoLayer = rememberGraphicsLayer()
+    val mascotCapture = remember { AiMascotCapture() }
+    SideEffect { dj.inputLayer = inputLayer; dj.logoLayer = logoLayer }
     val submit = {
         if (prompt.isNotBlank()) {
             keyboard?.hide(); focus.clearFocus()
@@ -87,6 +108,10 @@ internal fun ClaudeAiDjInput(runtime: Md3eRuntime, modifier: Modifier = Modifier
         OutlinedTextField(prompt, { prompt = it },
             Modifier.weight(1f).onGloballyPositioned { dj.inputBounds = it.boundsInRoot() }
                 .graphicsLayer { alpha = if (dj.shown && !dj.random) 0f else 1f }
+                .drawWithContent {
+                    if (!dj.shown) inputLayer.record { this@drawWithContent.drawContent() }
+                    drawContent()
+                }
                 .onPreviewKeyEvent {
                     if ((it.key == Key.Enter || it.key == Key.NumPadEnter) && it.type == KeyEventType.KeyUp) {
                         submit(); true
@@ -97,11 +122,27 @@ internal fun ClaudeAiDjInput(runtime: Md3eRuntime, modifier: Modifier = Modifier
             keyboardActions = KeyboardActions(onSend = { submit() }, onDone = { submit() }))
         Box(Modifier.size(48.dp).onGloballyPositioned { dj.logoBounds = it.boundsInRoot() }
             .graphicsLayer { alpha = if (dj.shown && dj.random) 0f else 1f }
-            .claudeClickable(enabled = dj.phase != "running", role = Role.Button, onClickLabel = "随机推荐") {
+            .drawWithContent {
+                if (!dj.shown) logoLayer.record { this@drawWithContent.drawContent() }
+                drawContent()
+            }
+            .semantics { contentDescription = "AI DJ 随机推荐" }
+            .claudeClickable(enabled = dj.phase != "running", role = Role.Button,
+                onClickLabel = "随机推荐", onLongClickLabel = "进入或退出实验性 AI DJ 模式",
+                onLongClick = {
+                    keyboard?.hide(); focus.clearFocus()
+                    runtime.play {
+                        if (experimentalAiDjActive.peek() == true) stopExperimentalAiDj()
+                        else startExperimentalAiDj(runtime.settings.str("aiBaseUrl"),
+                            runtime.settings.str("aiApiKey"), runtime.settings.str("aiModel"),
+                            runtime.settings.bool("aiForceKnowledge"))
+                    }
+                }, onClick = {
                 keyboard?.hide(); focus.clearFocus()
+                dj.mascotFrame = mascotCapture.capture()?.asImageBitmap()
                 dj.open("", true, runtime.settings.intOf("aiTasteCount").let { if (it > 0) it else 20 })
-            }, contentAlignment = Alignment.Center) {
-            Image(painterResource(R.drawable.ic_claude_ai_dj), "AI DJ 随机推荐", Modifier.size(44.dp))
+            }), contentAlignment = Alignment.Center) {
+            Md3eAiMascot(Modifier.size(48.dp), AiDjMascotStage.Home, mascotCapture, running = !dj.shown)
         }
     }
 }
@@ -111,6 +152,7 @@ internal fun ClaudeAiDjInput(runtime: Md3eRuntime, modifier: Modifier = Modifier
 internal fun ClaudeAiDjHost(runtime: Md3eRuntime, dj: ClaudeAiDjState,
     player: Md3ePlayerExpansionState, onDock: () -> Unit) {
     val currentDock by rememberUpdatedState(onDock)
+    val ios = LocalIosDesign.current
     val animate = claudeMotionEnabled()
     val reveal = remember { Animatable(0f) }
     val tilt = remember { Animatable(0f) }
@@ -131,7 +173,7 @@ internal fun ClaudeAiDjHost(runtime: Md3eRuntime, dj: ClaudeAiDjState,
     LaunchedEffect(dj.session, dj.phase) {
         if (dj.phase != "running") return@LaunchedEffect
         val controller = runtime.controller
-        if (controller.aiLoading.peek()) {
+        if (controller.aiLoading.peek() && !controller.experimentalAiDjActive.peek()) {
             dj.error = "已有推荐正在生成，请完成后重试。"; dj.phase = "error"
             return@LaunchedEffect
         }
@@ -142,10 +184,10 @@ internal fun ClaudeAiDjHost(runtime: Md3eRuntime, dj: ClaudeAiDjState,
             dj.error = "请先在设置中填写 AI API 地址、Key 和模型名称。"; dj.phase = "error"
             return@LaunchedEffect
         }
-        val count = if (dj.random) dj.count.roundToInt().coerceIn(1, 40) else
+        val count = if (dj.random) dj.count.roundToInt().coerceIn(5, 40) else
             (Regex("(\\d{1,3})\\s*(首|首歌|songs?)?", RegexOption.IGNORE_CASE)
-                .find(dj.prompt)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 10).coerceIn(1, 100)
-        val request = if (dj.random) "严格根据提供的听歌样本分析偏好，随机生成多种类型的歌曲，必须返回不同风格的真实歌曲，不要重复样本。" else dj.prompt
+                .find(dj.prompt)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 10).coerceIn(5, 100)
+        val request = if (dj.random) "主要根据收藏歌单和听歌历史选曲，以常听歌手和相近曲风为主，在偏好范围内随机推荐真实歌曲；保留少量风格相近的新歌或新发现，可包含熟悉的挚爱，不为了随机性混入无关流派。" else dj.prompt
         dj.outputFinished = false
         dj.error = ""; dj.output = ""; dj.songs = emptyList()
         dj.progress = "正在准备 AI 推荐…"
@@ -186,6 +228,10 @@ internal fun ClaudeAiDjHost(runtime: Md3eRuntime, dj: ClaudeAiDjState,
             dj.outputFinished = true
         }
         if (dj.phase == "docking" && dj.shown) {
+            if (ios) {
+                dj.dockStretch = 0f; dj.shown = false; dj.phase = "idle"
+                return@LaunchedEffect
+            }
             if (animate) {
                 // OM.flyThrough tilt establishes depth, then morphRect carries the card to the dock.
                 tilt.animateTo(1f, ClaudeOneTake.snappy())
@@ -217,6 +263,16 @@ internal fun ClaudeAiDjHost(runtime: Md3eRuntime, dj: ClaudeAiDjState,
         }
     }
     if (!dj.shown) return
+    if (ios) {
+        dev.t1m3.qplayer.android.ui.IosAwareAlertDialog(
+            onDismissRequest = { if (dj.phase !in setOf("result", "docking")) cancel() },
+            confirmButton = {}, scrollableContent = false, showActions = false,
+            text = {
+                AiDjDialogContent(runtime, dj, typing.value, sliderInteraction, ::cancel, currentDock,
+                    Modifier.fillMaxWidth().height(540.dp))
+            })
+        return
+    }
     // Completion has one explicit exit: the bottom button. Back cancels only unfinished work.
     BackHandler { if (dj.phase !in setOf("result", "docking")) cancel() }
     BoxWithConstraints(Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionInRoot() }
@@ -245,7 +301,9 @@ internal fun ClaudeAiDjHost(runtime: Md3eRuntime, dj: ClaudeAiDjState,
             .graphicsLayer {
                 val g = ClaudeOneTake.ExpoOut.transform(gather.value)
                 val frame = mix(mix(start, target, reveal.value), dock, g)
-                shape = RoundedCornerShape(28.dp)
+                shape = RoundedCornerShape(with(density) {
+                    lerp(start.height * .5f, 28.dp.toPx(), reveal.value).toDp()
+                })
                 clip = true
                 shadowElevation = 18.dp.toPx() * (1f - g)
                 transformOrigin = TransformOrigin(0f, 0f)
@@ -253,50 +311,89 @@ internal fun ClaudeAiDjHost(runtime: Md3eRuntime, dj: ClaudeAiDjState,
                 scaleX = frame.width / cardWidth; scaleY = frame.height / cardHeight
                 rotationX = -18f * tilt.value * (1f - g)
                 cameraDistance = 14f * density.density
-                alpha = 1f - ((g - .88f) / .12f).coerceIn(0f, 1f)
+                val cardBlend = ((reveal.value - .05f) / .45f).coerceIn(0f, 1f)
+                alpha = cardBlend * (1f - ((g - .88f) / .12f).coerceIn(0f, 1f))
             }.drawBehind {
                 drawRect(androidx.compose.ui.graphics.lerp(
                     androidx.compose.ui.graphics.lerp(paper, DjOrange, reveal.value), paper,
                     ClaudeOneTake.ExpoOut.transform(gather.value)))
             }, shape = RoundedCornerShape(28.dp), color = Color.Transparent,
             contentColor = DjCream) {
-            Column(Modifier.fillMaxSize().padding(22.dp).graphicsLayer {
-                alpha = ((reveal.value - .2f) / .65f).coerceIn(0f, 1f) *
-                    (1f - ClaudeOneTake.ExpoOut.transform(gather.value))
-            }, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Box(Modifier.align(Alignment.CenterHorizontally).width(30.dp).height(3.dp).background(DjCream.copy(alpha = .5f), RoundedCornerShape(2.dp)))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("aidj", Modifier.weight(1f), fontFamily = ClaudeSerif, fontSize = 38.sp)
-                }
-                Text(if (dj.random) "交给偶然，也交给你的喜好。" else dj.prompt, maxLines = 2, fontSize = 13.sp)
-                HorizontalDivider(color = DjCream.copy(alpha = .25f))
-                if (dj.random) {
-                    Text("${dj.count.roundToInt()} 首歌曲", fontFamily = ClaudeSerif, fontSize = 23.sp)
-                    Slider(dj.count, { dj.count = it.roundToInt().toFloat() }, enabled = dj.phase == "choosing",
-                        valueRange = 1f..40f, steps = 38, interactionSource = sliderInteraction,
-                        colors = SliderDefaults.colors(thumbColor = DjCream, activeTrackColor = DjCream,
-                            inactiveTrackColor = DjCream.copy(alpha = .25f), disabledThumbColor = DjCream,
-                            disabledActiveTrackColor = DjCream.copy(alpha = .75f)))
-                    if (dj.phase == "choosing") Text("选好数量后，点击开始生成", fontSize = 12.sp)
-                }
+            AiDjDialogContent(runtime, dj, typing.value, sliderInteraction, ::cancel, currentDock,
+                Modifier.fillMaxSize().padding(22.dp).graphicsLayer {
+                    alpha = ((reveal.value - .2f) / .65f).coerceIn(0f, 1f) *
+                        (1f - ClaudeOneTake.ExpoOut.transform(gather.value))
+                })
+        }
+
+        dj.sourceLayer?.let { sourceLayer ->
+            Box(Modifier.width(with(density) { start.width.toDp() })
+                .height(with(density) { start.height.toDp() })
+                .clearAndSetSemantics {}
+                .graphicsLayer {
+                    val frame = mix(start, target, reveal.value)
+                    transformOrigin = TransformOrigin(0f, 0f)
+                    translationX = frame.left; translationY = frame.top
+                    scaleX = frame.width / start.width.coerceAtLeast(1f)
+                    scaleY = frame.height / start.height.coerceAtLeast(1f)
+                    // Retain the real icon/text-field drawing at both endpoints.
+                    alpha = 1f - ((reveal.value - .05f) / .45f).coerceIn(0f, 1f)
+                }.drawWithContent {
+                    val frame = dj.mascotFrame
+                    if (dj.random && frame != null) {
+                        drawImage(frame, dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()))
+                    } else drawLayer(sourceLayer)
+                })
+        }
+    }
+}
+
+
+@Composable
+private fun AiDjDialogContent(runtime: Md3eRuntime, dj: ClaudeAiDjState, typingProgress: Float,
+    sliderInteraction: MutableInteractionSource, onCancel: () -> Unit, onDock: () -> Unit,
+    modifier: Modifier) {
+    val ink = if (LocalIosDesign.current) MaterialTheme.colorScheme.onSurface else DjCream
+    val heading = if (LocalIosDesign.current) androidx.compose.ui.text.font.FontFamily.Default else ClaudeSerif
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Box(Modifier.align(Alignment.CenterHorizontally).width(30.dp).height(3.dp).background(ink.copy(alpha = .5f), RoundedCornerShape(2.dp)))
+                // All variable-height content shares one viewport. The action
+                // below is measured separately and stays reachable at any font size.
                 Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("aidj", Modifier.weight(1f), fontFamily = heading, fontSize = 38.sp)
+                }
+                Text(if (dj.random) "Leave it to chance, and also to your preferences" else dj.prompt, maxLines = 2, fontSize = 13.sp)
+                HorizontalDivider(color = ink.copy(alpha = .25f))
+                if (dj.random) {
+                    Text("${dj.count.roundToInt()} 首歌曲", fontFamily = heading, fontSize = 23.sp)
+                    Slider(dj.count, { dj.count = it.roundToInt().toFloat() }, enabled = dj.phase == "choosing",
+                        valueRange = 5f..40f, steps = 34, interactionSource = sliderInteraction,
+                        colors = SliderDefaults.colors(thumbColor = ink, activeTrackColor = ink,
+                            inactiveTrackColor = ink.copy(alpha = .25f), disabledThumbColor = ink,
+                            disabledActiveTrackColor = ink.copy(alpha = .75f)))
+                    if (dj.phase == "choosing") Text("选好数量后，点击开始生成", fontSize = 12.sp)
+                }
                     if (dj.phase == "running") {
-                        SongChecklistWriting(Modifier.align(Alignment.CenterHorizontally).size(160.dp),
-                            paperColor = DjCream, backdropColor = null, animate = animate)
+                        Md3eAiMascot(Modifier.align(Alignment.CenterHorizontally).size(180.dp),
+                            aiDjMascotStage("", dj.progress))
                         Text(dj.progress.ifBlank { "正在生成…" }, Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                         // Keep this status line while matching; final prose is revealed once below.
                     }
                     if (dj.phase == "error") {
                         Text(dj.error, Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-                        TextButton(onClick = { dj.phase = "running" }, colors = ButtonDefaults.textButtonColors(contentColor = DjCream)) { Text("重试") }
+                        TextButton(onClick = { dj.phase = "running" }) { Text("重试") }
                     }
                     if (dj.phase == "result" || dj.phase == "docking") {
-                        Text("已为你找到 ${dj.songs.size} 首歌曲", fontFamily = ClaudeSerif, fontSize = 22.sp)
-                        if (dj.output.isNotBlank()) Text(dj.output.take((dj.output.length * typing.value).roundToInt()), fontSize = 14.sp)
+                        Text("已为你找到 ${dj.songs.size} 首歌曲", fontFamily = heading, fontSize = 22.sp)
+                        if (dj.output.isNotBlank()) Text(dj.output.take((dj.output.length * typingProgress).roundToInt()), fontSize = 14.sp)
                         dj.songs.forEachIndexed { index, song ->
-                            Row(Modifier.claudeEntrance(index), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                                Text((index + 1).toString().padStart(2, '0'), fontFamily = ClaudeMono, fontSize = 12.sp)
+                            Row(Modifier.claudeEntrance(index).songQueueMenu(song.name.orEmpty(), {},
+                                { runtime.controller.enqueueNeteaseSong(song) }), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                                Text((index + 1).toString().padStart(2, '0'),
+                                    fontFamily = if (LocalIosDesign.current) androidx.compose.ui.text.font.FontFamily.Default else ClaudeMono,
+                                    fontSize = 12.sp)
                                 Text("${song.name.orEmpty()} · ${song.artist.orEmpty()}", fontSize = 13.sp)
                             }
                         }
@@ -310,28 +407,25 @@ internal fun ClaudeAiDjHost(runtime: Md3eRuntime, dj: ClaudeAiDjState,
                 Button(onClick = {
                     when {
                         dj.phase == "choosing" -> dj.phase = "running"
-                        dj.phase == "running" || (dj.phase == "result" && !dj.outputFinished) -> cancel()
+                        dj.phase == "running" || (dj.phase == "result" && !dj.outputFinished) -> onCancel()
                         dj.phase == "result" -> {
                             var started = false
                             runtime.play { started = confirmAiPlaylistPlayback(dj.requestGeneration) }
                             if (started) {
                                 dj.ownsRequest = false
-                                currentDock(); dj.phase = "docking"
+                                onDock(); dj.phase = "docking"
                             } else {
                                 dj.error = "推荐结果已失效，请重新生成。"
                                 dj.phase = "error"
                             }
                         }
-                        dj.phase == "error" -> cancel()
+                        dj.phase == "error" -> onCancel()
                     }
                 }, enabled = dj.phase !in setOf("docking", "cancelled") && !dj.dismissRequested,
                     modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(50),
-                    colors = ButtonDefaults.buttonColors(containerColor = DjCream, contentColor = DjOrange,
-                        disabledContainerColor = DjCream, disabledContentColor = DjOrange)) {
+                    colors = ButtonDefaults.buttonColors(containerColor = ink, contentColor = DjOrange,
+                        disabledContainerColor = ink, disabledContentColor = DjOrange)) {
                     Text(actionLabel, Modifier.padding(vertical = 6.dp), fontSize = 14.sp)
                 }
             }
-        }
-    }
 }
-

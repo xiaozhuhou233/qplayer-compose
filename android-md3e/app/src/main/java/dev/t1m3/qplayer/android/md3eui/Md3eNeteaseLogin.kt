@@ -2,6 +2,9 @@
 
 package dev.t1m3.qplayer.android.md3eui
 
+import dev.t1m3.qplayer.android.ui.IosAwareAlertDialog as AlertDialog
+import dev.t1m3.qplayer.android.ui.IosAwareTextButton as TextButton
+
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*

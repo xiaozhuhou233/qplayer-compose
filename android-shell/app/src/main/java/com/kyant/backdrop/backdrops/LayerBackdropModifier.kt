@@ -57,13 +57,12 @@ private class LayerBackdropNode(
     override fun ContentDrawScope.draw() {
         // Observe the token so invalidate() invalidates only this draw node.
         backdrop.observeInvalidation()
-        if (backdrop.recordsFullContent) {
-            recordLayer(this@LayerBackdropNode, backdrop.graphicsLayer) { this@draw.drawContent() }
-            drawLayer(backdrop.graphicsLayer)
-        } else {
-            drawContent()
-            recordLayer(this@LayerBackdropNode, backdrop.graphicsLayer) { backdrop.onDraw(this@draw) }
+        // recordLayer uses DrawScope's GraphicsLayer.record extension, which
+        // redirects drawContent into this layer and restores its draw context.
+        recordLayer(this@LayerBackdropNode, backdrop.graphicsLayer) {
+            backdrop.onDraw(this@draw)
         }
+        drawLayer(backdrop.graphicsLayer)
         backdrop.markRecordedForSampling()
     }
 

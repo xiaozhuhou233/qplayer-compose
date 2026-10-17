@@ -13,6 +13,15 @@ package dev.t1m3.qplayer.audio;
  */
 public interface AudioBackend {
 
+    default boolean supportsAutoMix() { return false; }
+    default String autoMixSource() { return null; }
+
+    /** On success, retain an independent render handle and release it after playback/cancel.
+     *  The caller keeps its own handle so a pause or seek can reuse the completed file. */
+    default boolean prepareAutoMix(dev.t1m3.qplayer.audio.automix.AutoMixRender render) {
+        return false;
+    }
+
     /**
      * Begin playing {@code source} (a local file path or an {@code http(s)}
      * URL) from {@code startMs}. Replaces any current playback. Idempotent
@@ -189,6 +198,15 @@ public interface AudioBackend {
      * the curve is simply ignored.
      */
     default boolean beginCrossfade(long ms, FadeCurve curve) { return beginCrossfade(ms); }
+
+    /** Start the prepared render's dry prefix muted, then hand over at its audio-clock cue. */
+    default boolean beginAutoMix() { return beginCrossfade(96, FadeCurve.LINEAR); }
+
+    /** True once the prepared AutoMix deck has begun warming or handing over. */
+    default boolean autoMixInProgress() { return false; }
+
+    /** The current source still reports its old position during an asynchronous seek. */
+    default boolean isSeeking() { return false; }
 
     /**
      * Drop a prepared incoming player and restore the audible player's normal

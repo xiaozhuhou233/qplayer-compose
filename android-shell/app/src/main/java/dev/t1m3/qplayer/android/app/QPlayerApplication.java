@@ -30,6 +30,10 @@ public final class QPlayerApplication extends Application {
         // restarted service can initialize NeteaseClient's singleton cookie jar.
         AppDirs.setBase(getFilesDir().getAbsolutePath());
         AppDirs.migrateLegacyLayout();
+        dev.t1m3.qplayer.audio.automix.AutoMixRender.cleanPreviousSession(
+                AppDirs.cacheDir().resolve("automix"));
+        dev.t1m3.qplayer.audio.decode.Decoder.install((source, headers) ->
+                new dev.t1m3.qplayer.android.playback.AndroidAutoMixDecoder(this, source, headers));
         CredentialKeyProtection.install(new AndroidKeystoreKeyProtector());
 
         final Thread.UncaughtExceptionHandler previous = Thread.getDefaultUncaughtExceptionHandler();

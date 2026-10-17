@@ -1,5 +1,13 @@
 package dev.t1m3.qplayer.android.md3eui
 
+import dev.t1m3.qplayer.android.md3eui.Md3eAdaptiveButton as Button
+import dev.t1m3.qplayer.android.md3eui.Md3eAdaptiveOutlinedButton as OutlinedButton
+
+import dev.t1m3.qplayer.android.ui.IosAwareIconButton as IconButton
+import dev.t1m3.qplayer.android.ui.IosAwareTextButton as TextButton
+import dev.t1m3.qplayer.android.ui.IosAwareSwitch as Switch
+import dev.t1m3.qplayer.android.ui.IosAwareSlider as Slider
+
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -22,10 +30,10 @@ import kotlin.math.roundToInt
 // the old SettingsCatalog-driven Android screen.
 private val md3eSettingKeys = setOf(
     SettingsCatalog.LOW_SPEC_MODE_KEY, SettingsCatalog.PAGE_TRANSITION_KEY,
-    "claudeDesign", "darkMode", "showLocalTab", "monet", "paletteStyle", "paletteChroma", "maxCacheSizeMB",
+    "claudeDesign", "iosDesign", "iosGlassRefraction", "darkMode", "showLocalTab", "monet", "paletteStyle", "paletteChroma", "maxCacheSizeMB",
     "lyricFontSize", "lyricLineSpacing", "lyricSpring", "lyricScale",
     "lyricGlow", "lyricShadow", "lyricLinearAnim", "lyricMd3Color",
-    "lyricProgressStyle", SettingsCatalog.COVER_BACKGROUND_KEY,
+    "lyricProgressStyle", SettingsCatalog.COVER_BACKGROUND_KEY, SettingsCatalog.MV_BACKGROUND_KEY,
     "action:clearCache", "action:openRepo", "action:checkUpdate",
     "logCaptureEnabled", "action:logExport",
 )
@@ -42,7 +50,27 @@ internal fun Md3eSettingsPage(runtime: Md3eRuntime, modifier: Modifier = Modifie
         settings.rows(category).any(::supportedSetting)
     } }
     var category by remember { mutableStateOf(categories.firstOrNull().orEmpty()) }
-    Column(modifier) {
+    if (!LocalIosDesign.current) {
+        Column(modifier) {
+            Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                categories.forEach { item ->
+                    if (item == category) Button(onClick = { category = item }) { Text(item) }
+                    else OutlinedButton(onClick = { category = item }) { Text(item) }
+                }
+            }
+            LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (category == SettingsCatalog.APPEARANCE) item("design-mode") { Md3eDesignModeSelector(runtime) }
+                items(settings.rows(category).filter { supportedSetting(it) && it.key !in setOf("claudeDesign", "iosDesign") }, key = { it.key }) { spec ->
+                    Md3eSettingRow(spec, runtime, revision)
+                }
+            }
+        }
+        return
+    }
+    LazyColumn(modifier, contentPadding = PaddingValues(top = iosPageTopPadding()),
+        verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item("categories") {
         Row(Modifier.horizontalScroll(rememberScrollState())
             .padding(horizontal = 16.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -51,10 +79,33 @@ internal fun Md3eSettingsPage(runtime: Md3eRuntime, modifier: Modifier = Modifie
                 else OutlinedButton(onClick = { category = item }) { Text(item) }
             }
         }
-        LazyColumn(contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            items(settings.rows(category).filter(::supportedSetting), key = { it.key }) { spec ->
-                Md3eSettingRow(spec, runtime, revision)
+        }
+            if (category == SettingsCatalog.APPEARANCE) item("design-mode") {
+                Box(Modifier.padding(horizontal = 16.dp)) { Md3eDesignModeSelector(runtime) }
+            }
+            items(settings.rows(category).filter { supportedSetting(it) && it.key !in setOf("claudeDesign", "iosDesign") }, key = { it.key }) { spec ->
+                Box(Modifier.padding(horizontal = 16.dp)) { Md3eSettingRow(spec, runtime, revision) }
+            }
+        item("bottom-space") { Spacer(Modifier.height(16.dp)) }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun Md3eDesignModeSelector(runtime: Md3eRuntime) {
+    val revision = runtime.settingsRevision
+    val selected = when {
+        runtime.settings.bool("iosDesign") -> 2
+        runtime.settings.bool("claudeDesign") -> 0
+        else -> 1
+    }
+    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("界面模式", fontWeight = FontWeight.Medium)
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+            listOf("Claude", "MD", "iOS").forEachIndexed { index, label ->
+                SegmentedButton(selected = selected == index,
+                    onClick = { runtime.updateDesignMode(index) },
+                    shape = SegmentedButtonDefaults.itemShape(index, 3)) { Text(label) }
             }
         }
     }
@@ -66,7 +117,7 @@ private fun Md3eSettingRow(spec: SettingSpec, runtime: Md3eRuntime,
     val settings = runtime.settings
     if (spec.dependsOn.isNotBlank() && !settings.bool(spec.dependsOn)) return
     val current = settings.intOf(spec.key).coerceIn(spec.min, spec.max)
-    val description = spec.provider.takeIf { it.isNotBlank() }?.let(settings::info)
+    val description = if (spec.key == "iosDesign") "MusicOne 页面与共享转场，原版 iOS 玻璃导航、MiniPlayer 和弹窗；与 Claude 界面互斥" else spec.provider.takeIf { it.isNotBlank() }?.let(settings::info)
         ?.takeIf { it.isNotBlank() } ?: spec.desc
     Card(shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
@@ -74,7 +125,7 @@ private fun Md3eSettingRow(spec: SettingSpec, runtime: Md3eRuntime,
             verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text(spec.title, fontWeight = FontWeight.Medium)
+                    Text(if (spec.key == "iosDesign") "iOS 模式" else spec.title, fontWeight = FontWeight.Medium)
                     if (description.isNotBlank()) Text(description, fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }

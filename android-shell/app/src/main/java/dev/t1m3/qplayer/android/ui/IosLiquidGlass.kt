@@ -5,6 +5,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.isSpecified
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.Backdrop
@@ -33,6 +37,8 @@ internal fun IosLiquidGlass(
     shape: Shape = CircleShape,
     interaction: InteractiveHighlight? = null,
     lite: Boolean = false,
+    surfaceTint: Color = Color.Unspecified,
+    strongRefraction: Boolean = false,
     content: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit = {},
 ) {
     val adaptive = rememberRegionAdaptiveGlass(backdrop)
@@ -45,6 +51,8 @@ internal fun IosLiquidGlass(
                 interaction = interaction,
                 adaptive = adaptive,
                 lite = lite,
+                surfaceTint = surfaceTint,
+                strongRefraction = strongRefraction,
             )
         ),
         // Icons share the glass's measured center at every size, including
@@ -55,7 +63,10 @@ internal fun IosLiquidGlass(
         androidx.compose.runtime.CompositionLocalProvider(
             LocalGlassContentColor provides ink,
             androidx.compose.material3.LocalContentColor provides ink,
-        ) { content() }
+        ) {
+            androidx.compose.material3.ProvideTextStyle(
+                androidx.compose.material3.LocalTextStyle.current.copy(color = ink)) { content() }
+        }
     }
 }
 
@@ -68,6 +79,8 @@ internal fun iosLiquidGlassModifier(
     interaction: InteractiveHighlight? = null,
     adaptive: IosAdaptiveGlassState = rememberRegionAdaptiveGlass(backdrop),
     lite: Boolean = false,
+    surfaceTint: Color = Color.Unspecified,
+    strongRefraction: Boolean = false,
 ): Modifier {
     val refraction = LocalGlassRefraction.current
     val glassHighlight = if (lite) null else rememberIosControlGlassHighlight()
@@ -77,11 +90,8 @@ internal fun iosLiquidGlassModifier(
             backdrop = backdrop,
             shape = { shape },
             effects = {
-                    controlGlassEffects(
-                        adaptive = adaptive,
-                        refraction = refraction && !lite,
-                        blurDp = if (lite) 1.5f else BiliPaiGlassParameters.blurDp,
-                )
+                apiGlassEffects(adaptive.luminance, refraction && !lite,
+                    strongRefraction = strongRefraction)
             },
             layerBlock = interaction?.let { highlight ->
                 {
@@ -109,9 +119,14 @@ internal fun iosLiquidGlassModifier(
             innerShadow = null,
             highlight = if (lite) null else ({ glassHighlight?.value }),
             onDrawSurface = {
-                drawControlGlassSurface(dark, adaptive)
+                if (surfaceTint.isSpecified) {
+                    drawRect(surfaceTint, blendMode = BlendMode.Hue)
+                    drawRect(surfaceTint.copy(alpha = .75f))
+                } else drawControlGlassSurface(dark, adaptive)
             },
         )
+        // The glass shadow is outside; pointer highlights must stay inside its contour.
+        .clip(shape)
         .then(interaction?.modifier ?: Modifier)
         .then(interaction?.gestureModifier ?: Modifier)
 }

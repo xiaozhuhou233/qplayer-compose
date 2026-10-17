@@ -176,7 +176,7 @@ private class DrawBackdropElement(
 
     override fun update(node: DrawBackdropNode) {
         val effectsChanged = node.effects !== effects || node.shapeProvider != shapeProvider
-        node.backdrop = backdrop
+        node.updateBackdrop(backdrop)
         node.shapeProvider = shapeProvider
         node.effects = effects
         node.layerBlock = layerBlock
@@ -254,6 +254,16 @@ private class DrawBackdropNode(
         }
 
     private var graphicsLayer: GraphicsLayer? = null
+    private var stopWatchingBackdrop: (() -> Unit)? = null
+    private val backdropChanged: () -> Unit = { if (isAttached) invalidateDraw() }
+
+    fun updateBackdrop(value: Backdrop) {
+        if (backdrop === value) return
+        stopWatchingBackdrop?.invoke()
+        backdrop = value
+        stopWatchingBackdrop = if (isAttached) backdrop.observeChanges(backdropChanged) else null
+        if (isAttached) invalidateDraw()
+    }
     private var effectsDirty = true
     private var windowOrigin = Offset.Unspecified
     private var windowXAxis = Offset.Unspecified
@@ -290,7 +300,7 @@ private class DrawBackdropNode(
         }
     }
 
-    private val drawBackdropLayer: DrawScope.() -> Unit = {
+    private val recordBackdropLayer: DrawScope.() -> Unit = {
         val layer = graphicsLayer
         if (layer != null) {
             val padding = padding
@@ -307,7 +317,6 @@ private class DrawBackdropNode(
             layer.topLeft =
                 if (padding != 0f) IntOffset(-padding.toInt(), -padding.toInt())
                 else IntOffset.Zero
-            drawLayer(layer)
         }
     }
 
@@ -327,20 +336,24 @@ private class DrawBackdropNode(
             observeEffects()
         }
 
-        onDrawBehind?.invoke(this)
-        drawBackdropLayer()
-        onDrawSurface?.invoke(this)
-        drawContent()
-        onDrawFront?.invoke(this)
-
+        // Record the live source once per draw. Export before drawing children
+        // so nested glass uses this frame's material, including on first reveal.
+        recordBackdropLayer()
         exportedBackdrop?.graphicsLayer?.let { layer ->
             recordLayer(this@DrawBackdropNode, layer) {
                 onDrawBehind?.invoke(this)
-                drawBackdropLayer()
+                graphicsLayer?.let { drawLayer(it) }
                 onDrawSurface?.invoke(this)
                 onDrawFront?.invoke(this)
             }
+            exportedBackdrop?.markRecordedForSampling()
         }
+
+        onDrawBehind?.invoke(this)
+        graphicsLayer?.let { drawLayer(it) }
+        onDrawSurface?.invoke(this)
+        drawContent()
+        onDrawFront?.invoke(this)
     }
 
     override fun onGloballyPositioned(coordinates: LayoutCoordinates) {
@@ -388,10 +401,13 @@ private class DrawBackdropNode(
     override fun onAttach() {
         val graphicsContext = requireGraphicsContext()
         graphicsLayer = graphicsContext.createGraphicsLayer()
+        stopWatchingBackdrop = backdrop.observeChanges(backdropChanged)
         effectsDirty = true
     }
 
     override fun onDetach() {
+        stopWatchingBackdrop?.invoke()
+        stopWatchingBackdrop = null
         val graphicsContext = requireGraphicsContext()
         graphicsLayer?.let { layer ->
             graphicsContext.releaseGraphicsLayer(layer)

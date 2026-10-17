@@ -14,6 +14,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.isSpecified
@@ -49,6 +50,7 @@ fun LiquidButton(
     enabled: Boolean = true,
     tint: Color = Color.Unspecified,
     surfaceColor: Color = Color.Unspecified,
+    contentColor: Color = Color.Unspecified,
     content: @Composable RowScope.() -> Unit
 ) {
     val refraction = dev.t1m3.qplayer.android.ui.LocalGlassRefraction.current
@@ -116,16 +118,14 @@ fun LiquidButton(
                     if (tint.isSpecified) {
                         drawRect(tint, blendMode = BlendMode.Hue)
                         drawRect(tint.copy(alpha = 0.75f))
-                    }
-                    // Ⓜ The caller's own plate when it named one, else the bar's theme pair.
-                    if (surfaceColor.isSpecified) {
+                    } else if (surfaceColor.isSpecified) {
                         drawRect(surfaceColor)
-                        if (!adaptive.restoredDialog) drawBiliPaiReadabilityScrim(dark)
                     } else {
                         drawControlGlassSurface(dark, adaptive)
                     }
                 }
             )
+            .clip(CircleShape)
             .clickable(
                 enabled = enabled,
                 interactionSource = null,
@@ -147,7 +147,11 @@ fun LiquidButton(
         horizontalArrangement = Arrangement.spacedBy(8f.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        CompositionLocalProvider(LocalContentColor provides adaptive.contentColor,
-            LocalGlassContentColor provides adaptive.contentColor) { content() }
+        val ink = if (contentColor.isSpecified) contentColor else adaptive.contentColor
+        CompositionLocalProvider(LocalContentColor provides ink,
+            LocalGlassContentColor provides ink) {
+            androidx.compose.material3.ProvideTextStyle(
+                androidx.compose.material3.LocalTextStyle.current.copy(color = ink)) { content() }
+        }
     }
 }

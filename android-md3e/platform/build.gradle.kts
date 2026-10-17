@@ -15,6 +15,7 @@ val stagePlatform by tasks.registering(Sync::class) {
         include("dev/t1m3/qplayer/android/library/AndroidLibraryScanner.java")
         include("dev/t1m3/qplayer/android/graphics/AndroidColorExtractor.java")
         include("dev/t1m3/qplayer/android/playback/AndroidAudioBackend.java")
+        include("dev/t1m3/qplayer/android/playback/AndroidAutoMixDecoder.java")
         include("dev/t1m3/qplayer/android/playback/PlaybackService.java")
         include("dev/t1m3/qplayer/android/playback/PlaybackArtworkLoader.java")
     }

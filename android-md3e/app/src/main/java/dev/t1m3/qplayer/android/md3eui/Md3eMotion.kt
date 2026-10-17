@@ -85,6 +85,7 @@ internal val Md3eLowSpecMode get() = LocalLowSpecMode
 @Composable
 internal fun Modifier.md3eSharedCover(key: String): Modifier {
     if (LocalLowSpecMode.current) return this
+    if (LocalIosDesign.current) return iosArtworkAnchor(key)
     val claude = LocalClaudeDesign.current
     val shared = LocalPageSharedScope.current ?: return this
     val animated = LocalPageAnimatedScope.current ?: return this
@@ -120,6 +121,7 @@ internal fun Md3eCollectionContainer(
     detail: Boolean = false,
     content: @Composable () -> Unit,
 ) {
+    if (LocalIosDesign.current) { IosCollectionContainer(key, detail && key != null, modifier, content); return }
     val claude = LocalClaudeDesign.current
     val shared = LocalPageSharedScope.current
     val animated = LocalPageAnimatedScope.current

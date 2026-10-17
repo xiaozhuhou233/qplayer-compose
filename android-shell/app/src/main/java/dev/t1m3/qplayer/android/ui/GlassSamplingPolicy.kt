@@ -17,7 +17,8 @@ internal data class GlassSampleStamp(
 
 /** A cheap revision check is not a GPU readback. Static surfaces retain their
  * sample; the heartbeat also catches child RenderNodes moving without a parent draw. */
-internal class GlassSamplingPolicy {
+internal class GlassSamplingPolicy(private val perPage: Boolean = false) {
+    private var lastSucceeded = false
     private var lastStamp: GlassSampleStamp? = null
     private var lastSampleMs = 0L
     private var retryAfterMs = 0L
@@ -25,11 +26,15 @@ internal class GlassSamplingPolicy {
     fun shouldSample(nowMs: Long, stamp: GlassSampleStamp): Boolean {
         if (nowMs < retryAfterMs) return false
         if (lastStamp == null) return true
+        // The material version only advances when entering another page. Geometry,
+        // scroll and the idle heartbeat must not trigger another readback.
+        if (perPage && lastSucceeded && stamp.revision != null && stamp.revision == lastStamp?.revision) return false
         val interval = if (stamp != lastStamp) GLASS_SAMPLE_ACTIVE_MS else GLASS_SAMPLE_IDLE_MS
         return nowMs - lastSampleMs >= interval
     }
 
     fun completed(nowMs: Long, stamp: GlassSampleStamp, success: Boolean) {
+        lastSucceeded = success
         lastSampleMs = nowMs
         lastStamp = stamp
         retryAfterMs = if (success) 0L else nowMs + 1000L

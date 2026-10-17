@@ -1,12 +1,14 @@
 // QPlayer Android compatibility adaptation, 2026-09-28. Original: Copyright 2025 Kyant, Apache-2.0.
 package com.kyant.backdrop.backdrops
 
+import android.view.Choreographer
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.GraphicsLayerScope
 import androidx.compose.ui.graphics.drawscope.ContentDrawScope
@@ -30,8 +32,10 @@ fun rememberLayerBackdrop(
     graphicsLayer: GraphicsLayer = rememberGraphicsLayer(),
     onDraw: ContentDrawScope.() -> Unit = DefaultOnDraw
 ): LayerBackdrop {
-    return remember(graphicsLayer, onDraw) {
-        LayerBackdrop(graphicsLayer, onDraw)
+    val currentDraw = rememberUpdatedState(onDraw)
+    // Page/theme updates must not replace the source and reset all glass samplers.
+    return remember(graphicsLayer) {
+        LayerBackdrop(graphicsLayer) { currentDraw.value(this) }
     }
 }
 
@@ -59,10 +63,36 @@ class LayerBackdrop internal constructor(
 
     // Read only by the throttled sampler on the main thread. Deliberately NOT
     // Compose state: recording a background must never invalidate its consumers.
-    internal var samplingRevision: Long = 0L
+    override var samplingRevision: Long = 0L
         private set
 
-    internal fun markRecordedForSampling() { samplingRevision++ }
+    private val consumers = LinkedHashSet<() -> Unit>()
+    private var notificationPending = false
+    private val notifyConsumers = Choreographer.FrameCallback {
+        notificationPending = false
+        consumers.toList().forEach { it() }
+    }
+
+    override fun observeChanges(onChanged: () -> Unit): () -> Unit {
+        consumers.add(onChanged)
+        return {
+            consumers.remove(onChanged)
+            if (consumers.isEmpty() && notificationPending) {
+                Choreographer.getInstance().removeFrameCallback(notifyConsumers)
+                notificationPending = false
+            }
+        }
+    }
+
+    internal fun markRecordedForSampling() {
+        samplingRevision++
+        // Coalesce at the frame boundary. No state is written in draw(), and
+        // only glass consumers redraw; the source page is never invalidated here.
+        if (consumers.isNotEmpty() && !notificationPending) {
+            notificationPending = true
+            Choreographer.getInstance().postFrameCallback(notifyConsumers)
+        }
+    }
 
     override val isCoordinatesDependent: Boolean = true
 

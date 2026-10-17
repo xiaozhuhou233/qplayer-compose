@@ -11,12 +11,15 @@ import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.SystemClock;
 
 import dev.t1m3.qplayer.audio.AudioBackend;
+import dev.t1m3.qplayer.audio.AudioFocusResumeWindow;
 import dev.t1m3.qplayer.audio.FadeCurve;
 import dev.t1m3.qplayer.audio.IncomingMix;
 import dev.t1m3.qplayer.audio.KeyGlide;
 import dev.t1m3.qplayer.audio.MixNaturaliser;
+import dev.t1m3.qplayer.audio.automix.AutoMixHandoff;
 import dev.t1m3.qplayer.util.Logger;
 
 import java.io.IOException;
@@ -31,10 +34,136 @@ import java.io.IOException;
  * starts on the prepared callback, honoring the requested start offset.
  */
 public final class AndroidAudioBackend implements AudioBackend {
+    private dev.t1m3.qplayer.audio.automix.AutoMixRender activeAutoMix, incomingAutoMix;
+    private AutoMixHandoff autoMixHandoff;
+    private boolean autoMixAudible;
+    private long autoMixArmGeneration;
+
+    @Override public synchronized boolean autoMixInProgress() {
+        return incomingAutoMix != null && crossfading;
+    }
+
+    @Override public synchronized boolean beginAutoMix() {
+        if (autoMixInProgress()) return true;
+        if (incomingAutoMix == null || incomingAutoMix.leadInMs == 0)
+            return beginCrossfade(AutoMixHandoff.FADE_MS, FadeCurve.LINEAR);
+        if (crossfading || incomingPlayer == null || !incomingPrepared
+                || player == null || !prepared || !wantPlay) return false;
+        final AutoMixHandoff gate = new AutoMixHandoff(incomingAutoMix.exitMs,
+                incomingAutoMix.leadInMs, android.os.SystemClock.elapsedRealtime());
+        autoMixHandoff = gate;
+        autoMixAudible = false;
+        crossfading = true;
+        long generation = ++rampGeneration;
+        try {
+            incomingPlayer.setVolume(0f, 0f);
+            player.setVolume(baseGain(), baseGain());
+            incomingPlayer.setOnSeekCompleteListener(p -> {
+                synchronized (AndroidAudioBackend.this) {
+                    if (p == incomingPlayer && autoMixHandoff == gate) {
+                        gate.seekComplete(android.os.SystemClock.elapsedRealtime(), p.getCurrentPosition());
+                        Logger.info("AutoMix: muted prefix seek complete at {}ms", p.getCurrentPosition());
+                    }
+                }
+            });
+            // After a scrub into the warmup window, starting the WAV at zero
+            // forces a cold output start and another seek before it can align.
+            // Seek the muted dry prefix first, using the outgoing audio clock.
+            long initialSeek = gate.initialSeek(position());
+            if (initialSeek >= 0) incomingPlayer.seekTo(initialSeek, MediaPlayer.SEEK_CLOSEST);
+            incomingPlayer.start();
+            incomingRolling = true;
+            Logger.info("AutoMix: warming muted dry prefix; cue={}ms, lead={}ms",
+                    incomingAutoMix.exitMs, incomingAutoMix.leadInMs);
+        } catch (Throwable e) {
+            Logger.warn("AutoMix: warm start failed ({})", e.toString());
+            cancelIncoming();
+            return false;
+        }
+        rampHandler.post(() -> warmAutoMix(generation));
+        return true;
+    }
+
+    private void warmAutoMix(long generation) {
+        boolean abandoned = false;
+        synchronized (this) {
+            if (!crossfading || generation != rampGeneration || autoMixHandoff == null) return;
+            try {
+                long fileMs = incomingPlayer.getCurrentPosition();
+                long outgoingMs = position();
+                long command = autoMixHandoff.sample(android.os.SystemClock.elapsedRealtime(),
+                        outgoingMs, fileMs);
+                if (command == AutoMixHandoff.ABORT) {
+                    Logger.warn("AutoMix: warm clock missed cue; keeping outgoing audio");
+                    cancelIncoming();
+                    abandoned = true;
+                } else if (command == AutoMixHandoff.FADE) {
+                    Logger.info("AutoMix: warmed handoff; incoming={}ms, expected={}ms, drift={}ms",
+                            fileMs, incomingAutoMix.leadInMs + outgoingMs - incomingAutoMix.exitMs,
+                            fileMs - (incomingAutoMix.leadInMs + outgoingMs - incomingAutoMix.exitMs));
+                    autoMixHandoff = null;
+                    crossfading = false;
+                    autoMixAudible = true;
+                    if (!beginCrossfade(AutoMixHandoff.FADE_MS, FadeCurve.LINEAR)) {
+                        cancelIncoming(); abandoned = true;
+                    }
+                    if (!abandoned) return;
+                } else {
+                    player.setVolume(baseGain(), baseGain());
+                    if (command >= 0) {
+                        incomingPlayer.seekTo(command, MediaPlayer.SEEK_CLOSEST);
+                        Logger.info("AutoMix: align muted prefix to {}ms", command);
+                    }
+                    rampHandler.postDelayed(() -> warmAutoMix(generation), 16);
+                }
+            } catch (Throwable e) {
+                Logger.warn("AutoMix: warm handoff failed ({})", e.toString());
+                cancelIncoming(); abandoned = true;
+            }
+        }
+        if (abandoned) fire(onCrossfadeAbandoned);
+    }
+
+    @Override public boolean supportsAutoMix() { return true; }
+    @Override public synchronized String autoMixSource() {
+        return activeAutoMix == null ? source : activeAutoMix.original;
+    }
+
+    @Override public synchronized boolean prepareAutoMix(
+            dev.t1m3.qplayer.audio.automix.AutoMixRender render) {
+        dev.t1m3.qplayer.audio.automix.AutoMixRender retained = render.retain();
+        if (!prepareIncoming(render.file.toString(), 0L, false, IncomingMix.IDENTITY)) {
+            retained.delete();
+            return false;
+        }
+        incomingAutoMix = retained;
+        autoMixAudible = false;
+        final long generation = ++autoMixArmGeneration;
+        rampHandler.post(() -> armAutoMix(generation));
+        return true;
+    }
+
+    /** The parked deck follows the outgoing audio clock, even without UI polling. */
+    private synchronized void armAutoMix(long generation) {
+        if (generation != autoMixArmGeneration || incomingAutoMix == null || crossfading
+                || !wantPlay || player == null || !prepared) return;
+        if (isSeeking()) {
+            rampHandler.postDelayed(() -> armAutoMix(generation), 16);
+            return;
+        }
+        long position = position();
+        if (position > incomingAutoMix.exitMs + AutoMixHandoff.LATE_TOLERANCE_MS) return;
+        long remaining = incomingAutoMix.exitMs - incomingAutoMix.leadInMs - position;
+        if (remaining <= 0 && incomingPrepared && beginAutoMix()) return;
+        rampHandler.postDelayed(() -> armAutoMix(generation), Math.max(16, Math.min(100, remaining)));
+    }
 
     private MediaPlayer player;
     private String source;
     private long pendingSeekMs;
+    private boolean seeking;
+
+    @Override public synchronized boolean isSeeking() { return seeking; }
     private boolean wantPlay;
     private float volume = 0.8f;
     private boolean prepared;
@@ -315,14 +444,15 @@ public final class AndroidAudioBackend implements AudioBackend {
     //                                ducked track is one they then cannot find again.
     //                                Same come-back rule as a transient loss.
     //   GAIN                      -> resume, but only a pause WE made for a loss; a
-    //                                pause the user asked for stays a pause.
-    // resumeOnGain is that intent, and it is cleared by anything the app or the user
+    //                                pause the user asked for stays a pause. A loss
+    //                                lasting over five minutes stays paused too.
+    // resumeWindow is that intent, and it is cleared by anything the app or the user
     // decides by hand (pause(), play(), cancelAutoResume()).
     private final AudioManager audioManager;
     private final Context appContext;
     private AudioFocusRequest focusRequest;
     private boolean hasFocus;
-    private boolean resumeOnGain;
+    private final AudioFocusResumeWindow resumeWindow = new AudioFocusResumeWindow();
     /** True from the loss that paused us until focus is ours again or the user starts
      *  something by hand: nothing may start playing on its own while it is set
      *  (see pausedByAudioFocusLoss). */
@@ -357,7 +487,7 @@ public final class AndroidAudioBackend implements AudioBackend {
         // past (and there is nothing left for a later AUDIOFOCUS_GAIN to resume), and
         // the request is re-made if the permanent-loss path dropped it — this is how
         // the app gets a focus of its own back after another app took it for good.
-        resumeOnGain = false;
+        resumeWindow.cancel();
         pausedByFocus = false;
         requestFocus();
 
@@ -372,6 +502,7 @@ public final class AndroidAudioBackend implements AudioBackend {
                 .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                 .build());
         mp.setOnPreparedListener(this::onPrepared);
+        mp.setOnSeekCompleteListener(this::onMainSeekComplete);
         mp.setOnCompletionListener(p -> onCompleted(p));
         mp.setOnErrorListener(this::onPlayerError);
         mp.setOnVideoSizeChangedListener(this::onVideoSizeChanged);
@@ -552,6 +683,7 @@ public final class AndroidAudioBackend implements AudioBackend {
         Logger.info("MediaPlayer: prepared, duration={}ms", preparedPlayer.getDuration());
         applyVolume();
         if (pendingSeekMs > 0L) {
+            seeking = true;
             preparedPlayer.seekTo(pendingSeekMs, MediaPlayer.SEEK_CLOSEST);
         }
         if (wantPlay) {
@@ -559,6 +691,10 @@ public final class AndroidAudioBackend implements AudioBackend {
             Runnable cb = onStarted;
             if (cb != null) cb.run();
         }
+    }
+
+    private synchronized void onMainSeekComplete(MediaPlayer seekedPlayer) {
+        if (seekedPlayer == player) seeking = false;
     }
 
     private synchronized void onCompleted(MediaPlayer completedPlayer) {
@@ -590,7 +726,7 @@ public final class AndroidAudioBackend implements AudioBackend {
         // pressed pause" must not be undone by the next AUDIOFOCUS_GAIN. The focus
         // loss's own pause does not come through here — it pauses the player
         // directly, which is what keeps its flag alive.
-        resumeOnGain = false;
+        resumeWindow.cancel();
         pausedByFocus = false;
         // A pause in the middle of a post-mix ease-back would leave the track at
         // whatever tempo it had reached and resume it there; the correction is worth
@@ -614,7 +750,7 @@ public final class AndroidAudioBackend implements AudioBackend {
         // The user (or the media session) asked for playback: there is nothing left
         // for a later focus regain to resume, and a loss from before this request no
         // longer describes what the app is doing.
-        resumeOnGain = false;
+        resumeWindow.cancel();
         pausedByFocus = false;
         requestFocus();
         if (player != null && prepared) {
@@ -630,6 +766,14 @@ public final class AndroidAudioBackend implements AudioBackend {
     @Override
     public synchronized void seek(long ms) {
         long target = Math.max(0L, ms);
+        if (activeAutoMix != null) {
+            // Seeking always returns to the untouched song, including its skipped intro.
+            String original = activeAutoMix.original;
+            boolean resume = wantPlay;
+            play(original, target);
+            if (!resume) pause();
+            return;
+        }
         Logger.info("MediaPlayer: seek to {}ms", target);
         // The user is going somewhere else in THIS track: settle any post-mix
         // ease-back first, so what they seek into is the track at its own tempo.
@@ -643,6 +787,7 @@ public final class AndroidAudioBackend implements AudioBackend {
             // a basic seekTo undershoots by up to a keyframe interval, which made a
             // lyric tap (and the progress bar) land just before the target so the
             // PREVIOUS line highlighted.
+            seeking = true;
             player.seekTo(target, MediaPlayer.SEEK_CLOSEST);
         } else {
             pendingSeekMs = target;
@@ -653,7 +798,8 @@ public final class AndroidAudioBackend implements AudioBackend {
     public synchronized long position() {
         if (player != null && prepared) {
             try {
-                return player.getCurrentPosition();
+                long position = player.getCurrentPosition();
+                return activeAutoMix == null ? position : activeAutoMix.songPosition(position);
             } catch (IllegalStateException e) {
                 return 0L;
             }
@@ -663,6 +809,7 @@ public final class AndroidAudioBackend implements AudioBackend {
 
     @Override
     public synchronized long duration() {
+        if (activeAutoMix != null) return activeAutoMix.durationMs;
         if (player != null && prepared) {
             try {
                 int d = player.getDuration();
@@ -1459,6 +1606,7 @@ public final class AndroidAudioBackend implements AudioBackend {
     public synchronized boolean beginCrossfade(long ms, FadeCurve curve) {
         if (crossfading || incomingPlayer == null || !incomingPrepared) return false;
         if (player == null || !prepared || !wantPlay) return false;
+        if (incomingAutoMix != null) autoMixAudible = true;
         crossfading = true;
         rampCurve = curve != null ? curve : FadeCurve.LINEAR;
         long generation = ++rampGeneration;
@@ -1520,6 +1668,9 @@ public final class AndroidAudioBackend implements AudioBackend {
         // Read (and log) the A/B arm here as well, so a boundary with no correction at all
         // still says which shape produced its log.
         legacyEaseBacks();
+        // Starting a parked player and reading parameters can take longer than a short
+        // handoff. Its latency must never consume the gain ramp before its first tick.
+        rampStartNs = System.nanoTime();
         // From here until well past the promotion, both players' audio clocks are sampled so
         // a gap in what the listener hears can be attributed to an instant: see the class's
         // monitor note.
@@ -2512,10 +2663,14 @@ public final class AndroidAudioBackend implements AudioBackend {
         crossfading = false;
         player = in;
         source = incomingSource;
+        if (activeAutoMix != null) activeAutoMix.delete();
+        activeAutoMix = incomingAutoMix;
+        incomingAutoMix = null;
         prepared = true;
         // The incoming player was seeked before it started; the play head now
         // belongs to it and nothing is pending for it.
         pendingSeekMs = 0L;
+        seeking = false;
         wantPlay = true;
         incomingPlayer = null;
         incomingSource = null;
@@ -2531,6 +2686,7 @@ public final class AndroidAudioBackend implements AudioBackend {
         in.setOnPreparedListener(this::onPrepared);
         in.setOnErrorListener(this::onPlayerError);
         in.setOnCompletionListener(p -> onCompleted(p));
+        in.setOnSeekCompleteListener(this::onMainSeekComplete);
         // The promoted player's live position, logged at the swap itself: this is the
         // number the incoming track has already played (silently, then ramped up) and
         // exactly where it has to keep going. A value near the ramp's start instead of
@@ -2641,9 +2797,11 @@ public final class AndroidAudioBackend implements AudioBackend {
     private void cancelRamp() {
         rampGeneration++;
         crossfading = false;
+        autoMixHandoff = null;
     }
 
     private void releaseIncoming() {
+        autoMixArmGeneration++;
         // ⚠️ First, before anything is released: if the key blend had already bent the deck the
         // listener KEEPS hearing, that pitch has to come back (see restoreOutgoingPitch). This
         // method is every path that drops an overlap without promoting it — a pause, a seek, a
@@ -2658,13 +2816,21 @@ public final class AndroidAudioBackend implements AudioBackend {
         // tempo it was stretched to does not enter it (a stretched player's position
         // advances faster than the wall clock, which is exactly what makes it the right
         // resume point).
-        if (incomingPlayer != null && incomingRolling) {
+        if (incomingPlayer != null && incomingRolling
+                && (incomingAutoMix == null || autoMixAudible)) {
             try {
                 droppedIncomingMs = Math.max(0L,
                         Math.round(incomingPlayer.getCurrentPosition()));
             } catch (Throwable ignored) { }
         }
         releaseOne(incomingPlayer);
+        if (incomingAutoMix != null) {
+            if (droppedIncomingMs >= 0 && incomingRolling)
+                droppedIncomingMs = droppedIncomingMs >= incomingAutoMix.leadInMs
+                        ? incomingAutoMix.songPosition(droppedIncomingMs) : -1L;
+            incomingAutoMix.delete();
+            incomingAutoMix = null;
+        }
         incomingPlayer = null;
         // No listener is hearing this boundary any more: the monitor's whole reason to exist
         // (attributing a gap in the overlap to an instant inside it) is over with the overlap,
@@ -2696,7 +2862,10 @@ public final class AndroidAudioBackend implements AudioBackend {
     public synchronized long incomingPosition() {
         if (incomingPlayer != null && incomingRolling) {
             try {
-                return Math.max(0L, incomingPlayer.getCurrentPosition());
+                long position = Math.max(0L, incomingPlayer.getCurrentPosition());
+                if (incomingAutoMix != null && (!autoMixAudible || position < incomingAutoMix.leadInMs))
+                    return -1L;
+                return incomingAutoMix == null ? position : incomingAutoMix.songPosition(position);
             } catch (Throwable ignored) { }
         }
         return -1L;
@@ -2791,7 +2960,7 @@ public final class AndroidAudioBackend implements AudioBackend {
         focusRequest = null;
         hasFocus = false;
         ducked = false;
-        resumeOnGain = false;
+        resumeWindow.cancel();
         pausedByFocus = false;
     }
 
@@ -2814,10 +2983,10 @@ public final class AndroidAudioBackend implements AudioBackend {
     /** See {@link AudioBackend#cancelAutoResume()}. */
     @Override
     public synchronized void cancelAutoResume() {
-        if (resumeOnGain) {
+        if (resumeWindow.isPending()) {
             Logger.info("MediaPlayer: the user's own pause cancels the pending focus auto-resume");
         }
-        resumeOnGain = false;
+        resumeWindow.cancel();
         pausedByFocus = false;
     }
 
@@ -2837,11 +3006,15 @@ public final class AndroidAudioBackend implements AudioBackend {
         // republish a paused state at all.
         boolean wasAudible = player != null && prepared && player.isPlaying();
         boolean wasOverlapping = crossfading || incomingPlayer != null;
+        // Capture playback intent before clearing it. Idle/manual pauses cannot
+        // arm a resume, and another loss during this interruption cannot reset its clock.
+        resumeWindow.onLoss(SystemClock.elapsedRealtime(),
+                player != null && (wasAudible || wantPlay), resumeWhenFocusComes);
         Logger.info("MediaPlayer: audio focus {} at {}ms — pausing (audible={}, overlapping={});"
                         + " {}{}",
                 hint, position(), wasAudible, wasOverlapping,
-                resumeWhenFocusComes
-                        ? "auto-resume is armed for the next AUDIOFOCUS_GAIN"
+                resumeWindow.isPending()
+                        ? "auto-resume is armed for AUDIOFOCUS_GAIN within five minutes"
                         : "NO auto-resume",
                 keepFocus ? ""
                         : " and the focus request is forgotten, so the next play/resume"
@@ -2853,7 +3026,6 @@ public final class AndroidAudioBackend implements AudioBackend {
         // back from the app that just asked for it.
         wantPlay = false;
         pausedByFocus = true;
-        resumeOnGain = resumeWhenFocusComes;
         if (!keepFocus) forgetFocusAfterPermanentLoss();
         // Audio focus is with another app, so nothing here may keep playing — including
         // the incoming player of a running overlap.
@@ -2889,19 +3061,24 @@ public final class AndroidAudioBackend implements AudioBackend {
                 // Focus is ours again, so playback may start normally from here on.
                 pausedByFocus = false;
                 hasFocus = true;
-                Logger.info("MediaPlayer: audio focus gained at {}ms (ducked={}, resumeOnGain={})",
-                        position(), ducked, resumeOnGain);
+                boolean hadPendingResume = resumeWindow.isPending();
+                boolean shouldResume = resumeWindow.onGain(SystemClock.elapsedRealtime());
+                Logger.info("MediaPlayer: audio focus gained at {}ms (ducked={}, autoResume={})",
+                        position(), ducked, shouldResume);
                 if (ducked) {
                     ducked = false;
                     applyVolume();
                 }
-                if (resumeOnGain) {
-                    resumeOnGain = false;
-                    if (player != null && prepared) {
-                        player.start();
+                if (shouldResume) {
+                    if (player != null) {
                         wantPlay = true;
-                        fire(onResumed);
+                        if (prepared) {
+                            player.start();
+                            fire(onResumed);
+                        }
                     }
+                } else if (hadPendingResume) {
+                    Logger.info("MediaPlayer: interruption exceeded five minutes; waiting for manual play");
                 } else {
                     Logger.info("MediaPlayer: focus regained, but nothing is resumed: this pause"
                             + " was not made for a focus loss (a pause by the user stays a pause)");
@@ -2917,6 +3094,8 @@ public final class AndroidAudioBackend implements AudioBackend {
     }
 
     private void releasePlayer() {
+        seeking = false;
+        if (activeAutoMix != null) { activeAutoMix.delete(); activeAutoMix = null; }
         // A ramp in flight belongs to the source being replaced, and so does the
         // player it is ramping toward.
         cancelRamp();

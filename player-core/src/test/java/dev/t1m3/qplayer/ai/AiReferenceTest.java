@@ -26,10 +26,70 @@ import org.junit.Test;
  */
 public class AiReferenceTest {
 
+    @Test
+    public void collectionDrawAlwaysKeepsLikesAndAlsoSamplesOtherSavedPlaylists() {
+        List<dev.t1m3.qplayer.netease.dto.NeteasePlaylist> pool = new ArrayList<>();
+        for (long id = 1; id <= 12; id++) {
+            dev.t1m3.qplayer.netease.dto.NeteasePlaylist playlist = new dev.t1m3.qplayer.netease.dto.NeteasePlaylist();
+            playlist.id = id; playlist.name = id == 1 ? "我喜欢的音乐" : "收藏" + id;
+            pool.add(playlist);
+        }
+        pool.add(pool.get(1));
+        for (int seed = 0; seed < 10; seed++) {
+            List<dev.t1m3.qplayer.netease.dto.NeteasePlaylist> selected = AiReference.tasteCollections(pool, 1, new Random(seed));
+            assertEquals(3, selected.size());
+            assertEquals(1L, selected.get(0).id);
+            Set<Long> ids = new HashSet<>();
+            for (dev.t1m3.qplayer.netease.dto.NeteasePlaylist playlist : selected) assertTrue(ids.add(playlist.id));
+        }
+        assertEquals(1, AiReference.tasteCollections(null, 1, new Random(1)).size());
+        assertTrue(AiReference.tasteCollections(null, 0, new Random(1)).isEmpty());
+        assertEquals(1L, AiReference.tasteCollections(pool, 0, new Random(1)).get(0).id);
+    }
+
     private static List<String> pool(int n) {
         List<String> out = new ArrayList<>();
         for (int i = 0; i < n; i++) out.add("歌" + i + " - 歌手" + i);
         return out;
+    }
+
+    private static dev.t1m3.qplayer.netease.dto.NeteaseSong song(String name, String artist) {
+        dev.t1m3.qplayer.netease.dto.NeteaseSong song = new dev.t1m3.qplayer.netease.dto.NeteaseSong();
+        song.name = name; song.artist = artist; return song;
+    }
+
+    @Test
+    public void representativeSampleAnchorsFrequentArtistsAndCoversOtherArtists() {
+        List<dev.t1m3.qplayer.netease.dto.NeteaseSong> songs = new ArrayList<>();
+        for (int i = 0; i < 20; i++) songs.add(song("常听曲" + i, "常听歌手"));
+        for (int i = 0; i < 10; i++) songs.add(song("收藏曲" + i, "收藏歌手"));
+        for (int i = 0; i < 5; i++) songs.add(song("另一首" + i, "作者" + i));
+        List<String> first = AiReference.representativeSongs(songs, 6, new Random(1));
+        assertEquals(6, first.size());
+        assertTrue(first.get(0).endsWith(" — 常听歌手"));
+        assertTrue(first.get(1).endsWith(" — 收藏歌手"));
+        Set<String> artists = new HashSet<>();
+        for (String row : first) artists.add(row.substring(row.indexOf(" — ") + 3));
+        assertEquals("Small sample must not be filled by the dominant artist", 6, artists.size());
+        assertEquals(first, AiReference.representativeSongs(songs, 6, new Random(1)));
+        assertNotEquals(first, AiReference.representativeSongs(songs, 6, new Random(2)));
+        assertEquals("Sampling must not mutate source metadata", 35, songs.size());
+    }
+
+    @Test
+    public void representativeSampleDeduplicatesAndFillsSingleArtistLibraries() {
+        List<dev.t1m3.qplayer.netease.dto.NeteaseSong> songs = Arrays.asList(
+                null, song(" ", "作者"), song("歌A", "作者"), song(" 歌A ", " 作者 "),
+                song("歌B", "作者"), song("歌C", null));
+        List<String> rows = AiReference.representativeSongs(songs, 10, new Random(1));
+        assertEquals(3, rows.size());
+        assertTrue(rows.contains("歌A — 作者"));
+        assertTrue(rows.contains("歌B — 作者"));
+        assertTrue(rows.contains("歌C"));
+        assertTrue(AiReference.representativeSongs(null, 10, new Random(1)).isEmpty());
+        assertTrue(AiReference.representativeSongs(songs, 0, new Random(1)).isEmpty());
+        assertEquals(1, AiReference.representativeSongs(songs, 1, new Random(1)).size());
+        assertEquals(2, AiReference.sample(Arrays.asList(" A ", "A", "B"), 10, new Random(1)).size());
     }
 
     @Test

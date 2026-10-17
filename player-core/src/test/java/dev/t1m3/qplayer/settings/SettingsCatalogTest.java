@@ -7,6 +7,33 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class SettingsCatalogTest {
+    @Test public void mvBackgroundIsOptInAndAndroidOnly() {
+        SettingSpec spec = setting(SettingsCatalog.MV_BACKGROUND_KEY);
+        assertEquals(Boolean.FALSE, spec.def);
+        assertEquals(SettingSpec.SWITCH, spec.type);
+        assertEquals(SettingsCatalog.APPEARANCE, spec.category);
+        assertTrue(spec.appliesTo(SettingsCatalog.ANDROID));
+        assertFalse(spec.appliesTo(SettingsCatalog.DESKTOP));
+    }
+
+    @Test public void autoMixReplacesLegacyControlsAndPreservesMasterPreference() {
+        assertEquals("AutoMix", setting(SettingsCatalog.SMART_TRANSITION_KEY).title);
+        assertEquals(2, setting("autoMixMode").def);
+        assertEquals(6, setting("autoMixWindow").def);
+        assertEquals(Boolean.TRUE, setting("autoMixForceWindow").def);
+        assertEquals(0, setting("autoMixStyle").def);
+        assertEquals(Boolean.TRUE, setting("autoMixAutoCue").def);
+        assertEquals(Boolean.TRUE, setting("autoMixPitchEnabled").def);
+        assertEquals(SettingSpec.SWITCH, setting("autoMixPitchEnabled").type);
+        assertEquals(SettingsCatalog.SMART_TRANSITION_KEY, setting("autoMixPitchEnabled").dependsOn);
+        assertEquals("有可能吃掉下一首歌一分钟", setting("autoMixAutoCue").desc);
+        assertEquals(Boolean.TRUE, setting("precacheNextTrack").def);
+        assertFalse(SettingsCatalog.specs().stream().anyMatch(s ->
+                SettingsCatalog.TRANSITION_KIND_KEY.equals(s.key)
+                || SettingsCatalog.TRANSITION_BLEND_KEY.equals(s.key)
+                || SettingsCatalog.ACE_STEP.equals(s.category)));
+        assertEquals(60000, setting("aiTimeoutMs").def);
+    }
 
     @Test
     public void glassRefractionDefaultsOnAndIsAndroidOnly() {

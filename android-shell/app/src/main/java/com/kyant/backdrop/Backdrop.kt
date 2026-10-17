@@ -10,6 +10,12 @@ interface Backdrop {
 
     val isCoordinatesDependent: Boolean
 
+    /** Version used for adaptive colour sampling, independent of live pixel redraws. */
+    val samplingRevision: Long? get() = null
+
+    /** Subscribe to recorded pixels changing without a layout or composition change. */
+    fun observeChanges(onChanged: () -> Unit): () -> Unit = {}
+
     fun DrawScope.drawBackdrop(
         density: Density,
         coordinates: LayoutCoordinates?,

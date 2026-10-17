@@ -21,6 +21,14 @@ class Md3eActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // Draw the background through the cutout; only controls consume safe insets.
+        if (Build.VERSION.SDK_INT >= 28) window.attributes = window.attributes.apply {
+            layoutInDisplayCutoutMode = if (Build.VERSION.SDK_INT >= 30)
+                android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            else android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= 29) window.isStatusBarContrastEnforced = false
         runtime = Md3eRuntime.get(applicationContext)
         frameMonitor = Md3eFrameMonitor(this, runtime)
         runtime.setLocalPermission(checkSelfPermission(audioPermissionName()) == PackageManager.PERMISSION_GRANTED)

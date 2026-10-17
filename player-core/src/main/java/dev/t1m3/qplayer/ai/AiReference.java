@@ -1,5 +1,7 @@
 package dev.t1m3.qplayer.ai;
 
+import dev.t1m3.qplayer.netease.dto.NeteasePlaylist;
+import dev.t1m3.qplayer.netease.dto.NeteaseSong;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -15,7 +17,7 @@ import java.util.Random;
  *
  * <ul>
  *   <li><b>Randomness.</b> A generation is not reproducible twice: the history it is shown is a
- *   <em>random sample</em> of the account's listening history ({@link #sample}), the instruction it is
+ *   <em>representative sample</em> of the account's listening history ({@link #representativeSongs}), the instruction it is
  *   given carries a random 切入角度 ({@link #angle}), and the request is sent warm
  *   ({@link #temperature}) instead of at the greedy 0.2 the transition chooser needs. Same request,
  *   two different lists — which is the point.</li>
@@ -32,13 +34,15 @@ import java.util.Random;
  */
 public final class AiReference {
 
-    /** How many history rows are shown to the model, drawn at random from up to a hundred. Twenty,
-     *  the same order of magnitude as the liked-song sample the long-press shortcut already used: big
-     *  enough to carry the taste, small enough not to crowd out the request itself. */
-    public static final int HISTORY_SAMPLE = 20;
+    /** Small representative context; these are input samples, never output limits. */
+    public static final int HISTORY_SAMPLE = 10;
+    public static final int HISTORY_POOL = 40;
+    public static final int LIKED_SAMPLE = 6;
+    public static final int COLLECTION_SAMPLE = 3;
+    public static final int COLLECTION_POOL = 32;
 
     /** How many rows of the list that is playing are shown — the 「老歌」 anchor of a continuation. */
-    public static final int PREVIOUS_LIST_CAP = 20;
+    public static final int PREVIOUS_LIST_CAP = 6;
 
     /** The warm end of the request's temperature: this is the range the playlist is generated in.
      *  The transition chooser keeps the client's own 0.2 (it must answer the same way twice for the
@@ -52,13 +56,13 @@ public final class AiReference {
      * is what made two generations of the same request come back nearly identical.
      */
     private static final String[] ANGLES = {
-        "从我历史里挑一位我常听的歌手，找一首他/她最近发的新歌。",
-        "找几首风格相似但更小众、榜单上看不到的名字。",
+        "从我历史里常听的歌手中，选一首你已知的较新作品。",
+        "在常听曲风内找少量相似但更小众的作品，其余贴合历史与收藏。",
         "从我以前听过的东西里，找同年代同风格但我没听过的。",
         "不要按热度排，按我自己的口味顺序来挑。",
-        "挑一两首最近发行、还很少有人听的。",
+        "可以挑已知的较新或不太热门的作品。",
         "从我历史里出现过的歌手往外延伸一位，风格要接得上。",
-        "这张歌单里放两三首冷门佳作，其余按我的口味来。",
+        "少量加入与收藏相近的冷门佳作，其余以熟悉的歌手和曲风为主。",
         "用我历史里听得最多的那种情绪做主线，歌可以更旧或更新。",
     };
 
@@ -78,9 +82,70 @@ public final class AiReference {
         Collections.shuffle(copy, rnd);
         for (String row : copy) {
             if (out.size() >= count) break;
-            if (row != null && !row.trim().isEmpty()) out.add(row.trim());
+            if (row != null && !row.trim().isEmpty() && !out.contains(row.trim())) out.add(row.trim());
         }
         return out;
+    }
+
+    /**
+     * Anchor half the sample in the most represented artists, then rotate other
+     * artists before taking more tracks from the same one. Deduplicate tracks
+     * before counting artists, so repeated history entries cannot consume slots.
+     */
+    public static List<String> representativeSongs(List<NeteaseSong> pool, int count, Random rnd) {
+        List<String> out = new ArrayList<>();
+        if (pool == null || count <= 0) return out;
+        java.util.Map<String, List<String>> byArtist = new java.util.LinkedHashMap<>();
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        for (NeteaseSong song : pool) {
+            if (song == null || song.name == null || song.name.trim().isEmpty()) continue;
+            String artist = song.artist == null ? "" : song.artist.trim();
+            String row = song.name.trim() + (artist.isEmpty() ? "" : " — " + artist);
+            if (!seen.add(row.toLowerCase(java.util.Locale.ROOT))) continue;
+            // Missing artist data must not collapse unrelated tracks into one artist.
+            String key = (artist.isEmpty() ? row : artist).toLowerCase(java.util.Locale.ROOT);
+            byArtist.computeIfAbsent(key, ignored -> new ArrayList<>()).add(row);
+        }
+        List<List<String>> artists = new ArrayList<>(byArtist.values());
+        Collections.shuffle(artists, rnd);
+        artists.sort((a, b) -> Integer.compare(b.size(), a.size()));
+        for (List<String> songs : artists) Collections.shuffle(songs, rnd);
+        int anchors = Math.min(artists.size(), Math.max(1, count / 2));
+        for (int i = 0; i < anchors; i++) out.add(artists.get(i).remove(0));
+        List<List<String>> remaining = new ArrayList<>(artists.subList(anchors, artists.size()));
+        Collections.shuffle(remaining, rnd);
+        // Unrepresented artists first; frequent artists can fill spare slots.
+        remaining.addAll(artists.subList(0, anchors));
+        boolean added = true;
+        while (out.size() < count && added) {
+            added = false;
+            for (List<String> songs : remaining) {
+                if (out.size() >= count) break;
+                if (!songs.isEmpty()) { out.add(songs.remove(0)); added = true; }
+            }
+        }
+        return out;
+    }
+
+    /** Always keep the liked collection, then draw other collections without duplicate IDs. */
+    public static List<NeteasePlaylist> tasteCollections(
+            List<NeteasePlaylist> pool, long favoriteId, Random rnd) {
+        List<NeteasePlaylist> chosen = new ArrayList<>();
+        List<NeteasePlaylist> others = new ArrayList<>();
+        java.util.Set<Long> seen = new java.util.HashSet<>();
+        if (favoriteId > 0) {
+            NeteasePlaylist favorite = new NeteasePlaylist();
+            favorite.id = favoriteId; favorite.name = "我喜欢的音乐";
+            chosen.add(favorite); seen.add(favoriteId);
+        }
+        if (pool != null) for (NeteasePlaylist playlist : pool) {
+            if (playlist == null || playlist.id <= 0 || !seen.add(playlist.id)) continue;
+            if ("我喜欢的音乐".equals(playlist.name)) chosen.add(0, playlist);
+            else others.add(playlist);
+        }
+        Collections.shuffle(others, rnd);
+        chosen.addAll(others.subList(0, Math.min(2, others.size())));
+        return chosen;
     }
 
     /** One random 切入角度 for this generation — see {@link #ANGLES}. */
@@ -119,16 +184,15 @@ public final class AiReference {
     public static String block(List<String> historySample, List<String> previousList, List<String> angles) {
         StringBuilder sb = new StringBuilder();
         if (historySample != null && !historySample.isEmpty()) {
-            sb.append("我的听歌历史（最近播放的随机样本，仅用于判断我的口味和风格）：\n");
+            sb.append("我的听歌历史（代表样本）：\n");
             for (String row : historySample) sb.append(row).append('\n');
         }
         if (previousList != null && !previousList.isEmpty()) {
-            sb.append("\n上一张歌单（正在播放的老歌，用来延续同一风格；新歌单里既要有其中一部分老歌，"
-                    + "也要有新的歌）：\n");
+            sb.append("\n上一张歌单：\n");
             for (String row : previousList) sb.append(row).append('\n');
         }
         if (angles != null && !angles.isEmpty()) {
-            sb.append("\n本次的切入角度（必须体现在选曲里）：\n");
+            sb.append("\n本次的切入角度（可选参考，与用户要求冲突时忽略）：\n");
             for (String a : angles) sb.append(a).append('\n');
         }
         return sb.toString();

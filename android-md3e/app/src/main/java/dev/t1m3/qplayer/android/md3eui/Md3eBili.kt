@@ -2,6 +2,14 @@
 
 package dev.t1m3.qplayer.android.md3eui
 
+import dev.t1m3.qplayer.android.md3eui.Md3eAdaptiveButton as Button
+import dev.t1m3.qplayer.android.md3eui.Md3eAdaptiveFilledIconButton as FilledIconButton
+
+import dev.t1m3.qplayer.android.ui.IosAwareAlertDialog as AlertDialog
+import dev.t1m3.qplayer.android.ui.IosAwareIconButton as IconButton
+import dev.t1m3.qplayer.android.ui.IosAwareTextButton as TextButton
+import dev.t1m3.qplayer.android.ui.IosAwareSlider as Slider
+
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
@@ -68,15 +76,16 @@ internal data class BiliState(
 )
 
 @Composable
-internal fun Md3eBiliVideoRow(video: BiliClient.BiliVideo, onPlay: () -> Unit) {
+internal fun Md3eBiliVideoRow(video: BiliClient.BiliVideo, onEnqueue: () -> Unit, onPlay: () -> Unit) {
     BiliItemRow(video.title, video.author,
         "${video.durationText.ifBlank { biliTime(video.durationSeconds * 1000) }} · ${biliCount(video.playCount)}播放",
-        video.coverUrl, onPlay)
+        video.coverUrl, onEnqueue, onPlay)
 }
 
 @Composable
-private fun BiliItemRow(title: String, author: String, description: String, cover: String, onPlay: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable(onClick = onPlay).padding(horizontal = 16.dp, vertical = 10.dp),
+private fun BiliItemRow(title: String, author: String, description: String, cover: String,
+    onEnqueue: () -> Unit, onPlay: () -> Unit) {
+    Row(Modifier.fillMaxWidth().songQueueMenu(title, onPlay, onEnqueue).padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         Artwork(cover, Modifier.width(116.dp).height(72.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -129,7 +138,7 @@ internal fun Md3eBiliFavFoldersPage(runtime: Md3eRuntime, onLogin: () -> Unit,
     onOpen: (Long, String) -> Unit, modifier: Modifier = Modifier, onOpenPlayer: () -> Unit = {}) {
     val state = runtime.bili
     LaunchedEffect(state.loggedIn) { if (state.loggedIn) runtime.controller.loadBiliFavFolders(0L) }
-    LazyColumn(modifier, contentPadding = PaddingValues(bottom = 24.dp + LocalMd3eDockInset.current)) {
+    LazyColumn(modifier, contentPadding = PaddingValues(top = iosPageTopPadding(), bottom = 24.dp + LocalMd3eDockInset.current)) {
         item {
             Row(Modifier.fillMaxWidth().padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("B站收藏夹", Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
@@ -165,7 +174,7 @@ internal fun Md3eBiliFavItemsPage(runtime: Md3eRuntime, id: Long, title: String,
     modifier: Modifier = Modifier, onOpenPlayer: () -> Unit = {}) {
     LaunchedEffect(id) { runtime.controller.loadBiliFavItems(id, title) }
     val state = runtime.bili
-    LazyColumn(modifier, contentPadding = PaddingValues(bottom = 24.dp + LocalMd3eDockInset.current)) {
+    LazyColumn(modifier, contentPadding = PaddingValues(top = iosPageTopPadding(), bottom = 24.dp + LocalMd3eDockInset.current)) {
         item {
             Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(state.folderTitle.ifBlank { title }, style = MaterialTheme.typography.headlineSmall)
@@ -181,7 +190,10 @@ internal fun Md3eBiliFavItemsPage(runtime: Md3eRuntime, id: Long, title: String,
             Text(state.favError.ifBlank { "收藏夹中没有视频" }, Modifier.padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         itemsIndexed(state.items, key = { index, item -> "$index-${item.bvid}" }) { index, item ->
-            BiliItemRow(item.title, item.author, biliTime(item.durationSeconds * 1000), item.coverUrl) {
+            BiliItemRow(item.title, item.author, biliTime(item.durationSeconds * 1000), item.coverUrl,
+                onEnqueue = {
+                    runtime.controller.enqueueBiliFavorite(item)
+                }) {
                 runtime.play { playBiliFavItemAt(index) }
                 onOpenPlayer()
             }

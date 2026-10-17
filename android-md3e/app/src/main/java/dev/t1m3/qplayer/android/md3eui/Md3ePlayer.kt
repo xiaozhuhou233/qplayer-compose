@@ -2,6 +2,10 @@
 
 package dev.t1m3.qplayer.android.md3eui
 
+import dev.t1m3.qplayer.android.ui.IosAwareAlertDialog as AlertDialog
+import dev.t1m3.qplayer.android.ui.IosAwareIconButton as IconButton
+import dev.t1m3.qplayer.android.ui.IosAwareTextButton as TextButton
+
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.AnimatedVisibilityScope
@@ -28,7 +32,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.border
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.background
 import dev.t1m3.qplayer.android.md3eui.claudeClickable as clickable
 import androidx.compose.foundation.combinedClickable
@@ -43,6 +46,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import com.kyant.backdrop.backdrops.rememberLayerBackdrop
+import com.kyant.backdrop.backdrops.layerBackdrop
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.boundsInRoot
@@ -70,8 +75,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.CustomAccessibilityAction
-import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
@@ -84,10 +87,6 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.t1m3.qplayer.lyric.LyricLine
-import dev.t1m3.qplayer.model.Track
-import sh.calvin.reorderable.ReorderableItem
-import sh.calvin.reorderable.rememberReorderableLazyListState
-import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.PI
 import kotlin.math.sin
 
@@ -103,7 +102,7 @@ private val LocalPlayerCoverTransition = staticCompositionLocalOf<PlayerCoverTra
 private fun Modifier.playerTabCover(restingAngle: Float = 0f): Modifier {
     val transition = LocalPlayerCoverTransition.current ?: return rotate(restingAngle)
     val claude = LocalClaudeDesign.current
-    val otherAngle = if (claude && restingAngle == 0f) -5f else 0f
+    val otherAngle = 0f
     val angle = transition.animated.transition.animateFloat(
         transitionSpec = { tween(if (claude) ClaudeOneTake.PLAYER_TAB else 360, easing = if (claude) ClaudeOneTake.ExpoOut else FastOutSlowInEasing) },
         label = "player_cover_rotation"
@@ -154,14 +153,22 @@ internal fun Md3ePlayerScreen(runtime: Md3eRuntime, onBack: () -> Unit,
     }
     val state = runtime.playback
     var tab by remember(initialLyrics) { mutableIntStateOf(if (initialLyrics) 1 else 0) }
+    var detailHadMv by remember(state.songId) { mutableStateOf(false) }
     val expansion = LocalClaudePlayerExpansion.current
-    SideEffect { expansion?.detailShowsDisc = tab == 0 && !runtime.bili.playing }
     LaunchedEffect(runtime.bili.playing) { if (runtime.bili.playing) tab = 0 }
     var dragX by remember { mutableFloatStateOf(0f) }
     var dragY by remember { mutableFloatStateOf(0f) }
+    val ios = LocalIosDesign.current
+    var gestureStart by remember { mutableFloatStateOf(1f) }
+    val velocity = remember { androidx.compose.ui.input.pointer.util.VelocityTracker() }
     val context = LocalContext.current
     BackHandler(onBack = onBack)
+    val mvLayout = remember { MvBackdropLayout() }
+    var mvPan by remember(state.songId) { mutableFloatStateOf(0f) }
+    val mvExpected = tab == 0 && mvBackdropExpected(runtime)
+    val playerBackground = if (mvExpected) Color.Black else MaterialTheme.colorScheme.surfaceContainer
     Box(Modifier.fillMaxSize()
+        .onGloballyPositioned { mvLayout.rootTop = it.boundsInRoot().top }
         .pointerInput(Unit) {
             detectHorizontalDragGestures(
                 onDragStart = { dragX = 0f },
@@ -174,21 +181,46 @@ internal fun Md3ePlayerScreen(runtime: Md3eRuntime, onBack: () -> Unit,
                 onDragCancel = { dragX = 0f },
             )
         }
-        .pointerInput(Unit) {
+        .pointerInput(ios, expansion) {
             detectVerticalDragGestures(
-                onDragStart = { dragY = 0f },
-                onVerticalDrag = { change, amount -> change.consume(); dragY += amount },
+                onDragStart = {
+                    dragY = 0f; velocity.resetTracking()
+                    if (ios) expansion?.iosMotion?.let { motion ->
+                        gestureStart = motion.value; motion.beginDrag()
+                    }
+                },
+                onVerticalDrag = { change, amount ->
+                    change.consume(); dragY += amount
+                    velocity.addPosition(change.uptimeMillis, change.position)
+                    if (ios) expansion?.iosMotion?.dragTo(gestureStart - dragY / size.height.coerceAtLeast(1))
+                },
                 onDragEnd = {
-                    if (dragY < -72f) onQueue()
-                    if (dragY > 72f) onBack()
+                    val motion = if (ios) expansion?.iosMotion else null
+                    if (motion != null) {
+                        val speed = velocity.calculateVelocity().y
+                        val dismiss = dragY > 0f && (motion.value < .7f || (dragY > 32.dp.toPx() && speed > 650.dp.toPx()))
+                        motion.releaseDragWithVelocity(-speed / size.height.coerceAtLeast(1))
+                        motion.request(!dismiss)
+                        if (dismiss) onBack() else if (dragY < -72f) onQueue()
+                    } else {
+                        if (dragY < -72f) onQueue()
+                        if (dragY > 72f) onBack()
+                    }
                     dragY = 0f
                 },
-                onDragCancel = { dragY = 0f },
+                onDragCancel = { if (ios) expansion?.iosMotion?.request(true); dragY = 0f },
             )
         }
-        .background(MaterialTheme.colorScheme.surfaceContainer)) {
+        .background(playerBackground)) {
         val claude = LocalClaudeDesign.current
         val coverBackground = runtime.settings.bool("lyricCoverBackground") && state.cover.isNotBlank()
+        val playerGlassBackdrop = if (ios) rememberLayerBackdrop() else null
+        var mvBackground by remember(state.songId) { mutableStateOf(mvExpected) }
+        // Match the legacy player: record backgrounds only; glass controls are
+        // siblings, so their RenderNodes can never sample themselves.
+        Box(Modifier.fillMaxSize().then(
+            if (playerGlassBackdrop != null) Modifier.layerBackdrop(playerGlassBackdrop) else Modifier)
+            .background(playerBackground)) {
         if (coverBackground) {
             Crossfade(tab, animationSpec = tween(if (claude) ClaudeOneTake.PLAYER_TAB else 360, easing = if (claude) ClaudeOneTake.ExpoOut else FastOutSlowInEasing), label = "player_background") { backgroundTab ->
                 if (backgroundTab == 1) {
@@ -199,22 +231,54 @@ internal fun Md3ePlayerScreen(runtime: Md3eRuntime, onBack: () -> Unit,
                 }
             }
         }
+        if (mvExpected) {
+            // This stable layer stays BELOW the video throughout its first-frame fade.
+            Md3eSoftArtworkBackdrop(state.cover, Modifier.fillMaxSize())
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .45f)))
+        }
+        val mvState = Md3eMvBackdrop(runtime, mvLayout.sceneBottom,
+            mvLayout.controlsTop, visible = tab == 0, modifier = Modifier.fillMaxSize(), panFraction = mvPan)
+        val hasMvBackground = tab == 0 && mvState.hasVideo
+        SideEffect {
+            mvBackground = hasMvBackground
+            if (tab == 0) detailHadMv = hasMvBackground
+            expansion?.immersiveVideo = hasMvBackground
+            expansion?.detailShowsDisc = tab == 0 && !runtime.bili.playing && !hasMvBackground
+        }
+        }
+        if (tab == 0 && mvBackground) Box(Modifier.fillMaxWidth().fillMaxHeight(.5f)
+            .padding(top = 96.dp).pointerInput(state.songId) {
+                detectVerticalDragGestures { change, amount ->
+                    change.consume()
+                    mvPan = (mvPan + amount / (size.height + 96.dp.toPx()).coerceAtLeast(1f)).coerceIn(-MV_MAX_PAN_FRACTION, MV_MAX_PAN_FRACTION)
+                }
+            })
         val dynamicLyrics = tab == 1 && coverBackground && !runtime.settings.bool("lowSpecMode")
         val scheme = MaterialTheme.colorScheme
-        val displayScheme = if (dynamicLyrics) scheme.copy(
+        val displayScheme = if (dynamicLyrics || mvBackground) scheme.copy(
             onSurface = Color.White,
             onSurfaceVariant = Color(0xFFDDDDDD),
             onBackground = Color.White,
+            background = if (mvBackground) Color.Black else scheme.background,
+            surface = if (mvBackground) Color.Black else scheme.surface,
             surfaceContainerHigh = Color(0xD9252830),
         ) else scheme
         MaterialTheme(colorScheme = displayScheme) {
-        CompositionLocalProvider(LocalContentColor provides displayScheme.onSurface) {
+        CompositionLocalProvider(LocalContentColor provides displayScheme.onSurface,
+            dev.t1m3.qplayer.android.ui.LocalGlassAdaptiveColors provides false,
+            dev.t1m3.qplayer.android.ui.LocalPlayerGlassBackdrop provides playerGlassBackdrop,
+            dev.t1m3.qplayer.android.ui.LocalGlassDark provides (mvBackground || dynamicLyrics || dev.t1m3.qplayer.android.ui.LocalGlassDark.current),
+            LocalPlayerMvBackdrop provides mvBackground,
+            LocalPlayerMvLayout provides (if (tab == 0) mvLayout else null)) {
         Column(
             Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
                 .padding(horizontal = 24.dp, vertical = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Row(Modifier.fillMaxWidth().height(48.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (LocalIosDesign.current) dev.t1m3.qplayer.android.ui.IosPlayerHeader(
+                activeTab = tab, video = runtime.bili.playing, onTab = { tab = it },
+                onClose = onBack, onShare = null, onQueue = onQueue)
+             else Row(Modifier.fillMaxWidth().height(48.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack, modifier = Modifier.size(40.dp)) {
                     Icon(PlayerIcons.Back, "返回")
                 }
@@ -260,7 +324,7 @@ internal fun Md3ePlayerScreen(runtime: Md3eRuntime, onBack: () -> Unit,
                 ) { page ->
                     CompositionLocalProvider(LocalPlayerCoverTransition provides
                         PlayerCoverTransition(coverScope, this)) {
-                        if (page == 0) PlayerDetailTab(runtime, onLyrics = { tab = 1 },
+                        if (page == 0) PlayerDetailTab(runtime, showArtwork = !(if (tab == 0) mvBackground else detailHadMv), onLyrics = { tab = 1 }, onQueue = onQueue,
                             onOpenAlbum = onOpenAlbum, onOpenArtist = onOpenArtist)
                         else PlayerLyricsTab(runtime, onDetail = { tab = 0 })
                     }
@@ -291,10 +355,14 @@ private fun PlayerTab(label: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun PlayerDetailTab(runtime: Md3eRuntime, onLyrics: () -> Unit,
+private fun PlayerDetailTab(runtime: Md3eRuntime, showArtwork: Boolean, onLyrics: () -> Unit, onQueue: () -> Unit,
     onOpenAlbum: (Long) -> Unit, onOpenArtist: (Long) -> Unit) {
+    if (LocalIosDesign.current) {
+        IosPlayerDetail(runtime, showArtwork, onLyrics, onQueue, onOpenAlbum, onOpenArtist)
+        return
+    }
     if (LocalClaudeDesign.current) {
-        ClaudePlayerDetail(runtime, onLyrics, onOpenAlbum, onOpenArtist)
+        ClaudePlayerDetail(runtime, showArtwork, onLyrics, onOpenAlbum, onOpenArtist)
         return
     }
     val state = runtime.playback
@@ -309,7 +377,7 @@ private fun PlayerDetailTab(runtime: Md3eRuntime, onLyrics: () -> Unit,
                 val aspect = if (runtime.videoHeight > 0) runtime.videoWidth.toFloat() / runtime.videoHeight else 16f / 9f
                 val videoWidth = minOf(maxWidth, maxHeight * aspect)
                 Md3eVideoSlot(runtime, Modifier.width(videoWidth).height(videoWidth / aspect))
-            } else Artwork(state.cover, Modifier.size(coverSize).graphicsLayer {
+            } else if (showArtwork) Artwork(state.cover, Modifier.size(coverSize).graphicsLayer {
                 scaleX = scale.value; scaleY = scale.value
             }.clickable {
                 if (runtime.bili.playing) runtime.videoVisible = true else onLyrics()
@@ -317,7 +385,7 @@ private fun PlayerDetailTab(runtime: Md3eRuntime, onLyrics: () -> Unit,
             if (state.loading) CircularProgressIndicator(Modifier.size(48.dp))
         }
         Column(
-            Modifier.fillMaxWidth().height(58.dp),
+            Modifier.fillMaxWidth().height(58.dp).playerMvAnchor(scene = true),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
@@ -337,6 +405,7 @@ private fun PlayerDetailTab(runtime: Md3eRuntime, onLyrics: () -> Unit,
         }
         if (!state.hasTrack && !state.loading && runtime.bili.error.isNotBlank()) Text(runtime.bili.error,
             color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, maxLines = 2)
+        AutoMixPreparationBadge(state)
         if (runtime.bili.playing) {
             if (runtime.bili.error.isNotBlank()) Text(runtime.bili.error,
                 color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, maxLines = 2)
@@ -355,22 +424,30 @@ private fun PlayerDetailTab(runtime: Md3eRuntime, onLyrics: () -> Unit,
 }
 
 @Composable
-private fun ClaudePlayerDetail(runtime: Md3eRuntime, onLyrics: () -> Unit,
+private fun ClaudePlayerDetail(runtime: Md3eRuntime, showArtwork: Boolean, onLyrics: () -> Unit,
     onOpenAlbum: (Long) -> Unit, onOpenArtist: (Long) -> Unit) {
     val state = runtime.playback
+    var biliFavoriteOpen by remember { mutableStateOf(false) }
+    var biliLoginOpen by remember { mutableStateOf(false) }
+    if (biliFavoriteOpen) Md3eBiliFavPickerDialog(runtime) { biliFavoriteOpen = false }
+    if (biliLoginOpen) Md3eBiliLoginDialog(runtime) { biliLoginOpen = false }
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+    val compact = maxHeight < 540.dp
+    val gap = if (compact) 10.dp else 18.dp
     Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
         BoxWithConstraints(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
             if (runtime.bili.playing && runtime.videoVisible) {
                 val aspect = if (runtime.videoHeight > 0) runtime.videoWidth.toFloat() / runtime.videoHeight else 16f / 9f
                 val width = minOf(maxWidth, maxHeight * aspect)
                 Md3eVideoSlot(runtime, Modifier.width(width).height(width / aspect))
-            } else {
-                ClaudeVinylStageMd3e(state.cover, state.title, state.playing,
+            } else if (showArtwork) {
+                ClaudeArtworkStage(state.cover,
                     Modifier.fillMaxSize().clickable { if (runtime.bili.playing) runtime.videoVisible = true else onLyrics() })
             }
             if (state.loading) CircularProgressIndicator(Modifier.size(36.dp))
         }
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Spacer(Modifier.height(gap))
+        Row(Modifier.fillMaxWidth().playerMvAnchor(scene = true), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(state.title.ifBlank { "尚未播放" }, fontFamily = ClaudeSerif,
                     fontSize = 24.sp, fontWeight = FontWeight.SemiBold, maxLines = 2,
@@ -382,58 +459,186 @@ private fun ClaudePlayerDetail(runtime: Md3eRuntime, onLyrics: () -> Unit,
                 Md3ePlayingArtistLinks(state, onOpenArtist,
                     Modifier.padding(vertical = 4.dp), centered = false)
             }
-            IconButton(enabled = state.likeable, onClick = { runtime.likeDisplayed(state) }) {
+            IconButton(enabled = runtime.bili.playing || state.likeable, onClick = {
+                if (runtime.bili.playing) {
+                    if (runtime.bili.loggedIn) biliFavoriteOpen = true else biliLoginOpen = true
+                } else runtime.likeDisplayed(state)
+            }) {
                 Icon(if (state.liked) PlayerIcons.Favorite else PlayerIcons.FavoriteBorder,
                     "收藏歌曲", tint = MaterialTheme.colorScheme.primary)
             }
         }
+        Spacer(Modifier.height(gap))
+        AutoMixPreparationBadge(state, compact = true)
         if (runtime.bili.playing) BiliProgress(runtime) else PlayerProgress(state,
             wavy = false, onSeek = { runtime.seekDisplayed(state, it) }, modifier = Modifier.fillMaxWidth())
-        PlayerTransport(runtime)
+        Spacer(Modifier.height(gap))
+        ClaudePlayerTransport(runtime)
+        Spacer(Modifier.height(if (compact) 12.dp else 24.dp))
+    }
+    }
+}
+
+// Adapted from MusicOne PhoneExpandedPlayer, PlayerCoverStage and ImmersivePlaybackControls.
+// MIT, Copyright (c) 2026 ShuyunR; assets/licenses/musicone-LICENSE.txt.
+@Composable
+private fun IosPlayerDetail(runtime: Md3eRuntime, showArtwork: Boolean, onLyrics: () -> Unit,
+    onQueue: () -> Unit, onOpenAlbum: (Long) -> Unit, onOpenArtist: (Long) -> Unit) {
+    val state = runtime.playback
+    val expansion = LocalClaudePlayerExpansion.current
+    var biliFavorite by remember { mutableStateOf(false) }
+    var biliLogin by remember { mutableStateOf(false) }
+    if (biliFavorite) Md3eBiliFavPickerDialog(runtime) { biliFavorite = false }
+    if (biliLogin) Md3eBiliLoginDialog(runtime) { biliLogin = false }
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val compact = maxHeight < 520.dp
+        Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+            BoxWithConstraints(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                if (runtime.bili.playing && runtime.videoVisible) {
+                    val aspect = if (runtime.videoHeight > 0) runtime.videoWidth.toFloat() / runtime.videoHeight else 16f / 9f
+                    val width = minOf(maxWidth, maxHeight * aspect)
+                    Md3eVideoSlot(runtime, Modifier.width(width).height(width / aspect))
+                } else if (showArtwork) {
+                    val side = minOf(maxWidth, (maxHeight - 24.dp).coerceAtLeast(1.dp), 440.dp)
+                    Box(Modifier.size(side).onGloballyPositioned { expansion?.targetDiscBounds = it.boundsInRoot() }) {
+                        ClaudePlayerArtwork(state.cover, Modifier.fillMaxSize().playerTabCover()
+                            .graphicsLayer { alpha = if (expansion?.moving == true) 0f else 1f }
+                            .clickable { if (runtime.bili.playing) runtime.videoVisible = true else onLyrics() }, corner = 12.dp)
+                    }
+                }
+                if (state.loading) CircularProgressIndicator(Modifier.size(32.dp))
+            }
+            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp).playerMvAnchor(scene = true),
+                verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(state.title, fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.SemiBold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.clickable(enabled = state.albumId != 0L) { onOpenAlbum(state.albumId) })
+                    Md3ePlayingArtistLinks(state, onOpenArtist, fontSize = 16.sp, centered = false)
+                }
+                IconButton(onClick = {
+                    if (runtime.bili.playing) { if (runtime.bili.loggedIn) biliFavorite = true else biliLogin = true }
+                    else runtime.likeDisplayed(state)
+                }, enabled = runtime.bili.playing || state.likeable) {
+                    Icon(if (state.liked) PlayerIcons.Favorite else PlayerIcons.FavoriteBorder, "收藏歌曲", Modifier.size(24.dp))
+                }
+            }
+            AutoMixPreparationBadge(state, compact = true)
+            if (runtime.bili.playing) BiliProgress(runtime) else PlayerProgress(state, false,
+                onSeek = { runtime.seekDisplayed(state, it) }, modifier = Modifier.fillMaxWidth())
+            dev.t1m3.qplayer.android.ui.IosPlayerTransport(
+                playing = runtime.transportState.playing, previousEnabled = runtime.transportState.hasTrack && !runtime.transportState.privateFm,
+                playMode = state.playMode, liked = state.liked,
+                previous = runtime::previous, toggle = runtime::toggle, next = runtime::next,
+                shuffle = { runtime.play { setPlayMode(if (state.playMode == 1) 0 else 1) } },
+                repeat = { runtime.play { setPlayMode(if (state.playMode == 2) 0 else 2) } },
+                favorite = {
+                    if (runtime.bili.playing) { if (runtime.bili.loggedIn) biliFavorite = true else biliLogin = true }
+                    else runtime.likeDisplayed(state)
+                }, favoriteLongPress = {})
+            // The original shuffle / repeat / favorite capsule is the last row.
+            // Lyrics and queue remain in the player header.
+            Spacer(Modifier.height(if (compact) 8.dp else 16.dp))
+        }
     }
 }
 
 @Composable
-private fun ClaudeVinylStageMd3e(cover: String, album: String, playing: Boolean, modifier: Modifier) {
-    val expansion = LocalClaudePlayerExpansion.current
-    val coverTransition = LocalPlayerCoverTransition.current
-    // Move the disc concurrently with the cover; no delayed sleeve return.
-    // Joining the visibility transition also supports reversal without a timer
-    // from a previous navigation completing against the new page.
-    val separation = coverTransition?.animated?.transition?.animateFloat(
-        transitionSpec = { tween(ClaudeOneTake.VINYL_MOVE, easing = ClaudeOneTake.ExpoOut) },
-        label = "vinyl_sleeve_separation"
-    ) { visibility -> if (visibility == EnterExitState.Visible) 0f else 1f }
-    BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
-        val edge = minOf(maxWidth * .66f, maxHeight * .82f, 270.dp)
-        val accent = MaterialTheme.colorScheme.primary
-        Box(Modifier.width(edge * 1.36f).height(edge * 1.08f)) {
-            Column(Modifier.size(edge).align(Alignment.CenterStart).rotate(-5f)
-                .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(8.dp))
-                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp)).padding(12.dp)) {
-                Text("VINYL ARCHIVE", fontFamily = ClaudeMono, fontSize = 8.sp, letterSpacing = 1.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.height(8.dp))
-                Artwork(cover, Modifier.fillMaxWidth().weight(1f), corner = 4.dp)
-                Text(album, Modifier.padding(top = 8.dp), fontFamily = ClaudeSerif, fontSize = 12.sp,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+private fun AutoMixPreparationBadge(state: PlaybackState, compact: Boolean = false) {
+    if (state.autoMixStatus.isBlank() || !state.hasTrack) return
+    val ready = state.autoMixStatus.startsWith("本地融合制作成功")
+    if (compact) {
+        var details by remember { mutableStateOf(false) }
+        val label = if (ready) {
+            if (state.autoMixRemainingSeconds >= 0) "融合已就绪 · ${state.autoMixRemainingSeconds} s"
+            else "融合已就绪"
+        } else state.autoMixStatus.substringBefore(" · ")
+        Text(label, Modifier.fillMaxWidth().clickable { details = true }.padding(vertical = 4.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+        if (details) AlertDialog(onDismissRequest = { details = false },
+            title = { Text("本地融合") },
+            text = { Text(listOf(state.autoMixStatus, state.autoMixPlanSummary)
+                .filter { it.isNotBlank() }.joinToString("\n")) },
+            confirmButton = { TextButton(onClick = { details = false }) { Text("关闭") } })
+        return
+    }
+
+    Surface(
+        color = if (ready) MaterialTheme.colorScheme.secondaryContainer
+            else MaterialTheme.colorScheme.surfaceContainerHigh,
+        contentColor = if (ready) MaterialTheme.colorScheme.onSecondaryContainer
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(state.autoMixStatus, style = MaterialTheme.typography.labelSmall, maxLines = 2,
+                overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+            if (ready && state.autoMixPlanSummary.isNotBlank()) {
+                Text(state.autoMixPlanSummary, style = MaterialTheme.typography.labelSmall,
+                    textAlign = TextAlign.Center)
             }
-            Box(Modifier.size(edge * .9f).align(Alignment.CenterEnd)
-                .onGloballyPositioned { expansion?.targetDiscBounds = it.boundsInRoot() }
-                .playerTabForeground()
-                .graphicsLayer {
-                    val open = separation?.value ?: 0f
-                    translationX = edge.toPx() * .54f * open
-                    rotationZ = 12f * open
-                    scaleX = 1f - .08f * open
-                    scaleY = 1f - .08f * open
-                }
-                .shadow(14.dp, CircleShape, clip = false), contentAlignment = Alignment.Center) {
-                ClaudeMovingDisc(cover, Modifier.fillMaxSize().graphicsLayer {
-                    alpha = if (expansion?.moving == true) 0f else 1f
-                })
+            if (ready && state.autoMixRemainingSeconds >= 0) {
+                Text("距融合点还剩 ${state.autoMixRemainingSeconds} s",
+                    style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center)
             }
         }
+    }
+}
+
+/** The same uncropped artwork is carried from the dock into the player. */
+@Composable
+internal fun ClaudePlayerArtwork(cover: String, modifier: Modifier = Modifier,
+    corner: androidx.compose.ui.unit.Dp = 24.dp,
+    elevation: androidx.compose.ui.unit.Dp = 8.dp, decorated: Boolean = true) {
+    val shape = RoundedCornerShape(corner)
+    val frame = if (decorated) Modifier.shadow(elevation, shape, clip = false)
+        .border(.7.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .6f), shape) else Modifier
+    Artwork(cover, modifier.then(frame), corner = corner,
+        contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+        containerColor = Color.Transparent)
+}
+
+@Composable
+private fun ClaudeArtworkStage(cover: String, modifier: Modifier) {
+    val expansion = LocalClaudePlayerExpansion.current
+    BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
+        val edge = minOf(maxWidth * .88f, maxHeight * .94f, 360.dp)
+        Box(Modifier.size(edge)
+            .onGloballyPositioned { expansion?.targetDiscBounds = it.boundsInRoot() }) {
+            ClaudePlayerArtwork(cover, Modifier.fillMaxSize().playerTabCover()
+                .graphicsLayer { alpha = if (expansion?.moving == true) 0f else 1f })
+        }
+    }
+}
+
+@Composable
+private fun ClaudePlayerTransport(runtime: Md3eRuntime) {
+    val state = runtime.playback
+    Row(Modifier.fillMaxWidth().playerControlShadow(), verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onClick = { runtime.play { setPlayMode((state.playMode + 1) % 3) } }) {
+            val icon = when (state.playMode) {
+                1 -> PlayerIcons.Shuffle
+                2 -> PlayerIcons.RepeatOne
+                else -> PlayerIcons.Repeat
+            }
+            Icon(icon, when (state.playMode) { 1 -> "随机播放"; 2 -> "单曲循环"; else -> "列表循环" },
+                tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+        }
+        Box(Modifier.weight(1f)) {
+            PlayerTransportButtons(runtime.transportState.playing, runtime.transportState.hasTrack,
+                runtime.transportState.privateFm, runtime::previous, runtime::toggle, runtime::next,
+                runtime::setTransportMotionActive)
+        }
+        if (runtime.experimentalAiDjActive) {
+            IconButton(onClick = { runtime.play { stopExperimentalAiDj() } }) {
+                Icon(Md3eIcons.Close, "退出 AI DJ", modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        } else Spacer(Modifier.width(48.dp))
     }
 }
 
@@ -444,7 +649,7 @@ private fun PlayerTransport(runtime: Md3eRuntime) {
     var biliLoginOpen by remember { mutableStateOf(false) }
     if (biliFavoriteOpen) Md3eBiliFavPickerDialog(runtime) { biliFavoriteOpen = false }
     if (biliLoginOpen) Md3eBiliLoginDialog(runtime) { biliLoginOpen = false }
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(Modifier.playerControlShadow(), horizontalAlignment = Alignment.CenterHorizontally) {
         if (runtime.experimentalAiDjActive) TextButton(onClick = {
             runtime.play { stopExperimentalAiDj() }
         }) { Text("AI DJ · 实验模式｜退出") }
@@ -844,9 +1049,11 @@ private fun PlayerProgress(state: PlaybackState, wavy: Boolean,
             if (state.playing) animated.animateTo(target, tween(100)) else animated.snapTo(target)
         }
     }
-    val primary = MaterialTheme.colorScheme.primary
-    val track = MaterialTheme.colorScheme.surfaceContainerHighest
-    Column(modifier.widthIn(max = 600.dp)) {
+    val video = LocalPlayerMvBackdrop.current
+    val ios = LocalIosDesign.current
+    val primary = if (video) Color.White else if (ios) LocalContentColor.current.copy(alpha = .72f) else MaterialTheme.colorScheme.primary
+    val track = if (video) Color.White.copy(alpha = .28f) else MaterialTheme.colorScheme.surfaceContainerHighest
+    Column(modifier.widthIn(max = 600.dp).playerControlShadow().playerMvAnchor()) {
         Box(Modifier.fillMaxWidth().height(32.dp)
             .pointerInput(duration) {
                 detectTapGestures { point -> onSeek((duration * (point.x / size.width).coerceIn(0f, 1f)).toLong()) }
@@ -864,7 +1071,7 @@ private fun PlayerProgress(state: PlaybackState, wavy: Boolean,
                 val stroke = Stroke(width = if (dragging) 5.dp.toPx() else 3.dp.toPx(),
                     cap = androidx.compose.ui.graphics.StrokeCap.Round)
                 val gap = 10.dp.toPx()
-                val height = if (dragging) 14.dp.toPx() else 10.dp.toPx()
+                val height = if (ios) 5.dp.toPx() else if (dragging) 14.dp.toPx() else 10.dp.toPx()
                 // Geometry changes only with size or drag mode, never with time.
                 val wave = Path()
                 if (wavy && size.width > 0f) {
@@ -880,7 +1087,10 @@ private fun PlayerProgress(state: PlaybackState, wavy: Boolean,
                 onDrawBehind {
                     val shown = if (dragging) fraction else animated.value
                     val thumbX = (size.width * shown).coerceIn(gap, (size.width - gap).coerceAtLeast(gap))
-                    if (wavy) {
+                    if (ios) {
+                        drawRoundRect(track, topLeft = Offset(0f, center - height / 2f), size = Size(size.width, height), cornerRadius = CornerRadius(height / 2f))
+                        drawRoundRect(primary, topLeft = Offset(0f, center - height / 2f), size = Size(size.width * shown, height), cornerRadius = CornerRadius(height / 2f))
+                    } else if (wavy) {
                         clipRect(right = (thumbX - gap).coerceAtLeast(0f)) { drawPath(wave, primary, style = stroke) }
                         clipRect(left = (thumbX + gap).coerceAtMost(size.width)) { drawPath(wave, track, style = stroke) }
                     } else {
@@ -889,7 +1099,7 @@ private fun PlayerProgress(state: PlaybackState, wavy: Boolean,
                         drawRoundRect(track, topLeft = Offset((thumbX + gap).coerceAtMost(size.width), center - height / 2f),
                             size = Size((size.width - thumbX - gap).coerceAtLeast(0f), height), cornerRadius = CornerRadius(height / 2f))
                     }
-                    if (!state.loading) drawRoundRect(primary,
+                    if (!ios && !state.loading) drawRoundRect(primary,
                         topLeft = Offset(thumbX - 2.dp.toPx(), center - if (dragging) 14.dp.toPx() else 11.dp.toPx()),
                         size = Size(4.dp.toPx(), if (dragging) 28.dp.toPx() else 22.dp.toPx()), cornerRadius = CornerRadius(2.dp.toPx()))
                 }
@@ -910,185 +1120,13 @@ private fun PlayerElapsedTime(state: PlaybackState, draggedPosition: Long?) {
     Text(playerTime(seconds * 1000L), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
-@Composable
-@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
-internal fun Md3eQueueScreen(runtime: Md3eRuntime, onBack: () -> Unit,
-    timer: Md3eSleepTimerState) {
-    val state = runtime.playback
-    val queue = runtime.queue
-    val entryIds = remember(runtime) { AtomicLong() }
-    var entries by remember(runtime) {
-        mutableStateOf(queue.map { QueueEntry(entryIds.getAndIncrement(), it) })
-    }
-    var playingEntryId by remember(runtime) {
-        mutableStateOf(entries.getOrNull(state.queueIndex)?.id)
-    }
-    // The controller is polled; mirror each move immediately so the handle stays
-    // attached during a continuous drag. Reuse each occurrence's key when the
-    // controller catches up, including repeated instances of the same song.
-    LaunchedEffect(queue, state.queueIndex) {
-        entries = reconcileQueueEntries(entries, queue, entryIds)
-        playingEntryId = entries.getOrNull(state.queueIndex)?.id
-    }
-    fun moveEntry(fromId: Long, toId: Long) {
-        val from = entries.indexOfFirst { it.id == fromId }
-        val to = entries.indexOfFirst { it.id == toId }
-        if (from < 0 || to < 0 || from == to) return
-        runtime.controller.moveInQueue(from, to)
-        entries = entries.toMutableList().apply { add(to, removeAt(from)) }
-    }
-    val listState = rememberLazyListState()
-    val reorderState = rememberReorderableLazyListState(
-        lazyListState = listState,
-        onMove = { from, to ->
-            val fromId = from.key as? Long
-            val toId = to.key as? Long
-            if (fromId != null && toId != null) moveEntry(fromId, toId)
-        },
-    )
-    Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(PlayerIcons.Back, "返回") }
-            Text("播放队列", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.weight(1f))
-            Text("${queue.size} 首", style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.width(12.dp))
-        }
-        if (runtime.bili.queueVideo) {
-            Row(Modifier.fillMaxWidth().padding(start = 64.dp, end = 16.dp, bottom = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                FilterChip(
-                    selected = runtime.bili.queueMode == "RELATED",
-                    onClick = { runtime.play { switchBiliQueueMode("RELATED") } },
-                    enabled = !runtime.bili.queueSwitching,
-                    label = { Text("相关推荐") },
-                    modifier = Modifier.weight(1f),
-                    leadingIcon = if (runtime.bili.queueSwitching && runtime.bili.queueTargetMode == "RELATED") ({
-                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                    }) else null,
-                )
-                FilterChip(
-                    selected = runtime.bili.queueMode == "COLLECTION",
-                    onClick = { runtime.play { switchBiliQueueMode("COLLECTION") } },
-                    enabled = !runtime.bili.queueSwitching,
-                    label = { Text("当前合集") },
-                    modifier = Modifier.weight(1f),
-                    leadingIcon = if (runtime.bili.queueSwitching && runtime.bili.queueTargetMode == "COLLECTION") ({
-                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                    }) else null,
-                )
-            }
-        }
-        if (queue.isEmpty()) {
-            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Text("队列中还没有歌曲", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        } else {
-            LazyColumn(state = listState,
-                modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 24.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                itemsIndexed(entries, key = { _, entry -> entry.id }) { _, entry ->
-                    // Reorderable 2.2 defaults to the removed Compose 1.6
-                    // animateItemPlacement API. Pass the current API explicitly.
-                    ReorderableItem(reorderState, key = entry.id,
-                        animateItemModifier = Modifier.animateItem()) { dragging ->
-                        val scale by animateFloatAsState(if (dragging) 1.02f else 1f,
-                            animationSpec = if (LocalClaudeDesign.current) ClaudeOneTake.snappy() else spring(stiffness = Spring.StiffnessMediumLow),
-                            label = "queue_drag_scale")
-                        QueueRow(entry.track, selected = entry.id == playingEntryId,
-                            dragging = dragging,
-                            modifier = Modifier.graphicsLayer { scaleX = scale; scaleY = scale },
-                            onPlay = {
-                                val index = entries.indexOfFirst { it.id == entry.id }
-                                if (index >= 0) runtime.play { playQueueIndex(index) }
-                            },
-                            onRemove = {
-                                val index = entries.indexOfFirst { it.id == entry.id }
-                                if (index >= 0) {
-                                    runtime.controller.removeFromQueue(index)
-                                    entries = entries.filterNot { it.id == entry.id }
-                                }
-                            },
-                            dragHandle = {
-                                Icon(PlayerIcons.DragHandle, "拖拽调整歌曲顺序",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(40.dp)
-                                        .draggableHandle(interactionSource = remember { MutableInteractionSource() })
-                                        .semantics {
-                                            customActions = listOf(
-                                                CustomAccessibilityAction("向上移动") {
-                                                    val index = entries.indexOfFirst { it.id == entry.id }
-                                                    val target = entries.getOrNull(index - 1)
-                                                    if (target != null) moveEntry(entry.id, target.id)
-                                                    target != null
-                                                },
-                                                CustomAccessibilityAction("向下移动") {
-                                                    val index = entries.indexOfFirst { it.id == entry.id }
-                                                    val target = if (index >= 0) entries.getOrNull(index + 1) else null
-                                                    if (target != null) moveEntry(entry.id, target.id)
-                                                    target != null
-                                                },
-                                            )
-                                        })
-                            })
-                    }
-                }
-            }
-        }
-        // 定时停止播放（老版本的「定时播放」）—— 与老 app 一样放在列表下方。
-        Md3eSleepTimerControl(timer)
-    }
-}
-
-@Composable
-private fun QueueRow(track: Track, selected: Boolean, dragging: Boolean,
-    modifier: Modifier = Modifier, onPlay: () -> Unit, onRemove: () -> Unit,
-    dragHandle: @Composable () -> Unit) {
-    Surface(onClick = onPlay, modifier = modifier, shape = RoundedCornerShape(20.dp),
-        shadowElevation = if (dragging) 6.dp else 0.dp,
-        color = when {
-            selected -> MaterialTheme.colorScheme.primaryContainer
-            dragging -> MaterialTheme.colorScheme.surfaceContainerHigh
-            else -> Color.Transparent
-        }) {
-        Row(Modifier.fillMaxWidth().height(68.dp).padding(start = 8.dp, end = 4.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Artwork(track.coverThumbPath ?: track.coverUrl.orEmpty(), Modifier.size(48.dp))
-            Column(Modifier.weight(1f)) {
-                Text(track.title.orEmpty(), style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(track.artist.orEmpty(), style = MaterialTheme.typography.bodySmall,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            if (selected) Icon(Md3eIcons.MusicNote, "当前播放", Modifier.size(20.dp),
-                tint = MaterialTheme.colorScheme.primary)
-            dragHandle()
-            IconButton(onClick = onRemove) { Icon(PlayerIcons.Remove, "从队列移除") }
-        }
-    }
-}
-
-private data class QueueEntry(val id: Long, val track: Track)
-
-private fun reconcileQueueEntries(previous: List<QueueEntry>, tracks: List<Track>, ids: AtomicLong): List<QueueEntry> {
-    val remaining = previous.toMutableList()
-    return tracks.map { track ->
-        val existing = remaining.indexOfFirst { it.track === track }
-        if (existing >= 0) remaining.removeAt(existing) else QueueEntry(ids.getAndIncrement(), track)
-    }
-}
-
 private fun progress(position: Long, duration: Long): Float =
     if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f
 
 private fun playerTime(ms: Long): String =
     "${ms.coerceAtLeast(0) / 60000}:${((ms.coerceAtLeast(0) / 1000) % 60).toString().padStart(2, '0')}"
 
-private object PlayerIcons {
+internal object PlayerIcons {
     val Back = icon("Back", "M20,11H7.83l5.59,-5.59L12,4l-8,8l8,8l1.41,-1.41L7.83,13H20z")
     val Queue = icon("Queue", "M4,6h16v2H4zM4,11h16v2H4zM4,16h10v2H4zM17,15l5,3l-5,3z")
     val Share = icon("Share", "M18,16.08c-.76,0 -1.44,.3 -1.96,.77L8.91,12.7a3.25,3.25 0,0 0,0 -1.4l7.05,-4.11A3,3 0,1 0,15,5c0,.24 .03,.47 .09,.7L8.04,9.81a3,3 0,1 0,0 4.38l7.12,4.16c-.05,.2 -.08,.42 -.08,.65a2.92,2.92 0,1 0,2.92 -2.92z")

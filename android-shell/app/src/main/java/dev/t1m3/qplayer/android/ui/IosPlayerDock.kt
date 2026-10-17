@@ -38,7 +38,6 @@ internal fun IosPlayerDock(
     onHome: () -> Unit,
     onSearch: () -> Unit,
     modifier: Modifier = Modifier,
-    topAction: @Composable () -> Unit,
     player: @Composable (Modifier, () -> Float) -> Unit,
 ) {
     val view = LocalView.current
@@ -68,18 +67,17 @@ internal fun IosPlayerDock(
     val navVisible by remember { derivedStateOf { collapse.value < 0.999f } }
     val homeVisible by remember { derivedStateOf { collapse.value > 0.001f } }
     val expandedControls by remember { derivedStateOf { collapse.value < 0.01f } }
-    val actionVisible by remember { derivedStateOf { collapse.value < 0.5f } }
     // Keep one stable full-width bottom scrim behind the chrome. It must not be
     // scaled with the collapsing controls: scaling this separate layer made its
     // edge move away from the actual glass plates and looked like a detached
     // block during scrolling and route transitions.
-    CompositionLocalProvider(LocalGlassMotionActive provides collapsing) {
+    CompositionLocalProvider(LocalGlassMotionActive provides (LocalGlassMotionActive.current || collapsing)) {
     Box(modifier.fillMaxSize()) {
         Box(
             Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .height(if (hasTrack) 168.dp else 80.dp)
+                .height(if (hasTrack) 132.dp else 80.dp)
                 .drawWithCache {
                     val shadow = Brush.verticalGradient(
                         0f to Color.Transparent,
@@ -104,7 +102,7 @@ internal fun IosPlayerDock(
         BoxWithConstraints(
             Modifier
                 .fillMaxWidth()
-                .height(if (hasTrack) 168.dp else 64.dp)
+                .height(if (hasTrack) 120.dp else 64.dp)
         ) {
         // Each component samples its own bounds, as in the adaptive APK demo.
         val navWidth = (maxWidth - 72.dp).coerceAtLeast(64.dp)
@@ -153,9 +151,6 @@ internal fun IosPlayerDock(
             }, diameter = 64.dp, compactProgress = progress)
         }
         if (hasTrack) {
-            if (actionVisible) Box(Modifier.align(Alignment.TopEnd).playerChromeExit(playerExpansion)
-                .then(if (!expandedControls) Modifier.clearAndSetSemantics {} else Modifier)
-                .graphicsLayer { alpha = (1f - collapse.value * 2f).coerceAtLeast(0f) }) { topAction() }
             // Fixed-size parent avoids relaying every frame into Scaffold/page
             // measurement. Only this player's small subtree changes width.
             Layout(modifier = Modifier.fillMaxSize(), content = {
@@ -184,7 +179,7 @@ internal fun IosPlayerDock(
                 val playerHeight = expandedHeight * (1f - p) + collapsedHeight * p
                 val height = playerHeight.roundToInt()              // 48dp → 44dp
                 val child = measurables.single().measure(Constraints.fixed(width, height))
-                val expandedCenter = 72.dp.toPx()
+                val expandedCenter = 24.dp.toPx()
                 // All compact controls share this bottom edge inside the dock.
                 // The outer box already owns the navigation inset and 12dp gap;
                 // moving below this edge cancels that gap and escapes its bounds.

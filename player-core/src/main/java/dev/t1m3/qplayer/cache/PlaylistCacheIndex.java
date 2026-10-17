@@ -137,6 +137,16 @@ public final class PlaylistCacheIndex {
         return byId.get(id);
     }
 
+    /** Remove account membership immediately, even if the following refresh is offline. */
+    public void removeFromMine(long id) {
+        synchronized (byId) {
+            Cached e = byId.get(id);
+            if (e != null) e.mine = false;
+            mineOrder.remove(Long.valueOf(id));
+        }
+        dirty = true;
+    }
+
     /** Save the exact order returned by /user/playlist for fast offline startup. */
     public void setMineOrder(List<Long> ids) {
         synchronized (byId) {

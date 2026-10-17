@@ -77,6 +77,7 @@ private class RestoredDialogGlassSampler(
     private val backdrop: Backdrop,
     private val layer: GraphicsLayer,
     initialLuminance: Float,
+    private val live: Boolean,
 ) {
     private val luminanceAnimation = Animatable(initialLuminance)
     private val inkAnimation = Animatable(restoredDialogContentColor(initialLuminance))
@@ -90,12 +91,13 @@ private class RestoredDialogGlassSampler(
     fun sampleStamp(): GlassSampleStamp? {
         val target = coordinates?.takeIf { it.isAttached } ?: return null
         val source = backdrop as? LayerBackdrop
+        if (backdrop.samplingRevision == 0L) return null
         if (source != null && (source.samplingRevision == 0L || source.layerCoordinates?.isAttached != true)) return null
         val visible = target.boundsInWindow()
         if (visible.width < 1f || visible.height < 1f ||
             !visible.overlaps(target.findRootCoordinates().boundsInWindow())) return null
         val position = target.positionInWindow()
-        return GlassSampleStamp(source?.samplingRevision,
+        return GlassSampleStamp(backdrop.samplingRevision,
             position.x.roundToInt(), position.y.roundToInt(), target.size.width, target.size.height)
     }
 
@@ -143,15 +145,17 @@ private class RestoredDialogGlassSampler(
         }
     }
 
-    suspend fun animateLuminance(value: Float) = luminanceAnimation.animateTo(value, tween(GLASS_COLOR_DURATION_MS))
-    suspend fun animateInk(value: Color) = inkAnimation.animateTo(value, tween(GLASS_INK_DURATION_MS))
+    suspend fun animateLuminance(value: Float) = luminanceAnimation.animateTo(value,
+        tween(if (live) 160 else GLASS_COLOR_DURATION_MS))
+    suspend fun animateInk(value: Color) = inkAnimation.animateTo(value,
+        tween(if (live) BiliPaiGlassParameters.inkAnimationMillis else GLASS_INK_DURATION_MS))
 }
 
 @Composable
-private fun rememberRestoredDialogGlassSampler(backdrop: Backdrop): RestoredDialogGlassSampler {
+private fun rememberRestoredDialogGlassSampler(backdrop: Backdrop, live: Boolean = false): RestoredDialogGlassSampler {
     val layer = rememberGraphicsLayer()
     val initial = if (LocalGlassDark.current) 0f else 1f
-    val glass = remember(backdrop, layer) { RestoredDialogGlassSampler(backdrop, layer, initial) }
+    val glass = remember(backdrop, layer, live) { RestoredDialogGlassSampler(backdrop, layer, initial, live) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val density = LocalDensity.current
     val direction = LocalLayoutDirection.current
@@ -159,11 +163,13 @@ private fun rememberRestoredDialogGlassSampler(backdrop: Backdrop): RestoredDial
     val fallback by rememberUpdatedState(initial)
     val samplingEnabled = LocalGlassSamplingEnabled.current
     val motion = LocalGlassMotionActive.current
-    LaunchedEffect(glass, lifecycle, density, direction, tintKey, samplingEnabled, motion) {
+    val perPage = LocalGlassPerPageSampling.current
+    val policy = remember(glass, perPage) { GlassSamplingPolicy(perPage) }
+    LaunchedEffect(glass, lifecycle, density, direction, tintKey, samplingEnabled, motion, perPage) {
         if (!samplingEnabled || motion) return@LaunchedEffect
         lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            val policy = GlassSamplingPolicy()
             var inkJob: Job? = null
+            var luminanceJob: Job? = null
             var lastInk: Color? = null
             while (isActive) {
                 val stamp = glass.sampleStamp()
@@ -174,19 +180,32 @@ private fun rememberRestoredDialogGlassSampler(backdrop: Backdrop): RestoredDial
                 val measured = readGlassSample(glass, density, direction)
                 policy.completed(SystemClock.uptimeMillis(), stamp, measured != null)
                 val sample = measured ?: fallback
-                // APK: use the unquantised mean for both targets, then finish
-                // its 1000ms luminance tween before taking the next sample.
+                // Dialogs retain the original material timing. Live chrome
+                // keeps sampling while its foreground/tint transition runs.
                 val ink = restoredDialogContentColor(sample)
                 if (ink != lastInk) {
                     lastInk = ink
                     inkJob?.cancel()
                     inkJob = launch { glass.animateInk(ink) }
                 }
-                glass.animateLuminance(sample)
+                if (live) {
+                    luminanceJob?.cancel()
+                    luminanceJob = launch { glass.animateLuminance(sample) }
+                } else glass.animateLuminance(sample)
             }
         }
     }
     return glass
+}
+
+/** Bounded, lifecycle-aware sampling of the actual region behind live chrome. */
+@Composable
+internal fun rememberLiveIosGlass(backdrop: Backdrop): IosAdaptiveGlassState {
+    val sampler = rememberRestoredDialogGlassSampler(backdrop, live = true)
+    return remember(sampler) {
+        IosAdaptiveGlassState(themeLuminance = derivedStateOf { sampler.luminance },
+            ink = derivedStateOf { sampler.contentColor }, modifier = sampler.modifier)
+    }
 }
 
 /**
@@ -247,9 +266,9 @@ internal fun BackdropEffectScope.controlGlassEffects(
 }
 
 internal fun controlGlassShadow(dark: Boolean, adaptive: IosAdaptiveGlassState): Shadow =
-    if (adaptive.restoredDialog) RestoredIosDialogShadow else iosGlassShadow(dark)
+    if (adaptive.restoredDialog) RestoredIosDialogShadow else iosGlassShadow(adaptive.luminance < .5f)
 
 internal fun DrawScope.drawControlGlassSurface(dark: Boolean, adaptive: IosAdaptiveGlassState) {
     // The restored dialog material has no extra white/scrim fill.
-    if (!adaptive.restoredDialog) drawBiliPaiGlassSurface(dark)
+    if (!adaptive.restoredDialog) drawBiliPaiGlassSurface(adaptive.luminance < .5f)
 }

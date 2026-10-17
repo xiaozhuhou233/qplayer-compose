@@ -93,7 +93,6 @@ fun LiquidBottomTabs(
     require(tabsCount > 1)
     val refraction = LocalGlassRefraction.current
     // The reference's own two colour pairs, keyed on the app's theme flag.
-    val isLightTheme = !dark
     val accentColor = androidx.compose.ui.graphics.lerp(
         MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.onSurface,
         BiliPaiGlassParameters.contentReadabilityBoost * 0.65f)
@@ -204,10 +203,10 @@ fun LiquidBottomTabs(
                     backdrop = backdrop,
                     shape = { CircleShape },
                     effects = {
-                        apiGlassEffects(adaptive.luminance, refraction)
+                        apiGlassEffects(adaptive.luminance, refraction, strongRefraction = true)
                     },
                     highlight = { baseHighlight.value },
-                    shadow = { iosGlassShadow(dark) },
+                    shadow = { iosGlassShadow(adaptive.luminance < .5f) },
                     innerShadow = null,
                     layerBlock = {
                         val progress = dampedDragAnimation.pressProgress
@@ -215,7 +214,7 @@ fun LiquidBottomTabs(
                         scaleX = scale
                         scaleY = scale
                     },
-                    onDrawSurface = { drawBiliPaiGlassSurface(dark) }
+                    onDrawSurface = { drawBiliPaiGlassSurface(adaptive.luminance < .5f) }
                 )
                 .then(interactiveHighlight.modifier)
                 .height(64f.dp)
@@ -243,12 +242,12 @@ fun LiquidBottomTabs(
                         backdrop = backdrop,
                         shape = { CircleShape },
                         effects = {
-                            apiGlassEffects(adaptive.luminance, refraction, shellHeightDp = 64f)
+                            apiGlassEffects(adaptive.luminance, refraction, shellHeightDp = 64f, strongRefraction = true)
                         },
                         highlight = null,
                         // Only the visible plate casts a shadow; this is the lens's source.
                         shadow = null,
-                        onDrawSurface = { drawBiliPaiGlassSurface(dark) }
+                        onDrawSurface = { drawBiliPaiGlassSurface(adaptive.luminance < .5f) }
                     )
                     .then(interactiveHighlight.modifier)
                     .height(56f.dp)
@@ -300,7 +299,7 @@ fun LiquidBottomTabs(
                     onDrawSurface = {
                         val progress = dampedDragAnimation.pressProgress
                         drawRect(
-                            if (isLightTheme) Color.Black.copy(0.1f)
+                            if (adaptive.luminance >= .5f) Color.Black.copy(0.1f)
                             else Color.White.copy(0.1f),
                             alpha = 1f - progress
                         )

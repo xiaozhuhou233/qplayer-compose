@@ -30,6 +30,29 @@ public final class AiEndpoint {
 
     private AiEndpoint() {}
 
+    /** Only transport errors are retried; authentication and TLS failures stay explicit. */
+    public static boolean isConnectionFailure(Throwable error) {
+        for (int depth = 0; error != null && depth < 8; depth++, error = error.getCause()) {
+            if (error instanceof java.net.UnknownHostException
+                    || error instanceof java.net.SocketException
+                    || error instanceof java.net.SocketTimeoutException
+                    || error instanceof java.io.EOFException) return true;
+        }
+        return false;
+    }
+
+    public static String connectionFailureMessage(Throwable error) {
+        for (int depth = 0; error != null && depth < 8; depth++, error = error.getCause()) {
+            if (error instanceof java.net.UnknownHostException)
+                return "域名解析失败，请检查网络、VPN/代理或服务地址后重试";
+            if (error instanceof java.net.SocketTimeoutException)
+                return "请求超时，请检查网络或在设置中增加 AI 请求超时后重试";
+            if (error instanceof java.net.SocketException || error instanceof java.io.EOFException)
+                return "网络连接中断，请恢复网络后重试剩余歌单";
+        }
+        return "";
+    }
+
     /**
      * The URL to POST a chat completion to, from any of the accepted address forms.
      *

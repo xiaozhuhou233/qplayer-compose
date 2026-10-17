@@ -2,6 +2,12 @@
 
 package dev.t1m3.qplayer.android.md3eui
 
+import dev.t1m3.qplayer.android.md3eui.Md3eAdaptiveButton as Button
+
+import dev.t1m3.qplayer.android.ui.IosAwareAlertDialog as AlertDialog
+import dev.t1m3.qplayer.android.ui.IosAwareIconButton as IconButton
+import dev.t1m3.qplayer.android.ui.IosAwareTextButton as TextButton
+
 import dev.t1m3.qplayer.android.md3eui.claudeClickable as clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.background
@@ -37,11 +43,14 @@ import dev.t1m3.qplayer.netease.dto.NeteaseSong
 
 @Composable
 internal fun Md3eNavigationBar(selected: String, showLocalTab: Boolean = true,
+    includeSystemInset: Boolean = true,
     onSelect: (String) -> Unit) {
+    val systemInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val barInsets = if (includeSystemInset) WindowInsets.navigationBars else WindowInsets(0, 0, 0, 0)
     if (LocalClaudeDesign.current) {
         Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)) {
             HorizontalDivider(thickness = .8.dp, color = MaterialTheme.colorScheme.outlineVariant)
-            Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 4.dp)) {
+            Row(Modifier.fillMaxWidth().windowInsetsPadding(barInsets).padding(horizontal = 16.dp, vertical = 4.dp)) {
                 listOf(Triple("home", Md3eIcons.Home, "主页"),
                     Triple("playlists", Md3eIcons.Playlist, "歌单"),
                     Triple("local", Md3eIcons.Library, "本地"),
@@ -62,7 +71,8 @@ internal fun Md3eNavigationBar(selected: String, showLocalTab: Boolean = true,
         }
         return
     }
-    NavigationBar(modifier = Modifier.height(80.dp),
+    NavigationBar(modifier = Modifier.height((80.dp - if (includeSystemInset) 0.dp else systemInset).coerceAtLeast(0.dp)),
+        windowInsets = barInsets,
         containerColor = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 3.dp) {
         listOf(
             Triple("home", Md3eIcons.Home, "主页"),
@@ -85,9 +95,27 @@ internal fun Md3eNavigationBar(selected: String, showLocalTab: Boolean = true,
 
 @Composable
 internal fun Md3ePlaylistsPage(state: PlaylistState, onLogin: () -> Unit, onRefresh: () -> Unit,
-    onOpen: (Long) -> Unit, modifier: Modifier = Modifier) {
+    onOpen: (Long) -> Unit, onDelete: (NeteasePlaylist) -> Unit, canDelete: (Long) -> Boolean,
+    modifier: Modifier = Modifier) {
+    var selected by remember { mutableStateOf<NeteasePlaylist?>(null) }
+    selected?.let { p ->
+        AlertDialog(onDismissRequest = { selected = null },
+            title = { Text(if (!p.owned) "取消收藏歌单？" else if (canDelete(p.id)) "删除歌单？" else "歌单选项") },
+            text = { Text(if (p.owned && !canDelete(p.id)) "「${p.name.orEmpty()}」是系统默认或暂不可删除的歌单。"
+                else if (p.owned) "从网易云账号删除「${p.name.orEmpty()}」？歌单删除后无法恢复，歌曲本身不会被删除。"
+                else "取消收藏「${p.name.orEmpty()}」？原作者的歌单会保留。") },
+            confirmButton = {
+                if (!p.owned || canDelete(p.id)) TextButton(onClick = { selected = null; onDelete(p) }) {
+                    Text(if (p.owned) "删除歌单" else "取消收藏", color = MaterialTheme.colorScheme.error)
+                } else TextButton(onClick = { selected = null }) { Text("知道了") }
+            }, dismissButton = { TextButton(onClick = { selected = null }) { Text("取消") } })
+    }
+    if (LocalIosDesign.current) {
+        IosPlaylistsPage(state, onLogin, onRefresh, onOpen, { selected = it }, modifier)
+        return
+    }
     if (LocalClaudeDesign.current) {
-        ClaudePlaylistsPage(state, onLogin, onRefresh, onOpen, modifier)
+        ClaudePlaylistsPage(state, onLogin, onRefresh, onOpen, { selected = it }, modifier)
         return
     }
     var category by rememberSaveable { mutableIntStateOf(0) }
@@ -108,14 +136,14 @@ internal fun Md3ePlaylistsPage(state: PlaylistState, onLogin: () -> Unit, onRefr
                 }
             }
             if (shown.isEmpty()) item { EmptyPage(if (category == 0) "还没有创建的歌单" else "还没有收藏的歌单") }
-            items(shown, key = { it.id }) { playlist -> PlaylistRow(playlist) { onOpen(playlist.id) } }
+            items(shown, key = { it.id }) { playlist -> PlaylistRow(playlist, { selected = playlist }) { onOpen(playlist.id) } }
         }
     }
 }
 
 @Composable
 private fun ClaudePlaylistsPage(state: PlaylistState, onLogin: () -> Unit, onRefresh: () -> Unit,
-    onOpen: (Long) -> Unit, modifier: Modifier) {
+    onOpen: (Long) -> Unit, onLongClick: (NeteasePlaylist) -> Unit, modifier: Modifier) {
     var category by rememberSaveable { mutableIntStateOf(0) }
     val shown = state.mine.filter { if (category == 0) it.owned else !it.owned }
     LazyColumn(modifier, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 22.dp)) {
@@ -147,16 +175,18 @@ private fun ClaudePlaylistsPage(state: PlaylistState, onLogin: () -> Unit, onRef
                     modifier = Modifier.padding(vertical = 28.dp))
             }
             itemsIndexed(shown, key = { _, it -> it.id }) { index, playlist ->
-                Box(Modifier.claudeEntrance(index).animateItem(placementSpec = ClaudeOneTake.snappy())) { ClaudePlaylistRow(playlist) { onOpen(playlist.id) } }
+                Box(Modifier.claudeEntrance(index).animateItem(placementSpec = ClaudeOneTake.snappy())) {
+                    ClaudePlaylistRow(playlist, { onLongClick(playlist) }) { onOpen(playlist.id) }
+                }
             }
         }
     }
 }
 
 @Composable
-private fun ClaudePlaylistRow(playlist: NeteasePlaylist, onOpen: () -> Unit) {
+private fun ClaudePlaylistRow(playlist: NeteasePlaylist, onLongClick: () -> Unit, onOpen: () -> Unit) {
     Md3eCollectionContainer("cover:playlist:${playlist.id}", Modifier.fillMaxWidth(), corner = 8.dp) {
-Row(Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(vertical = 9.dp),
+Row(Modifier.fillMaxWidth().clickable(onClick = onOpen, onLongClick = onLongClick, onLongClickLabel = "歌单选项").padding(vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
         Artwork(playlist.coverThumbPath ?: playlist.coverUrl.orEmpty(),
             Modifier.size(62.dp).md3eSharedCover("cover:playlist:${playlist.id}"), corner = 8.dp)
@@ -173,9 +203,9 @@ Row(Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(vertical = 9.dp)
 }
 
 @Composable
-private fun PlaylistRow(playlist: NeteasePlaylist, onOpen: () -> Unit) {
+private fun PlaylistRow(playlist: NeteasePlaylist, onLongClick: () -> Unit, onOpen: () -> Unit) {
     Md3eCollectionContainer("cover:playlist:${playlist.id}", Modifier.fillMaxWidth(), corner = 16.dp) {
-Row(Modifier.fillMaxWidth().clickable(onClick = onOpen).heightIn(min = 76.dp)
+Row(Modifier.fillMaxWidth().clickable(onClick = onOpen, onLongClick = onLongClick, onLongClickLabel = "歌单选项").heightIn(min = 76.dp)
         .padding(horizontal = 20.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp)) {
         Artwork(playlist.coverThumbPath ?: playlist.coverUrl.orEmpty(),
@@ -195,9 +225,13 @@ Row(Modifier.fillMaxWidth().clickable(onClick = onOpen).heightIn(min = 76.dp)
 
 @Composable
 internal fun Md3ePlaylistDetail(state: PlaylistState, id: Long, onBack: () -> Unit, onRefresh: () -> Unit,
-    onPlay: PlayAction, modifier: Modifier = Modifier) {
+    onPlay: PlayAction, onEnqueue: (NeteaseSong) -> Unit, modifier: Modifier = Modifier) {
+    if (LocalIosDesign.current) {
+        IosPlaylistDetail(state, id, onRefresh, onPlay, onEnqueue, modifier)
+        return
+    }
     if (LocalClaudeDesign.current) {
-        ClaudePlaylistDetail(state, id, onRefresh, onPlay, modifier)
+        ClaudePlaylistDetail(state, id, onRefresh, onPlay, onEnqueue, modifier)
         return
     }
     LazyColumn(modifier, contentPadding = PaddingValues(bottom = 24.dp + LocalMd3eDockInset.current)) {
@@ -224,14 +258,14 @@ internal fun Md3ePlaylistDetail(state: PlaylistState, id: Long, onBack: () -> Un
         if (state.loading) item { CenterLoading("正在加载歌单") }
         if (!state.loading && state.tracks.isEmpty()) item { EmptyPage("歌单中还没有歌曲") }
         itemsIndexed(state.tracks, key = { index, song -> "$index-${song.id}" }) { index, song ->
-            NeteaseSongRow(song, null) { onPlay { playPlaylistTrack(index) } }
+            NeteaseSongRow(song, null, { onEnqueue(song) }) { onPlay { playPlaylistTrack(index) } }
         }
     }
 }
 
 @Composable
 private fun ClaudePlaylistDetail(state: PlaylistState, id: Long, onRefresh: () -> Unit,
-    onPlay: PlayAction, modifier: Modifier) {
+    onPlay: PlayAction, onEnqueue: (NeteaseSong) -> Unit, modifier: Modifier) {
     val songListState = androidx.compose.foundation.lazy.rememberLazyListState()
     LazyColumn(modifier, state = songListState, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp)) {
         item {
@@ -261,7 +295,9 @@ private fun ClaudePlaylistDetail(state: PlaylistState, id: Long, onRefresh: () -
         itemsIndexed(state.tracks, key = { index, song -> "$index-${song.id}" }) { index, song ->
             Row(Modifier.fillMaxWidth().claudeEntrance(index, replayOnVisit = true,
                 songListState = songListState, songKey = "$index-${song.id}")
-                .animateItem(placementSpec = ClaudeOneTake.snappy()).clickable { onPlay { playPlaylistTrack(index) } }.padding(vertical = 7.dp),
+                .animateItem(placementSpec = ClaudeOneTake.snappy())
+                .songQueueMenu(song.name.orEmpty(), { onPlay { playPlaylistTrack(index) } }, { onEnqueue(song) })
+                .padding(vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Artwork(song.coverThumbPath ?: song.coverUrl.orEmpty(), Modifier.size(48.dp), corner = 6.dp)
                 Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
@@ -279,9 +315,11 @@ private fun ClaudePlaylistDetail(state: PlaylistState, id: Long, onRefresh: () -
 
 @Composable
 internal fun Md3eLocalPage(state: LocalState, onPermission: () -> Unit, onRefresh: () -> Unit,
-    onPlay: PlayAction, onPlayBili: (Track) -> Unit = {}, modifier: Modifier = Modifier) {
+    onPlay: PlayAction, onEnqueue: (Track) -> Unit, onPlayBili: (Track) -> Unit = {}, modifier: Modifier = Modifier) {
     var category by rememberSaveable { mutableIntStateOf(0) }
-    LazyColumn(modifier, contentPadding = PaddingValues(bottom = 24.dp + LocalMd3eDockInset.current)) {
+    LazyColumn(modifier, contentPadding = PaddingValues(
+        top = iosPageTopPadding(),
+        bottom = 24.dp + LocalMd3eDockInset.current)) {
         item { PageHeading(if (category == 0) "本地音乐" else "B站缓存",
             "${if (category == 0) state.tracks.size else state.bili.size} 首", onRefresh,
             enabled = category == 0 && state.permissionGranted && !state.scanning) }
@@ -294,7 +332,7 @@ internal fun Md3eLocalPage(state: LocalState, onPermission: () -> Unit, onRefres
         if (category == 1) {
             if (state.bili.isEmpty()) item { EmptyPage("还没有缓存 B 站视频") }
             itemsIndexed(state.bili, key = { _, track -> "bili-${track.biliBvid}-${track.biliCid}" }) { _, track ->
-                LocalSongRow(track, null) { onPlayBili(track) }
+                LocalSongRow(track, null, { onEnqueue(track) }) { onPlayBili(track) }
             }
             return@LazyColumn
         }
@@ -314,7 +352,7 @@ internal fun Md3eLocalPage(state: LocalState, onPermission: () -> Unit, onRefres
                 color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
         itemsIndexed(state.tracks, key = { index, track -> "$index-${track.contentUri ?: track.filePath}" }) { index, track ->
-            LocalSongRow(track, null) { onPlay { play(index) } }
+            LocalSongRow(track, null, { onEnqueue(track) }) { onPlay { play(index) } }
         }
     }
 }
@@ -322,7 +360,9 @@ internal fun Md3eLocalPage(state: LocalState, onPermission: () -> Unit, onRefres
 @Composable
 internal fun Md3eSearchPage(state: SearchState, onSearch: (String, String) -> Unit,
     onLoadMore: () -> Unit, onClearHistory: () -> Unit, onOpenAlbum: (Long) -> Unit,
-    onOpenArtist: (Long) -> Unit, onPlay: PlayAction, modifier: Modifier = Modifier,
+    onOpenArtist: (Long) -> Unit, onPlay: PlayAction,
+    onEnqueueSong: (NeteaseSong) -> Unit, onEnqueueTrack: (Track) -> Unit,
+    onEnqueueVideo: (dev.t1m3.qplayer.bili.BiliClient.BiliVideo) -> Unit, modifier: Modifier = Modifier,
     onOpenPlayer: () -> Unit = {}, onBiliLogin: () -> Unit = {}, onBiliFavorites: () -> Unit = {},
     biliLoggedIn: Boolean = false) {
     var query by rememberSaveable { mutableStateOf(state.query) }
@@ -331,7 +371,9 @@ internal fun Md3eSearchPage(state: SearchState, onSearch: (String, String) -> Un
         query = term
         if (term.isNotBlank()) onSearch(term.trim(), mode)
     }
-    LazyColumn(modifier, contentPadding = PaddingValues(bottom = 24.dp + LocalMd3eDockInset.current)) {
+    LazyColumn(modifier, contentPadding = PaddingValues(
+        top = iosPageTopPadding(),
+        bottom = 24.dp + LocalMd3eDockInset.current)) {
         item {
             Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -391,13 +433,13 @@ internal fun Md3eSearchPage(state: SearchState, onSearch: (String, String) -> Un
                         Text(state.videoError, Modifier.padding(20.dp), color = MaterialTheme.colorScheme.error)
                     }
                     itemsIndexed(state.videos, key = { index, video -> "bili-$index-${video.bvid}" }) { _, video ->
-                        Md3eBiliVideoRow(video) { onPlay { playBiliCollection(video) }; onOpenPlayer() }
+                        Md3eBiliVideoRow(video, { onEnqueueVideo(video) }) { onPlay { playBiliCollection(video) }; onOpenPlayer() }
                     }
                 }
                 "song" -> {
                     if (state.songs.isNotEmpty()) item { ListHeading("网易云歌曲", state.songs.size) }
                     itemsIndexed(state.songs, key = { index, song -> "song-$index-${song.id}" }) { index, song ->
-                        NeteaseSongRow(song, index + 1) { onPlay { playSearchResult(index) } }
+                        NeteaseSongRow(song, index + 1, { onEnqueueSong(song) }) { onPlay { playSearchResult(index) } }
                     }
                     if (state.hasMore) item {
                         Box(Modifier.fillMaxWidth().padding(12.dp), contentAlignment = Alignment.Center) {
@@ -408,7 +450,7 @@ internal fun Md3eSearchPage(state: SearchState, onSearch: (String, String) -> Un
                     }
                     if (state.local.isNotEmpty()) item { ListHeading("本地匹配", state.local.size) }
                     itemsIndexed(state.local, key = { index, track -> "local-$index-${track.contentUri ?: track.filePath}" }) { index, track ->
-                        LocalSongRow(track, index + 1) { onPlay { playLocalSearchResult(index) } }
+                        LocalSongRow(track, index + 1, { onEnqueueTrack(track) }) { onPlay { playLocalSearchResult(index) } }
                     }
                 }
                 "album" -> items(state.albums, key = { it.id }) { album -> AlbumRow(album) { onOpenAlbum(album.id) } }
@@ -436,21 +478,9 @@ private fun SearchSuggestions(title: String, terms: List<String>, onClear: (() -
 @Composable
 internal fun Md3eArtistDetail(state: ArtistDetailState, onBack: () -> Unit, onAlbum: (Long) -> Unit,
     onPlay: PlayAction, onEnqueue: (NeteaseSong) -> Unit, modifier: Modifier = Modifier) {
-    var menuSong by remember(state.id) { mutableStateOf<NeteaseSong?>(null) }
-    menuSong?.let { song ->
-        ModalBottomSheet(onDismissRequest = { menuSong = null }) {
-            Text(song.name.orEmpty(), Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
-                style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            ListItem(
-                headlineContent = { Text("添加到播放列表") },
-                leadingContent = { Icon(Md3eIcons.Playlist, null) },
-                modifier = Modifier.fillMaxWidth().clickable {
-                    menuSong = null
-                    onEnqueue(song)
-                },
-            )
-            Spacer(Modifier.height(20.dp))
-        }
+    if (LocalIosDesign.current) {
+        IosArtistDetail(state, onAlbum, onPlay, onEnqueue, modifier)
+        return
     }
     LazyColumn(modifier, contentPadding = PaddingValues(bottom = 24.dp + LocalMd3eDockInset.current)) {
         item {
@@ -469,7 +499,7 @@ internal fun Md3eArtistDetail(state: ArtistDetailState, onBack: () -> Unit, onAl
         if (state.loading) item { CenterLoading("正在加载歌手") }
         if (state.songs.isNotEmpty()) item { ListHeading("热门歌曲", state.songs.size) }
         itemsIndexed(state.songs, key = { index, song -> "$index-${song.id}" }) { index, song ->
-            NeteaseSongRow(song, index + 1, onLongClick = { menuSong = song }) { onPlay { playArtistSong(index) } }
+            NeteaseSongRow(song, index + 1, { onEnqueue(song) }) { onPlay { playArtistSong(index) } }
         }
         if (state.albums.isNotEmpty()) item { ListHeading("专辑", state.albums.size) }
         items(state.albums, key = { it.id }) { album -> AlbumRow(album) { onAlbum(album.id) } }
@@ -479,12 +509,13 @@ internal fun Md3eArtistDetail(state: ArtistDetailState, onBack: () -> Unit, onAl
 
 @Composable
 internal fun Md3eAlbumDetail(state: AlbumDetailState, id: Long, onBack: () -> Unit,
-    onPlay: PlayAction, modifier: Modifier = Modifier) {
+    onPlay: PlayAction, onEnqueue: (NeteaseSong) -> Unit, modifier: Modifier = Modifier) {
     if (LocalClaudeDesign.current) {
-        ClaudeAlbumCollection(state, id, onPlay, modifier)
+        ClaudeAlbumCollection(state, id, onPlay, onEnqueue, modifier)
         return
     }
-    LazyColumn(modifier, contentPadding = PaddingValues(bottom = 24.dp + LocalMd3eDockInset.current)) {
+    LazyColumn(modifier, contentPadding = PaddingValues(
+        top = iosPageTopPadding(), bottom = 24.dp + LocalMd3eDockInset.current)) {
         item {
             Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -499,14 +530,15 @@ internal fun Md3eAlbumDetail(state: AlbumDetailState, id: Long, onBack: () -> Un
         }
         if (state.loading) item { CenterLoading("正在加载专辑") }
         itemsIndexed(state.tracks, key = { index, song -> "$index-${song.id}" }) { index, song ->
-            NeteaseSongRow(song, index + 1) { onPlay { playAlbumTrack(index) } }
+            NeteaseSongRow(song, index + 1, { onEnqueue(song) }) { onPlay { playAlbumTrack(index) } }
         }
         if (!state.loading && state.tracks.isEmpty()) item { EmptyPage("专辑中没有歌曲") }
     }
 }
 
 @Composable
-private fun ClaudeAlbumCollection(state: AlbumDetailState, id: Long, onPlay: PlayAction, modifier: Modifier) {
+private fun ClaudeAlbumCollection(state: AlbumDetailState, id: Long, onPlay: PlayAction,
+    onEnqueue: (NeteaseSong) -> Unit, modifier: Modifier) {
     LazyColumn(modifier, contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             Column(Modifier.fillMaxWidth().claudeEntrance(), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -538,7 +570,8 @@ private fun ClaudeAlbumCollection(state: AlbumDetailState, id: Long, onPlay: Pla
             Row(Modifier.claudeEntrance(index).animateItem(placementSpec = ClaudeOneTake.snappy()), verticalAlignment = Alignment.CenterVertically) {
                 Text((index + 1).toString().padStart(2, '0'), Modifier.width(25.dp),
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Row(Modifier.weight(1f).clickable { onPlay { playAlbumTrack(index) } }
+                Row(Modifier.weight(1f).songQueueMenu(song.name.orEmpty(),
+                    { onPlay { playAlbumTrack(index) } }, { onEnqueue(song) })
                     .padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Artwork(song.coverThumbPath ?: song.coverUrl.orEmpty(), Modifier.size(48.dp), corner = 6.dp)
                     Column(Modifier.weight(1f).padding(horizontal = 11.dp)) {
@@ -547,7 +580,7 @@ private fun ClaudeAlbumCollection(state: AlbumDetailState, id: Long, onPlay: Pla
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
-                Icon(Md3eIcons.Playlist, "加入队列", Modifier.size(20.dp).clickable { onPlay { enqueueNeteaseSong(song) } },
+                Icon(Md3eIcons.Playlist, "加入队列", Modifier.size(20.dp).clickable { onEnqueue(song) },
                     tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .6f))
@@ -591,20 +624,19 @@ private fun ListHeading(title: String, count: Int) {
 }
 
 @Composable
-private fun NeteaseSongRow(song: NeteaseSong, number: Int?, onLongClick: (() -> Unit)? = null, onPlay: () -> Unit) {
-    SongResultRow(song.coverThumbPath ?: song.coverUrl.orEmpty(), song.name.orEmpty(), song.artist.orEmpty(), number, onPlay, onLongClick)
+private fun NeteaseSongRow(song: NeteaseSong, number: Int?, onEnqueue: () -> Unit, onPlay: () -> Unit) {
+    SongResultRow(song.coverThumbPath ?: song.coverUrl.orEmpty(), song.name.orEmpty(), song.artist.orEmpty(), number, onPlay, onEnqueue)
 }
 
 @Composable
-private fun LocalSongRow(track: Track, number: Int?, onPlay: () -> Unit) {
-    SongResultRow(track.coverThumbPath ?: track.coverLocalPath.orEmpty(), track.title.orEmpty(), track.artist.orEmpty(), number, onPlay)
+private fun LocalSongRow(track: Track, number: Int?, onEnqueue: () -> Unit, onPlay: () -> Unit) {
+    SongResultRow(track.coverThumbPath ?: track.coverLocalPath.orEmpty(), track.title.orEmpty(), track.artist.orEmpty(), number, onPlay, onEnqueue)
 }
 
 @Composable
 private fun SongResultRow(cover: String, title: String, artist: String, number: Int?, onPlay: () -> Unit,
-    onLongClick: (() -> Unit)? = null) {
-    val interaction = if (onLongClick == null) Modifier.clickable(onClick = onPlay)
-        else Modifier.combinedClickable(onClick = onPlay, onLongClick = onLongClick, onLongClickLabel = "歌曲选项")
+    onEnqueue: () -> Unit) {
+    val interaction = Modifier.songQueueMenu(title, onPlay, onEnqueue)
     Row(Modifier.fillMaxWidth().claudeEntrance((number ?: 1) - 1).then(interaction).heightIn(min = 64.dp)
         .padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {

@@ -72,7 +72,9 @@ private fun getCacheFile(context: Context, source: String): File {
 }
 
 @Composable
-internal fun Artwork(url: String, modifier: Modifier = Modifier, corner: androidx.compose.ui.unit.Dp = 24.dp) {
+internal fun Artwork(url: String, modifier: Modifier = Modifier, corner: androidx.compose.ui.unit.Dp = 24.dp,
+    contentScale: ContentScale = ContentScale.Crop,
+    containerColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.surfaceContainerHigh) {
     val source = remember(url) { artworkRequestSource(url) }
     val context = LocalContext.current.applicationContext
 
@@ -84,6 +86,18 @@ internal fun Artwork(url: String, modifier: Modifier = Modifier, corner: android
     LaunchedEffect(source) {
         if (source.isNotBlank() && imageBitmap == null) {
             imageBitmap = awaitArtwork(context, source)
+        }
+    }
+
+    val iosMotion = LocalIosCollectionTransition.current
+    val coverKey = modifier.foldIn<String?>(null) { key, element -> if (element is IosCoverIdentity) element.key else key }
+    SideEffect {
+        if (coverKey != null && imageBitmap != null && iosMotion != null) {
+            iosMotion.images[coverKey] = imageBitmap!!
+            while (iosMotion.images.size > 48) {
+                val stale = iosMotion.images.keys.firstOrNull { it != iosMotion.motion.coverKey } ?: break
+                iosMotion.images.remove(stale)
+            }
         }
     }
 
@@ -99,7 +113,7 @@ internal fun Artwork(url: String, modifier: Modifier = Modifier, corner: android
         ).value
     }
 
-    Surface(modifier, shape = RoundedCornerShape(corner), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+    Surface(modifier, shape = RoundedCornerShape(corner), color = containerColor) {
         val currentBitmap = imageBitmap
         Box(contentAlignment = Alignment.Center) {
             if (currentBitmap == null) {
@@ -114,7 +128,7 @@ internal fun Artwork(url: String, modifier: Modifier = Modifier, corner: android
                     bitmap = currentBitmap,
                     contentDescription = null,
                     modifier = Modifier.matchParentSize(),
-                    contentScale = ContentScale.Crop,
+                    contentScale = contentScale,
                     alpha = imageAlpha
                 )
             }
@@ -240,7 +254,7 @@ private fun java.io.InputStream.readBytesBounded(limit: Int): ByteArray? {
 internal fun Md3eSoftArtworkBackdrop(
     cover: String,
     modifier: Modifier = Modifier,
-    radius: androidx.compose.ui.unit.Dp = 72.dp
+    radius: androidx.compose.ui.unit.Dp = 144.dp
 ) {
     BoxWithConstraints(modifier.clipToBounds()) {
         Artwork(

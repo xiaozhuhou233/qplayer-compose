@@ -201,13 +201,31 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         Property<Object> p = values.get(key);
         if (spec == null || p == null) return;
         Object v = normalize(spec, raw);
-        if (v == null || v.equals(p.peek())) return;
+        if (v == null) return;
+        // An explicit duration edit selects seconds rather than the automatic
+        // style/beat-count window, even if the slider commits the same value.
+        // Update the pair before pushing it to the controller so no render can
+        // start with the new seconds and the old automatic-window policy.
+        boolean pinWindow = "autoMixWindow".equals(key) && !bool("autoMixForceWindow");
+        if (v.equals(p.peek()) && !pinWindow) return;
+        if (pinWindow) {
+            values.get("autoMixForceWindow").set(Boolean.TRUE);
+            persist(specsByKey.get("autoMixForceWindow"), Boolean.TRUE);
+        }
+        if ("autoMixTuning".equals(key)) {
+            try { dev.t1m3.qplayer.audio.mix.MixTuning.parse(String.valueOf(v)); }
+            catch (dev.t1m3.qplayer.audio.mix.TuningException ex) {
+                if (controller != null) controller.toast.set("AutoMix 参数无效：" + ex.getMessage());
+                return;
+            }
+        }
         if ("aiProvider".equals(key)) {
             saveAiProviderFields(((Number) p.peek()).intValue());
         }
         p.set(v);
         persist(spec, v);
         apply(spec, v);
+        if (pinWindow) fireHooks("autoMixForceWindow", Boolean.TRUE);
         // Design switches are exclusive even when changed through a non-Compose host.
         // Claude uses a lightweight paper theme and may coexist with low-spec rendering.
         if (Boolean.TRUE.equals(v)) {
@@ -477,40 +495,23 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
                 case "unblock": controller.setUnblockEnabled(bool("unblock")); break;
                 case "mirror": controller.setUpdateMirror(bool("mirror")); break;
                 case "fade": controller.setFadeEnabled(bool("fade")); break;
+                case "autoMixMode":
+                case "autoMixAutoCue":
+                case "autoMixPitchEnabled":
+                case "precacheNextTrack":
+                case "autoMixStyle":
+                case "autoMixWindow":
+                case "autoMixForceWindow":
+                case "autoMixWidth":
+                case "autoMixScale":
+                case "autoMixStretch":
+                case "autoMixTuning":
                 case SettingsCatalog.SMART_TRANSITION_KEY:
-                case SettingsCatalog.TRANSITION_KIND_KEY:
-                case SettingsCatalog.TRANSITION_CURVE_KEY:
-                // The blend's length reaches the controller the same way: one number it
-                // reads when a boundary is decided, so moving the slider mid-song is
-                // simply the length the NEXT boundary gets.
-                case SettingsCatalog.TRANSITION_BLEND_KEY:
-                // 节拍对齐/低频互换 take effect on the next boundary, but they still
-                // have to reach the controller when they are toggled — the whole
-                // block is re-pushed, so a row that is switched mid-song is not a
-                // setting that only applies after a restart.
-                case SettingsCatalog.BEAT_ALIGN_KEY:
-                case SettingsCatalog.BASS_SWAP_KEY:
-                // The AI transition chooser is configured by the same rows the AI DJ
-                // is: changing any of them re-pushes the whole 智能过渡 block, which
-                // re-installs the chooser (or removes it) and leaves every other
-                // transition setting exactly as the user left it.
                 case "aiBaseUrl":
                 case "aiApiKey":
                 case "aiModel":
                 case "aiTimeoutMs":
                     pushTransition();
-                    break;
-                // The ACE-Step rows — their own group, because it is a different service from the
-                // AI music assistant above (a music GENERATION endpoint, with its own protocol, its
-                // own key and its own model name). All five are one configuration, so changing any
-                // of them re-pushes all of it; the renderer reads it once per render, which happens
-                // minutes before the boundary it is for.
-                case SettingsCatalog.ACE_STEP_ENABLED_KEY:
-                case SettingsCatalog.ACE_STEP_BASE_URL_KEY:
-                case SettingsCatalog.ACE_STEP_API_KEY_KEY:
-                case SettingsCatalog.ACE_STEP_MODEL_KEY:
-                case SettingsCatalog.ACE_STEP_BED_DB_KEY:
-                    pushAceStep();
                     break;
                 case "highQuality": controller.setHighQualityEnabled(bool("highQuality")); break;
                 case "maxCacheSizeMB": controller.setCacheMaxSizeMB(intOf("maxCacheSizeMB")); break;
@@ -537,79 +538,26 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         controller.setCacheMaxSizeMB(intOf("maxCacheSizeMB"));
         pushCustomApi();
         pushTransition();
-        // The ACE-Step group is pushed with everything else on load, so a session that starts with
-        // the switch already on has its settings at the controller before the first render is asked
-        // for — a value that only arrived after the first boundary would be a feature that appears
-        // to need a restart.
-        pushAceStep();
+
     }
 
-    /** The whole 「智能过渡」 block, in one place: the switch, the forced kind, the
-     *  ramp curve, and the AI chooser's provider. Settings are the single source of
-     *  truth — the controller keeps no copy, so this runs on load and on every
-     *  change of any of these rows, and toggling the switch takes effect at the very
-     *  next track boundary.
-     *
-     *  <p>The kind row's index 0 is 自动 (ask the chooser), so index n maps to
-     *  {@code TransitionKind.CHOICES.get(n - 1)} and null restores the chooser.
-     *
-     *  <p>The AI chooser is wired from the same three values the 「AI DJ」 dialog
-     *  hands to {@code generateAiPlaylist} — address, key, model — so configuring
-     *  the AI once configures both, and there is no second place to enter a key, no
-     *  second model name, and no second enable path. With no provider configured the
-     *  controller keeps the local rules; with 「智能过渡」 off it never asks anything
-     *  at all, whichever chooser is installed. */
+    /** AutoMix settings and the existing recommendation API timeout. */
     private void pushTransition() {
         if (controller == null) return;
-        controller.setTransitionEnabled(bool(SettingsCatalog.SMART_TRANSITION_KEY));
-        int kindIndex = intOf(SettingsCatalog.TRANSITION_KIND_KEY);
-        java.util.List<dev.t1m3.qplayer.audio.TransitionKind> kinds =
-                dev.t1m3.qplayer.audio.TransitionKind.CHOICES;
-        dev.t1m3.qplayer.audio.TransitionKind kind = null;
-        if (kindIndex > 0) {
-            kind = kinds.get(Math.min(kindIndex, kinds.size()) - 1);
+        controller.setPrecacheNextEnabled(bool("precacheNextTrack"));
+        try {
+            controller.setAutoMixConfig(new dev.t1m3.qplayer.audio.automix.AutoMixConfig(
+                    bool(SettingsCatalog.SMART_TRANSITION_KEY), intOf("autoMixMode"),
+                    intOf("autoMixStyle"), intOf("autoMixWindow"), bool("autoMixForceWindow"),
+                    intOf("autoMixWidth"), intOf("autoMixScale"), bool("autoMixStretch"), str("autoMixTuning"), bool("autoMixAutoCue"), bool("autoMixPitchEnabled")));
+        } catch (dev.t1m3.qplayer.audio.mix.TuningException ex) {
+            controller.toast.set("AutoMix 参数无效：" + ex.getMessage());
+            controller.setAutoMixConfig(new dev.t1m3.qplayer.audio.automix.AutoMixConfig(
+                    bool(SettingsCatalog.SMART_TRANSITION_KEY), intOf("autoMixMode"),
+                    intOf("autoMixStyle"), intOf("autoMixWindow"), bool("autoMixForceWindow"),
+                    intOf("autoMixWidth"), intOf("autoMixScale"), bool("autoMixStretch"), "", bool("autoMixAutoCue"), bool("autoMixPitchEnabled")));
         }
-        controller.setTransitionKindOverride(kind);
-        controller.setFadeCurve(curveOf(intOf(SettingsCatalog.TRANSITION_CURVE_KEY)));
-        controller.setBeatAlignmentEnabled(bool(SettingsCatalog.BEAT_ALIGN_KEY));
-        // The rows that refine 「智能过渡」 are 节拍对齐, 低频互换 and the curve. Tempo and
-        // key are not settings any more than they are gates: the controller measures
-        // them per pair and applies whatever is small enough to be inaudible (see
-        // MixNaturaliser), on the incoming track only, and a pair it cannot measure is
-        // simply overlapped untouched.
-        controller.setBassSwapEnabled(bool(SettingsCatalog.BASS_SWAP_KEY));
-        // The blend's length, in ms: the row stores seconds (it is what the slider
-        // shows), the controller works in ms like every other time in the transition
-        // machinery. Pushed on load and on every change of the row, so the next boundary
-        // decided after a move uses the new length and a restart keeps it.
-        controller.setBlendDurationMs(
-                intOf(SettingsCatalog.TRANSITION_BLEND_KEY) * 1000L);
-        controller.setAiTransitionConfig(str("aiBaseUrl"), str("aiApiKey"), str("aiModel"),
-                intOf("aiTimeoutMs"));    }
-
-    /**
-     * The whole ACE-Step group in one place, pushed to the controller on load and on every change of
-     * one of its rows: the switch, the address, the user's own key, the model, and how far under
-     * the passage the generated bed sits.
-     *
-     * <p>Its own group and its own push, deliberately not folded into {@link #pushTransition()}: the
-     * 「AI」 rows above configure the AI music assistant (an OpenAI-compatible <em>text</em> endpoint),
-     * while this is a music-generation endpoint with a different protocol, a different key and a
-     * different model name — sharing a key between them would be wrong, and so would sharing a push.
-     *
-     * <p>The renderer asks for the cloud only when the four required values are all there; with the
-     * switch off, or a row empty, the edit a render writes is byte for byte the one this build made
-     * before ACE-Step existed. The key never leaves this method's arguments except into the config
-     * the controller holds, and the controller's log line says whether one is set — never the key.
-     */
-    private void pushAceStep() {
-        if (controller == null) return;
-        controller.setAceStepBedConfig(
-                bool(SettingsCatalog.ACE_STEP_ENABLED_KEY),
-                str(SettingsCatalog.ACE_STEP_BASE_URL_KEY),
-                str(SettingsCatalog.ACE_STEP_API_KEY_KEY),
-                str(SettingsCatalog.ACE_STEP_MODEL_KEY),
-                intOf(SettingsCatalog.ACE_STEP_BED_DB_KEY));
+        controller.setAiTransitionConfig(str("aiBaseUrl"), str("aiApiKey"), str("aiModel"), intOf("aiTimeoutMs"));
     }
 
     private void pushCustomApi() {

@@ -99,24 +99,33 @@ internal fun ClaudeOpening(
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Text(
             if (name.isBlank()) greetingFor(hour) else "${greetingFor(hour)}，$name",
-            fontFamily = ClaudeSerif, fontSize = 34.sp, lineHeight = 42.sp,
-            fontWeight = FontWeight.Normal,
+            fontFamily = ClaudeSerif, fontSize = 36.sp, lineHeight = 44.sp,
+            letterSpacing = (-0.4).sp, fontWeight = FontWeight.Normal,
         )
         Text(dailyPhrase, fontFamily = ClaudeSerif, fontStyle = FontStyle.Italic,
             fontSize = 15.sp, lineHeight = 24.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
         aiInput()
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("私人 FM", Modifier.clip(RoundedCornerShape(6.dp))
+        // Private FM is a real destination, so it gets a full-width row under a
+        // rule instead of a small text link: serif name, sans explanation.
+        Column(Modifier.fillMaxWidth()) {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
                 .onGloballyPositioned { roamBounds = it.boundsInRoot() }
                 .clickable {
                     roam?.source = roamBounds
                     onPrivateFm()
-                }.padding(vertical = 4.dp, horizontal = 2.dp),
-                fontSize = 14.sp, fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.primary)
-            Text("  由网易云按你的口味续播", fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }.padding(vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("私人 FM", fontFamily = ClaudeSerif, fontWeight = FontWeight.SemiBold,
+                        fontSize = 17.sp)
+                    Text("由网易云按你的口味续播", fontFamily = ClaudeSans, fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text("开始听", fontFamily = ClaudeSans, fontWeight = FontWeight.Medium,
+                    fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+            }
         }
     }
 }
@@ -163,8 +172,7 @@ internal fun ClaudeSongList(
         Spacer(Modifier.height(4.dp))
         shown.forEachIndexed { index, song ->
             Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
-                .combinedClickable(onClick = { play(index) },
-                    onLongClick = { enqueue(song) }, onLongClickLabel = "加入播放队列")
+                .songQueueMenu(song.name.orEmpty(), { play(index) }, { enqueue(song) })
                 .padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
                 Artwork(song.coverThumbPath ?: song.coverUrl.orEmpty(),
                     Modifier.size(46.dp), corner = 6.dp)
@@ -178,7 +186,8 @@ internal fun ClaudeSongList(
                             fontFamily = ClaudeMono, fontSize = 10.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    Text(song.artist.orEmpty(), Modifier.padding(top = 2.dp), fontSize = 12.sp,
+                    Text(song.artist.orEmpty(), Modifier.padding(top = 2.dp),
+                        fontFamily = ClaudeSans, fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                     // The only handwriting on this screen, and only when the API
@@ -214,7 +223,8 @@ internal fun ClaudeAlbumCover(album: NeteaseAlbum, onOpen: () -> Unit) {
             Text(album.name ?: "未知专辑", Modifier.padding(top = 8.dp),
                 fontFamily = ClaudeSerif, fontSize = 13.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(album.artistName.orEmpty(), Modifier.padding(top = 2.dp), fontSize = 11.sp,
+            Text(album.artistName.orEmpty(), Modifier.padding(top = 2.dp),
+                fontFamily = ClaudeSans, fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
         }

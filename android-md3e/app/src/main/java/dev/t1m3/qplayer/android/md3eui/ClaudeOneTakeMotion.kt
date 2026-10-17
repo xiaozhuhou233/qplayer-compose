@@ -8,6 +8,7 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
@@ -158,17 +159,25 @@ internal fun Modifier.claudeEntrance(index: Int = 0, replayOnVisit: Boolean = fa
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 internal fun Modifier.claudeClickable(enabled: Boolean = true, onClickLabel: String? = null,
-    role: Role? = null, onClick: () -> Unit): Modifier = composed {
+    role: Role? = null, onLongClick: (() -> Unit)? = null, onLongClickLabel: String? = null,
+    onClick: () -> Unit): Modifier = composed {
     if (!LocalClaudeDesign.current || !claudeMotionEnabled())
-        return@composed clickable(enabled = enabled, onClickLabel = onClickLabel, role = role, onClick = onClick)
+        return@composed if (onLongClick == null)
+            clickable(enabled = enabled, onClickLabel = onClickLabel, role = role, onClick = onClick)
+        else combinedClickable(enabled = enabled, onClickLabel = onClickLabel, role = role,
+            onLongClick = onLongClick, onLongClickLabel = onLongClickLabel, onClick = onClick)
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val scale = animateFloatAsState(if (pressed) .96f else 1f,
         if (pressed) tween(ClaudeOneTake.PRESS, easing = ClaudeOneTake.ExpoOut) else ClaudeOneTake.bouncy(), label = "contact spring")
-    graphicsLayer { scaleX = scale.value; scaleY = if (pressed) scale.value * .985f else scale.value }
-        .clickable(interactionSource = interaction, indication = null, enabled = enabled,
-            onClickLabel = onClickLabel, role = role, onClick = onClick)
+    val contact = graphicsLayer { scaleX = scale.value; scaleY = if (pressed) scale.value * .985f else scale.value }
+    if (onLongClick == null) contact.clickable(interactionSource = interaction, indication = null, enabled = enabled,
+        onClickLabel = onClickLabel, role = role, onClick = onClick)
+    else contact.combinedClickable(interactionSource = interaction, indication = null, enabled = enabled,
+        onClickLabel = onClickLabel, role = role, onLongClick = onLongClick,
+        onLongClickLabel = onLongClickLabel, onClick = onClick)
 }
 
 /** One disc/angle survives mini -> player, rather than restarting at the destination. */

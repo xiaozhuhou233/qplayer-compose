@@ -28,6 +28,7 @@ internal object Md3eIcons {
     val ChevronRight = icon("ChevronRight", "M9,6l6,6l-6,6l-1.4,-1.4l4.6,-4.6l-4.6,-4.6z")
     val Close = icon("Close", "M18.3,5.7L12,12l6.3,6.3l-1.4,1.4L10.6,13.4L4.3,19.7l-1.4,-1.4L9.2,12L2.9,5.7l1.4,-1.4l6.3,6.3l6.3,-6.3z")
     val Delete = icon("Delete", "M6,7h12v13H6zM9,3h6l1,2h4v2H4V5h4z")
+    val DragHandle = icon("DragHandle", "M4,9h16v2H4zM4,13h16v2H4z")
 
     private fun icon(name: String, path: String) = ImageVector.Builder(name, 24.dp, 24.dp, 24f, 24f)
         .addPath(addPathNodes(path), fill = SolidColor(Color.Black)).build()

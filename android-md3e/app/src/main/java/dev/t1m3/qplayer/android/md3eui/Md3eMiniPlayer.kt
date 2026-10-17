@@ -11,7 +11,10 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
@@ -109,12 +112,17 @@ internal fun Md3eMiniPlayerDock(
     playerExpansion: Md3ePlayerExpansionState? = null,
 ) {
     val privateRoam = LocalClaudePrivateRoam.current
-    var roamBounds by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
+    val enterMillis = if (LocalClaudeDesign.current) ClaudeOneTake.CARRY else 400
+    val exitMillis = if (LocalClaudeDesign.current) ClaudeOneTake.TRAVEL else 320
     AnimatedVisibility(
         visible = visible && runtime.playback.hasTrack,
         modifier = modifier,
-        enter = if (Md3eLowSpecMode.current) androidx.compose.animation.EnterTransition.None else if (LocalClaudeDesign.current) ClaudeOneTake.sheetIn() else Md3eMotion.sheetIn(),
-        exit = if (Md3eLowSpecMode.current) androidx.compose.animation.ExitTransition.None else if (LocalClaudeDesign.current) ClaudeOneTake.sheetOut() else Md3eMotion.sheetOut(),
+        enter = if (Md3eLowSpecMode.current) androidx.compose.animation.EnterTransition.None else
+            slideInVertically(tween(enterMillis, easing = playerArtworkEasing)) { it } +
+                fadeIn(tween(enterMillis, easing = playerArtworkEasing)),
+        exit = if (Md3eLowSpecMode.current) androidx.compose.animation.ExitTransition.None else
+            slideOutVertically(tween(exitMillis, easing = playerArtworkEasing)) { it } +
+                fadeOut(tween(exitMillis, easing = playerArtworkEasing)),
     ) {
         if (LocalClaudeDesign.current) {
             Md3eMiniPlayer(runtime, onOpen,
@@ -126,28 +134,7 @@ internal fun Md3eMiniPlayerDock(
                     } else onLogin()
                 })
         } else {
-            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-                Box(Modifier.fillMaxWidth().height(40.dp).padding(end = 8.dp)) {
-                    SmallFloatingActionButton(
-                        onClick = {
-                            if (runtime.home.loggedIn) {
-                                privateRoam?.source = roamBounds
-                                privateRoam?.open()
-                            } else onLogin()
-                        },
-                        modifier = Modifier.align(Alignment.TopEnd)
-                            .onGloballyPositioned { roamBounds = it.boundsInRoot() }
-                            .then(if (playerExpansion != null) Modifier.md3ePlayerChromeExit(playerExpansion) else Modifier),
-                        shape = CircleShape,
-                        containerColor = MaterialTheme.colorScheme.primaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                        elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 0.dp, pressedElevation = 0.dp,
-                            focusedElevation = 0.dp, hoveredElevation = 0.dp),
-                    ) { Icon(Md3eIcons.AutoAwesome, "私人漫游") }
-                }
-                Spacer(Modifier.height(8.dp))
-                Md3eMiniPlayer(runtime, onOpen, Modifier.fillMaxWidth().padding(horizontal = 16.dp), playerExpansion)
-            }
+            Md3eMiniPlayer(runtime, onOpen, Modifier.fillMaxWidth().padding(horizontal = 16.dp), playerExpansion)
         }
     }
 }
@@ -160,9 +147,22 @@ internal fun Md3eMiniPlayer(
     playerExpansion: Md3ePlayerExpansionState? = null,
     onRoam: () -> Unit = {},
 ) {
+    if (runtime.experimentalAiDjWaiting) {
+        Surface(modifier.height(64.dp)
+            .then(if (playerExpansion != null) Modifier.md3ePlayerExpansionSource(playerExpansion) else Modifier)
+            .clickable(onClick = onOpen), shape = RoundedCornerShape(32.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerLow) {
+            Row(Modifier.fillMaxSize().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Md3eAiMascot(Modifier.size(40.dp), runtime.experimentalAiDjStage)
+                Text(runtime.experimentalAiDjMessage, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f))
+            }
+        }
+        return
+    }
     val dj = LocalClaudeAiDj.current
     val state = runtime.playback
-    val claude = LocalClaudeDesign.current
+    val claude = LocalClaudeDesign.current || LocalIosDesign.current
     val view = LocalView.current
     val ink = MaterialTheme.colorScheme.onSurface
     val lowSpec = Md3eLowSpecMode.current
@@ -187,9 +187,12 @@ internal fun Md3eMiniPlayer(
         shape = RoundedCornerShape(32.dp),
         tonalElevation = 1.dp,
         // The expansion host owns the moving surface/shadow. Its snapshot carries only controls.
-        shadowElevation = if (claude) { if (playerExpansion?.active == true) 0.dp else 4.dp } else 7.dp,
+        shadowElevation = if (claude) { if (playerExpansion?.active == true) 0.dp else 2.dp } else 7.dp,
         color = if (claude && playerExpansion?.active != true) MaterialTheme.colorScheme.surfaceContainerLow
             else androidx.compose.ui.graphics.Color.Transparent,
+        // Claude: a hairline edge on the paper does the lifting; the shadow stays faint.
+        border = if (claude && playerExpansion?.active != true)
+            BorderStroke(.6.dp, MaterialTheme.colorScheme.outlineVariant) else null,
     ) {
         Box(Modifier.fillMaxSize()) {
             if (!claude && state.cover.isNotBlank()) {
@@ -201,7 +204,8 @@ internal fun Md3eMiniPlayer(
                 Modifier.fillMaxSize().padding(start = 8.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Box(Modifier.size(if (claude) 44.dp else 52.dp).pointerInput(state.duration, state.songId) {
+                Box(Modifier.size(if (claude) 40.dp else 52.dp)
+                    .then(if (claude) Modifier else Modifier.pointerInput(state.duration, state.songId) {
                     detectTapGestures { offset ->
                         val angle = Math.toDegrees(atan2(
                             (offset.y - size.height / 2f).toDouble(),
@@ -210,12 +214,16 @@ internal fun Md3eMiniPlayer(
                         val fraction = ((angle + 90f + 360f) % 360f) / 360f
                         if (state.duration > 0) runtime.controller.seek((state.duration * fraction).roundToLong())
                     }
-                }, contentAlignment = Alignment.Center) {
-                    MiniCoverProgress(state)
+                }), contentAlignment = Alignment.Center) {
+                    if (!claude) MiniCoverProgress(state)
                     if (claude) {
-                        ClaudeMovingDisc(state.cover, Modifier.size(40.dp)
-                            .onGloballyPositioned { playerExpansion?.miniDiscBounds = it.boundsInRoot() }
-                            .graphicsLayer { alpha = if (playerExpansion?.active == true) 0f else 1f })
+                        ClaudePlayerArtwork(state.cover, Modifier.size(34.dp)
+                            .onGloballyPositioned {
+                                // Keep the real landing point current while the detail page is open.
+                                playerExpansion?.miniDiscBounds = it.boundsInRoot()
+                            }
+                            .graphicsLayer { alpha = if (playerExpansion?.active == true) 0f else 1f },
+                            corner = 7.dp, elevation = 1.dp)
                     } else if (lowSpec) MiniCover(state.cover)
                     else AnimatedContent(
                         targetState = state.cover,
@@ -247,8 +255,9 @@ private fun androidx.compose.foundation.layout.RowScope.MiniTrackInfo(
         Text(
             title,
             maxLines = 1,
-            fontSize = if (claude) 13.sp else 14.sp,
+            fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
+            fontFamily = if (claude) ClaudeSerif else null,
             color = ink,
             overflow = TextOverflow.Clip,
             // A B站 P title can be much longer than the dock. Keep the
@@ -263,6 +272,7 @@ private fun androidx.compose.foundation.layout.RowScope.MiniTrackInfo(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             fontSize = if (claude) 11.sp else 12.sp,
+            fontFamily = if (claude) ClaudeSans else null,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
@@ -281,17 +291,19 @@ private fun MiniPlayPause(playing: Boolean, claude: Boolean, lowSpec: Boolean, o
             shape = RoundedCornerShape(playCorner.value)
             clip = true
         }
-            .background(MaterialTheme.colorScheme.primaryContainer)
+            // Claude: the one solid thing in the dock is an ink-coloured play key.
+            .background(if (claude) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.primaryContainer)
             .clickable {
                 view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                 onToggle()
             },
         contentAlignment = Alignment.Center,
     ) {
+        val iconTint = if (claude) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.onPrimaryContainer
         if (lowSpec) Icon(
             if (playing) Md3eIcons.Pause else Md3eIcons.PlayArrow,
             if (playing) "暂停" else "播放",
-            Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer,
+            Modifier.size(22.dp), tint = iconTint,
         ) else AnimatedContent(
             targetState = playing,
             transitionSpec = { fadeIn(tween(140)) togetherWith fadeOut(tween(100)) },
@@ -299,7 +311,7 @@ private fun MiniPlayPause(playing: Boolean, claude: Boolean, lowSpec: Boolean, o
         ) { playing -> Icon(
             if (playing) Md3eIcons.Pause else Md3eIcons.PlayArrow,
             if (playing) "暂停" else "播放",
-            Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer,
+            Modifier.size(22.dp), tint = iconTint,
         ) }
     }
 }
@@ -314,14 +326,15 @@ private fun MiniTransport(icon: androidx.compose.ui.graphics.vector.ImageVector,
     val view = LocalView.current
     Box(
         Modifier.size(if (LocalClaudeDesign.current) 40.dp else 32.dp).clip(CircleShape)
-            .background(if (LocalClaudeDesign.current) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.onPrimary)
+            // Claude: skip keys are bare glyphs, so the play key is the only filled shape.
+            .background(if (LocalClaudeDesign.current) androidx.compose.ui.graphics.Color.Transparent else MaterialTheme.colorScheme.onPrimary)
             .clickable {
                 view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                 onClick()
             },
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, label, Modifier.size(20.dp), tint = if (LocalClaudeDesign.current) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.primary)
+        Icon(icon, label, Modifier.size(20.dp), tint = if (LocalClaudeDesign.current) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary)
     }
 }
 

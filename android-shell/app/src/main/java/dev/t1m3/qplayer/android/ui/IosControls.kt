@@ -29,6 +29,8 @@ private fun useIosControls() = LocalIosDesign.current && LocalIosControls.curren
 
 @Composable
 private fun controlBackdrop(): com.kyant.backdrop.Backdrop {
+    // Sample the dialog's exported material, which excludes its foreground
+    // controls and therefore cannot capture a button into its own source.
     LocalIosDialogGlassBackdrop.current?.let { return it }
     LocalPlayerGlassBackdrop.current?.let { return it }
     LocalIosTopBarBackdrop.current?.let { return it }
@@ -43,6 +45,24 @@ internal fun IosAwareButton(onClick: () -> Unit, modifier: Modifier = Modifier,
     if (LocalIosDialogAction.current != null) { DialogAction(onClick, modifier, enabled, content); return }
     if (!useIosControls()) { Button(onClick, modifier, enabled, content = content); return }
     GlassAction(onClick, modifier, enabled, true, content)
+}
+
+/** Neutral white playback capsule; deliberately independent of the theme accent. */
+@Composable
+internal fun IosNeutralButton(onClick: () -> Unit, modifier: Modifier = Modifier,
+    enabled: Boolean = true, contentColor: androidx.compose.ui.graphics.Color = androidx.compose.ui.graphics.Color(0xFF18181A),
+    content: @Composable RowScope.() -> Unit) {
+    val dark = LocalGlassDark.current
+    val ink = (if (dark) androidx.compose.ui.graphics.Color.White else androidx.compose.ui.graphics.Color(0xFF18181A))
+        .copy(alpha = if (enabled) 1f else .4f)
+    val view = LocalView.current
+    LiquidButton(onClick = {
+        view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+        onClick()
+    }, backdrop = controlBackdrop(), modifier = modifier, enabled = enabled,
+        isInteractive = enabled, contentColor = ink,
+        surfaceColor = iosGlassSurface(dark, LocalGlassTint.current),
+        content = content)
 }
 
 @Composable
@@ -65,6 +85,8 @@ private fun GlassAction(onClick: () -> Unit, modifier: Modifier, enabled: Boolea
             onClick()
         }, backdrop = controlBackdrop(), modifier = modifier,
             enabled = enabled, isInteractive = enabled,
+            contentColor = (if (filled) scheme.onPrimary else scheme.primary)
+                .copy(alpha = if (enabled) 1f else 0.4f),
             tint = if (filled) scheme.primary else androidx.compose.ui.graphics.Color.Unspecified,
             surfaceColor = if (filled) androidx.compose.ui.graphics.Color.Unspecified
             else if (LocalRestoredIosDialogGlass.current) androidx.compose.ui.graphics.Color.Transparent
