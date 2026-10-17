@@ -11607,11 +11607,15 @@ public final class PlayerController {
                     // 任何硬性限制 —— 少取会漏掉匹配，多花的时间是买正确性）。
                     List<NeteaseSong> candidates = netease.searchSongs(x.title + " " + x.artist, 30, 0);
                     NeteaseSong match = bestAiSongMatch(candidates, x.title, x.artist);
-                    if (match == null) {
+                    // 首选缺失、或只找到翻唱/现场/伴奏这类版本时，再用纯歌名搜一次，给原版一次机会。
+                    boolean preferClean = match == null
+                            || (!isNonOriginalVersion(x.title) && isNonOriginalVersion(match.name));
+                    if (preferClean) {
                         // Artist spelling and collaboration separators vary a
                         // lot between AI output and NetEase search metadata.
                         candidates = netease.searchSongs(x.title, 30, 0);
-                        match = bestAiSongMatch(candidates, x.title, x.artist);
+                        NeteaseSong clean = bestAiSongMatch(candidates, x.title, x.artist);
+                        if (clean != null && (match == null || !isNonOriginalVersion(clean.name))) match = clean;
                     }
                     if (match != null && !(excludeLiked && likedIds.contains(match.id))
                             && !containsId(resolved, match.id)) resolved.add(match);
@@ -11620,6 +11624,17 @@ public final class PlayerController {
                 Logger.info("ai playlist: generated {} song(s) in {} ms — matched {} real track(s) in {} ms",
                         rec.songs.size(), matchedStart - genStart, resolved.size(),
                         System.currentTimeMillis() - matchedStart);
+                if (resolved.isEmpty()) {
+                    // 兜底：严格规则下一首都配不上时，只放行「歌名精确、非翻唱/现场」的候选。
+                    for (AiPlaylistResult.Song x : rec.songs) {
+                        if (generation != aiRequestGeneration.get()) return;
+                        if (resolved.size() >= Math.min(matchTarget, 5)) break;
+                        List<NeteaseSong> loose = netease.searchSongs(x.title, 10, 0);
+                        NeteaseSong match = bestAiSongMatchLoose(loose, x.title, x.artist);
+                        if (match != null && !(excludeLiked && likedIds.contains(match.id))
+                                && !containsId(resolved, match.id)) resolved.add(match);
+                    }
+                }
                 if (resolved.isEmpty()) throw new IllegalStateException("网易云未找到推荐歌曲");
                 // ⚠️ Round 35 REMOVED the interleave step that round 34 put here — the user:
                 // 「也不用非要是中英文穿插」. The prompt still asks for a natural mix, but the order the
@@ -11788,25 +11803,86 @@ public final class PlayerController {
 
     private static boolean containsId(List<NeteaseSong> list, long id) { for (NeteaseSong s : list) if (s.id == id) return true; return false; }
 
+    /**
+     * 版本标记：翻唱 / 现场 / 伴奏 / remix / DJ / 加速… 都表示「不是原版录音室版本」。
+     * 只在括号段或「 - 」后缀里认，避免把 “Live Forever” 这类正常歌名判错。
+     */
+    private static final java.util.regex.Pattern AI_VERSION_MARK =
+            java.util.regex.Pattern.compile(
+                    "(?i)[（(\\[【]\\s*[^）)\\]】]{0,24}?"
+                            + "(live|现场|演唱会|remix|混音|dj|翻唱|翻自|原唱|伴奏|instrumental|karaoke|ktv|纯音乐|试听|demo|加速|减速|降调|升调|sped\\s?up|slowed|nightcore|8d|女声|男声|童声|钢琴版|吉他版|0\\.\\d+x|1\\.\\d+x)"
+                            + "[^）)\\]】]{0,24}[）)\\]】]"
+                            + "|(?i)\\s[-–—]\\s*(live|remix|cover|instrumental|karaoke|sped\\s?up|slowed|nightcore)\\s*$");
+
+    /** 歌名点名了非原版（现场 / remix…）时，这类结果不该被惩罚。 */
+    private static boolean isNonOriginalVersion(String rawTitle) {
+        if (rawTitle == null || rawTitle.isEmpty()) return false;
+        return AI_VERSION_MARK.matcher(rawTitle).find();
+    }
+
+    /**
+     * 选出一首「确实是要的那首原版」。
+     *
+     * <p>用户 2026-10-17：「找到的很多都不是原版」——旧的打分把括号内容整段删掉，
+     * 于是 (Live) / （翻唱） / （伴奏） 与原版同分，谁排前面谁赢。这里改成：
+     * 歌名精确 &gt; 只是包含 &gt; 模糊；歌手完全相同加分更多；同名但带版本标记的候选
+     * 重罚（除非请求本身就点名了那个版本），所以原版永远排在翻唱前面。
+     */
     private static NeteaseSong bestAiSongMatch(List<NeteaseSong> candidates, String wantedTitle, String wantedArtist) {
         if (candidates == null || candidates.isEmpty() || wantedTitle == null) return null;
         String title = normalizeAiText(wantedTitle);
         String artist = normalizeAiText(wantedArtist);
+        boolean wantsVersion = isNonOriginalVersion(wantedTitle);
         NeteaseSong best = null;
-        int bestScore = 0;
+        int bestScore = Integer.MIN_VALUE;
         for (NeteaseSong candidate : candidates) {
             if (candidate == null || candidate.name == null) continue;
             String gotTitle = normalizeAiText(candidate.name);
-            int score = 0;
-            if (gotTitle.equals(title)) score += 100;
-            else if (gotTitle.contains(title) || title.contains(gotTitle)) score += 70;
-            else if (sharedTokenCount(gotTitle, title) >= 2) score += 45;
+            int score;
+            // 关键：歌名对上但歌手完全对不上时不能放行 —— 那正是「同名翻唱」的形状。
+            // 所以精确歌名只值 60，必须再有一条歌手证据（相同 +40 / 包含 +25）才过线。
+            if (gotTitle.equals(title)) score = 60;
+            else if (gotTitle.contains(title)) score = 40;
+            else if (title.contains(gotTitle) && gotTitle.length() >= 2) score = 30;
+            else if (sharedTokenCount(gotTitle, title) >= 2) score = 20;
+            else continue;                                  // 歌名都对不上，跳过
             String gotArtist = normalizeAiText(candidate.artist);
-            if (!artist.isEmpty() && !gotArtist.isEmpty()
+            boolean artistExact = !artist.isEmpty() && !gotArtist.isEmpty()
+                    && gotArtist.equals(artist);
+            if (artistExact) score += 40;
+            else if (!artist.isEmpty() && !gotArtist.isEmpty()
                     && (gotArtist.contains(artist) || artist.contains(gotArtist))) score += 25;
+            // 同名但不是原版：翻唱 / 现场 / 伴奏 / remix / DJ / 加速版，重罚。
+            if (!wantsVersion && isNonOriginalVersion(candidate.name)) score -= 70;
             if (score > bestScore) { bestScore = score; best = candidate; }
         }
         return bestScore >= 70 ? best : null;
+    }
+
+    /**
+     * 兜底匹配：只在严格规则配到的歌太少时使用。
+     *
+     * <p>严格规则要求「歌名 + 歌手证据」，歌手名在两种语言/两种写法之间对不上时（例如
+     * 译名），整张歌单可能一首都不剩。这时只放行**歌名完全一致且不是翻唱/现场/伴奏**的
+     * 候选；仍然拒绝任何带版本标记的结果，所以兜底也不会把翻唱塞进来。
+     */
+    private static NeteaseSong bestAiSongMatchLoose(List<NeteaseSong> candidates,
+            String wantedTitle, String wantedArtist) {
+        if (candidates == null || candidates.isEmpty() || wantedTitle == null) return null;
+        String title = normalizeAiText(wantedTitle);
+        String artist = normalizeAiText(wantedArtist);
+        boolean wantsVersion = isNonOriginalVersion(wantedTitle);
+        NeteaseSong best = null;
+        int bestScore = Integer.MIN_VALUE;
+        for (NeteaseSong candidate : candidates) {
+            if (candidate == null || candidate.name == null) continue;
+            if (!normalizeAiText(candidate.name).equals(title)) continue;
+            if (!wantsVersion && isNonOriginalVersion(candidate.name)) continue;
+            String gotArtist = normalizeAiText(candidate.artist);
+            int score = !artist.isEmpty() && gotArtist.equals(artist) ? 2 : 1;
+            if (score > bestScore) { bestScore = score; best = candidate; }
+        }
+        return best;
     }
 
     private static String normalizeAiText(String value) {
