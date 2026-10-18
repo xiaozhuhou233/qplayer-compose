@@ -286,7 +286,8 @@ public final class SettingsCatalog {
                 .desc("Gemini 不联网，只用模型知识推荐")
                 .build());
         out.add(SettingSpec.text("aiWebSearchUrl", AI, "搜索 API 地址", "https://api.tavily.com/search")
-                .desc("默认 Tavily，可填兼容的自定义搜索接口")
+                .desc("留空或填 deepseek.com 用 DeepSeek 联网搜索（Key 可留空，沿用上面的 AI Key）；"
+                        + "填其它地址走 Tavily 兼容接口")
                 .build());
         out.add(SettingSpec.text("aiWebSearchKey", AI, "搜索 API Key", "")
                 .desc("自行申请填写，仅保存在本机")

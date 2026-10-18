@@ -242,6 +242,11 @@ public final class AiClient {
         }
         if (webContext != null && webContext.contains("KNOWLEDGE_BASE_ONLY")) {
             system += "当前已开启强制使用知识库：无论用户提出什么问题，都禁止联网、禁止调用搜索工具、禁止要求搜索资料，只能使用你已有的模型知识完成推荐。";
+        } else {
+            // 联网由应用完成（DeepSeek /tools/search 或用户自填的搜索接口），结果作为参考资料附在用户回合里。
+            // 模型自己既不需要、也不该再声明要联网，只负责从资料里挑真实歌曲。
+            system += "\n需要最新/新歌/榜单这类实时信息时，应用已经把联网检索到的资料一并给你（见用户消息里的「联网资料」）；"
+                    + "请从资料里挑真实歌曲，资料没覆盖到的部分用你自己的知识补足，不要猜歌名。";
         }
         // 用户回合只放「输入」：请求本身、数量、参考块。规则已在 system 里，不重复。
         String user = "Request: " + normalizedRequest +
@@ -254,7 +259,8 @@ public final class AiClient {
             if (webContext.contains("KNOWLEDGE_BASE_FALLBACK") || webContext.contains("KNOWLEDGE_BASE_ONLY")) {
                 user += "\n\n联网搜索不可用。请直接使用你的音乐知识库完成任务，必须输出可搜索的真实歌名和歌手，不要返回人物介绍、道歉或拒绝。\n";
             } else {
-                user += "\n\n以下是联网搜索得到的参考资料。优先从其中提取真实歌名和歌手，不要把网页标题或说明当成歌曲；资料不完整时只返回能确认的歌曲：\n" + webContext;
+                user += "\n\n联网资料（应用检索到的实时结果，优先从中挑真实歌名和歌手，不要把网页标题或说明当成歌曲）：\n"
+                        + webContext;
             }
         }
         // Warm, and a fresh draw for every attempt: 「ai 算法生成的歌曲要有随机性」. A retry after an

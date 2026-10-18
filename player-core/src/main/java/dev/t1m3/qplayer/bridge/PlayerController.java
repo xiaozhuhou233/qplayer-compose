@@ -15,6 +15,7 @@ import dev.t1m3.qplayer.bili.BiliClient;
 import dev.t1m3.qplayer.ai.AiPlaylistResult;
 import dev.t1m3.qplayer.ai.AiReference;
 import dev.t1m3.qplayer.ai.AiEndpoint;
+import dev.t1m3.qplayer.ai.WebLookup;
 import dev.t1m3.qplayer.ai.WebSearchClient;
 import dev.t1m3.qplayer.audio.BeatProfile;
 import dev.t1m3.qplayer.audio.BeatProfiler;
@@ -11539,26 +11540,26 @@ public final class PlayerController {
                         oldSongs == null ? null : aiLines(oldSongs, AiReference.PREVIOUS_LIST_CAP),
                         AiReference.angles(rnd));
                 String webContext = "";
-                // Always use the provider knowledge base; ordinary prompts
-                // must not be blocked by optional web-search configuration.
-                boolean needsWebSearch = false;
-                if (webSearchEnabled && needsWebSearch) {
-                    if (webSearchKey == null || webSearchKey.trim().isEmpty()) {
-                        if (forceKnowledge) webContext = "[KNOWLEDGE_BASE_FALLBACK] 未提供联网资料，请使用模型内置音乐知识库，必须输出可搜索的真实歌名和歌手。";
-                        else throw new IllegalStateException("该问题需要联网搜索，请在设置 > AI 中填写 Tavily Search API Key");
-                    } else {
-                        postAiGeneration(generation, () -> aiProgress.set("正在联网查询榜单和热门歌曲…"));
-                        try {
-                            webContext = new WebSearchClient(webSearchUrl, webSearchKey, 30000)
-                                    .search(request, 5);
-                        } catch (java.io.IOException searchError) {
-                            if (forceKnowledge) webContext = "[KNOWLEDGE_BASE_FALLBACK] 联网搜索失败，请使用模型内置音乐知识库，必须输出可搜索的真实歌名和歌手。";
-                            else throw new IllegalStateException("联网搜索失败，请检查搜索 API 地址和 Key");
+                // 2026-10-18：请求涉及「最新/新歌/榜单」这类需要实时信息的问题时，先联网检索
+                // （DeepSeek 的 /tools/search，或用户自填的搜索接口），再把结果作为参考资料交给模型。
+                // 检索失败只是没有资料，不会让生成失败。forceKnowledge 时一律不联网。
+                boolean needsWebSearch = !forceKnowledge && WebLookup.wantsFreshness(request);
+                if (needsWebSearch) {
+                    postAiGeneration(generation, () -> aiProgress.set("正在联网查询最新的歌曲资料…"));
+                    StringBuilder searched = new StringBuilder();
+                    for (String query : WebLookup.queriesFor(request, historyLines)) {
+                        if (generation != aiRequestGeneration.get()) return;
+                        String block = WebLookup.search(webSearchUrl, webSearchKey, baseUrl, apiKey,
+                                query, Math.min(aiPlaylistTimeoutMs, 20_000));
+                        if (!block.isEmpty() && searched.indexOf(block) < 0) {
+                            searched.append(block).append("\n\n");
                         }
-                        if (webContext.trim().isEmpty()) {
-                            if (forceKnowledge) webContext = "[KNOWLEDGE_BASE_FALLBACK] 搜索没有返回资料，请使用模型内置音乐知识库，必须输出可搜索的真实歌名和歌手。";
-                            else throw new IllegalStateException("联网搜索没有返回有效资料，请换一种描述");
-                        }
+                        if (searched.length() > 6000) break;   // 资料够用即可，别把提示词撑爆
+                    }
+                    webContext = searched.toString().trim();
+                    if (webContext.isEmpty() && !webSearchEnabled && !forceKnowledge) {
+                        // 没配搜索、或搜索不可用时保持沉默：用模型自己的知识继续。
+                        webContext = "";
                     }
                 }
                 long genStart = System.currentTimeMillis();
@@ -11571,7 +11572,7 @@ public final class PlayerController {
                                 .generatePlaylist(text, request, count,
                                         forceKnowledge
                                                 ? "[KNOWLEDGE_BASE_ONLY] 强制使用模型内置知识库，禁止联网搜索，输出真实可搜索歌曲。"
-                                                : "",
+                                                : webContext,
                                         references);
                     } catch (IOException retryable) {
                         lastAiError = retryable;
