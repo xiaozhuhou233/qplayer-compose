@@ -4949,3 +4949,35 @@ sha256 `addb68b2…`；release 10,774,794 bytes sha256 `1199e837…`）。验证
 ⚠️ 行为取舍：宁可少一首也不放错版本。如果用户发现某首歌「被跳过了」，先查它在网易云是否只有
 live/伴奏版本；这是有意为之。若歌单明显变短且用户不满意，可把 `-70` 调轻或让兜底更早介入。
 
+
+### 2026-10-18a（AI 遇到需要实时信息的问题就联网）
+
+用户：「最新消息 deepseek api 支持联网搜索了，所以你让 ai 如果碰到需要联网的问题就去联网
+https://api-docs.deepseek.com/zh-cn/guides/search」。
+
+**关键事实**：DeepSeek 的联网搜索**不是 chat 请求里的开关**，而是独立工具接口
+`POST /v1/tools/search`（Bearer 鉴权，body `{query, count, need_content}`，响应 `results[]` 里
+`summary` 是给模型读的长摘要）。所以流程是：**应用先搜 → 结果作为「联网资料」拼进提示词**，
+**chat 请求体一字未加**（禁则不变）。
+
+新增 `player-core/.../ai/WebLookup.java`：
+- `wantsFreshness(request)`：命中 最新/最近/新歌/新专辑/刚发/榜单/排行/热歌/现在/今年/trending/
+  latest/207x 年份 → 联网；「来点安静的歌」「周杰伦的歌」这类保持离线（已用 13 个用例验证）。
+- `search(...)`：地址为空或含 deepseek.com → 走 DeepSeek `/tools/search`（Key 可空，沿用 AI Key）；
+  其它地址 → 原有 Tavily 兼容 `WebSearchClient`。**任何失败都返回空串**，生成继续用模型知识。
+- `queriesFor(...)`：请求本身 + 「歌单 新歌 最新」、请求 + 「热门歌曲 2026」、以及从口味样本里
+  取一位常听歌手的「<歌手> 新歌」；资料总量 >6000 字符即停。
+- `forceKnowledge`（强制知识库）仍然完全禁网。
+
+提示词：非强制知识库时 system 追加一句「应用已经把联网检索到的资料一并给你，从资料里挑真实
+歌曲」；用户回合的参考块标题改为「联网资料（应用检索到的实时结果…）」。
+设置里「搜索 API 地址」的说明更新为「留空或填 deepseek.com 用 DeepSeek 联网搜索（Key 可留空）」。
+
+**验证**：两棵树 player-core 编译绿；聚焦测试 22/22；`D:\qplayer-dev\LookupTest.java` 用编译产物
+验证判定/路由/查询词全过。**没有真实 Key，未对线上接口实测。**
+桌面树提交 `8994569`（**未推**；桌面 `claude` 仍落后 origin/claude）。
+
+⚠️ 打包受阻：桌面树 `android-md3e/core/build` 被并行构建占用（`Unable to delete directory`），
+release 任务起不来；`android-md3e/app/build/outputs/apk/debug/app-debug.apk`（14:07，含本改动）
+已用 TEST 证书重签为 `D:\qplayer-dev\QPlayer-OnlineSearch.apk`（sha256 `2563c615…`）供安装。
+
